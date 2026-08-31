@@ -1,0 +1,12 @@
+[package]
+name    = "xtask"
+version = "0.0.0"
+publish = false
+edition.workspace      = true
+# Not published, but `cargo deny` reads the licence of every crate in the graph
+# and an unlicensed workspace member fails the whole check.
+license.workspace      = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }

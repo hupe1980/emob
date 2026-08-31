@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/emob-core",
+    "crates/emob-eichrecht",
+    "xtask",
+]
+
+[workspace.package]
+version      = "0.1.0"
+authors      = ["hupe1980"]
+edition      = "2024"
+license      = "MIT OR Apache-2.0"
+repository   = "https://github.com/hupe1980/emob"
+rust-version = "1.94"
+
+[workspace.dependencies]
+# ── External ────────────────────────────────────────────────────────────────
+thiserror  = "2"
+serde      = { version = "1", features = ["derive"] }
+# `arbitrary_precision` is not optional for this workspace: without it
+# `serde_json` parses every number through `f64`, and OCMF's `2935.600` — three
+# decimals the meter is *stating* as its accuracy — comes back as `2935.6`. With
+# it, `Number` keeps the literal and `emob-eichrecht` reads the exact decimal the
+# station wrote. `preserve_order` matters for the same reason one layer up: a
+# document that is re-emitted must not silently reorder what a peer sent.
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+time       = { version = "0.3", features = ["std", "macros", "parsing", "formatting"] }
+uuid       = { version = "1", features = ["v4", "v7", "serde"] }
+anyhow     = "1"
+
+# Every quantity in this workspace either *is* money or *becomes* money. A
+# binary float cannot represent 0.10, and `10.1 - 0.1` is 10.000000000000002 —
+# which is precisely the subtraction OCMF prescribes for a session's energy.
+# `cargo xtask no-floats` fails the build on an `f32`/`f64` in any public API.
+rust_decimal = { version = "1", features = ["macros", "serde-with-str"] }
+
+# ── Eichrecht: OCMF signature verification ──────────────────────────────────
+# The curves OCMF Table 22/23 name. secp256r1 is the default since OCMF 0.4;
+# the others are feature-gated so a deployment links only what its fleet uses.
+sha2      = "0.10"
+p256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
+p384      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
+k256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
+ecdsa     = { version = "0.16", features = ["der"] }
+signature = "2"
+hex       = "0.4"
+base64    = "0.22"
+
+# ── Internal (path + version so the domain crates can be published) ─────────
+emob-core      = { path = "crates/emob-core",      version = "0.1" }
+emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.1" }
+emob-session   = { path = "crates/emob-session",   version = "0.1" }
+emob-cdr       = { path = "crates/emob-cdr",       version = "0.1" }
+emob-tariff    = { path = "crates/emob-tariff",    version = "0.1" }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+strip         = "debuginfo"

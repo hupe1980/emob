@@ -1,0 +1,12 @@
+[toolchain]
+# Pinned to the declared MSRV so every developer and every CI lane compiles on
+# exactly the same toolchain. Bumping the MSRV means changing this value and the
+# `rust-version` in Cargo.toml in the same commit.
+#
+# 1.94 is the floor because:
+#   - edition 2024 needs 1.85
+#   - `let_chains` (used across the OCMF reading chain) stabilised in 1.88
+#   - it is the floor the sibling workspaces (`mako`, `hems`) already carry, and
+#     a crate that is consumed by both must not ask for more than they allow
+channel    = "1.94"
+components = ["rustfmt", "clippy"]

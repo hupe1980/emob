@@ -1,0 +1,29 @@
+base_url = "https://hupe1980.github.io/emob"
+title = "emob"
+description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, AFIR and Eichrecht as executable cited rules, OCPP/OCPI/OICP/ISO 15118 native, and no binary float anywhere near the money."
+default_language = "en"
+compile_sass = false
+build_search_index = false
+generate_feeds = true
+feed_filenames = ["atom.xml"]
+
+[markdown]
+smart_punctuation = true
+# Deep links to every heading: a documentation page whose sections cannot be
+# linked to is one nobody links to.
+insert_anchor_links = "heading"
+
+[extra]
+repository = "https://github.com/hupe1980/emob"
+tagline    = "open-source charging operations for the European market"
+# The landing page's five numbers. They are here rather than in the template so
+# that changing one is a one-line diff against the thing that produced it:
+# `emob_core::obligation::CALENDAR`, `cargo test --workspace`, the crate list,
+# `cargo xtask no-floats`, and `emob_eichrecht::ocmf::KeyType`.
+stat_obligations = "14"
+stat_tests       = "105"
+stat_crates      = "2"
+stat_floats      = "0"
+stat_curves      = "3"
+
+keywords = "EV charging, CPO, EMP, eMSP, OCPP, OCPI, OICP, ISO 15118, OCMF, Eichrecht, AFIR, Plug and Charge, roaming, Rust, charging station management"

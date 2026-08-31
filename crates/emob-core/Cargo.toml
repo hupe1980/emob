@@ -1,0 +1,26 @@
+[package]
+name        = "emob-core"
+description = "Domain model of the e-mobility charging market — text-preserving EVSE and contract identifiers in both grammars, exact decimal energy and money, and the AFIR/Eichrecht obligation calendar as dated, cited, executable rules"
+keywords    = ["ev", "charging", "afir", "emobility", "ocpi"]
+categories  = ["science", "data-structures"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = ["dep:serde", "rust_decimal/serde", "time/serde"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

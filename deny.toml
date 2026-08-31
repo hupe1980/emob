@@ -1,0 +1,56 @@
+# cargo-deny — licences and advisories.
+#
+# Run with `just deny` or `cargo deny check`. CI runs it on every change; a
+# scheduled job re-runs the advisory half against the unchanged main branch,
+# because an advisory filed on a Wednesday concerns a dependency that was clean
+# on merge day.
+
+[graph]
+all-features = true
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-musl" }, # the static build for a site controller
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-apple-darwin" },
+]
+
+[licenses]
+# Permissive only. A copyleft dependency in a crate an operator links into their
+# own charging platform is a decision for them to take deliberately, not one to
+# inherit from us.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MIT-0",
+    "CC0-1.0",
+    "0BSD",
+]
+confidence-threshold = 0.9
+
+[bans]
+# A second major version of a numeric or serialisation crate is how two halves
+# of the workspace come to disagree about what a number is — and in this
+# workspace a number is money. Any new duplicate needs an entry here with a
+# reason.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[[bans.deny]]
+# The workspace promise is exact decimal arithmetic end to end. A crate whose
+# whole purpose is approximate decimal formatting has no business in the
+# dependency graph of an invoice.
+name = "float-cmp"
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
