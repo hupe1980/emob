@@ -6,10 +6,10 @@ description = "Install the four crates that exist, verify a charging session und
 
 # Getting started
 
-Four crates are built from this workspace today. Everything on this page runs. ✅
+Five crates are built from this workspace today. Everything on this page runs. ✅
 
 ```console
-cargo add emob-core emob-eichrecht emob-session emob-cdr
+cargo add emob-core emob-eichrecht emob-session emob-cdr emob-tariff
 ```
 
 ## Verify a charging session
@@ -103,6 +103,32 @@ let cdr = CdrBuilder::from_session(&session, Direction::Import)?
 let mut ledger = CdrLedger::new();
 assert_eq!(ledger.accept(cdr.clone()), Acceptance::Stored);
 assert_eq!(ledger.accept(cdr), Acceptance::Duplicate);  // a retry, not a second invoice
+```
+
+## Price it, and show the same price
+
+```rust
+use emob_tariff::{Chargeable, Dimension, PriceComponent, Tariff, TariffKind, describe, rate};
+
+let tariff = Tariff::simple(id, Currency::EUR, TariffKind::AdHoc, vec![
+    PriceComponent::new(Dimension::Energy, dec("0.49")),
+    PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
+]);
+
+// What the driver is shown, in the order AFIR prescribes.
+assert_eq!(describe(&tariff, at).one_line(), "0.49 EUR / kWh · 0.10 EUR / min");
+
+// What they are charged, from the same numbers.
+let rated = rate(&tariff, &Chargeable::energy_only(cdr.total_energy, at));
+assert_eq!(rated.total().to_string(), "8.82 EUR");
+```
+
+And whether the tariff is one this charger may lawfully offer at all:
+
+```rust
+use emob_tariff::check_afir;
+
+assert!(check_afir(&tariff, dec("150")).is_lawful());
 ```
 
 ## Ask whether a charge point is compliant

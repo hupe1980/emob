@@ -44,19 +44,46 @@ pub enum CurrentType {
 
 /// How a driver without a contract can pay.
 ///
-/// AFIR distinguishes the two sharply: a card reader is required at new DC
-/// points of at least 50 kW, while every public point must at minimum offer
-/// *some* ad-hoc path `[AFIR Art. 5(1)–(2)]`.
+/// These are exactly the three instruments `[AFIR Art. 5(1)]` enumerates, and
+/// the distinction between them is load-bearing: the article allows (c) — an
+/// internet-connected device such as a QR code — **only** at points below
+/// 50 kW. At 50 kW and above, only a card reader or a contactless device
+/// satisfies the duty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum AdHocPayment {
     /// Nothing: a contract is the only way in.
     None,
-    /// A web/QR flow, or an app that does not require registration.
-    DigitalOnly,
-    /// A payment card reader at the point itself (contactless at minimum).
+    /// `[AFIR Art. 5(1)(c)]` — a device using an internet connection allowing
+    /// secure payment, such as one generating a QR code.
+    ///
+    /// Qualifies **only below 50 kW**. Above it, this is the same as having
+    /// nothing, which is the trap this variant exists to make visible.
+    QrCode,
+    /// `[AFIR Art. 5(1)(a)–(b)]` — a payment card reader, or a contactless
+    /// device able to read payment cards.
+    ///
+    /// Qualifies at any power. A single terminal may serve several points
+    /// within one recharging pool, so this is set for every point the terminal
+    /// serves, not only the one it is bolted to.
     CardReader,
+}
+
+impl AdHocPayment {
+    /// Whether this instrument satisfies `[AFIR Art. 5(1)]` at a given power.
+    ///
+    /// The QR-code option is restricted to points below 50 kW, so the same
+    /// equipment is compliant on an 22 kW AC post and non-compliant on the
+    /// 150 kW charger beside it.
+    #[must_use]
+    pub fn satisfies_afir_at(self, rated_power_kw: Decimal) -> bool {
+        match self {
+            Self::None => false,
+            Self::QrCode => rated_power_kw < Decimal::from(50),
+            Self::CardReader => true,
+        }
+    }
 }
 
 /// Which vehicle-communication generations a point implements.
@@ -109,6 +136,29 @@ pub struct DataPublication {
     pub registered: bool,
 }
 
+/// How the ad-hoc price is built and shown.
+///
+/// `[AFIR Art. 5(4)]` says two different things depending on power, and both
+/// are checkable facts about a point rather than opinions about a tariff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PriceTransparency {
+    /// The ad-hoc price is based on a price per kWh for the electricity
+    /// delivered.
+    ///
+    /// Mandatory at 50 kW and above: "the ad hoc price charged by the operator
+    /// **shall be based on the price per kWh**". A purely per-minute tariff on
+    /// a fast charger is unlawful, which is a rule almost nothing checks.
+    pub energy_based: bool,
+    /// The price per kWh, and any occupancy fee per minute, are shown at the
+    /// station before the session starts.
+    pub shown_at_station: bool,
+    /// Every price component is available before the session starts, in the
+    /// order `[AFIR Art. 5(4)]` prescribes — per kWh, per minute, per session,
+    /// then anything else.
+    pub components_in_prescribed_order: bool,
+}
+
 /// The Eichrecht posture of a point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -153,15 +203,30 @@ pub struct ChargePointProfile {
     /// When it was last substantially renovated, if ever. AFIR's "newly
     /// installed or renovated" wording makes a renovation a second birth date.
     pub renovated_on: Option<Date>,
-    /// Whether the point sits along the trans-European transport network,
-    /// which triggers the 2027 card-reader retrofit `[AFIR Art. 5(2)]`.
+    /// Whether the point sits along the trans-European transport network.
     pub on_ten_t: bool,
+    /// Whether the point is on a safe and secure parking area.
+    ///
+    /// Named alongside TEN-T in the 2027 retrofit duty `[AFIR Art. 5(1)]`, and
+    /// easy to miss: a truck parking area away from the corridor is in scope
+    /// just as a motorway service station is.
+    pub on_safe_secure_parking: bool,
+    /// Whether the recharging service is paid for at all.
+    ///
+    /// `[AFIR Art. 5(1)]` exempts points "that do not require payment for the
+    /// recharging service" from the whole payment-instrument régime. A free
+    /// workplace or municipal charger owes no card reader.
+    pub requires_payment: bool,
     /// How someone without a contract pays.
     pub ad_hoc_payment: AdHocPayment,
-    /// Whether the ad-hoc price is shown before the session starts.
-    pub price_displayed_before_session: bool,
-    /// Whether the ad-hoc price is free of roaming surcharges.
-    pub ad_hoc_price_free_of_roaming_surcharge: bool,
+    /// Whether automatic authentication (Plug & Charge, `AutoCharge`) is
+    /// offered here.
+    pub offers_automatic_authentication: bool,
+    /// Whether the right *not* to use automatic authentication is shown
+    /// clearly and offered conveniently `[AFIR Art. 5(2)]`.
+    pub automatic_authentication_opt_out_offered: bool,
+    /// How the ad-hoc price is built and shown.
+    pub price_transparency: PriceTransparency,
     /// Which vehicle-communication generations it speaks.
     pub v2g: V2gCommunication,
     /// Whether it offers Plug & Charge.
@@ -232,9 +297,12 @@ impl ChargePointProfile {
             commissioned_on,
             renovated_on: None,
             on_ten_t: false,
+            on_safe_secure_parking: false,
+            requires_payment: true,
             ad_hoc_payment: AdHocPayment::None,
-            price_displayed_before_session: false,
-            ad_hoc_price_free_of_roaming_surcharge: false,
+            offers_automatic_authentication: false,
+            automatic_authentication_opt_out_offered: false,
+            price_transparency: PriceTransparency::default(),
             v2g: V2gCommunication::pwm_only(),
             offers_plug_and_charge: false,
             data: DataPublication::default(),
@@ -276,5 +344,24 @@ mod tests {
         assert_eq!(p.ad_hoc_payment, AdHocPayment::None);
         assert!(!p.data.datex2);
         assert!(!p.metering.signed_values);
+        assert!(
+            p.requires_payment,
+            "…but it does charge for charging, or half the duties would not bind it"
+        );
+    }
+
+    #[test]
+    fn a_qr_code_qualifies_below_fifty_kilowatts_and_not_above() {
+        // The same equipment, compliant on the 22 kW post and non-compliant on
+        // the 150 kW charger beside it. [AFIR Art. 5(1)(c)]
+        assert!(AdHocPayment::QrCode.satisfies_afir_at(Decimal::from(22)));
+        assert!(!AdHocPayment::QrCode.satisfies_afir_at(Decimal::from(150)));
+        assert!(!AdHocPayment::QrCode.satisfies_afir_at(Decimal::from(50)));
+
+        // A card reader qualifies everywhere.
+        assert!(AdHocPayment::CardReader.satisfies_afir_at(Decimal::from(22)));
+        assert!(AdHocPayment::CardReader.satisfies_afir_at(Decimal::from(350)));
+
+        assert!(!AdHocPayment::None.satisfies_afir_at(Decimal::from(22)));
     }
 }

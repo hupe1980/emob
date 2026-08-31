@@ -5,6 +5,7 @@ members = [
     "crates/emob-eichrecht",
     "crates/emob-session",
     "crates/emob-cdr",
+    "crates/emob-tariff",
     "xtask",
 ]
 

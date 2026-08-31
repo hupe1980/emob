@@ -1,0 +1,27 @@
+[package]
+name        = "emob-tariff"
+description = "EV charging tariffs where the price shown to the driver is derived from the tariff that rates the session, components ordered as AFIR prescribes, and a conformance check that knows a per-minute-only tariff is unlawful above 50 kW"
+keywords    = ["ev-charging", "tariff", "pricing", "afir", "ocpi"]
+categories  = ["science", "data-structures"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = ["dep:serde", "emob-core/serde", "rust_decimal/serde", "time/serde"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

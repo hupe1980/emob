@@ -1,6 +1,6 @@
 +++
 title = "Architecture"
-weight = 5
+weight = 6
 description = "What is built, what is designed, how emob sits beside the protocol kits it consumes, and the roaming stance that decides how the rest gets written."
 +++
 
@@ -14,12 +14,14 @@ description = "What is built, what is designed, how emob sits beside the protoco
 | `emob-eichrecht` | OCMF parse and verify, the key registry, the session chain, the evidence record |
 | `emob-session` | Authorisation paths, cumulative meter series, and the quarter-hour split that conserves exactly |
 | `emob-cdr` | The record and its builder, idempotent acceptance, and pre-flight validation |
+| `emob-tariff` | Rating, the display derived from the rating tariff, and the AFIR shape check |
 
-184 tests, no I/O, no clock, no binary floats. `just ci` green.
+233 tests, no I/O, no clock, no binary floats. `just ci` green.
 
 An end-to-end test drives the whole chain: OCMF records signed with a real key
 at test time, verified, assembled into evidence, matched against a session, built
-into a CDR, validated as a partner would, and accepted exactly once. It also
+into a CDR, validated as a partner would, accepted exactly once, and priced —
+with the displayed price asserted equal to the charged one. It also
 proves the failures — one changed digit, a deleted middle record, a substitute
 reading and an unregistered station each stop the chain, each with a reason that
 names what went wrong.
@@ -28,7 +30,6 @@ names what went wrong.
 
 | Crate | Holds |
 |---|---|
-| `emob-tariff` | CPO and EMP tariffs, ad-hoc pricing, and display strings derived from the tariff that rates |
 | `emob-roam` | The canonical ↔ wire translation layer and its cost notes; the partner registry |
 | `emob-pnc` | Plug & Charge contracts, certificate pools, multi-PKI |
 | `emob-poi` | Locations, the LSV/AFIR registry state machine, DATEX II export |

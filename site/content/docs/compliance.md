@@ -1,6 +1,6 @@
 +++
 title = "The obligation calendar"
-weight = 4
+weight = 5
 description = "AFIR, DA-656, LSV 2026, MessEG and the THG preconditions as dated, cited, executable rules — and why applicability and satisfaction have to stay separate questions."
 +++
 
@@ -24,10 +24,13 @@ for finding in report.failing() {
 | Duty | Source | From |
 |---|---|---|
 | Ad-hoc charging without a contract | `[AFIR Art. 5(1)]` | 13.04.2024 |
-| No roaming surcharge on the ad-hoc price | `[AFIR Art. 5(4)]` | 13.04.2024 |
-| Price per kWh shown before the session | `[AFIR Art. 5(4)]` | 13.04.2024 |
-| Card reader at new DC ≥ 50 kW | `[AFIR Art. 5(2)]` | 13.04.2024 |
-| Card reader retrofit on TEN-T ≥ 50 kW | `[AFIR Art. 5(2)]` | 01.01.2027 |
+| A payment instrument widely used in the Union, at points deployed from 13.04.2024 | `[AFIR Art. 5(1)]` | 13.04.2024 |
+| …retrofitted at ≥ 50 kW on TEN-T **or a safe and secure parking area** | `[AFIR Art. 5(1)]` | 01.01.2027 |
+| The right *not* to use automatic authentication, shown and offered | `[AFIR Art. 5(2)]` | 13.04.2024 |
+| At ≥ 50 kW the ad-hoc price must be **based on a price per kWh** | `[AFIR Art. 5(4)]` | 13.04.2024 |
+| At ≥ 50 kW the price per kWh and any occupancy fee shown at the station | `[AFIR Art. 5(4)]` | 13.04.2024 |
+| Below 50 kW every component available, **in the prescribed order** | `[AFIR Art. 5(4)]` | 13.04.2024 |
+| Provider: disclose all components incl. e-roaming; no cross-border surcharge | `[AFIR Art. 5(5)]` | 13.04.2024 |
 | Data to the National Access Point | `[AFIR Art. 20]` | 14.04.2025 |
 | …in the DATEX II Recharging profile | `[AFIR Art. 20]` | 14.04.2026 |
 | EN ISO 15118-2 at new/renovated public points | `[DA-656]` | 08.01.2026 |
@@ -79,9 +82,31 @@ bind it. So the calendar has four outcomes, not two:
 | `Failing` | binds this point, and it is not |
 | `NotApplicable` | does not bind this point |
 | `NotYetInForce` | not in force on the date asked about |
+| `DifferentScope` | binds somebody other than a charge point |
+
+`DifferentScope` is how a duty that binds a *mobility service provider* — Art.
+5(5)'s disclosure obligation — stays in the calendar without being judged
+against a charge point. Leaving it out entirely would let it be forgotten;
+evaluating it against a point would be a category error.
 
 Merging the middle two produces reports that cry wolf, which is how compliance
 dashboards come to be ignored.
+
+Three exemptions in the AFIR text are easy to miss, and each is modelled as
+`NotApplicable` rather than as a pass:
+
+**A free charge point owes no payment instrument.** The whole régime "shall not
+apply to publicly accessible recharging points that do not require payment for
+the recharging service". A free municipal or workplace charger is out of scope.
+
+**A QR code satisfies the duty only below 50 kW.** Art. 5(1) lists three
+acceptable instruments and restricts (c) — an internet-connected device such as
+one generating a QR code — to points below 50 kW. The same equipment is
+compliant on a 22 kW post and non-compliant on the 150 kW charger beside it.
+
+**The 2027 retrofit reaches safe and secure parking areas**, not only the TEN-T
+road network — and it explicitly covers points deployed *before* 13.04.2024,
+which is the whole purpose of the paragraph.
 
 The sharpest example is the PWM exemption. `[DA-656]` excludes existing points
 that only do basic PWM signalling from the ISO 15118 duties, in as many words.

@@ -7,8 +7,8 @@ template = "section.html"
 
 # Documentation
 
-Five pages, in the order they build on each other: what exists and how to use
-it, then the three ideas the workspace is organised around, then where the rest
+Six pages, in the order they build on each other: what exists and how to use
+it, then the four ideas the workspace is organised around, then where the rest
 is going.
 
 Every page marks ✅ built and 📐 designed. The gap between the two is the most

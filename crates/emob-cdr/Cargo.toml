@@ -27,6 +27,7 @@ serde = ["dep:serde", "emob-core/serde", "emob-session/serde", "time/serde"]
 # The end-to-end test signs real OCMF records and drives them through the whole
 # chain, so it needs the verification crate and a signing key.
 emob-eichrecht = { workspace = true }
+emob-tariff    = { workspace = true }
 hex            = { workspace = true }
 p256           = { workspace = true }
 rust_decimal   = { workspace = true }

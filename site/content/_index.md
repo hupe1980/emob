@@ -20,6 +20,7 @@ product.
 <div class="card"><h3>Compliance is a query</h3><p>“Are we AFIR-ready for 2027?” is normally a consulting engagement. Here it is a function call against a calendar of dated, cited duties — and a build guard fails if a rule cites a document the source index cannot produce.</p></div>
 <div class="card"><h3>Applicability is not failure</h3><p>A private depot is not <em>failing</em> the ad-hoc payment duty; the duty does not bind it. A legacy PWM-only point is not failing ISO 15118-20; the delegated act exempts it in as many words. Merging those with real breaches is how compliance dashboards come to be ignored.</p></div>
 <div class="card"><h3>The quarter-hour split conserves exactly</h3><p>A session from 10:01 to 10:22 must be settled against two quarter hours, and the boundary falls two thirds of the way through. Computing each slot independently leaves a sum that misses the total, and the usual fix shoves the remainder into the last slot — misattributing energy to whoever held it. Taking differences of cumulative boundaries makes the sum telescope instead: exact, always, whatever the ratio.</p></div>
+<div class="card"><h3>The price shown is the price charged</h3><p>A tariff has to rate a session and be displayed before it starts. When those come from two places they drift, and a driver is billed something other than what they were quoted. Here the description is <em>derived from</em> the tariff that rates — one set of numbers, so there is nothing to drift from. And a per-minute-only tariff, lawful on a 22 kW post, is refused on the 150 kW charger beside it.</p></div>
 <div class="card"><h3>Money is never a float</h3><p>Every quantity here either is money or becomes money. A build guard fails on an <code>f32</code> or <code>f64</code> anywhere — including a late <code>from_f64</code>, because a float converted at the boundary is still a float that was wrong at the source.</p></div>
 <div class="card"><h3>Scale is a claim about accuracy</h3><p>A register reporting <code>2935.600 kWh</code> is stating three decimals of resolution. Rewriting it as <code>2935.6</code> discards something the meter said about itself — which OCMF forbids in as many words. Nothing here strips a trailing zero, and even <code>Wh → kWh</code> moves the point rather than dividing.</p></div>
 <div class="card"><h3>Replayable, because nothing reads a clock</h3><p>The domain crates take time and keys as arguments. A dispute about a session from two years ago is answered by replaying the check exactly as it ran — and a build guard fails if a domain crate ever reaches for the ambient world.</p></div>
@@ -61,10 +62,10 @@ sessions unverifiable.
 
 ## Where it stands
 
-Four domain crates are real, tested and green — `emob-core`,
-`emob-eichrecht`, `emob-session` and `emob-cdr` — with **184 tests**, no I/O, no
+Five domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
+`emob-session`, `emob-cdr` and `emob-tariff` — with **233 tests**, no I/O, no
 clock, no floats, and an end-to-end test that drives a genuinely signed session
-from the meter to a settled record. The rest of the platform — tariffs, roaming,
+from the meter all the way to a price. The rest of the platform — roaming,
 Plug & Charge, billing — is designed and not yet built, and the
 [documentation](@/docs/_index.md) marks which is which on every page rather than
 blurring the two.

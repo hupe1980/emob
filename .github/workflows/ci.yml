@@ -73,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [emob-core, emob-eichrecht, emob-session, emob-cdr]
+        crate: [emob-core, emob-eichrecht, emob-session, emob-cdr, emob-tariff]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

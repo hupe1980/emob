@@ -248,6 +248,7 @@ dependencies = [
  "emob-core",
  "emob-eichrecht",
  "emob-session",
+ "emob-tariff",
  "hex",
  "p256",
  "rust_decimal",
@@ -289,6 +290,18 @@ dependencies = [
 
 [[package]]
 name = "emob-session"
+version = "0.1.0"
+dependencies = [
+ "emob-core",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "emob-tariff"
 version = "0.1.0"
 dependencies = [
  "emob-core",

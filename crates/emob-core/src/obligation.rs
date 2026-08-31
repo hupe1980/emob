@@ -57,14 +57,26 @@ use crate::station::{AdHocPayment, ChargePointProfile};
 pub enum ObligationId {
     /// Ad-hoc charging must be possible without a contract.
     AfirAdHocAccess,
-    /// The ad-hoc price must carry no roaming surcharge.
-    AfirNoRoamingSurcharge,
-    /// New DC points of at least 50 kW need a payment card reader.
-    AfirCardReaderNewDc,
-    /// TEN-T points of at least 50 kW must be retrofitted with one.
-    AfirCardReaderTenTRetrofit,
-    /// The price per kWh must be shown before the session starts.
-    AfirPriceTransparency,
+    /// A point that charges for the service needs a widely used payment
+    /// instrument.
+    AfirPaymentInstrument,
+    /// Points of at least 50 kW on TEN-T or a safe and secure parking area must
+    /// be retrofitted with a card reader or contactless device.
+    AfirPaymentInstrumentRetrofit,
+    /// Where automatic authentication is offered, the right not to use it must
+    /// be shown and offered.
+    AfirAutomaticAuthenticationOptOut,
+    /// At 50 kW and above the ad-hoc price must be based on a price per kWh.
+    AfirEnergyBasedAdHocPrice,
+    /// At 50 kW and above the price per kWh and any occupancy fee must be shown
+    /// at the station.
+    AfirPriceShownAtStation,
+    /// Below 50 kW every price component must be available, in the prescribed
+    /// order.
+    AfirPriceComponentsInOrder,
+    /// A mobility service provider must disclose every price component,
+    /// e-roaming costs included, and may not surcharge cross-border roaming.
+    AfirMspPriceDisclosure,
     /// Static and dynamic data must reach the National Access Point.
     AfirNapData,
     /// …in the DATEX II Recharging profile.
@@ -91,10 +103,13 @@ impl ObligationId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AfirAdHocAccess => "afir-ad-hoc-access",
-            Self::AfirNoRoamingSurcharge => "afir-no-roaming-surcharge",
-            Self::AfirCardReaderNewDc => "afir-card-reader-new-dc",
-            Self::AfirCardReaderTenTRetrofit => "afir-card-reader-ten-t-retrofit",
-            Self::AfirPriceTransparency => "afir-price-transparency",
+            Self::AfirPaymentInstrument => "afir-payment-instrument",
+            Self::AfirPaymentInstrumentRetrofit => "afir-payment-instrument-retrofit",
+            Self::AfirAutomaticAuthenticationOptOut => "afir-automatic-authentication-opt-out",
+            Self::AfirEnergyBasedAdHocPrice => "afir-energy-based-ad-hoc-price",
+            Self::AfirPriceShownAtStation => "afir-price-shown-at-station",
+            Self::AfirPriceComponentsInOrder => "afir-price-components-in-order",
+            Self::AfirMspPriceDisclosure => "afir-msp-price-disclosure",
             Self::AfirNapData => "afir-nap-data",
             Self::AfirDatex2 => "afir-datex2",
             Self::Da656Iso15118Dash2 => "da656-iso15118-2",
@@ -114,6 +129,25 @@ impl core::fmt::Display for ObligationId {
     }
 }
 
+/// Who a duty binds.
+///
+/// Not every obligation in European charging law is about a charge point.
+/// `[AFIR Art. 5(5)]` binds the *mobility service provider*; NIS2 and the Cyber
+/// Resilience Act bind the operator as an undertaking. Judging those against a
+/// [`ChargePointProfile`] would be a category error, and leaving them out of
+/// the calendar entirely would let them be forgotten — so they are here, and
+/// they report [`Status::DifferentScope`] when a charge point is what was
+/// asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+pub enum Scope {
+    /// The duty is a property of one charge point.
+    ChargePoint,
+    /// The duty binds a mobility service provider.
+    MobilityServiceProvider,
+}
+
 /// One regulatory duty: what it demands, of whom, from when, and who says so.
 #[derive(Debug, Clone, Copy)]
 pub struct Obligation {
@@ -123,6 +157,8 @@ pub struct Obligation {
     pub title: &'static str,
     /// The citation, in the form `specs/README.md` indexes.
     pub citation: &'static str,
+    /// Who the duty binds.
+    pub scope: Scope,
     /// The first day the duty binds.
     pub applies_from: Date,
     /// The last day it binds, for duties that are superseded.
@@ -155,6 +191,9 @@ pub enum Status {
     NotApplicable,
     /// The duty is not yet in force, or no longer is, on the date asked about.
     NotYetInForce,
+    /// The duty binds somebody other than a charge point, so a charge-point
+    /// profile cannot answer it.
+    DifferentScope,
 }
 
 /// One obligation, judged.
@@ -220,60 +259,132 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirAdHocAccess,
         title: "Ad-hoc charging must be possible without a contract",
         citation: "[AFIR Art. 5(1)]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2024 - 04 - 13),
         applies_until: None,
         applicable: |p| p.is_public(),
         satisfied: |p| p.ad_hoc_payment != AdHocPayment::None,
-        remedy: "offer a contract-free payment path (card reader, or a web/QR flow)",
+        remedy: "offer a contract-free payment path at the point",
     },
     Obligation {
-        id: ObligationId::AfirNoRoamingSurcharge,
-        title: "The ad-hoc price must carry no roaming surcharge",
-        citation: "[AFIR Art. 5(4)]",
+        id: ObligationId::AfirPaymentInstrument,
+        title: "A point deployed from 13.04.2024 needs a payment instrument widely used in the Union",
+        citation: "[AFIR Art. 5(1)]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2024 - 04 - 13),
         applies_until: None,
-        applicable: |p| p.is_public(),
-        satisfied: |p| p.ad_hoc_price_free_of_roaming_surcharge,
-        remedy: "price the ad-hoc tariff without the roaming component",
+        // Three conditions, and the third is the one implementations miss: the
+        // whole régime "shall not apply to publicly accessible recharging
+        // points that do not require payment for the recharging service". A
+        // free municipal charger owes no card reader.
+        applicable: |p| {
+            p.is_public()
+                && p.requires_payment
+                && p.effective_installation_date() >= date!(2024 - 04 - 13)
+        },
+        // A QR-code device satisfies (c) only below 50 kW; at or above it, only
+        // a card reader or contactless device does.
+        satisfied: |p| p.ad_hoc_payment.satisfies_afir_at(p.rated_power_kw),
+        remedy: "fit a card reader or contactless device (a QR flow only qualifies below 50 kW)",
     },
     Obligation {
-        id: ObligationId::AfirPriceTransparency,
-        title: "The price per kWh must be shown before the session starts",
-        citation: "[AFIR Art. 5(4)]",
-        applies_from: date!(2024 - 04 - 13),
+        id: ObligationId::AfirPaymentInstrumentRetrofit,
+        title: "Points of at least 50 kW on TEN-T or a safe and secure parking area must be retrofitted",
+        citation: "[AFIR Art. 5(1)]",
+        scope: Scope::ChargePoint,
+        applies_from: date!(2027 - 01 - 01),
         applies_until: None,
-        applicable: |p| p.is_public(),
-        satisfied: |p| p.price_displayed_before_session,
-        remedy: "derive the displayed price from the tariff that rates the session",
+        // Explicitly reaches points deployed *before* 13.04.2024 — the whole
+        // point of the paragraph — and covers safe and secure parking areas as
+        // well as the TEN-T road network.
+        applicable: |p| {
+            p.is_public()
+                && p.requires_payment
+                && p.is_at_least_50_kw()
+                && (p.on_ten_t || p.on_safe_secure_parking)
+        },
+        satisfied: |p| p.ad_hoc_payment == AdHocPayment::CardReader,
+        remedy: "retrofit a card reader or contactless device before 01.01.2027",
     },
     Obligation {
-        id: ObligationId::AfirCardReaderNewDc,
-        title: "New DC points of at least 50 kW need a payment card reader",
+        id: ObligationId::AfirAutomaticAuthenticationOptOut,
+        title: "Where automatic authentication is offered, the right not to use it must be shown",
         citation: "[AFIR Art. 5(2)]",
+        scope: Scope::ChargePoint,
+        applies_from: date!(2024 - 04 - 13),
+        applies_until: None,
+        applicable: |p| p.is_public() && p.offers_automatic_authentication,
+        satisfied: |p| p.automatic_authentication_opt_out_offered,
+        remedy: "show the ad-hoc and contract alternatives clearly, and offer them conveniently",
+    },
+    Obligation {
+        id: ObligationId::AfirEnergyBasedAdHocPrice,
+        title: "At 50 kW and above the ad-hoc price must be based on a price per kWh",
+        citation: "[AFIR Art. 5(4)]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2024 - 04 - 13),
         applies_until: None,
         applicable: |p| {
             p.is_public()
+                && p.requires_payment
                 && p.is_at_least_50_kw()
                 && p.effective_installation_date() >= date!(2024 - 04 - 13)
         },
-        satisfied: |p| p.ad_hoc_payment == AdHocPayment::CardReader,
-        remedy: "fit a contactless payment terminal",
+        // A purely per-minute tariff on a fast charger is unlawful. An
+        // occupancy fee per minute is permitted *in addition* to the kWh price,
+        // never instead of it.
+        satisfied: |p| p.price_transparency.energy_based,
+        remedy: "price the ad-hoc tariff per kWh; an occupancy fee per minute may only be added to it",
     },
     Obligation {
-        id: ObligationId::AfirCardReaderTenTRetrofit,
-        title: "TEN-T points of at least 50 kW must be retrofitted with a card reader",
-        citation: "[AFIR Art. 5(2)]",
-        applies_from: date!(2027 - 01 - 01),
+        id: ObligationId::AfirPriceShownAtStation,
+        title: "At 50 kW and above the price per kWh and any occupancy fee must be shown at the station",
+        citation: "[AFIR Art. 5(4)]",
+        scope: Scope::ChargePoint,
+        applies_from: date!(2024 - 04 - 13),
         applies_until: None,
-        applicable: |p| p.is_public() && p.is_at_least_50_kw() && p.on_ten_t,
-        satisfied: |p| p.ad_hoc_payment == AdHocPayment::CardReader,
-        remedy: "retrofit a contactless payment terminal before 01.01.2027",
+        applicable: |p| {
+            p.is_public()
+                && p.requires_payment
+                && p.is_at_least_50_kw()
+                && p.effective_installation_date() >= date!(2024 - 04 - 13)
+        },
+        satisfied: |p| p.price_transparency.shown_at_station,
+        remedy: "show the price before the session starts, derived from the tariff that rates it",
+    },
+    Obligation {
+        id: ObligationId::AfirPriceComponentsInOrder,
+        title: "Below 50 kW every price component must be available, in the prescribed order",
+        citation: "[AFIR Art. 5(4)]",
+        scope: Scope::ChargePoint,
+        applies_from: date!(2024 - 04 - 13),
+        applies_until: None,
+        // The article prescribes the *order*: per kWh, per minute, per session,
+        // then anything else. An unordered list of the right numbers does not
+        // satisfy it.
+        applicable: |p| p.is_public() && p.requires_payment && !p.is_at_least_50_kw(),
+        satisfied: |p| p.price_transparency.components_in_prescribed_order,
+        remedy: "present the components as kWh, then minute, then session, then the rest",
+    },
+    Obligation {
+        id: ObligationId::AfirMspPriceDisclosure,
+        title: "A mobility service provider must disclose every price component, e-roaming costs included, and may not surcharge cross-border roaming",
+        citation: "[AFIR Art. 5(5)]",
+        scope: Scope::MobilityServiceProvider,
+        applies_from: date!(2024 - 04 - 13),
+        applies_until: None,
+        // Binds the provider, not the point. Kept in the calendar so it cannot
+        // be forgotten, and reported as out of scope when a charge point is
+        // what was asked about.
+        applicable: |_| false,
+        satisfied: |_| false,
+        remedy: "disclose all components before the session, and never surcharge cross-border e-roaming",
     },
     Obligation {
         id: ObligationId::AfirNapData,
         title: "Static and dynamic data must reach the National Access Point, free of charge",
         citation: "[AFIR Art. 20]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2025 - 04 - 14),
         applies_until: None,
         applicable: |p| p.is_public(),
@@ -284,6 +395,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirDatex2,
         title: "National Access Point data must be delivered in the DATEX II Recharging profile",
         citation: "[AFIR Art. 20]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2026 - 04 - 14),
         applies_until: None,
         applicable: |p| p.is_public(),
@@ -294,6 +406,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Da656Iso15118Dash2,
         title: "Newly installed or renovated public points must implement EN ISO 15118-2",
         citation: "[DA-656]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2026 - 01 - 08),
         applies_until: None,
         // The exemption is the interesting half: an existing PWM-only point is
@@ -311,6 +424,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Da656Iso15118Dash20,
         title: "Public and private Mode 3/4 points must implement EN ISO 15118-20",
         citation: "[DA-656]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2027 - 01 - 01),
         applies_until: None,
         // This is the one duty that reaches private points too.
@@ -322,6 +436,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Da656PlugAndChargeBothGenerations,
         title: "A Plug & Charge point must support both EN ISO 15118-2 and -20",
         citation: "[DA-656]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2027 - 01 - 01),
         applies_until: None,
         applicable: |p| p.offers_plug_and_charge,
@@ -332,6 +447,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Lsv2026Registration,
         title: "Public points must be registered and their operation reported",
         citation: "[LSV26]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2026 - 01 - 01),
         applies_until: None,
         applicable: |p| p.is_public(),
@@ -342,6 +458,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EichrechtConformityAssessedMeter,
         title: "Billing by energy requires a conformity-assessed meter",
         citation: "[MessEG §33]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2019 - 04 - 01),
         applies_until: None,
         applicable: |p| p.metering.bills_by_energy,
@@ -352,6 +469,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EichrechtVerifiableValues,
         title: "The customer must be able to verify the billed measured value",
         citation: "[PTB-A 50.7]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2019 - 04 - 01),
         applies_until: None,
         applicable: |p| p.metering.bills_by_energy,
@@ -362,6 +480,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::ThgEligibility,
         title: "THG-Quote requires a register entry and access for third parties",
         citation: "[38k]",
+        scope: Scope::ChargePoint,
         applies_from: date!(2022 - 01 - 01),
         applies_until: None,
         applicable: |p| p.is_public(),
@@ -376,7 +495,9 @@ pub fn assess(point: &ChargePointProfile, on: Date) -> Assessment {
     let findings = CALENDAR
         .iter()
         .map(|obligation| {
-            let status = if !obligation.in_force_on(on) {
+            let status = if obligation.scope != Scope::ChargePoint {
+                Status::DifferentScope
+            } else if !obligation.in_force_on(on) {
                 Status::NotYetInForce
             } else if !(obligation.applicable)(point) {
                 Status::NotApplicable
@@ -505,51 +626,207 @@ mod tests {
     #[test]
     fn a_renovation_pulls_an_old_point_into_a_new_duty() {
         let mut point = ChargePointProfile::bare(evse(), date!(2019 - 01 - 01));
-        point.v2g = V2gCommunication {
-            pwm: true,
-            iso15118_2: false,
-            iso15118_20: false,
-        };
         point.current_type = CurrentType::Dc;
         point.rated_power_kw = Decimal::from(150);
 
-        // Untouched: the 2024 card-reader duty binds only new points.
-        let before = assess(&point, date!(2026 - 06 - 01));
+        // Untouched: the payment-instrument duty binds points deployed from
+        // 13.04.2024.
         assert_eq!(
-            status_of(&before, ObligationId::AfirCardReaderNewDc),
+            status_of(
+                &assess(&point, date!(2026 - 06 - 01)),
+                ObligationId::AfirPaymentInstrument
+            ),
             Status::NotApplicable
         );
 
         // Renovated in 2026: it counts as new from that day.
         point.renovated_on = Some(date!(2026 - 03 - 01));
-        let after = assess(&point, date!(2026 - 06 - 01));
         assert_eq!(
-            status_of(&after, ObligationId::AfirCardReaderNewDc),
+            status_of(
+                &assess(&point, date!(2026 - 06 - 01)),
+                ObligationId::AfirPaymentInstrument
+            ),
             Status::Failing
         );
     }
 
     #[test]
-    fn the_ten_t_retrofit_is_a_2027_duty_even_for_an_old_point() {
+    fn a_free_charge_point_owes_no_payment_instrument() {
+        // "shall not apply to publicly accessible recharging points that do not
+        // require payment for the recharging service" [AFIR Art. 5(1)].
+        let mut point = ChargePointProfile::bare(evse(), date!(2026 - 06 - 01));
+        point.rated_power_kw = Decimal::from(150);
+        point.requires_payment = false;
+
+        let report = assess(&point, date!(2027 - 06 - 01));
+        for duty in [
+            ObligationId::AfirPaymentInstrument,
+            ObligationId::AfirPaymentInstrumentRetrofit,
+            ObligationId::AfirEnergyBasedAdHocPrice,
+            ObligationId::AfirPriceShownAtStation,
+        ] {
+            assert_eq!(
+                status_of(&report, duty),
+                Status::NotApplicable,
+                "{duty} must not bind a point that charges nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_qr_code_satisfies_the_duty_below_fifty_kilowatts_only() {
+        // The same equipment on two posts in one car park.
+        let mut slow = ChargePointProfile::bare(evse(), date!(2026 - 06 - 01));
+        slow.rated_power_kw = Decimal::from(22);
+        slow.ad_hoc_payment = AdHocPayment::QrCode;
+        assert_eq!(
+            status_of(
+                &assess(&slow, date!(2026 - 09 - 01)),
+                ObligationId::AfirPaymentInstrument
+            ),
+            Status::Satisfied
+        );
+
+        let mut fast = slow.clone();
+        fast.rated_power_kw = Decimal::from(150);
+        assert_eq!(
+            status_of(
+                &assess(&fast, date!(2026 - 09 - 01)),
+                ObligationId::AfirPaymentInstrument
+            ),
+            Status::Failing,
+            "AFIR Art. 5(1)(c) allows the QR option only below 50 kW"
+        );
+    }
+
+    #[test]
+    fn the_2027_retrofit_reaches_safe_parking_as_well_as_ten_t() {
         let mut point = ChargePointProfile::bare(evse(), date!(2018 - 01 - 01));
-        point.current_type = CurrentType::Dc;
         point.rated_power_kw = Decimal::from(350);
-        point.on_ten_t = true;
-        point.ad_hoc_payment = AdHocPayment::DigitalOnly;
+        point.ad_hoc_payment = AdHocPayment::QrCode;
+
+        // Neither TEN-T nor a parking area: out of scope.
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2027 - 06 - 01)),
+                ObligationId::AfirPaymentInstrumentRetrofit
+            ),
+            Status::NotApplicable
+        );
+
+        // A safe and secure parking area away from the corridor is in scope
+        // just as a motorway service station is — easy to miss, and named in
+        // the article.
+        point.on_safe_secure_parking = true;
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2027 - 06 - 01)),
+                ObligationId::AfirPaymentInstrumentRetrofit
+            ),
+            Status::Failing
+        );
+
+        // …and it reaches points deployed long before 13.04.2024, which is the
+        // whole purpose of the paragraph.
+        assert_eq!(point.commissioned_on, date!(2018 - 01 - 01));
+    }
+
+    #[test]
+    fn a_fast_charger_may_not_price_by_the_minute_alone() {
+        // "the ad hoc price charged by the operator shall be based on the price
+        // per kWh" [AFIR Art. 5(4)]. Almost nothing checks this.
+        let mut point = ChargePointProfile::bare(evse(), date!(2026 - 06 - 01));
+        point.rated_power_kw = Decimal::from(150);
+        point.price_transparency.energy_based = false;
 
         assert_eq!(
             status_of(
-                &assess(&point, date!(2026 - 12 - 31)),
-                ObligationId::AfirCardReaderTenTRetrofit
-            ),
-            Status::NotYetInForce
-        );
-        assert_eq!(
-            status_of(
-                &assess(&point, date!(2027 - 01 - 01)),
-                ObligationId::AfirCardReaderTenTRetrofit
+                &assess(&point, date!(2026 - 09 - 01)),
+                ObligationId::AfirEnergyBasedAdHocPrice
             ),
             Status::Failing
+        );
+
+        point.price_transparency.energy_based = true;
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2026 - 09 - 01)),
+                ObligationId::AfirEnergyBasedAdHocPrice
+            ),
+            Status::Satisfied
+        );
+    }
+
+    #[test]
+    fn the_two_price_display_duties_are_split_at_fifty_kilowatts() {
+        let mut fast = ChargePointProfile::bare(evse(), date!(2026 - 06 - 01));
+        fast.rated_power_kw = Decimal::from(150);
+        let report = assess(&fast, date!(2026 - 09 - 01));
+        assert_eq!(
+            status_of(&report, ObligationId::AfirPriceShownAtStation),
+            Status::Failing
+        );
+        assert_eq!(
+            status_of(&report, ObligationId::AfirPriceComponentsInOrder),
+            Status::NotApplicable,
+            "the ordered-components duty is the sub-50 kW one"
+        );
+
+        let mut slow = fast.clone();
+        slow.rated_power_kw = Decimal::from(22);
+        let report = assess(&slow, date!(2026 - 09 - 01));
+        assert_eq!(
+            status_of(&report, ObligationId::AfirPriceComponentsInOrder),
+            Status::Failing
+        );
+        assert_eq!(
+            status_of(&report, ObligationId::AfirPriceShownAtStation),
+            Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn automatic_authentication_carries_an_opt_out_duty() {
+        let mut point = ChargePointProfile::bare(evse(), date!(2026 - 06 - 01));
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2026 - 09 - 01)),
+                ObligationId::AfirAutomaticAuthenticationOptOut
+            ),
+            Status::NotApplicable
+        );
+
+        point.offers_automatic_authentication = true;
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2026 - 09 - 01)),
+                ObligationId::AfirAutomaticAuthenticationOptOut
+            ),
+            Status::Failing
+        );
+
+        point.automatic_authentication_opt_out_offered = true;
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2026 - 09 - 01)),
+                ObligationId::AfirAutomaticAuthenticationOptOut
+            ),
+            Status::Satisfied
+        );
+    }
+
+    #[test]
+    fn a_provider_duty_is_out_of_scope_for_a_charge_point() {
+        // Art. 5(5) binds the mobility service provider. Judging it against a
+        // charge point would be a category error; omitting it from the calendar
+        // would let it be forgotten.
+        let point = ChargePointProfile::bare(evse(), date!(2026 - 06 - 01));
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2026 - 09 - 01)),
+                ObligationId::AfirMspPriceDisclosure
+            ),
+            Status::DifferentScope
         );
     }
 
@@ -570,8 +847,11 @@ mod tests {
         point.rated_power_kw = Decimal::from(300);
         point.on_ten_t = true;
         point.ad_hoc_payment = AdHocPayment::CardReader;
-        point.price_displayed_before_session = true;
-        point.ad_hoc_price_free_of_roaming_surcharge = true;
+        point.price_transparency = crate::station::PriceTransparency {
+            energy_based: true,
+            shown_at_station: true,
+            components_in_prescribed_order: true,
+        };
         point.v2g = V2gCommunication::both_generations();
         point.offers_plug_and_charge = true;
         point.data = crate::station::DataPublication {
@@ -604,7 +884,7 @@ mod tests {
             .map(|o| o.id)
             .collect();
         assert!(upcoming.contains(&ObligationId::Da656Iso15118Dash20));
-        assert!(upcoming.contains(&ObligationId::AfirCardReaderTenTRetrofit));
+        assert!(upcoming.contains(&ObligationId::AfirPaymentInstrumentRetrofit));
         assert!(
             !upcoming.contains(&ObligationId::AfirDatex2),
             "DATEX II already started in April 2026"

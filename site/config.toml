@@ -22,9 +22,9 @@ tagline    = "open-source charging operations for the European market"
 # `cargo xtask no-floats`, and `emob_eichrecht::ocmf::KeyType`.
 # The description below names the four crates; keep it in step with the table
 # on the architecture page.
-stat_obligations = "14"
-stat_tests       = "184"
-stat_crates      = "4"
+stat_obligations = "17"
+stat_tests       = "233"
+stat_crates      = "5"
 stat_floats      = "0"
 stat_curves      = "3"
 

@@ -1,5 +1,5 @@
 //! The whole chain, end to end: signed meter values → evidence → session →
-//! CDR → ledger.
+//! CDR → ledger → money.
 //!
 //! Each crate tests its own half. This is the test that they compose — that the
 //! kilowatt-hour the station signed is the kilowatt-hour on the record a partner
@@ -10,13 +10,16 @@
 //! would go through, so the test proves the path rather than a constant.
 
 use emob_cdr::{Acceptance, CdrBuilder, CdrLedger, EvidenceRef, validate};
-use emob_core::{Direction, Energy, PartyId};
+use emob_core::{Currency, Direction, Energy, PartyId};
 use emob_eichrecht::ocmf::KeyType;
 use emob_eichrecht::registry::{ComponentRef, RegisteredKey};
 use emob_eichrecht::{Evidence, KeyRegistry, PublicKey, ocmf};
 use emob_session::{
     Authorization, EndReason, IdentificationStrength, MeterReading, MeterSeries, ReadingContext,
     Session, SessionState,
+};
+use emob_tariff::{
+    Chargeable, Dimension, PriceComponent, Tariff, TariffKind, check_afir, describe, rate,
 };
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::{DerSignature, SigningKey};
@@ -415,4 +418,99 @@ fn a_session_overstating_its_authorisation_cannot_produce_a_cdr() {
         err.to_string().contains("claims ad-hoc authorisation"),
         "{err}"
     );
+}
+
+// ── The last leg: from a settled record to money ────────────────────────────
+
+fn dec(s: &str) -> Decimal {
+    Decimal::from_str(s).unwrap()
+}
+
+/// A lawful fast-charger ad-hoc tariff: per kWh, with an occupancy fee on top —
+/// exactly the shape `[AFIR Art. 5(4)]` permits at 50 kW and above.
+fn fast_charger_tariff() -> Tariff {
+    Tariff::simple(
+        "ad-hoc-dc".parse().unwrap(),
+        Currency::EUR,
+        TariffKind::AdHoc,
+        vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")),
+            PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
+        ],
+    )
+}
+
+#[test]
+fn the_price_shown_is_the_price_charged() {
+    // The property the whole tariff crate exists for, exercised on a record
+    // that came out of the real chain rather than a fixture.
+    let evidence = evidence_of(&raw_records());
+    let session = session();
+    let cdr = CdrBuilder::from_session(&session, Direction::Import)
+        .unwrap()
+        .key(PartyId::new("DE", "ABC").unwrap(), "cdr-1".parse().unwrap())
+        .evidence(evidence_ref(&evidence))
+        .build()
+        .unwrap();
+
+    let tariff = fast_charger_tariff();
+
+    // What a driver approaching the charger is shown, before anything happens.
+    let shown = describe(&tariff, cdr.started_at);
+    assert_eq!(shown.one_line(), "0.49 EUR / kWh · 0.10 EUR / min");
+    assert_eq!(shown.per_kwh(), Some(dec("0.49")));
+
+    // What the session is actually rated at, from the CDR the chain produced.
+    let rated = rate(
+        &tariff,
+        &Chargeable::energy_only(cdr.total_energy, cdr.started_at),
+    );
+
+    assert_eq!(
+        rated.lines[0].unit_price,
+        shown.per_kwh().unwrap(),
+        "the displayed price and the charged price are the same number"
+    );
+    // 18.000 kWh at 0.49.
+    assert_eq!(rated.total().to_string(), "8.82 EUR");
+    assert!(rated.lines_sum_to_total());
+    assert!(rated.notes.is_empty(), "{:?}", rated.notes);
+}
+
+#[test]
+fn a_fast_charger_may_not_offer_a_per_minute_only_tariff() {
+    let lawful = fast_charger_tariff();
+    assert!(check_afir(&lawful, dec("150")).is_lawful());
+
+    // The same operator, the same charger, priced by the minute alone.
+    let unlawful = Tariff::simple(
+        "ad-hoc-dc".parse().unwrap(),
+        Currency::EUR,
+        TariffKind::AdHoc,
+        vec![PriceComponent::new(Dimension::Time, dec("0.35"))],
+    );
+    let verdict = check_afir(&unlawful, dec("150"));
+    assert!(!verdict.is_lawful());
+    assert!(
+        verdict.reasons().any(|r| r.contains("price per kWh")),
+        "{:?}",
+        verdict.reasons().collect::<Vec<_>>()
+    );
+
+    // …and the identical tariff is fine on a 22 kW post.
+    assert!(check_afir(&unlawful, dec("22")).is_lawful());
+}
+
+#[test]
+fn an_unbillable_session_never_reaches_a_price() {
+    // The chain's central promise, carried to the end: a tampered record has no
+    // energy, so there is nothing for a tariff to rate.
+    let mut raw = raw_records();
+    raw[2] = raw[2].replace("118.000", "218.000");
+    let evidence = evidence_of(&raw);
+
+    assert_eq!(evidence.billable_energy(), None);
+    // There is no path from here to a number: `rate` takes a `Chargeable`, and
+    // the only energy this session has is the `None` above.
+    assert!(!evidence.is_billable());
 }

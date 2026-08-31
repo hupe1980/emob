@@ -7,13 +7,13 @@ value survives in, and the driver contract all of it turns into an invoice.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> 🚧 **Status: early.** Four domain crates are real, tested and green —
+> 🚧 **Status: early.** Five domain crates are real, tested and green —
 > [`emob-core`](crates/emob-core), [`emob-eichrecht`](crates/emob-eichrecht),
-> [`emob-session`](crates/emob-session) and [`emob-cdr`](crates/emob-cdr) —
-> with **184 tests** and an end-to-end test that drives a genuinely signed
-> session from the meter to a settled record. Everything else is designed and
-> not yet built, and this README marks which is which rather than blurring the
-> two.
+> [`emob-session`](crates/emob-session), [`emob-cdr`](crates/emob-cdr) and
+> [`emob-tariff`](crates/emob-tariff) — with **233 tests** and an end-to-end
+> test that drives a genuinely signed session from the meter all the way to a
+> price. Everything else is designed and not yet built, and this README marks
+> which is which rather than blurring the two.
 
 ## Why
 
@@ -36,7 +36,7 @@ that already exist as siblings rather than re-implemented: [`ocpp-kit`],
 [`iso15118`]: https://github.com/hupe1980/iso15118
 [`eebus`]: https://github.com/hupe1980/eebus
 
-## The four properties that decide quality
+## The five properties that decide quality
 
 ### A value that does not verify does not bill
 
@@ -108,6 +108,28 @@ every one. Interpolation assumes constant power across a gap, which a tapering
 charge curve does not deliver — so the assumption travels with the number, all
 the way to the partner's copy of the record.
 
+### The price shown is the price charged
+
+A tariff has to rate a finished session *and* be displayed before one starts
+`[AFIR Art. 5(4)]`. When those come from two places they drift — the screen
+reads a CMS field, the invoice reads the tariff engine, one of them was updated
+— and a driver is billed something other than the quote. Here `describe()` is
+derived from the tariff that `rate()` reads:
+
+```rust
+assert_eq!(describe(&tariff, at).one_line(), "0.49 EUR / kWh · 0.50 EUR / session");
+assert_eq!(rate(&tariff, &session).total().to_string(), "14.96 EUR");
+```
+
+The component order is the regulation's too: AFIR prescribes kWh, then minute,
+then session, then the rest, so `Dimension` is declared in that order and
+**sorting the components is complying with the article**.
+
+And a tariff can be unlawful on its own. At 50 kW and above the ad-hoc price
+"shall be based on the price per kWh", with an occupancy fee per minute allowed
+only *in addition* — so the same per-minute tariff is fine on a 22 kW post and
+refused on the 150 kW charger beside it.
+
 ### Money is never a float, and scale is information
 
 Every quantity here either is money or becomes money.
@@ -135,7 +157,7 @@ than dividing, so `29500 Wh` becomes `29.500 kWh` and not `29.5`.
 | [`emob-eichrecht`](crates/emob-eichrecht) | OCMF parse/verify, the key registry, the session chain, the evidence record | ✅ |
 | [`emob-session`](crates/emob-session) | Authorisation paths, cumulative meter series, and the quarter-hour split | ✅ |
 | [`emob-cdr`](crates/emob-cdr) | The record and its builder, idempotent acceptance, pre-flight validation | ✅ |
-| `emob-tariff` | CPO/EMP tariffs, ad-hoc pricing, display strings derived from the rating tariff | 📐 |
+| [`emob-tariff`](crates/emob-tariff) | Rating, the display derived from the rating tariff, and the AFIR shape check | ✅ |
 | `emob-roam` | Canonical ↔ wire translation and its cost notes; partner registry | 📐 |
 | `emob-pnc` | Plug & Charge contracts, OPCP pools, multi-PKI | 📐 |
 | `emob-poi` | Locations, LSV/AFIR registry state, DATEX II export | 📐 |
