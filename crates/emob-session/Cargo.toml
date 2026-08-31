@@ -1,0 +1,27 @@
+[package]
+name        = "emob-session"
+description = "EV charging sessions: authorisation paths, cumulative meter series, and a quarter-hour split that conserves energy exactly by construction and records whether each slot was measured or interpolated"
+keywords    = ["ev-charging", "ocpp", "metering", "session", "settlement"]
+categories  = ["science", "data-structures"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = ["dep:serde", "emob-core/serde", "rust_decimal/serde", "time/serde"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

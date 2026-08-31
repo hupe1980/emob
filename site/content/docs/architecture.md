@@ -1,6 +1,6 @@
 +++
 title = "Architecture"
-weight = 4
+weight = 5
 description = "What is built, what is designed, how emob sits beside the protocol kits it consumes, and the roaming stance that decides how the rest gets written."
 +++
 
@@ -12,15 +12,22 @@ description = "What is built, what is designed, how emob sits beside the protoco
 |---|---|
 | `emob-core` | Identifiers in both grammars, text-preserving; exact energy and money; the charge-point profile; the obligation calendar |
 | `emob-eichrecht` | OCMF parse and verify, the key registry, the session chain, the evidence record |
+| `emob-session` | Authorisation paths, cumulative meter series, and the quarter-hour split that conserves exactly |
+| `emob-cdr` | The record and its builder, idempotent acceptance, and pre-flight validation |
 
-105 tests, no I/O, no clock, no binary floats. `just ci` green.
+184 tests, no I/O, no clock, no binary floats. `just ci` green.
+
+An end-to-end test drives the whole chain: OCMF records signed with a real key
+at test time, verified, assembled into evidence, matched against a session, built
+into a CDR, validated as a partner would, and accepted exactly once. It also
+proves the failures — one changed digit, a deleted middle record, a substitute
+reading and an unregistered station each stop the chain, each with a reason that
+names what went wrong.
 
 ## What is designed 📐
 
 | Crate | Holds |
 |---|---|
-| `emob-session` | Session lifecycle across every entry path — local RFID, roaming, ad-hoc, Plug & Charge, AutoCharge — with clock-aligned energy series |
-| `emob-cdr` | CDR construction from session and evidence, inbound validation, dedupe, re-rating, disputes |
 | `emob-tariff` | CPO and EMP tariffs, ad-hoc pricing, and display strings derived from the tariff that rates |
 | `emob-roam` | The canonical ↔ wire translation layer and its cost notes; the partner registry |
 | `emob-pnc` | Plug & Charge contracts, certificate pools, multi-PKI |

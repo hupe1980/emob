@@ -7,10 +7,13 @@ value survives in, and the driver contract all of it turns into an invoice.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> 🚧 **Status: early.** Two domain crates are real, tested and green —
-> [`emob-core`](crates/emob-core) and [`emob-eichrecht`](crates/emob-eichrecht),
-> 105 tests. Everything else in [the plan](#the-plan) is designed and not yet
-> built, and this README marks which is which rather than blurring the two.
+> 🚧 **Status: early.** Four domain crates are real, tested and green —
+> [`emob-core`](crates/emob-core), [`emob-eichrecht`](crates/emob-eichrecht),
+> [`emob-session`](crates/emob-session) and [`emob-cdr`](crates/emob-cdr) —
+> with **184 tests** and an end-to-end test that drives a genuinely signed
+> session from the meter to a settled record. Everything else is designed and
+> not yet built, and this README marks which is which rather than blurring the
+> two.
 
 ## Why
 
@@ -33,7 +36,7 @@ that already exist as siblings rather than re-implemented: [`ocpp-kit`],
 [`iso15118`]: https://github.com/hupe1980/iso15118
 [`eebus`]: https://github.com/hupe1980/eebus
 
-## The three properties that decide quality
+## The four properties that decide quality
 
 ### A value that does not verify does not bill
 
@@ -81,6 +84,30 @@ cannot be applied a year before it exists. Applicability and satisfaction stay
 separate questions: a private depot is not *failing* the ad-hoc payment duty,
 the duty does not bind it.
 
+### The quarter-hour split conserves energy exactly
+
+Germany's pass-through model settles a session against the quarter hours it
+touched `[A6 §IV.1]`. A session running 10:01 to 10:22 crosses a boundary two
+thirds of the way through, and seven kilowatt-hours times two thirds does not
+terminate.
+
+Computing each slot independently leaves a sum that misses the total, and the
+usual fix shoves the remainder into the last slot — misattributing energy to
+whoever held 10:15. Instead, the cumulative value at each boundary is computed
+once and differences are taken, so the sum **telescopes**: every interior
+boundary cancels exactly, whatever it was rounded to.
+
+```rust
+let split = split::into_quarter_hours(&series)?;
+assert!(split.conserves());        // exactly, for every session
+assert!(!split.fully_measured());  // …and it says when it had to interpolate
+```
+
+A test runs 144 generated sessions chosen for awkward ratios and asserts it on
+every one. Interpolation assumes constant power across a gap, which a tapering
+charge curve does not deliver — so the assumption travels with the number, all
+the way to the partner's copy of the record.
+
 ### Money is never a float, and scale is information
 
 Every quantity here either is money or becomes money.
@@ -106,8 +133,8 @@ than dividing, so `29500 Wh` becomes `29.500 kWh` and not `29.5`.
 |---|---|---|
 | [`emob-core`](crates/emob-core) | Identifiers in both grammars, text-preserving; exact energy/money; the charge-point profile; the obligation calendar | ✅ |
 | [`emob-eichrecht`](crates/emob-eichrecht) | OCMF parse/verify, the key registry, the session chain, the evidence record | ✅ |
-| `emob-session` | Session lifecycle across every entry path; clock-aligned energy series | 📐 |
-| `emob-cdr` | CDR construction, inbound validation, dedupe, re-rating, disputes | 📐 |
+| [`emob-session`](crates/emob-session) | Authorisation paths, cumulative meter series, and the quarter-hour split | ✅ |
+| [`emob-cdr`](crates/emob-cdr) | The record and its builder, idempotent acceptance, pre-flight validation | ✅ |
 | `emob-tariff` | CPO/EMP tariffs, ad-hoc pricing, display strings derived from the rating tariff | 📐 |
 | `emob-roam` | Canonical ↔ wire translation and its cost notes; partner registry | 📐 |
 | `emob-pnc` | Plug & Charge contracts, OPCP pools, multi-PKI | 📐 |

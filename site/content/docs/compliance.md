@@ -1,6 +1,6 @@
 +++
 title = "The obligation calendar"
-weight = 3
+weight = 4
 description = "AFIR, DA-656, LSV 2026, MessEG and the THG preconditions as dated, cited, executable rules — and why applicability and satisfaction have to stay separate questions."
 +++
 

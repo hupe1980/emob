@@ -1,0 +1,34 @@
+[package]
+name        = "emob-cdr"
+description = "Charge detail records for EV charging: built so they cannot fail their own arithmetic, accepted exactly once with retransmissions told apart from conflicts, and validated without ever being silently repaired"
+keywords    = ["ev-charging", "cdr", "ocpi", "roaming", "billing"]
+categories  = ["data-structures", "science"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+emob-session = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = ["dep:serde", "emob-core/serde", "emob-session/serde", "time/serde"]
+
+[dev-dependencies]
+# The end-to-end test signs real OCMF records and drives them through the whole
+# chain, so it needs the verification crate and a signing key.
+emob-eichrecht = { workspace = true }
+hex            = { workspace = true }
+p256           = { workspace = true }
+rust_decimal   = { workspace = true }
+serde_json     = { workspace = true }
+sha2           = { workspace = true }

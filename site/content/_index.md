@@ -1,7 +1,7 @@
 +++
 title = "emob"
 template = "index.html"
-description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, AFIR and Eichrecht as executable cited rules, and no binary float anywhere near the money."
+description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, a quarter-hour split that conserves energy exactly, AFIR and Eichrecht as executable cited rules, and no binary float anywhere near the money."
 +++
 
 Someone plugs in a car. Four minutes later a number exists that two companies
@@ -19,6 +19,7 @@ product.
 <div class="card"><h3>Signatures cannot see a deletion</h3><p>Drop the middle records of a charging session and every remaining signature still verifies. The specification assigns that check to a separate component — contiguous pagination, a begin marker, an end marker — and so does this workspace, as its own question with its own answer.</p></div>
 <div class="card"><h3>Compliance is a query</h3><p>“Are we AFIR-ready for 2027?” is normally a consulting engagement. Here it is a function call against a calendar of dated, cited duties — and a build guard fails if a rule cites a document the source index cannot produce.</p></div>
 <div class="card"><h3>Applicability is not failure</h3><p>A private depot is not <em>failing</em> the ad-hoc payment duty; the duty does not bind it. A legacy PWM-only point is not failing ISO 15118-20; the delegated act exempts it in as many words. Merging those with real breaches is how compliance dashboards come to be ignored.</p></div>
+<div class="card"><h3>The quarter-hour split conserves exactly</h3><p>A session from 10:01 to 10:22 must be settled against two quarter hours, and the boundary falls two thirds of the way through. Computing each slot independently leaves a sum that misses the total, and the usual fix shoves the remainder into the last slot — misattributing energy to whoever held it. Taking differences of cumulative boundaries makes the sum telescope instead: exact, always, whatever the ratio.</p></div>
 <div class="card"><h3>Money is never a float</h3><p>Every quantity here either is money or becomes money. A build guard fails on an <code>f32</code> or <code>f64</code> anywhere — including a late <code>from_f64</code>, because a float converted at the boundary is still a float that was wrong at the source.</p></div>
 <div class="card"><h3>Scale is a claim about accuracy</h3><p>A register reporting <code>2935.600 kWh</code> is stating three decimals of resolution. Rewriting it as <code>2935.6</code> discards something the meter said about itself — which OCMF forbids in as many words. Nothing here strips a trailing zero, and even <code>Wh → kWh</code> moves the point rather than dividing.</p></div>
 <div class="card"><h3>Replayable, because nothing reads a clock</h3><p>The domain crates take time and keys as arguments. A dispute about a session from two years ago is answered by replaying the check exactly as it ran — and a build guard fails if a domain crate ever reaches for the ambient world.</p></div>
@@ -60,8 +61,10 @@ sessions unverifiable.
 
 ## Where it stands
 
-Two domain crates are real, tested and green: `emob-core` and
-`emob-eichrecht`, 105 tests, no I/O, no clock, no floats. The rest of the
-platform — sessions, CDRs, tariffs, roaming, Plug & Charge, billing — is
-designed and not yet built, and the [documentation](@/docs/_index.md) marks
-which is which on every page rather than blurring the two.
+Four domain crates are real, tested and green — `emob-core`,
+`emob-eichrecht`, `emob-session` and `emob-cdr` — with **184 tests**, no I/O, no
+clock, no floats, and an end-to-end test that drives a genuinely signed session
+from the meter to a settled record. The rest of the platform — tariffs, roaming,
+Plug & Charge, billing — is designed and not yet built, and the
+[documentation](@/docs/_index.md) marks which is which on every page rather than
+blurring the two.

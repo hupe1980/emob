@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/emob"
 title = "emob"
-description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, AFIR and Eichrecht as executable cited rules, OCPP/OCPI/OICP/ISO 15118 native, and no binary float anywhere near the money."
+description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, a quarter-hour split that conserves energy exactly, AFIR and Eichrecht as executable cited rules, and no binary float anywhere near the money."
 default_language = "en"
 compile_sass = false
 build_search_index = false
@@ -20,9 +20,11 @@ tagline    = "open-source charging operations for the European market"
 # that changing one is a one-line diff against the thing that produced it:
 # `emob_core::obligation::CALENDAR`, `cargo test --workspace`, the crate list,
 # `cargo xtask no-floats`, and `emob_eichrecht::ocmf::KeyType`.
+# The description below names the four crates; keep it in step with the table
+# on the architecture page.
 stat_obligations = "14"
-stat_tests       = "105"
-stat_crates      = "2"
+stat_tests       = "184"
+stat_crates      = "4"
 stat_floats      = "0"
 stat_curves      = "3"
 

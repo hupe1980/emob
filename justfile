@@ -39,7 +39,7 @@ lint:
 purity:
     #!/usr/bin/env bash
     set -uo pipefail
-    pure="emob-core emob-eichrecht"
+    pure="emob-core emob-eichrecht emob-session emob-cdr"
     fail=0
     for crate in $pure; do
         [ -d "crates/$crate/src" ] || continue

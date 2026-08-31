@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "crates/emob-core",
     "crates/emob-eichrecht",
+    "crates/emob-session",
+    "crates/emob-cdr",
     "xtask",
 ]
 

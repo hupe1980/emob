@@ -1,16 +1,15 @@
 +++
 title = "Getting started"
 weight = 1
-description = "Install the two crates that exist, verify a charging session under German calibration law, and ask the obligation calendar whether a charge point is ready for 2027."
+description = "Install the four crates that exist, verify a charging session under German calibration law, split it across quarter hours, build a CDR, and ask the obligation calendar whether a charge point is ready for 2027."
 +++
 
 # Getting started
 
-Two crates are built and published from this workspace today. Everything on this
-page runs. ✅
+Four crates are built from this workspace today. Everything on this page runs. ✅
 
 ```console
-cargo add emob-core emob-eichrecht
+cargo add emob-core emob-eichrecht emob-session emob-cdr
 ```
 
 ## Verify a charging session
@@ -75,6 +74,36 @@ no public key is registered for signing component "meter:BQ1"
 The pagination one deserves attention. Every signature in that session is
 genuine — dropping records does not invalidate the ones that remain. Only the
 chain check sees it.
+
+## Split a session across quarter hours
+
+```rust
+use emob_session::split;
+
+let split = split::into_quarter_hours(&series)?;
+
+assert!(split.conserves());        // exactly, for every session
+assert!(split.fully_measured());   // …and every boundary had a reading on it
+```
+
+The sum equals the session total to the last digit, whatever the ratios work out
+to — see [Sessions and settlement](@/docs/settlement.md) for why that is by
+construction rather than by reconciliation.
+
+## Build a CDR
+
+```rust
+use emob_cdr::{CdrBuilder, CdrLedger, Acceptance};
+
+let cdr = CdrBuilder::from_session(&session, Direction::Import)?
+    .key(party, "cdr-1".parse()?)
+    .evidence(evidence_ref)
+    .build()?;
+
+let mut ledger = CdrLedger::new();
+assert_eq!(ledger.accept(cdr.clone()), Acceptance::Stored);
+assert_eq!(ledger.accept(cdr), Acceptance::Duplicate);  // a retry, not a second invoice
+```
 
 ## Ask whether a charge point is compliant
 
