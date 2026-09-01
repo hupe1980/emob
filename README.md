@@ -854,10 +854,17 @@ dispute about a two-year-old session is replayed exactly as it happened — and
 builds each from its own tarball. Pushing a `vX.Y.Z` tag runs
 [`release.yml`](.github/workflows/release.yml), which re-runs the whole gate
 against the tagged revision, refuses a tag whose version the manifests do not
-carry, and then publishes with `cargo publish --workspace`. It needs a
-`CARGO_REGISTRY_TOKEN` secret on a `crates-io` environment — which is also where
-a required reviewer goes, because a version number is spent the moment crates.io
-accepts it.
+carry, and then publishes the nine crates one step at a time in dependency
+order.
+
+A publish is nine uploads and can stop in the middle, leaving the version spent
+for some crates and free for the rest — so each step treats *already uploaded* as
+the upload having already happened, and a re-run finishes the release instead of
+needing a version bump. Every other failure still stops the run.
+
+It needs a `CARGO_REGISTRY_TOKEN` secret on a `crates-io` environment, which is
+also where a required reviewer goes: a version number is spent the moment
+crates.io accepts it.
 
 ## Sources
 
