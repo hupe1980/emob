@@ -13,8 +13,8 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
-# Internal-only documents (not published) — the architecture/concept notes
-CONCEPT.md
+# Internal-only documents (not published) — the architecture notes and the backlog
+concepts/
 
 # Third-party regulations, laws, standards, protocol documents and papers
 # (copyrighted; indexed with retrieval URLs in specs/README.md so the folder

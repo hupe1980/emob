@@ -55,6 +55,32 @@ impl ReadingContext {
     pub const fn is_transaction_boundary(self) -> bool {
         matches!(self, Self::TransactionBegin | Self::TransactionEnd)
     }
+
+    /// The OCPP spelling, identical in 1.6, 2.0.1 and 2.1.
+    ///
+    /// Beside the variants rather than in the OCPP crate, because these *are*
+    /// the OCPP names — the variant documentation gives them one line up — and a
+    /// spelling kept somewhere else is a spelling that drifts from the enum it
+    /// spells.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TransactionBegin => "Transaction.Begin",
+            Self::TransactionEnd => "Transaction.End",
+            Self::SampleClock => "Sample.Clock",
+            Self::SamplePeriodic => "Sample.Periodic",
+            Self::InterruptionBegin => "Interruption.Begin",
+            Self::InterruptionEnd => "Interruption.End",
+            Self::Trigger => "Trigger",
+            Self::Other => "Other",
+        }
+    }
+}
+
+impl core::fmt::Display for ReadingContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// One reading of a cumulative energy register.
@@ -66,6 +92,7 @@ impl ReadingContext {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MeterReading {
     /// When the register held this value.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
     pub at: time::OffsetDateTime,
     /// The register's value.
     pub register: Energy,

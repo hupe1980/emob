@@ -8,6 +8,7 @@
 
 use rust_decimal::Decimal;
 
+use super::obis::ObisCode;
 use crate::error::OcmfError;
 
 /// The pagination context: is this reading part of a transaction, or a
@@ -298,6 +299,7 @@ impl TimeStatus {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OcmfTime {
     /// The instant, parsed.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
     pub instant: time::OffsetDateTime,
     /// How much the clock behind it can be trusted.
     pub status: TimeStatus,
@@ -382,6 +384,13 @@ impl ReadingUnit {
     pub const fn is_energy(self) -> bool {
         matches!(self, Self::KWh | Self::Wh)
     }
+
+    /// Whether this unit measures resistance — the two `LU` may take
+    /// `[OCMF Tab. 24]`.
+    #[must_use]
+    pub const fn is_resistance(self) -> bool {
+        matches!(self, Self::MOhm | Self::UOhm)
+    }
 }
 
 /// Alternating or direct current `[OCMF Tab. 21]`.
@@ -409,8 +418,9 @@ pub struct Reading {
     pub transaction: Option<TransactionMarker>,
     /// `RV` — the value, exact, with the scale the meter stated.
     pub value: Option<Decimal>,
-    /// `RI` — the OBIS code identifying what was read.
-    pub obis: Option<String>,
+    /// `RI` — the OBIS code identifying what was read, classified as far as it
+    /// can be `[OCMF Tab. 25]`.
+    pub obis: Option<ObisCode>,
     /// `RU` — the unit.
     pub unit: Option<ReadingUnit>,
     /// `RT` — AC or DC.
@@ -426,6 +436,30 @@ pub struct Reading {
 }
 
 impl Reading {
+    /// The register value as an [`emob_core::Energy`], in the unit the reading
+    /// states.
+    ///
+    /// `None` for a reading with no value — `[OCMF Tab. 7]` lets `RV` be
+    /// omitted "if only the occurrence of an error condition (event) of the
+    /// meter is to be indicated" — or one whose unit is not an energy at all.
+    ///
+    /// The conversion lives here rather than at each call site because `RU` is
+    /// `Wh` on ordinary German hardware and kWh elsewhere, and a caller that
+    /// reads `value` and forgets `unit` is out by a factor of a thousand.
+    /// [`Energy::from_wh`] shifts the decimal point rather than dividing, so
+    /// the meter's own resolution survives either way.
+    ///
+    /// [`Energy::from_wh`]: emob_core::Energy::from_wh
+    #[must_use]
+    pub fn energy(&self) -> Option<emob_core::Energy> {
+        let value = self.value?;
+        match self.unit? {
+            ReadingUnit::KWh => emob_core::Energy::from_kwh(value).ok(),
+            ReadingUnit::Wh => emob_core::Energy::from_wh(value).ok(),
+            ReadingUnit::MOhm | ReadingUnit::UOhm => None,
+        }
+    }
+
     /// Whether this reading may be used as the basis for an energy charge.
     ///
     /// Three conditions, all of which have to hold: the meter was working, no
@@ -509,6 +543,26 @@ impl IdentificationLevel {
     }
 }
 
+/// The cable-loss compensation parameters `[OCMF Tab. 24]`.
+///
+/// Present when the meter compensates for the resistance of the charging cable,
+/// which is what lets a station bill the energy that reached the *vehicle*
+/// rather than the energy that left the meter. `LR` and `LU` are mandatory
+/// inside the object: a compensation nobody can reproduce is a compensation
+/// nobody can check, and a notified body asks for exactly this.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LossCompensation {
+    /// `LN` — a traceability text for the cable characteristics.
+    pub naming: Option<String>,
+    /// `LI` — a traceability id into the meter's documentation.
+    pub identification: Option<Decimal>,
+    /// `LR` — the cable resistance used in the computation. Mandatory.
+    pub resistance: Decimal,
+    /// `LU` — the unit of that resistance: milliohm or microohm. Mandatory.
+    pub resistance_unit: ReadingUnit,
+}
+
 /// The identification section of a payload `[OCMF Tab. 4]`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -521,6 +575,10 @@ pub struct Identification {
     /// a flag this crate does not know is still evidence.
     pub flags: Vec<String>,
     /// `IT` — the type of the identification data (`ISO14443`, `EMAID`, …).
+    ///
+    /// Mandatory whenever the section is present `[OCMF Tab. 4]`, so it is not
+    /// an `Option`: a section without it is a malformed record, and the parser
+    /// says so rather than substituting an empty string.
     pub id_type: String,
     /// `ID` — the identification data itself.
     pub id_data: Option<String>,
@@ -551,7 +609,14 @@ pub struct Payload {
     /// `MF` — meter firmware.
     pub meter_firmware: Option<String>,
     /// `CF` — charge controller firmware version.
+    ///
+    /// Some notified bodies require it, to tie an OCMF data set to the
+    /// documentation of the corresponding Schalt-Mess-Koordination
+    /// `[OCMF Tab. 5]`.
     pub controller_firmware: Option<String>,
+    /// `LC` — the cable-loss compensation parameters, when the meter
+    /// compensates.
+    pub loss_compensation: Option<LossCompensation>,
     /// The user-assignment section, present exactly when there is a
     /// transaction reference.
     pub identification: Option<Identification>,

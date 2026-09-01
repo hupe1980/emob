@@ -1,11 +1,12 @@
 //! The identifiers the e-mobility market runs on.
 //!
-//! # Two grammars, one identity, and the text that arrived
+//! # Several grammars, one identity, and the text that arrived
 //!
 //! Every identifier here accepts more than one written form of the same thing.
 //! An `EvseId` may be `DE*AB7*E840*6487` or `DEAB7E8406487`; an [`Emaid`] may
-//! follow ISO 15118 (`DE-8AA-CA2B3C4D5-1`) or DIN SPEC 91286
-//! (`DE8AA1234567890`). Two rules follow, and both are load-bearing:
+//! follow ISO 15118 (`NL-TNM-000122045-U`), EMI3 (`NL-TNM-C00122045-K`) or
+//! DIN SPEC 91286 (`NL-TNM-012204-5`). Two rules follow, and both are
+//! load-bearing:
 //!
 //! 1. **Equality is canonical.** The separated and packed spellings of one
 //!    charge point are the same charge point, hash the same and compare equal.
@@ -18,6 +19,16 @@
 //!
 //! [`canonical`](EvseId::canonical) is the normalised form, for anyone who
 //! wants it deliberately.
+//!
+//! # And the check digit is checked
+//!
+//! A contract identifier ends in a digit whose only job is to catch a
+//! transcription error — a card read wrong, a character lost in a support
+//! form, a column shifted in a partner's export. An identifier that has lost
+//! one still parses, still routes, and bills a session to somebody else's
+//! contract; so [`Emaid`] verifies the digit it was given and computes the one
+//! it was not. The two grammars use **different algorithms**, which is why
+//! telling them apart is the first thing the parser does.
 //!
 //! # Why not reuse the sibling kits' types
 //!
@@ -38,7 +49,7 @@ use crate::error::IdError;
 /// exactly. Never used for equality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Spelling {
-    /// Separators present, e.g. `DE*AB7*E840*6487` or `DE-8AA-CA2B3C4D5-1`.
+    /// Separators present, e.g. `DE*AB7*E840*6487` or `NL-TNM-000122045-U`.
     Separated,
     /// No separators, e.g. `DEAB7E8406487`.
     Packed,
@@ -101,7 +112,7 @@ impl EvseId {
         if trimmed.is_empty() {
             return Err(IdError::Empty { kind: "EvseId" });
         }
-        let spelling = if trimmed.contains('*') || trimmed.contains('-') {
+        let spelling = if trimmed.contains('*') {
             Spelling::Separated
         } else {
             Spelling::Packed
@@ -109,11 +120,16 @@ impl EvseId {
         // Under eMI3/ISO 15118-1 the `*` separator is optional *throughout*,
         // including inside the power-outlet section — `DE*AB7*E840*6487` and
         // `DEAB7E8406487` are one charge point. Canonicalising therefore strips
-        // every separator, not just the two structural ones. `oicp-kit` reaches
-        // the same conclusion from the same grammar, and the two must agree:
-        // they meet in the roaming translation layer, and an id that compares
-        // equal on one side and not the other routes a session to nobody.
-        let canonical = canonicalise(trimmed, &['-', '*']);
+        // every `*`, not just the two structural ones. `oicp-kit` reaches the
+        // same conclusion from the same grammar, and the two must agree: they
+        // meet in the roaming translation layer, and an id that compares equal
+        // on one side and not the other routes a session to nobody.
+        //
+        // `-` is *not* a separator here, unlike in a contract id. The EVSE
+        // grammar does not define one, and silently eating a hyphen would make
+        // `DE-AB7-E840` — which is not an EVSE id — parse as one and compare
+        // equal to a real charge point.
+        let canonical = canonicalise(trimmed, &['*']);
 
         let bytes = canonical.as_bytes();
         if bytes.len() < 4 {
@@ -144,10 +160,8 @@ impl EvseId {
         if outlet.is_empty() || outlet.len() > 30 {
             return Err(IdError::BadOutlet);
         }
-        if !outlet
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '*')
-        {
+        // Every `*` is already gone, so what remains must be alphanumeric.
+        if !outlet.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err(IdError::BadOutlet);
         }
 
@@ -231,49 +245,130 @@ impl FromStr for EvseId {
 // ── Emaid / EvcoId ──────────────────────────────────────────────────────────
 
 /// Which grammar a contract identifier was written in.
+///
+/// Three, not two, and the difference is the length of the instance section:
+///
+/// | Grammar | Instance | Packed length | Example |
+/// |---|---|---|---|
+/// | [`Din91286`](ContractGrammar::Din91286) | 6 alphanumerics | 11, or 12 with the check digit | `NL-TNM-012204-5` |
+/// | [`Iso15118`](ContractGrammar::Iso15118) | 9 alphanumerics | 14, or 15 with the check digit | `NL-TNM-000122045-U` |
+/// | [`Emi3`](ContractGrammar::Emi3) | `C` + 8 alphanumerics | 14, or 15 with the check digit | `NL-TNM-C00122045-K` |
+///
+/// EMI3 is ISO's instance section with a `C` in front, so the two are one
+/// grammar with a marker rather than two shapes — but the marker is what makes
+/// a DIN identifier convertible, so it is worth naming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ContractGrammar {
-    /// ISO 15118-1: `<country 2><provider 3><instance 9>[<check 1>]`.
-    Iso15118,
-    /// DIN SPEC 91286: `<country 2><provider 3><instance 9><check 1>`, always
-    /// 15 characters, always with the check digit.
+    /// DIN SPEC 91286 — the EVCOID a German RFID card carries.
     Din91286,
+    /// ISO 15118-1 — the EMAID a contract certificate carries.
+    Iso15118,
+    /// EMI3 — ISO's shape with a `C`-marked instance, which is what a DIN
+    /// identifier becomes when it is lifted into the ISO world.
+    Emi3,
 }
 
-/// A contract identifier — an eMAID (ISO 15118) or an EVCOID (DIN SPEC 91286).
+impl ContractGrammar {
+    /// How many characters the instance section has.
+    #[must_use]
+    pub const fn instance_len(self) -> usize {
+        match self {
+            Self::Din91286 => 6,
+            Self::Iso15118 | Self::Emi3 => 9,
+        }
+    }
+
+    /// The whole identifier's length, without the check digit.
+    #[must_use]
+    pub const fn body_len(self) -> usize {
+        5 + self.instance_len()
+    }
+
+    /// Whether this grammar's check digit is the DIN one rather than the ISO
+    /// one. They are different algorithms and they do not agree.
+    #[must_use]
+    pub const fn uses_din_check_digit(self) -> bool {
+        matches!(self, Self::Din91286)
+    }
+
+    /// The name a diagnostic should call this grammar.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Din91286 => "DIN SPEC 91286",
+            Self::Iso15118 => "ISO 15118-1",
+            Self::Emi3 => "EMI3",
+        }
+    }
+}
+
+impl fmt::Display for ContractGrammar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A contract identifier — an EMAID (ISO 15118 / EMI3) or an EVCOID
+/// (DIN SPEC 91286).
 ///
 /// This is what a Plug & Charge contract, an app authorisation and a roaming
-/// `Authorize` all key on. Both grammars carry the same three parts and differ
-/// in whether the check digit is optional, so one type models both and
-/// remembers which it was given.
+/// `Authorize` all key on. All three grammars carry the same three parts and a
+/// check digit, so one type models them and remembers which it was given.
+///
+/// # The check digit is checked
+///
+/// It exists to catch a transcription error — a card read wrong, a digit lost
+/// in a support form, a column shifted in a partner's export — and a contract
+/// id that has lost a digit still *parses* and bills a session to somebody
+/// else. So a supplied check digit is verified against the grammar's own
+/// algorithm, and an omitted one is computed:
 ///
 /// ```
 /// use emob_core::ids::{ContractGrammar, Emaid};
 ///
-/// let iso: Emaid = "DE-8AA-CA2B3C4D5-1".parse()?;
+/// let iso: Emaid = "NL-TNM-000122045-U".parse()?;
 /// assert_eq!(iso.grammar(), ContractGrammar::Iso15118);
-/// assert_eq!(iso.provider_id(), "8AA");
-/// assert_eq!(iso.to_string(), "DE-8AA-CA2B3C4D5-1"); // written back as it arrived
+/// assert_eq!(iso.provider_id(), "TNM");
+/// assert_eq!(iso.to_string(), "NL-TNM-000122045-U"); // written back as it arrived
 ///
-/// let packed: Emaid = "DE8AACA2B3C4D51".parse()?;
-/// assert_eq!(iso, packed);                           // the same contract
+/// // The same contract, spelled without separators and without the digit.
+/// let packed: Emaid = "NLTNM000122045".parse()?;
+/// assert_eq!(iso, packed);
+/// assert_eq!(packed.check_digit(), 'U');             // …computed, not invented
+///
+/// // And one digit wrong is refused rather than routed.
+/// assert!("NL-TNM-000122045-X".parse::<Emaid>().is_err());
 /// # Ok::<(), emob_core::error::IdError>(())
 /// ```
 #[derive(Debug, Clone, Eq)]
 pub struct Emaid {
     raw: String,
-    canonical: String,
+    /// Country, provider and instance — uppercase, separators removed, **no**
+    /// check digit. This is the identity.
+    body: String,
+    check_digit: char,
+    carried_check_digit: bool,
     grammar: ContractGrammar,
     spelling: Spelling,
 }
 
 impl Emaid {
-    /// Parse a contract id in either grammar and either spelling.
+    /// Parse a contract id in any of the three grammars and either spelling.
+    ///
+    /// The grammar follows from the length and the shape: 11 or 12 characters
+    /// is DIN SPEC 91286, 14 or 15 is ISO 15118-1 — or EMI3 when the instance
+    /// begins with `C`, which is the marker that makes it convertible back to
+    /// DIN.
     ///
     /// # Errors
     ///
-    /// [`IdError`] when the length or character classes do not fit either
-    /// grammar.
+    /// [`IdError::BadContractLength`] when the length fits no grammar,
+    /// [`IdError::BadCountry`], [`IdError::BadProvider`] or
+    /// [`IdError::BadInstance`] for a malformed section, and
+    /// [`IdError::BadCheckDigit`] when the supplied digit is not the one the
+    /// grammar computes.
     pub fn parse(raw: &str) -> Result<Self, IdError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -286,16 +381,23 @@ impl Emaid {
         };
         let canonical = canonicalise(trimmed, &['-', '*']);
 
-        // 14 = ISO without the optional check digit; 15 = either grammar with
-        // it. DIN SPEC 91286 always carries the check digit, so a 14-character
-        // id can only be ISO.
-        // Both lengths read as ISO here. A 15-character id *could* be either
-        // grammar — they are indistinguishable by shape — so the ambiguous case
-        // resolves to ISO and `parse_din` is how a caller who knows better says
-        // so. Guessing DIN from the length alone would be a coin flip recorded
-        // as a fact.
-        let grammar = match canonical.len() {
-            14 | 15 => ContractGrammar::Iso15118,
+        // 11/12 is DIN's six-character instance, 14/15 is ISO's nine — the
+        // lengths do not overlap, so nothing has to be guessed. The longer
+        // pair splits again on the instance's first character: a leading `C`
+        // is EMI3's marker, and it is what carries a DIN identifier's six
+        // digits and its check digit into a nine-character instance.
+        let (grammar, carried_check_digit) = match canonical.len() {
+            11 => (ContractGrammar::Din91286, false),
+            12 => (ContractGrammar::Din91286, true),
+            14 | 15 => {
+                let emi3 = canonical.as_bytes().get(5) == Some(&b'C');
+                let grammar = if emi3 {
+                    ContractGrammar::Emi3
+                } else {
+                    ContractGrammar::Iso15118
+                };
+                (grammar, canonical.len() == 15)
+            }
             _ => {
                 return Err(IdError::BadContractLength {
                     len: canonical.len(),
@@ -314,86 +416,198 @@ impl Emaid {
             return Err(IdError::BadInstance);
         }
 
+        let (body, supplied) = canonical.split_at(grammar.body_len());
+        let computed = compute_check_digit(grammar, body).ok_or(IdError::BadInstance)?;
+        if let Some(given) = supplied.chars().next()
+            && given != computed
+        {
+            return Err(IdError::BadCheckDigit {
+                grammar: grammar.as_str(),
+                given,
+                computed,
+            });
+        }
+
         Ok(Self {
             raw: trimmed.to_owned(),
-            canonical,
+            body: body.to_owned(),
+            check_digit: computed,
+            carried_check_digit,
             grammar,
             spelling,
         })
     }
 
-    /// Parse, and require the DIN SPEC 91286 grammar (15 characters, check
-    /// digit present).
+    /// Parse, and require one particular grammar.
+    ///
+    /// Use it where the wire already says which grammar it speaks — an OICP
+    /// `EvcoID` field, a DIN-only card reader — so that an identifier of the
+    /// wrong shape is refused at the boundary rather than three layers in.
     ///
     /// # Errors
     ///
-    /// [`IdError::BadContractLength`] when the id is not 15 characters.
-    pub fn parse_din(raw: &str) -> Result<Self, IdError> {
-        let mut id = Self::parse(raw)?;
-        if id.canonical.len() != 15 {
-            return Err(IdError::BadContractLength {
-                len: id.canonical.len(),
+    /// [`IdError::WrongContractGrammar`] when the id parses as something else,
+    /// plus everything [`Self::parse`] can return.
+    pub fn parse_as(raw: &str, grammar: ContractGrammar) -> Result<Self, IdError> {
+        let id = Self::parse(raw)?;
+        if id.grammar != grammar {
+            return Err(IdError::WrongContractGrammar {
+                expected: grammar.as_str(),
+                found: id.grammar.as_str(),
             });
         }
-        id.grammar = ContractGrammar::Din91286;
         Ok(id)
     }
 
-    /// The normalised form: uppercase, separators removed.
+    /// The normalised form: uppercase, separators removed, check digit present.
     #[must_use]
-    pub fn canonical(&self) -> &str {
-        &self.canonical
+    pub fn canonical(&self) -> String {
+        let mut out = self.body.clone();
+        out.push(self.check_digit);
+        out
+    }
+
+    /// The identity: country, provider and instance, without the check digit.
+    ///
+    /// What equality and hashing are over — the digit is derived from these, so
+    /// including it would only make two spellings of one contract differ.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
     }
 
     /// The ISO 3166-1 alpha-2 country code.
     #[must_use]
     pub fn country_code(&self) -> &str {
-        &self.canonical[..2]
+        &self.body[..2]
     }
 
     /// The mobility provider identifier.
     #[must_use]
     pub fn provider_id(&self) -> &str {
-        &self.canonical[2..5]
+        &self.body[2..5]
     }
 
     /// The instance part — the contract itself, without the check digit.
     #[must_use]
     pub fn instance(&self) -> &str {
-        &self.canonical[5..14]
+        &self.body[5..]
     }
 
-    /// The check digit, when the id carries one.
+    /// The check digit: the one that arrived, or the one the grammar computes
+    /// when the id was written without it.
+    ///
+    /// Always available, because it is always derivable. Ask
+    /// [`Self::carried_check_digit`] whether it was actually written down.
     #[must_use]
-    pub fn check_digit(&self) -> Option<char> {
-        self.canonical.chars().nth(14)
+    pub const fn check_digit(&self) -> char {
+        self.check_digit
+    }
+
+    /// Whether the identifier as it arrived carried its check digit.
+    #[must_use]
+    pub const fn carried_check_digit(&self) -> bool {
+        self.carried_check_digit
     }
 
     /// Which grammar this id was read as.
     #[must_use]
-    pub fn grammar(&self) -> ContractGrammar {
+    pub const fn grammar(&self) -> ContractGrammar {
         self.grammar
     }
 
     /// How this id was spelled where it came from.
     #[must_use]
-    pub fn spelling(&self) -> Spelling {
+    pub const fn spelling(&self) -> Spelling {
         self.spelling
+    }
+
+    /// The same contract as an EMI3 identifier.
+    ///
+    /// A DIN identifier lifts into EMI3 by becoming its own instance: `C0`,
+    /// then the six-character instance, then the DIN check digit — so
+    /// `NL-TNM-012204-5` and `NL-TNM-C00122045-K` are one contract written for
+    /// two worlds. An identifier that is already ISO or EMI3 is returned
+    /// unchanged in identity.
+    ///
+    /// # Errors
+    ///
+    /// [`IdError::BadInstance`] if the conversion cannot produce a valid
+    /// identifier, which the grammars make unreachable.
+    pub fn to_emi3(&self) -> Result<Self, IdError> {
+        match self.grammar {
+            ContractGrammar::Emi3 | ContractGrammar::Iso15118 => Ok(self.clone()),
+            ContractGrammar::Din91286 => Self::parse(&format!(
+                "{}{}C0{}{}",
+                self.country_code(),
+                self.provider_id(),
+                self.instance(),
+                self.check_digit,
+            )),
+        }
+    }
+
+    /// The same contract as a DIN SPEC 91286 identifier, when it has one.
+    ///
+    /// Only an EMI3 instance can go back: it has to begin `C0`, and its last
+    /// character has to be the DIN check digit of what precedes it. An ISO
+    /// identifier that was never a DIN one has no DIN spelling, and inventing
+    /// one would mint a contract nobody issued.
+    ///
+    /// # Errors
+    ///
+    /// [`IdError::NotConvertibleToDin`] when the instance carries no DIN
+    /// identifier, including when its embedded check digit does not check out.
+    pub fn to_din(&self) -> Result<Self, IdError> {
+        if self.grammar == ContractGrammar::Din91286 {
+            return Ok(self.clone());
+        }
+        let instance = self.instance();
+        if !instance.starts_with("C0") {
+            return Err(IdError::NotConvertibleToDin {
+                instance: instance.to_owned(),
+            });
+        }
+        Self::parse(&format!(
+            "{}{}{}",
+            self.country_code(),
+            self.provider_id(),
+            &instance[2..],
+        ))
+        .map_err(|_| IdError::NotConvertibleToDin {
+            instance: instance.to_owned(),
+        })
+    }
+}
+
+/// The check digit for a body, by the algorithm its grammar names.
+fn compute_check_digit(grammar: ContractGrammar, body: &str) -> Option<char> {
+    if grammar.uses_din_check_digit() {
+        crate::check_digit::din(body)
+    } else {
+        crate::check_digit::iso(body)
     }
 }
 
 impl PartialEq for Emaid {
     /// Two contract ids are the same contract when their country, provider and
-    /// instance agree — the check digit is a transcription guard, not part of
-    /// the identity, and one wire carries it while another does not.
+    /// instance agree — the check digit is a transcription guard derived from
+    /// them, not part of the identity, and one wire carries it while another
+    /// does not.
+    ///
+    /// A DIN identifier and its EMI3 lift are **not** equal, because their
+    /// instances differ; [`Emaid::to_emi3`] is how a caller says it wants them
+    /// compared, and saying so is the point. Treating the two as one silently
+    /// would make an ISO identifier that merely happens to start `C0` collide
+    /// with a DIN contract nobody issued.
     fn eq(&self, other: &Self) -> bool {
-        self.canonical[..14] == other.canonical[..14]
+        self.body == other.body
     }
 }
 
 impl core::hash::Hash for Emaid {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.canonical[..14].hash(state);
+        self.body.hash(state);
     }
 }
 
@@ -405,7 +619,7 @@ impl PartialOrd for Emaid {
 
 impl Ord for Emaid {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.canonical[..14].cmp(&other.canonical[..14])
+        self.body.cmp(&other.body)
     }
 }
 
@@ -426,8 +640,12 @@ impl FromStr for Emaid {
 
 /// An EVCOID — the DIN SPEC 91286 spelling of a contract id.
 ///
-/// An alias rather than a separate type: the grammars describe the same
-/// identity and [`Emaid::grammar`] records which one was used.
+/// An alias rather than a separate type: one value carries all three grammars,
+/// [`Emaid::grammar`] records which one it was read as, and
+/// [`Emaid::parse_as`] is how a wire that speaks only one says so. A separate
+/// type would need a conversion at every boundary and would still not stop a
+/// DIN identifier being handed to an ISO field, because the compiler cannot
+/// see which wire a string came off.
 pub type EvcoId = Emaid;
 
 // ── Serde ───────────────────────────────────────────────────────────────────
@@ -473,7 +691,7 @@ macro_rules! serde_via_string {
 #[cfg(feature = "serde")]
 serde_via_string!(EvseId, "an EVSE id such as DE*AB7*E840*6487");
 #[cfg(feature = "serde")]
-serde_via_string!(Emaid, "a contract id such as DE-8AA-CA2B3C4D5-1");
+serde_via_string!(Emaid, "a contract id such as NL-TNM-000122045-U");
 
 // ── Party identity ──────────────────────────────────────────────────────────
 
@@ -524,6 +742,30 @@ impl PartyId {
 impl fmt::Display for PartyId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}*{}", self.country_code, self.party_id)
+    }
+}
+
+impl FromStr for PartyId {
+    type Err = IdError;
+
+    /// Read a party from the one string it is written as.
+    ///
+    /// A type with a `Display` and no `FromStr` cannot round-trip, and every
+    /// caller that reads a party out of a configuration file, a URL segment or
+    /// a partner's registration form ends up splitting the string by hand —
+    /// each in its own slightly different way, which is how `DE*ABC` and
+    /// `DEABC` come to be two entries in one routing table.
+    ///
+    /// Both separators the field uses are accepted, and so is the packed
+    /// spelling: OCPI writes the pair as two members, the EVSE-ID format joins
+    /// them with `*`, the contract-ID format with `-`, and a URL path carries
+    /// them bare. All five are one party.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let canonical = canonicalise(raw.trim(), &['-', '*']);
+        if canonical.len() != 5 {
+            return Err(IdError::BadOperator);
+        }
+        Self::new(&canonical[..2], &canonical[2..])
     }
 }
 
@@ -667,7 +909,7 @@ mod tests {
         // No `E` marker: this is a contract id, and treating it as an EVSE id
         // is how a session gets billed to a charge point.
         assert!(matches!(
-            EvseId::parse("DE8AACA2B3C4D51"),
+            EvseId::parse("NLTNM000122045U"),
             Err(IdError::NotAnEvse)
         ));
     }
@@ -680,29 +922,146 @@ mod tests {
     }
 
     #[test]
-    fn emaid_grammars_agree_on_identity() {
-        let iso: Emaid = "DE-8AA-CA2B3C4D5-1".parse().unwrap();
-        let packed: Emaid = "DE8AACA2B3C4D51".parse().unwrap();
-        let without_check: Emaid = "DE8AACA2B3C4D5".parse().unwrap();
+    fn evse_id_does_not_eat_hyphens() {
+        // The contract grammar separates with `-`; the EVSE grammar does not.
+        // Stripping it here would make a hyphenated string that is not an EVSE
+        // id parse as one — and compare equal to a real charge point.
+        assert!(matches!(
+            EvseId::parse("DE-AB7-E840-6487"),
+            Err(IdError::BadOperator)
+        ));
+        // …and the `*` spelling of the same id still works.
+        assert!(EvseId::parse("DE*AB7*E840*6487").is_ok());
+    }
 
-        assert_eq!(iso, packed);
-        assert_eq!(iso, without_check, "the check digit is not the identity");
-        assert_eq!(iso.provider_id(), "8AA");
-        assert_eq!(iso.instance(), "CA2B3C4D5");
-        assert_eq!(iso.check_digit(), Some('1'));
-        assert_eq!(without_check.check_digit(), None);
+    #[test]
+    fn emaid_spellings_agree_on_identity() {
+        let separated: Emaid = "NL-TNM-000122045-U".parse().unwrap();
+        let packed: Emaid = "NLTNM000122045U".parse().unwrap();
+        let without_check: Emaid = "NLTNM000122045".parse().unwrap();
+
+        assert_eq!(separated, packed);
+        assert_eq!(
+            separated, without_check,
+            "the check digit is derived from the identity, not part of it"
+        );
+        assert_eq!(separated.provider_id(), "TNM");
+        assert_eq!(separated.instance(), "000122045");
+        assert_eq!(separated.check_digit(), 'U');
+        assert!(separated.carried_check_digit());
+        assert!(!without_check.carried_check_digit());
+        assert_eq!(
+            without_check.check_digit(),
+            'U',
+            "an omitted digit is computed rather than absent"
+        );
+        assert_eq!(without_check.canonical(), "NLTNM000122045U");
+    }
+
+    #[test]
+    fn a_transcription_error_is_refused_rather_than_routed() {
+        // The whole purpose of the digit. An identifier that has lost a
+        // character still parses, still routes, and bills a session to
+        // somebody else's contract.
+        let err = Emaid::parse("NL-TNM-000122045-X").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IdError::BadCheckDigit {
+                    given: 'X',
+                    computed: 'U',
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("bill the wrong contract"), "{err}");
+    }
+
+    #[test]
+    fn the_three_grammars_are_told_apart_by_shape() {
+        // Six-character instance or nine, and a `C` marker on the nine. The
+        // lengths do not overlap, so nothing is guessed.
+        let din: Emaid = "NL-TNM-012204-5".parse().unwrap();
+        assert_eq!(din.grammar(), ContractGrammar::Din91286);
+        assert_eq!(din.instance(), "012204");
+        assert_eq!(din.check_digit(), '5');
+
+        let iso: Emaid = "NL-TNM-000122045-U".parse().unwrap();
+        assert_eq!(iso.grammar(), ContractGrammar::Iso15118);
+
+        let emi3: Emaid = "NL-TNM-C00122045-K".parse().unwrap();
+        assert_eq!(emi3.grammar(), ContractGrammar::Emi3);
+        assert_eq!(emi3.instance(), "C00122045");
+
+        // …and a caller that already knows which wire it is on can say so.
+        assert!(Emaid::parse_as("NL-TNM-012204-5", ContractGrammar::Din91286).is_ok());
+        assert!(matches!(
+            Emaid::parse_as("NL-TNM-012204-5", ContractGrammar::Iso15118),
+            Err(IdError::WrongContractGrammar { .. })
+        ));
+    }
+
+    #[test]
+    fn a_din_card_and_its_emi3_lift_are_one_contract_written_twice() {
+        // The conversion a German RFID card needs to reach a 15118 world:
+        // `C0`, the six-character instance, then the DIN check digit.
+        let din: Emaid = "NL-TNM-012204-5".parse().unwrap();
+        let emi3 = din.to_emi3().unwrap();
+
+        assert_eq!(emi3.canonical(), "NLTNMC00122045K");
+        assert_eq!(emi3.grammar(), ContractGrammar::Emi3);
+        assert_eq!(emi3, "NL-TNM-C00122045-K".parse::<Emaid>().unwrap());
+
+        // …and back again, losslessly.
+        assert_eq!(emi3.to_din().unwrap(), din);
+        assert_eq!(din.to_din().unwrap(), din);
+        assert_eq!(emi3.to_emi3().unwrap(), emi3);
+    }
+
+    #[test]
+    fn an_iso_contract_that_was_never_a_din_one_has_no_din_spelling() {
+        // Minting one would invent a contract nobody issued.
+        let iso: Emaid = "NL-TNM-000122045-U".parse().unwrap();
+        assert!(matches!(
+            iso.to_din(),
+            Err(IdError::NotConvertibleToDin { .. })
+        ));
+
+        // Even a `C0` prefix is not enough: the embedded digit has to check
+        // out as a DIN check digit, or the "conversion" is a guess.
+        let looks_convertible: Emaid = "NLTNMC00122040".parse().unwrap();
+        assert_eq!(looks_convertible.grammar(), ContractGrammar::Emi3);
+        assert!(matches!(
+            looks_convertible.to_din(),
+            Err(IdError::NotConvertibleToDin { .. })
+        ));
     }
 
     #[test]
     fn emaid_writes_back_what_arrived() {
-        let id: Emaid = "DE-8AA-CA2B3C4D5-1".parse().unwrap();
-        assert_eq!(id.to_string(), "DE-8AA-CA2B3C4D5-1");
+        for raw in [
+            "NL-TNM-000122045-U",
+            "NLTNM000122045U",
+            "nl-tnm-000122045-u",
+            "NL-TNM-012204-5",
+        ] {
+            let id: Emaid = raw.parse().unwrap();
+            assert_eq!(id.to_string(), raw, "spelling must survive the round trip");
+        }
     }
 
     #[test]
     fn emaid_rejects_wrong_length() {
-        assert!(Emaid::parse("DE8AA").is_err());
-        assert!(Emaid::parse("DE8AACA2B3C4D5123").is_err());
+        assert!(Emaid::parse("NLTNM").is_err());
+        assert!(Emaid::parse("NLTNM0001220451234").is_err());
+        // Thirteen characters is between the two grammars and belongs to
+        // neither, which is a fact worth reporting rather than rounding to the
+        // nearest.
+        assert!(matches!(
+            Emaid::parse("NLTNM00012204"),
+            Err(IdError::BadContractLength { len: 13 })
+        ));
     }
 
     #[test]
@@ -713,6 +1072,26 @@ mod tests {
         assert_eq!(party.to_string(), "DE*ABC");
         assert!(PartyId::new("DEU", "ABC").is_err());
         assert!(PartyId::new("DE", "ABCD").is_err());
+    }
+
+    #[test]
+    fn a_party_survives_the_round_trip_it_is_written_for() {
+        // A `Display` with no `FromStr` is a value that cannot be read back,
+        // and every caller then splits the string its own way — which is how
+        // `DE*ABC` and `DEABC` become two entries in one routing table.
+        let party = PartyId::new("DE", "ABC").unwrap();
+        assert_eq!(party.to_string().parse::<PartyId>().unwrap(), party);
+
+        for spelling in ["DE*ABC", "DE-ABC", "DEABC", "de*abc", "  DE*ABC  "] {
+            assert_eq!(spelling.parse::<PartyId>().unwrap(), party, "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_party_that_is_not_a_pair_is_refused_rather_than_padded() {
+        for wrong in ["DE", "DE*ABCD", "D*ABC", "DE*AB", "", "DE**ABC*X"] {
+            assert!(wrong.parse::<PartyId>().is_err(), "{wrong}");
+        }
     }
 
     #[test]

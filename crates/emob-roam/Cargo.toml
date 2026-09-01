@@ -1,0 +1,51 @@
+[package]
+name        = "emob-roam"
+description = "The roaming edge: one canonical charge detail record carried onto OCPI 2.3.0 and 2.2.1 with an explicit account of what the crossing cost, routed to the partner the contract identifier itself names"
+keywords    = ["ev-charging", "ocpi", "roaming", "emsp", "cdr"]
+categories  = ["api-bindings", "data-structures"]
+readme      = "README.md"
+
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+
+# **Not** `workspace = true`, and the exception is the point. Every other crate
+# here promises 1.94 — the floor the sibling workspaces carry, and the one the
+# crates that decide money keep, so `mako` and `hems` can consume them. This one
+# speaks to `ocpi-kit`, which declares 1.96, and a roaming edge is not something
+# either sibling consumes. Raising the shared floor to take one dependency would
+# make every downstream pay for a wire they do not use.
+rust-version = "1.96"
+
+# `ocpi-kit` is not optional. Unlike the crates that decide money — which build
+# with no protocol implementation anywhere in their tree — this crate *is* the
+# seam onto a wire, and a build of it without that wire would have nothing to
+# translate.
+#
+# `emob-poi` is here for one reason, and it is the same reason that crate exists
+# at all: the location a partner's CDR names and the location the national
+# access point publishes are one object. A CPO whose OCPI Locations module and
+# whose Mobilithek feed disagree about a connector is the industry norm, and it
+# is only possible where the two are generated from two inventories.
+[dependencies]
+emob-cdr     = { workspace = true }
+emob-core    = { workspace = true }
+emob-poi     = { workspace = true }
+emob-session = { workspace = true }
+emob-tariff  = { workspace = true }
+
+ocpi-kit = { workspace = true }
+
+rust_decimal = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[dev-dependencies]
+emob-eichrecht = { workspace = true }
+hex            = { workspace = true }
+p256           = { workspace = true }
+serde_json     = { workspace = true }
+sha2           = { workspace = true }
+time           = { workspace = true, features = ["macros"] }

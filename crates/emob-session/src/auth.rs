@@ -1,6 +1,6 @@
 //! How a charging session was authorised.
 //!
-//! Five paths reach the same outcome — a station starts delivering energy — and
+//! Six paths reach the same outcome — a station starts delivering energy — and
 //! they are not interchangeable. Two things depend on which one was used:
 //!
 //! - **AFIR.** A publicly accessible point must offer at least one path that
@@ -12,7 +12,7 @@
 //!   stories, and [`AuthPath::strongest_plausible_level`] is what lets the CDR
 //!   layer notice.
 
-use emob_core::{ContractId, Emaid};
+use emob_core::{ContractId, Emaid, IdentificationStrength};
 
 /// The mechanism that authorised a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,44 +98,6 @@ impl core::fmt::Display for AuthPath {
             Self::PlugAndCharge => "Plug & Charge",
             Self::AutoCharge => "AutoCharge",
             Self::RemoteCommand => "remote command",
-        })
-    }
-}
-
-/// How strongly a user was tied to a session, ordered.
-///
-/// A coarsening of `[OCMF Tab. 11]`'s levels that drops the error states, so
-/// that comparing two strengths is always meaningful. The OCMF error levels
-/// (`MISMATCH`, `INVALID`, `OUTDATED`, `UNKNOWN`) are not weak assignments —
-/// they are failures, and they are handled where they belong, in
-/// `emob-eichrecht`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
-pub enum IdentificationStrength {
-    /// No assignment at all.
-    None,
-    /// Unsecured — a bare RFID UID, a MAC address.
-    Hearsay,
-    /// A backend vouched for it.
-    Trusted,
-    /// The signature component verified it by special measures.
-    Verified,
-    /// A cryptographic signature certifies the assignment.
-    Certified,
-    /// A secure feature established it — a secure card, Plug & Charge.
-    Secure,
-}
-
-impl core::fmt::Display for IdentificationStrength {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::None => "none",
-            Self::Hearsay => "hearsay",
-            Self::Trusted => "trusted",
-            Self::Verified => "verified",
-            Self::Certified => "certified",
-            Self::Secure => "secure",
         })
     }
 }
@@ -305,14 +267,6 @@ mod tests {
     fn paths_and_strengths_render_as_prose() {
         assert_eq!(AuthPath::AdHoc.to_string(), "ad-hoc");
         assert_eq!(AuthPath::PlugAndCharge.to_string(), "Plug & Charge");
-        assert_eq!(IdentificationStrength::Secure.to_string(), "secure");
-    }
-
-    #[test]
-    fn identification_strength_is_ordered() {
-        assert!(IdentificationStrength::Secure > IdentificationStrength::Trusted);
-        assert!(IdentificationStrength::Trusted > IdentificationStrength::Hearsay);
-        assert!(IdentificationStrength::Hearsay > IdentificationStrength::None);
     }
 
     #[test]
@@ -339,7 +293,7 @@ mod tests {
         // An RFID UID…
         assert!(TokenRef::new("1F2D3A4F5506C7").is_err());
         // …an eMAID…
-        assert!(TokenRef::new("DE8AACA2B3C4D51").is_err());
+        assert!(TokenRef::new("NLTNM000122045U").is_err());
         // …and anything that is not a 256-bit digest.
         assert!(TokenRef::new("").is_err());
         assert!(

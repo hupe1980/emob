@@ -16,16 +16,21 @@ insert_anchor_links = "heading"
 [extra]
 repository = "https://github.com/hupe1980/emob"
 tagline    = "open-source charging operations for the European market"
-# The landing page's five numbers. They are here rather than in the template so
+# The landing page's five numbers. They live here rather than in the template so
 # that changing one is a one-line diff against the thing that produced it:
-# `emob_core::obligation::CALENDAR`, `cargo test --workspace`, the crate list,
-# `cargo xtask no-floats`, and `emob_eichrecht::ocmf::KeyType`.
-# The description below names the four crates; keep it in step with the table
-# on the architecture page.
-stat_obligations = "17"
-stat_tests       = "233"
-stat_crates      = "5"
+#
+#   stat_obligations  emob_core::obligation::CALENDAR — `.len()`
+#   stat_tests        cargo test --workspace --all-features
+#   stat_crates       the publishable crates under crates/
+#   stat_floats       cargo xtask no-floats
+#   stat_curves       emob_eichrecht::ocmf::verify::KeyType
+#
+# A number here that no longer matches its source is worse than no number, so
+# they are checked whenever the architecture page's crate table changes.
+stat_obligations = "33"
+stat_tests       = "579"
+stat_crates      = "9"
 stat_floats      = "0"
-stat_curves      = "3"
+stat_curves      = "4"
 
 keywords = "EV charging, CPO, EMP, eMSP, OCPP, OCPI, OICP, ISO 15118, OCMF, Eichrecht, AFIR, Plug and Charge, roaming, Rust, charging station management"

@@ -6,6 +6,11 @@ members = [
     "crates/emob-session",
     "crates/emob-cdr",
     "crates/emob-tariff",
+    "crates/emob-ocpp",
+    "crates/emob-poi",
+    "crates/emob-sim",
+    "crates/emob-roam",
+    "services/csmsd",
     "xtask",
 ]
 
@@ -38,10 +43,45 @@ anyhow     = "1"
 # `cargo xtask no-floats` fails the build on an `f32`/`f64` in any public API.
 rust_decimal = { version = "1", features = ["macros", "serde-with-str"] }
 
+# ── The OCPP wire ───────────────────────────────────────────────────────────
+# Only `emob-ocpp` and `csmsd` see these types. The seam's own vocabulary has no
+# OCPP in it, deliberately: OCPP's model of a meter value is the wrong model for
+# money, and a crate that imported it in order to convert away from it would
+# have the wrong types in scope exactly where it matters.
+#
+# 0.2 is the first release that can carry money: every OCPP `number` is an exact
+# decimal rather than an `f64`, and `metering` reads the signed meter record —
+# the value §33 MessEG lets a customer check — out of both the 2.x field and the
+# 1.6 `SignedData` string that holds the same object. Only `emob-ocpp` and
+# `csmsd` depend on it; everything that decides money does not.
+ocpp-kit = { version = "0.2", default-features = false }
+
+# ── The OCPI wire ───────────────────────────────────────────────────────────
+# Only `emob-roam` sees these types. `convert` is not an extra: a partner on
+# 2.2.1 is the ordinary case, and the point of the crossing is that what the
+# downgrade cost is reported rather than decided silently.
+ocpi-kit = { version = "0.2", default-features = false, features = ["v2_3_0", "v2_2_1", "convert"] }
+
+# ── The vehicle wire ────────────────────────────────────────────────────────
+# A **dev**-dependency of `emob-core`, and only that, until `emob-pnc` is built.
+# `emob-core` decides money and carries no protocol implementation in its tree,
+# but the two crates name the same generations — and 0.3 is where that spelling
+# got an owner (`Protocol::as_str`, `Display`, `FromStr`, and a `FromStr` that
+# refuses a bare `iso15118` because the DATEX II profile defines that literal as
+# -20 and has no literal for -2). `crates/emob-core/tests/the_kits_agree.rs`
+# asserts the two spellings are one spelling, which is a test rather than a hope.
+iso15118 = { version = "0.3", default-features = false }
+
 # ── Eichrecht: OCMF signature verification ──────────────────────────────────
-# The curves OCMF Table 22/23 name. secp256r1 is the default since OCMF 0.4;
-# the others are feature-gated so a deployment links only what its fleet uses.
+# The curves OCMF Table 22/23 name. secp256r1 is the default since OCMF 0.4 —
+# and secp192r1 is not a legacy curiosity: the eBZ LD3 data set shipped with the
+# S.A.F.E. Transparenzsoftware as a reference sample is signed
+# `ECDSA-secp192r1-SHA256`, so a verifier without it cannot check a common
+# German meter. The two brainpool curves have no usable pure-Rust arithmetic
+# (RustCrypto's `bp256`/`bp384` gate theirs behind `wip-arithmetic-do-not-use`),
+# which is why `emob-eichrecht` recognises and refuses them by name.
 sha2      = "0.10"
+p192      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 p256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 p384      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 k256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
@@ -56,6 +96,10 @@ emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.1" }
 emob-session   = { path = "crates/emob-session",   version = "0.1" }
 emob-cdr       = { path = "crates/emob-cdr",       version = "0.1" }
 emob-tariff    = { path = "crates/emob-tariff",    version = "0.1" }
+emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.1" }
+emob-poi       = { path = "crates/emob-poi",       version = "0.1" }
+emob-sim       = { path = "crates/emob-sim",       version = "0.1" }
+emob-roam      = { path = "crates/emob-roam",      version = "0.1" }
 
 [profile.release]
 opt-level     = 3

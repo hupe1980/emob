@@ -94,6 +94,24 @@ pub enum EndReason {
     Other,
 }
 
+/// One state the session was in, and when it entered it.
+///
+/// The history exists because "suspended" is not a status light, it is an
+/// interval that gets priced: `[AFIR Art. 5(4)]` lets a fast charger add an
+/// occupancy fee per minute for the time the vehicle is connected and not
+/// charging. A state field with no timestamp can say the session *is*
+/// suspended and never say for how long, which is precisely the number the
+/// article turns on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StateChange {
+    /// The state entered.
+    pub state: SessionState,
+    /// When.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
+    pub at: time::OffsetDateTime,
+}
+
 /// A charging session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -105,13 +123,16 @@ pub struct Session {
     /// How it was authorised, and for whom.
     pub authorization: Authorization,
     /// When it began.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
     pub started_at: time::OffsetDateTime,
     /// When it ended, once it has.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339::option"))]
     pub ended_at: Option<time::OffsetDateTime>,
     /// Why it ended.
     pub end_reason: Option<EndReason>,
-    /// Where it is now.
-    pub state: SessionState,
+    /// Every state the session has been in, in order, starting with
+    /// [`SessionState::Pending`] at [`Self::started_at`].
+    history: Vec<StateChange>,
     /// The energy it moved, by direction.
     ///
     /// A vector rather than one series because a bidirectional session has two
@@ -135,25 +156,86 @@ impl Session {
             started_at,
             ended_at: None,
             end_reason: None,
-            state: SessionState::Pending,
+            history: vec![StateChange {
+                state: SessionState::Pending,
+                at: started_at,
+            }],
             series: Vec::new(),
         }
     }
 
-    /// Move to a new state.
+    /// Where the session is now.
+    #[must_use]
+    pub fn state(&self) -> SessionState {
+        // `open` seeds the history and nothing empties it.
+        self.history[self.history.len() - 1].state
+    }
+
+    /// Every state it has been in, in order.
+    #[must_use]
+    pub fn history(&self) -> &[StateChange] {
+        &self.history
+    }
+
+    /// The state the session was in at an instant.
+    ///
+    /// `None` before it started.
+    #[must_use]
+    pub fn state_at(&self, at: time::OffsetDateTime) -> Option<SessionState> {
+        self.history
+            .iter()
+            .rev()
+            .find(|change| change.at <= at)
+            .map(|change| change.state)
+    }
+
+    /// Whether the session was suspended for the whole of `[from, to)` — the
+    /// interval an occupancy fee may be charged for `[AFIR Art. 5(4)]`.
+    #[must_use]
+    pub fn suspended_throughout(
+        &self,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> bool {
+        if to <= from {
+            return false;
+        }
+        if self.state_at(from) != Some(SessionState::Suspended) {
+            return false;
+        }
+        // No transition may land strictly inside the interval.
+        !self
+            .history
+            .iter()
+            .any(|change| change.at > from && change.at < to)
+    }
+
+    /// Move to a new state at an instant.
     ///
     /// # Errors
     ///
     /// [`SessionError::IllegalTransition`] when the protocol forbids it —
     /// above all, anything at all after the session ended.
-    pub fn transition_to(&mut self, next: SessionState) -> Result<(), SessionError> {
-        if !self.state.can_transition_to(next) {
+    /// [`SessionError::TimeWentBackwards`] when the instant precedes the last
+    /// transition, because a history that is not ordered cannot be read as
+    /// intervals.
+    pub fn transition_to(
+        &mut self,
+        next: SessionState,
+        at: time::OffsetDateTime,
+    ) -> Result<(), SessionError> {
+        let current = self.state();
+        if !current.can_transition_to(next) {
             return Err(SessionError::IllegalTransition {
-                from: self.state,
+                from: current,
                 to: next,
             });
         }
-        self.state = next;
+        let last = self.history[self.history.len() - 1].at;
+        if at < last {
+            return Err(SessionError::TimeWentBackwards { previous: last, at });
+        }
+        self.history.push(StateChange { state: next, at });
         Ok(())
     }
 
@@ -161,8 +243,10 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// [`SessionError::IllegalTransition`] when it has already ended.
-    /// [`SessionError::EndsBeforeItStarts`] when the end precedes the start.
+    /// [`SessionError::IllegalTransition`] when it has already ended,
+    /// [`SessionError::EndsBeforeItStarts`] when the end precedes the start, or
+    /// [`SessionError::TimeWentBackwards`] when it precedes the last
+    /// transition.
     pub fn end(&mut self, at: time::OffsetDateTime, reason: EndReason) -> Result<(), SessionError> {
         if at < self.started_at {
             return Err(SessionError::EndsBeforeItStarts {
@@ -170,7 +254,7 @@ impl Session {
                 ended_at: at,
             });
         }
-        self.transition_to(SessionState::Ended)?;
+        self.transition_to(SessionState::Ended, at)?;
         self.ended_at = Some(at);
         self.end_reason = Some(reason);
         Ok(())
@@ -185,7 +269,7 @@ impl Session {
     /// session, and guessing which is how energy gets double-billed.
     /// [`SessionError::DuplicateDirection`] when a direction already has one.
     pub fn attach_series(&mut self, series: MeterSeries) -> Result<(), SessionError> {
-        if self.state.is_final() {
+        if self.state().is_final() {
             return Err(SessionError::AlreadyEnded);
         }
         if self
@@ -266,6 +350,15 @@ pub enum SessionError {
         ended_at: time::OffsetDateTime,
     },
 
+    /// A transition is dated before the one it follows.
+    #[error("a transition at {at} follows one at {previous}: the history must be ordered")]
+    TimeWentBackwards {
+        /// The last transition's instant.
+        previous: time::OffsetDateTime,
+        /// The instant offered.
+        at: time::OffsetDateTime,
+    },
+
     /// A second series for a direction that already has one.
     #[error("the session already has a {direction} series")]
     DuplicateDirection {
@@ -335,26 +428,70 @@ mod tests {
     #[test]
     fn a_session_runs_its_normal_course() {
         let mut s = session();
-        assert_eq!(s.state, SessionState::Pending);
-        s.transition_to(SessionState::Charging).unwrap();
-        s.transition_to(SessionState::Suspended).unwrap();
-        s.transition_to(SessionState::Charging).unwrap();
+        assert_eq!(s.state(), SessionState::Pending);
+        s.transition_to(SessionState::Charging, at(1)).unwrap();
+        s.transition_to(SessionState::Suspended, at(20)).unwrap();
+        s.transition_to(SessionState::Charging, at(25)).unwrap();
         s.attach_series(import_series()).unwrap();
         s.end(at(30), EndReason::Local).unwrap();
 
-        assert_eq!(s.state, SessionState::Ended);
+        assert_eq!(s.state(), SessionState::Ended);
         assert_eq!(s.end_reason, Some(EndReason::Local));
         assert_eq!(s.duration(), Some(time::Duration::minutes(30)));
         assert_eq!(
             s.total(Direction::Import).unwrap().to_string(),
             "18.000 kWh"
         );
+        assert_eq!(
+            s.history().len(),
+            5,
+            "pending, charging, suspended, charging, ended"
+        );
+    }
+
+    #[test]
+    fn the_history_answers_when_rather_than_only_what() {
+        // "Suspended" with no timestamp cannot say for how long, and the
+        // occupancy fee of AFIR Art. 5(4) is a price per minute of exactly
+        // that interval.
+        let mut s = session();
+        s.transition_to(SessionState::Charging, at(0)).unwrap();
+        s.transition_to(SessionState::Suspended, at(40)).unwrap();
+        s.end(at(70), EndReason::Local).unwrap();
+
+        assert_eq!(s.state_at(at(10)), Some(SessionState::Charging));
+        assert_eq!(s.state_at(at(50)), Some(SessionState::Suspended));
+        assert_eq!(s.state_at(at(-1)), None, "before it started");
+
+        assert!(
+            s.suspended_throughout(at(45), at(60)),
+            "half an hour of occupancy, and the tariff may price it"
+        );
+        assert!(
+            !s.suspended_throughout(at(30), at(50)),
+            "charging for part of it"
+        );
+        assert!(
+            !s.suspended_throughout(at(60), at(80)),
+            "the session ended at 70"
+        );
+    }
+
+    #[test]
+    fn a_history_that_runs_backwards_is_refused() {
+        let mut s = session();
+        s.transition_to(SessionState::Charging, at(20)).unwrap();
+        assert!(matches!(
+            s.transition_to(SessionState::Suspended, at(10)),
+            Err(SessionError::TimeWentBackwards { .. })
+        ));
+        assert_eq!(s.state(), SessionState::Charging, "and nothing moved");
     }
 
     #[test]
     fn nothing_follows_the_end() {
         let mut s = session();
-        s.transition_to(SessionState::Charging).unwrap();
+        s.transition_to(SessionState::Charging, at(0)).unwrap();
         s.end(at(30), EndReason::Local).unwrap();
 
         // Not a second end…
@@ -364,7 +501,7 @@ mod tests {
         ));
         // …not a resumption…
         assert!(matches!(
-            s.transition_to(SessionState::Charging),
+            s.transition_to(SessionState::Charging, at(40)),
             Err(SessionError::IllegalTransition { .. })
         ));
         // …and not a late series, which is a duplicate or a different session.
@@ -377,9 +514,9 @@ mod tests {
     #[test]
     fn a_session_cannot_go_back_to_pending() {
         let mut s = session();
-        s.transition_to(SessionState::Charging).unwrap();
+        s.transition_to(SessionState::Charging, at(0)).unwrap();
         assert!(matches!(
-            s.transition_to(SessionState::Pending),
+            s.transition_to(SessionState::Pending, at(5)),
             Err(SessionError::IllegalTransition { .. })
         ));
     }
@@ -391,7 +528,11 @@ mod tests {
             s.end(at(-5), EndReason::Local),
             Err(SessionError::EndsBeforeItStarts { .. })
         ));
-        assert_eq!(s.state, SessionState::Pending, "and the state is untouched");
+        assert_eq!(
+            s.state(),
+            SessionState::Pending,
+            "and the state is untouched"
+        );
     }
 
     #[test]

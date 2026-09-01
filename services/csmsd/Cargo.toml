@@ -1,0 +1,27 @@
+[package]
+name       = "csmsd"
+publish    = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+description = "The CSMS daemon: an OCPP 1.6J/2.0.1/2.1 endpoint whose transaction events reach the Eichrecht chain, with the seam rule enforced by the types it is allowed to see"
+
+[dependencies]
+emob-cdr       = { workspace = true }
+emob-core      = { workspace = true }
+emob-eichrecht = { workspace = true }
+emob-ocpp      = { workspace = true }
+emob-session   = { workspace = true }
+emob-tariff    = { workspace = true }
+ocpp-kit       = { workspace = true, features = ["std", "tokio", "csms", "v1_6", "v2_0_1", "v2_1"] }
+anyhow         = { workspace = true }
+rust_decimal   = { workspace = true }
+time           = { workspace = true }
+tokio          = { version = "1.45", features = ["rt-multi-thread", "macros", "signal"] }
+
+[dev-dependencies]
+ocpp-kit     = { workspace = true, features = ["std", "tokio", "csms", "station", "v1_6", "v2_0_1", "v2_1"] }
+tokio        = { version = "1.45", features = ["rt-multi-thread", "macros", "time", "net"] }

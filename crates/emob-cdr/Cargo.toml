@@ -13,7 +13,19 @@ rust-version.workspace = true
 
 [dependencies]
 emob-core    = { workspace = true }
+# A CDR names the signed records it rests on, and derives from them the two
+# facts the builder cross-checks: how strongly the user was identified, and
+# whether the duration may be billed at all. Reading those off the evidence
+# rather than off a field somebody filled in is the difference between a check
+# and a formality.
+emob-eichrecht = { workspace = true }
 emob-session = { workspace = true }
+# A CDR is what two companies settle against, so it carries what they settle:
+# the energy *and* the money. Rating lives in `emob-tariff` and the record holds
+# its result, rather than the two being joined in a service where nothing checks
+# that the euros and the kilowatt-hours came from the same periods.
+emob-tariff  = { workspace = true }
+rust_decimal = { workspace = true }
 serde        = { workspace = true, optional = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }
@@ -21,15 +33,19 @@ time         = { workspace = true }
 [features]
 default = ["serde"]
 ## Serialize/deserialize every public type.
-serde = ["dep:serde", "emob-core/serde", "emob-session/serde", "time/serde"]
+serde = [
+    "dep:serde",
+    "emob-core/serde",
+    "emob-eichrecht/serde",
+    "emob-session/serde",
+    "emob-tariff/serde",
+    "time/serde-well-known",
+]
 
 [dev-dependencies]
-# The end-to-end test signs real OCMF records and drives them through the whole
-# chain, so it needs the verification crate and a signing key.
-emob-eichrecht = { workspace = true }
-emob-tariff    = { workspace = true }
+# The end-to-end test signs real OCMF records at test time, so it needs a
+# signing key and a hash.
 hex            = { workspace = true }
 p256           = { workspace = true }
-rust_decimal   = { workspace = true }
 serde_json     = { workspace = true }
 sha2           = { workspace = true }

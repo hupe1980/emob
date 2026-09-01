@@ -121,27 +121,57 @@ impl PriceComponent {
 
 /// When an element applies.
 ///
-/// Only the restrictions this crate can evaluate from a session are modelled.
-/// A tariff carrying restrictions outside this set is not silently treated as
-/// unrestricted — [`crate::rating::rate`] reports it — because assuming a
-/// restriction is absent is how a night tariff gets applied at noon.
+/// # The restrictions are cumulative, and that is what makes tiers work
+///
+/// `min_kwh` and `min_duration_s` are read against what the session has done
+/// **so far**, not against its final total. That is what OCPI means by "valid
+/// from this amount of energy being used", and it is the difference between a
+/// tariff that charges the first 10 kWh at one price and the rest at another —
+/// which is what the field is for — and one that retroactively reprices the
+/// whole session the moment it crosses a threshold, which is what a
+/// whole-session reading produces.
+///
+/// # A restriction this crate cannot evaluate is not an absent restriction
+///
+/// [`Self::unevaluable`] carries anything a wire adapter parsed and this crate
+/// cannot judge — an OCPI `reservation` restriction, a partner extension. An
+/// element carrying one **never matches**, and [`crate::rating::rate`] says so
+/// in a note. Silently treating it as unrestricted is how a night tariff gets
+/// applied at noon.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Restrictions {
-    /// Applies only from this time of day, local to the station.
+    /// Applies only from this time of day, in the offset the session carries.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::clock::option"))]
     pub start_time: Option<time::Time>,
     /// Applies only until this time of day.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::clock::option"))]
     pub end_time: Option<time::Time>,
+    /// Applies only from this calendar date.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::date::option"))]
+    pub start_date: Option<time::Date>,
+    /// Applies only before this calendar date.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::date::option"))]
+    pub end_date: Option<time::Date>,
     /// Applies only once this much energy has been delivered, in kWh.
     pub min_kwh: Option<Decimal>,
     /// Applies only below this much energy, in kWh.
     pub max_kwh: Option<Decimal>,
+    /// Applies only at or above this average power, in kW.
+    pub min_power_kw: Option<Decimal>,
+    /// Applies only below this average power, in kW.
+    pub max_power_kw: Option<Decimal>,
     /// Applies only from this duration into the session, in seconds.
     pub min_duration_s: Option<u64>,
     /// Applies only below this duration, in seconds.
     pub max_duration_s: Option<u64>,
     /// Applies only on these weekdays. Empty means every day.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::weekday"))]
     pub days_of_week: Vec<time::Weekday>,
+    /// Restrictions that arrived on the wire and this crate cannot evaluate.
+    ///
+    /// Kept verbatim, and disqualifying: an element carrying one never matches.
+    pub unevaluable: Vec<String>,
 }
 
 impl Restrictions {
@@ -149,6 +179,66 @@ impl Restrictions {
     #[must_use]
     pub fn is_unrestricted(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Whether every restriction here is one this crate can judge.
+    #[must_use]
+    pub fn is_evaluable(&self) -> bool {
+        self.unevaluable.is_empty()
+    }
+
+    /// A one-line statement of what this element is restricted to, for a price
+    /// display that has to admit the price depends on something.
+    ///
+    /// Empty when the element is unrestricted.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        // `time::Time`'s own `Display` writes seconds and sub-seconds; a price
+        // display wants `22:00`.
+        let hhmm = |t: time::Time| format!("{:02}:{:02}", t.hour(), t.minute());
+        match (self.start_time, self.end_time) {
+            (Some(from), Some(to)) => parts.push(format!("{}–{}", hhmm(from), hhmm(to))),
+            (Some(from), None) => parts.push(format!("from {}", hhmm(from))),
+            (None, Some(to)) => parts.push(format!("until {}", hhmm(to))),
+            (None, None) => {}
+        }
+        if !self.days_of_week.is_empty() {
+            let days: Vec<String> = self
+                .days_of_week
+                .iter()
+                .map(|d| d.to_string()[..3].to_owned())
+                .collect();
+            parts.push(days.join("/"));
+        }
+        match (self.min_kwh, self.max_kwh) {
+            (Some(min), Some(max)) => parts.push(format!("{min}–{max} kWh")),
+            (Some(min), None) => parts.push(format!("from {min} kWh")),
+            (None, Some(max)) => parts.push(format!("first {max} kWh")),
+            (None, None) => {}
+        }
+        match (self.min_power_kw, self.max_power_kw) {
+            (Some(min), Some(max)) => parts.push(format!("{min}–{max} kW")),
+            (Some(min), None) => parts.push(format!("from {min} kW")),
+            (None, Some(max)) => parts.push(format!("below {max} kW")),
+            (None, None) => {}
+        }
+        match (self.min_duration_s, self.max_duration_s) {
+            (Some(min), Some(max)) => parts.push(format!("{}–{} min", min / 60, max / 60)),
+            (Some(min), None) => parts.push(format!("after {} min", min / 60)),
+            (None, Some(max)) => parts.push(format!("first {} min", max / 60)),
+            (None, None) => {}
+        }
+        match (self.start_date, self.end_date) {
+            (Some(from), Some(to)) => parts.push(format!("{from}–{to}")),
+            (Some(from), None) => parts.push(format!("from {from}")),
+            (None, Some(to)) => parts.push(format!("until {to}")),
+            (None, None) => {}
+        }
+        for unknown in &self.unevaluable {
+            parts.push(format!("unevaluable: {unknown}"));
+        }
+        parts.join(", ")
     }
 }
 
@@ -225,6 +315,20 @@ pub struct Tariff {
     pub min_price: Option<Decimal>,
     /// A session under this tariff costs at most this much.
     pub max_price: Option<Decimal>,
+    /// The first instant this version of the tariff is in force, **inclusive**.
+    ///
+    /// `None` for a tariff that has always been in force.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339::option"))]
+    pub valid_from: Option<time::OffsetDateTime>,
+    /// The instant it stops being in force, **exclusive**.
+    ///
+    /// Half-open on purpose, and for the reason the key registry's windows are:
+    /// with two inclusive bounds a tariff replaced at midnight has two versions
+    /// covering that instant, and the answer depends on insertion order.
+    /// `[from, until)` makes consecutive versions partition the timeline
+    /// exactly, which is what a price history is.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339::option"))]
+    pub valid_until: Option<time::OffsetDateTime>,
 }
 
 impl Tariff {
@@ -244,7 +348,28 @@ impl Tariff {
             elements: vec![TariffElement::unrestricted(components)],
             min_price: None,
             max_price: None,
+            valid_from: None,
+            valid_until: None,
         }
+    }
+
+    /// The same tariff, in force over a half-open window.
+    #[must_use]
+    pub const fn valid_between(
+        mut self,
+        from: Option<time::OffsetDateTime>,
+        until: Option<time::OffsetDateTime>,
+    ) -> Self {
+        self.valid_from = from;
+        self.valid_until = until;
+        self
+    }
+
+    /// Whether this version was in force at an instant — `[from, until)`.
+    #[must_use]
+    pub fn covers(&self, at: time::OffsetDateTime) -> bool {
+        self.valid_from.is_none_or(|from| at >= from)
+            && self.valid_until.is_none_or(|until| at < until)
     }
 
     /// Every dimension this tariff prices anywhere.
@@ -266,6 +391,26 @@ impl Tariff {
     #[must_use]
     pub fn prices_energy(&self) -> bool {
         self.dimensions().iter().any(|d| d.is_energy())
+    }
+
+    /// The VAT rate that governs the whole tariff, when its components agree.
+    ///
+    /// `None` when different components carry different rates — which is
+    /// lawful (a service fee and delivered electricity can sit in different
+    /// categories) and means a caller wanting one number has to ask for the
+    /// breakdown instead.
+    #[must_use]
+    pub fn uniform_vat(&self) -> Option<Decimal> {
+        let mut rates = self
+            .elements
+            .iter()
+            .flat_map(|e| e.components.iter().map(|c| c.vat));
+        let first = rates.next()?;
+        if rates.all(|r| r == first) {
+            first
+        } else {
+            None
+        }
     }
 }
 
@@ -345,6 +490,8 @@ mod tests {
             ],
             min_price: None,
             max_price: None,
+            valid_from: None,
+            valid_until: None,
         };
         assert_eq!(t.dimensions(), vec![Dimension::Energy, Dimension::Flat]);
     }

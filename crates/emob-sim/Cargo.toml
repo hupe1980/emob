@@ -1,0 +1,29 @@
+[package]
+name        = "emob-sim"
+description = "A deterministic e-mobility fleet simulator: virtual charging stations that sign genuine OCMF, seeded faults, and a reconciliation that proves every kilowatt-hour either billed or was refused with a reason"
+keywords    = ["ev-charging", "simulation", "ocmf", "testing", "eichrecht"]
+categories  = ["simulation", "development-tools::testing"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-cdr       = { workspace = true }
+emob-core      = { workspace = true }
+emob-eichrecht = { workspace = true }
+emob-ocpp      = { workspace = true }
+emob-session   = { workspace = true }
+emob-tariff    = { workspace = true }
+hex            = { workspace = true }
+p256           = { workspace = true }
+rust_decimal   = { workspace = true }
+sha2           = { workspace = true }
+thiserror      = { workspace = true }
+time           = { workspace = true }
+
+[features]
+default = []

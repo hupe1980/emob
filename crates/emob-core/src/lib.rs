@@ -12,15 +12,24 @@
 //! - [`ids`] — [`EvseId`], [`Emaid`] and friends:
 //!   two grammars per identifier, canonical equality, and a `Display` that
 //!   returns the text that arrived.
-//! - [`quantity`] — [`Energy`],
-//!   [`Money`], [`PricePerKwh`],
-//!   [`Direction`]: exact decimals, no binary floats
-//!   anywhere, and direction as a field rather than a sign.
-//! - [`station`] — [`ChargePointProfile`]: the
-//!   facts about a charge point that regulation actually asks about.
+//! - [`quantity`] — [`Energy`], [`Money`], [`Currency`], [`Direction`]: exact
+//!   decimals, no binary floats anywhere, direction as a field rather than a
+//!   sign, and rounding that follows the currency's own minor unit.
+//! - [`identification`] — [`IdentificationStrength`]: the ordered scale a
+//!   session's authorisation path and its signed meter record are compared on.
+//! - [`period`] — [`QuarterHour`]: the grid the German market settles on, a
+//!   meter stores its load profile in, and a price may move on — and the
+//!   footnote about *which* instant names it that shifts a settlement file by
+//!   fifteen minutes when it is read past. Also [`ClockResolution`], the floor
+//!   below which a measured span is not a number an invoice may use.
+//! - [`station`] — [`ChargePointProfile`] and
+//!   [`ProviderProfile`]: the facts about a charge point, and about a mobility
+//!   service provider, that regulation actually asks about.
 //! - [`obligation`] — the obligation calendar: AFIR, DA-656, LSV 2026,
 //!   MessEG/PTB-A and the THG preconditions as dated, cited, executable rules,
-//!   and [`assess`](obligation::assess()) to judge a point against all of them.
+//!   with [`assess`](obligation::assess()) and
+//!   [`assess_provider`](obligation::assess_provider()) to judge each side
+//!   against all of them.
 //!
 //! # No I/O, no clock
 //!
@@ -44,7 +53,7 @@
 //! for finding in report.failing() {
 //!     println!("{} — {}", finding.obligation.citation, finding.obligation.remedy);
 //! }
-//! assert_eq!(report.verdict(), Verdict::Failing); // the data duties are still open
+//! assert_eq!(report.verdict(), Verdict::Failing); // the data and register duties are still open
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -52,15 +61,25 @@
 #![warn(missing_docs, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+mod check_digit;
 pub mod error;
+pub mod identification;
 pub mod ids;
 pub mod obligation;
+pub mod period;
 pub mod quantity;
 pub mod station;
+pub mod wire;
 
 pub use error::{CoreError, IdError, QuantityError, Result};
+pub use identification::IdentificationStrength;
 pub use ids::{
     CdrId, ContractId, Emaid, EvcoId, EvseId, LocationId, PartyId, SessionId, StationId, TariffId,
 };
-pub use quantity::{Currency, Direction, Energy, Money, PricePerKwh};
-pub use station::ChargePointProfile;
+pub use period::{ClockResolution, ClockResolutionError, QuarterHour};
+pub use quantity::{Currency, Direction, Energy, Money};
+pub use station::{
+    Accessibility, AdHocPayment, ChargePointProfile, ChargingMode, CurrentType, DataPublication,
+    EnergyMeasurementPoint, MeteringPosture, Notice, OperatorChange, Ownership, PriceConduct,
+    PriceTransparency, ProviderProfile, Registration, V2gCommunication,
+};

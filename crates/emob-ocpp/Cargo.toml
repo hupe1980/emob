@@ -1,0 +1,39 @@
+[package]
+name        = "emob-ocpp"
+description = "The OCPP seam: signed meter values lifted out of a charging station's transaction events into an exact, verifiable billing chain — and the rule that no float from the telemetry ledger ever becomes a billed kilowatt-hour"
+keywords    = ["ocpp", "ev-charging", "eichrecht", "ocmf", "metering"]
+categories  = ["science", "encoding"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core      = { workspace = true }
+emob-eichrecht = { workspace = true }
+emob-session   = { workspace = true }
+ocpp-kit       = { workspace = true, features = ["std", "csms", "v1_6", "v2_0_1", "v2_1"] }
+serde          = { workspace = true, optional = true }
+thiserror      = { workspace = true }
+time           = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = [
+    "dep:serde",
+    "emob-core/serde",
+    "emob-eichrecht/serde",
+    "emob-session/serde",
+    "time/serde-well-known",
+]
+
+
+[dev-dependencies]
+emob-cdr    = { workspace = true }
+emob-tariff = { workspace = true }
+rust_decimal = { workspace = true }
+serde_json   = { workspace = true }

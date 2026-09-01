@@ -27,7 +27,7 @@
 //!     TariffKind::AdHoc,
 //!     vec![
 //!         PriceComponent::new(Dimension::Flat, dec("0.50")),
-//!         PriceComponent::new(Dimension::Energy, dec("0.49")),
+//!         PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
 //!     ],
 //! );
 //!
@@ -35,8 +35,14 @@
 //! assert_eq!(describe(&tariff, at).one_line(), "0.49 EUR / kWh · 0.50 EUR / session");
 //!
 //! // What the driver pays, from the same numbers.
-//! let rated = rate(&tariff, &Chargeable::energy_only(Energy::from_kwh(dec("29.500"))?, at));
-//! assert_eq!(rated.total().to_string(), "14.96 EUR");   // 29.500 × 0.49 + 0.50
+//! let session = Chargeable::energy_only(
+//!     Energy::from_kwh(dec("29.500"))?,
+//!     at,
+//!     at + time::Duration::minutes(30),
+//! )?;
+//! let rated = rate(&tariff, &session);
+//! assert_eq!(rated.gross().to_string(), "14.96 EUR");   // 29.500 × 0.49 + 0.50
+//! assert_eq!(rated.tax().to_string(), "2.31 EUR");      // 19 % of the electricity
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -55,13 +61,32 @@
 //! per-minute-only tariff is lawful on a 22 kW post and unlawful on the 150 kW
 //! charger beside it, and [`check_afir`] is the function that says so.
 //!
+//! # A session is a sequence of periods, so tiers actually tier
+//!
+//! [`rate`] walks the session's periods in order and asks which element applies
+//! at the start of each one, carrying the cumulative energy and duration. That
+//! is what makes "the first 10 kWh at 0.39, the rest at 0.59" mean what it
+//! says — rated against the session *total* instead, a 30 kWh session reprices
+//! all thirty at 0.59, including the ten the driver was quoted at 0.39. The
+//! quarter-hour slots `emob-session` already produces are exactly the right
+//! periods, so the split that conserves energy is also the input that prices
+//! it.
+//!
 //! # Every term of the total is a line
 //!
-//! [`rate`] returns one [`Line`] per component that applied, with its quantity,
-//! its unit price and its amount. The total is their sum and nothing else —
-//! unless a minimum or maximum moved it, and then a [`RatingNote`] says which.
-//! Rounding up to a block size produces a note too, because it is always
-//! against the customer.
+//! [`rate`] returns one [`Line`] per *distinct price* that applied, with its
+//! quantity, its unit price and its amount — so a tiered session shows both
+//! tiers. The total is their sum plus at most one [`Adjustment`], the minimum
+//! or maximum, which is a term a reader can see rather than a number that
+//! moved. Rounding up to a block size produces a [`RatingNote`], because it is
+//! always against the customer.
+//!
+//! # Tax is a breakdown, not a number
+//!
+//! [`Rated::tax_summary`] returns one [`TaxLine`] per VAT rate — the shape
+//! EN 16931 requires and `[UStG §14]` makes mandatory between businesses in
+//! Germany. Electricity and a service fee can sit in different categories, so
+//! an invoice stating only a gross total cannot be checked.
 //!
 //! # No I/O, no clock
 //!
@@ -77,10 +102,15 @@ pub mod conformance;
 pub mod display;
 pub mod rating;
 pub mod tariff;
+pub mod version;
 
 pub use conformance::{Conformance, Objection, check_afir};
-pub use display::{DisplayLine, PriceDescription, describe};
-pub use rating::{Chargeable, Line, Rated, RatingNote, rate};
+pub use display::{DisplayLine, PriceDescription, Tier, describe};
+pub use rating::{
+    Adjustment, AdjustmentKind, Chargeable, ChargeableError, Line, Period, Rated, RatingNote,
+    SessionState, TaxLine, rate,
+};
 pub use tariff::{
     Dimension, PriceComponent, Restrictions, Tariff, TariffElement, TariffKind, TaxIncluded,
 };
+pub use version::{TariffFingerprint, TariffHistory, TariffHistoryError};

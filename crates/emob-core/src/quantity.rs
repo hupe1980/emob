@@ -197,10 +197,32 @@ impl fmt::Display for Energy {
 }
 
 /// An ISO 4217 currency code.
+///
+/// Written on the wire as the three letters — `"EUR"` — and never as the three
+/// bytes. A `#[serde(transparent)]` newtype over `[u8; 3]` serialises to
+/// `[69, 85, 82]`, which round-trips through this crate perfectly and is
+/// unreadable to every partner, invoice format and human that a rated CDR
+/// passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Currency([u8; 3]);
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Currency {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Currency {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        // Through `new`, so a code that arrives from a partner is validated on
+        // the way in rather than trusted because it was already typed.
+        let code = <std::borrow::Cow<'_, str> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(&code).map_err(D::Error::custom)
+    }
+}
 
 impl Currency {
     /// The euro.
@@ -228,6 +250,30 @@ impl Currency {
     pub fn as_str(&self) -> &str {
         // Constructed only from ASCII letters.
         core::str::from_utf8(&self.0).unwrap_or("???")
+    }
+
+    /// How many decimal places this currency's minor unit has — the ISO 4217
+    /// exponent.
+    ///
+    /// Two for almost everything, and the exceptions are the point: a total
+    /// rounded to two decimals in yen invents a hundredth of a unit that does
+    /// not exist, and one rounded to two in Kuwaiti dinar throws a fils away.
+    /// Hard-coding `2` works until the day it does not, and that day arrives on
+    /// an invoice.
+    ///
+    /// Unknown codes get two, which is the right guess and a documented one.
+    #[must_use]
+    pub fn minor_unit_digits(self) -> u32 {
+        match self.as_str() {
+            // Exponent 0 — no minor unit at all.
+            "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF"
+            | "UGX" | "UYI" | "VND" | "VUV" | "XAF" | "XOF" | "XPF" => 0,
+            // Exponent 3.
+            "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
+            // Everything a European charging platform actually meets — EUR,
+            // CHF, GBP, the Nordic and CEE currencies — is exponent 2.
+            _ => 2,
+        }
     }
 }
 
@@ -291,14 +337,43 @@ impl Money {
 
     /// Round to the currency's minor unit, half away from zero — the rule
     /// German invoicing practice and EN 16931 both assume.
+    ///
+    /// The number of places comes from [`Currency::minor_unit_digits`], not
+    /// from a hard-coded two, so a yen total is a whole number and a dinar
+    /// total keeps its third decimal.
     #[must_use]
     pub fn round_to_minor_unit(self) -> Self {
         Self {
-            amount: self
-                .amount
-                .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero),
+            amount: self.amount.round_dp_with_strategy(
+                self.currency.minor_unit_digits(),
+                rust_decimal::RoundingStrategy::MidpointAwayFromZero,
+            ),
             currency: self.currency,
         }
+    }
+
+    /// Subtract, refusing to mix currencies.
+    ///
+    /// # Errors
+    ///
+    /// [`QuantityError::CurrencyMismatch`] when the currencies differ.
+    pub fn checked_sub(self, rhs: Self) -> Result<Self, QuantityError> {
+        if self.currency != rhs.currency {
+            return Err(QuantityError::CurrencyMismatch {
+                left: self.currency.to_string(),
+                right: rhs.currency.to_string(),
+            });
+        }
+        Ok(Self {
+            amount: self.amount - rhs.amount,
+            currency: self.currency,
+        })
+    }
+
+    /// `true` when there is no money here at all.
+    #[must_use]
+    pub fn is_zero(self) -> bool {
+        self.amount.is_zero()
     }
 
     /// Add, refusing to mix currencies.
@@ -334,51 +409,11 @@ impl fmt::Display for Money {
     }
 }
 
-/// A price per kilowatt-hour.
-///
-/// A distinct type from [`Money`] because the AFIR price-transparency duty is
-/// stated in €/kWh `[AFIR Art. 5(4)]` and multiplying a €/kWh by a kWh must
-/// produce a [`Money`], never another rate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct PricePerKwh {
-    rate: Decimal,
-    currency: Currency,
-}
+impl Sub for Money {
+    type Output = Result<Self, QuantityError>;
 
-impl PricePerKwh {
-    /// A rate in currency per kWh.
-    #[must_use]
-    pub const fn new(rate: Decimal, currency: Currency) -> Self {
-        Self { rate, currency }
-    }
-
-    /// The rate itself.
-    #[must_use]
-    pub const fn rate(self) -> Decimal {
-        self.rate
-    }
-
-    /// The currency.
-    #[must_use]
-    pub const fn currency(self) -> Currency {
-        self.currency
-    }
-
-    /// What `energy` costs at this rate, unrounded.
-    ///
-    /// Rounding is the caller's decision because rounding per line and rounding
-    /// per invoice give different totals, and which one is right is a tax
-    /// question rather than an arithmetic one.
-    #[must_use]
-    pub fn times(self, energy: Energy) -> Money {
-        Money::new(self.rate * energy.kwh(), self.currency)
-    }
-}
-
-impl fmt::Display for PricePerKwh {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}/kWh", self.rate, self.currency)
+    fn sub(self, rhs: Self) -> Self::Output {
+        self.checked_sub(rhs)
     }
 }
 
@@ -462,14 +497,50 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_times_energy_is_money() {
-        let rate = PricePerKwh::new(dec("0.49"), Currency::EUR);
-        let energy = Energy::from_kwh(dec("29.500")).unwrap();
-        assert_eq!(rate.times(energy).amount(), dec("14.45500"));
+    fn money_subtraction_refuses_to_mix_currencies_too() {
+        // A credit note, a refund and a partner settlement are all ordinary
+        // amounts that happen to be negative.
+        let a = Money::new(dec("10.00"), Currency::EUR);
+        let b = Money::new(dec("14.46"), Currency::EUR);
+        assert_eq!((a - b).unwrap().amount(), dec("-4.46"));
+        assert!((a - Money::new(dec("1.00"), Currency::new("CHF").unwrap())).is_err());
+        assert!(Money::zero(Currency::EUR).is_zero());
+    }
+
+    #[test]
+    fn rounding_follows_the_currencys_own_minor_unit() {
+        // Hard-coding two decimals invents a hundredth of a yen that does not
+        // exist, and throws away a fils.
+        let jpy = Currency::new("JPY").unwrap();
+        assert_eq!(jpy.minor_unit_digits(), 0);
         assert_eq!(
-            rate.times(energy).round_to_minor_unit().amount(),
-            dec("14.46")
+            Money::new(dec("1234.56"), jpy)
+                .round_to_minor_unit()
+                .amount(),
+            dec("1235")
         );
+
+        let kwd = Currency::new("KWD").unwrap();
+        assert_eq!(kwd.minor_unit_digits(), 3);
+        assert_eq!(
+            Money::new(dec("1.23456"), kwd)
+                .round_to_minor_unit()
+                .amount(),
+            dec("1.235")
+        );
+
+        // Everything a European charging platform actually meets is two.
+        for code in [
+            "EUR", "CHF", "GBP", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF",
+        ] {
+            assert_eq!(
+                Currency::new(code).unwrap().minor_unit_digits(),
+                2,
+                "{code}"
+            );
+        }
+        // …and an unknown code gets the right guess, documented.
+        assert_eq!(Currency::new("ZZZ").unwrap().minor_unit_digits(), 2);
     }
 
     #[test]

@@ -1,12 +1,19 @@
 [toolchain]
-# Pinned to the declared MSRV so every developer and every CI lane compiles on
-# exactly the same toolchain. Bumping the MSRV means changing this value and the
-# `rust-version` in Cargo.toml in the same commit.
+# The toolchain everything in this repository is built and tested with. It is
+# **not** the same number as the MSRV, and since `emob-roam` arrived it cannot
+# be: see `rust-version` in Cargo.toml.
 #
-# 1.94 is the floor because:
+# 1.96 is the channel because:
 #   - edition 2024 needs 1.85
 #   - `let_chains` (used across the OCMF reading chain) stabilised in 1.88
-#   - it is the floor the sibling workspaces (`mako`, `hems`) already carry, and
-#     a crate that is consumed by both must not ask for more than they allow
-channel    = "1.94"
+#   - `ocpi-kit` 0.2 declares 1.96, and `emob-roam` is the crate that speaks to
+#     it. The workspace has to be able to build every member, so the *toolchain*
+#     follows the highest floor any member asks for.
+#
+# The **promise** is the other number. `[workspace.package] rust-version` stays
+# at 1.94, which is what the sibling workspaces (`mako`, `hems`) carry, and the
+# crates they consume — everything that decides money — still declare it. Only
+# `emob-roam` overrides it, and `just msrv` proves the distinction rather than
+# asserting it.
+channel    = "1.96"
 components = ["rustfmt", "clippy"]

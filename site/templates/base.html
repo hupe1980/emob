@@ -116,6 +116,10 @@ footer nav{padding:0 0 .8rem;max-width:none}
 .pager{display:flex;gap:1rem;justify-content:space-between;margin-top:3rem;padding-top:1.2rem;border-top:1px solid var(--line);font-size:.94rem}
 .zola-anchor{opacity:0;margin-left:.35rem;font-weight:400;text-decoration:none}
 h2:hover .zola-anchor,h3:hover .zola-anchor,.zola-anchor:focus{opacity:.55}
+.mermaid{margin:1.6rem 0;text-align:center;overflow-x:auto}
+.mermaid:not([data-processed]){opacity:0}
+figure.diagram{margin:1.6rem 0}
+figure.diagram figcaption{font-size:.88rem;color:var(--muted);text-align:center;margin-top:.5rem}
 </style>
 </head>
 <body>
@@ -135,6 +139,7 @@ h2:hover .zola-anchor,h3:hover .zola-anchor,.zola-anchor:focus{opacity:.55}
     <a href="{{ get_url(path='@/docs/eichrecht.md') }}">Eichrecht</a> ·
     <a href="{{ get_url(path='@/docs/settlement.md') }}">Settlement</a> ·
     <a href="{{ get_url(path='@/docs/pricing.md') }}">Tariffs</a> ·
+    <a href="{{ get_url(path='@/docs/roaming.md') }}">Roaming</a> ·
     <a href="{{ get_url(path='@/docs/compliance.md') }}">Compliance</a> ·
     <a href="{{ config.extra.repository }}" rel="noopener">Source</a>
   </nav>
@@ -142,5 +147,40 @@ h2:hover .zola-anchor,h3:hover .zola-anchor,.zola-anchor:focus{opacity:.55}
   EVRoaming Foundation, Hubject, S.A.F.E. e.V., the PTB or the Bundesnetzagentur.
   Regulatory documents are cited, never redistributed.
 </footer>
+
+<!-- Diagrams are authored as ```mermaid fences, so they stay readable and
+     diffable in the Markdown source. The renderer is fetched only on pages that
+     actually contain one, and the page is fully readable without it. -->
+<script type="module">
+  const blocks = document.querySelectorAll("pre > code.language-mermaid");
+  if (blocks.length) {
+    const { default: mermaid } = await import(
+      "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"
+    );
+    const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    mermaid.initialize({
+      startOnLoad: false,
+      // Every diagram is authored in this repository's own Markdown; there is
+      // no user-supplied content on this site. `loose` is what lets a node
+      // label carry a `<br/>` and a `<small>` subtitle instead of printing the
+      // tags as text.
+      securityLevel: "loose",
+      theme: dark ? "dark" : "neutral",
+      themeVariables: { fontFamily: "inherit", fontSize: "14px" },
+      flowchart: { curve: "basis", useMaxWidth: true },
+      sequence: { useMaxWidth: true },
+    });
+    for (const code of blocks) {
+      const figure = document.createElement("figure");
+      figure.className = "diagram";
+      const target = document.createElement("div");
+      target.className = "mermaid";
+      target.textContent = code.textContent;
+      figure.append(target);
+      code.parentElement.replaceWith(figure);
+    }
+    await mermaid.run({ querySelector: ".mermaid" });
+  }
+</script>
 </body>
 </html>

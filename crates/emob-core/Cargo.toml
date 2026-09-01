@@ -20,7 +20,11 @@ time         = { workspace = true }
 [features]
 default = ["serde"]
 ## Serialize/deserialize every public type.
-serde = ["dep:serde", "rust_decimal/serde", "time/serde"]
+serde = ["dep:serde", "rust_decimal/serde", "time/serde-well-known"]
 
 [dev-dependencies]
+# Only here. Nothing a downstream links carries a protocol implementation; the
+# agreement about how a vehicle-communication generation is spelled is still
+# checked on every `cargo test`. See `tests/the_kits_agree.rs`.
+iso15118   = { workspace = true }
 serde_json = { workspace = true }

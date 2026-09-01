@@ -20,7 +20,7 @@
 //! finding in it — it is not evidence at all, and reporting "pagination break"
 //! about forged records would be answering the wrong question.
 
-use emob_core::Energy;
+use emob_core::{Energy, IdentificationStrength};
 
 use crate::chain::{self, ChainFinding, ChainReport};
 use crate::error::VerifyError;
@@ -60,7 +60,14 @@ pub struct VerifiedRecord {
     pub record: OcmfRecord,
     /// SHA-256 of the payload the signature covers — a stable content address.
     pub payload_digest: [u8; 32],
-    /// Where the key that checked it came from.
+    /// The key it was checked against.
+    ///
+    /// The key itself and not only a description of it, because the customer's
+    /// own verifier needs it: a transparency file that named a key without
+    /// carrying it would leave the driver to find it, which is the step
+    /// `[MessEG §33]` exists to remove.
+    pub key: crate::ocmf::PublicKey,
+    /// Where that key came from — a type approval, a provisioning run.
     pub key_provenance: String,
 }
 
@@ -69,7 +76,14 @@ pub struct VerifiedRecord {
 pub struct Evidence {
     /// The records whose signatures checked out, in order.
     pub verified: Vec<VerifiedRecord>,
-    /// Everything standing between these records and an invoice.
+    /// Everything wrong with these records.
+    ///
+    /// Not the same as "everything standing between them and an invoice", and
+    /// the difference matters: a clock this build cannot bill a duration
+    /// against is a problem that leaves the **energy** perfectly billable. Ask
+    /// [`Self::billable_energy`] and [`Self::billable_duration`] what may
+    /// actually be charged; read this to find out why not, and to see what a
+    /// dispute will be about.
     pub problems: Vec<EvidenceProblem>,
     /// The chain report, when the signatures allowed one to be produced.
     pub chain: Option<ChainReport>,
@@ -97,6 +111,7 @@ impl Evidence {
                     Ok(()) => verified.push(VerifiedRecord {
                         record: record.clone(),
                         payload_digest: ocmf::payload_digest(record),
+                        key: registered.key.clone(),
                         key_provenance: registered.provenance.clone(),
                     }),
                     Err(error) => problems.push(EvidenceProblem::Signature { pagination, error }),
@@ -124,22 +139,80 @@ impl Evidence {
 
     /// The energy this session may be billed for.
     ///
-    /// `None` whenever anything at all went wrong. **A value that does not
-    /// verify does not bill** — and because the only way to reach the number is
-    /// through this method, that is a property of the type rather than a rule
-    /// somebody has to remember.
+    /// `None` whenever a signature failed, or any chain finding disqualifies
+    /// the energy. **A value that does not verify does not bill** — and because
+    /// the only way to reach the number is through this method, that is a
+    /// property of the type rather than a rule somebody has to remember.
+    ///
+    /// A chain report exists only when every record verified, so delegating to
+    /// it is the whole check: `None` here covers a forged record and a deleted
+    /// one alike.
     #[must_use]
     pub fn billable_energy(&self) -> Option<Energy> {
-        if !self.problems.is_empty() {
-            return None;
-        }
         self.chain.as_ref()?.billable_energy
     }
 
-    /// Whether this session may be billed at all.
+    /// The duration this session may be billed for.
+    ///
+    /// A **different** question, with a different answer. A session on an
+    /// unsynchronised clock `[OCMF Tab. 19]`, or one whose `EF` flags mark the
+    /// time unusable, has an energy an invoice may use and a duration it may
+    /// not — and `[AFIR Art. 5(4)]` lets a tariff charge for both, so the two
+    /// have to be answerable separately or a per-minute occupancy fee gets
+    /// billed off a clock nobody can defend.
+    #[must_use]
+    pub fn billable_duration(&self) -> Option<time::Duration> {
+        self.chain.as_ref()?.billable_duration
+    }
+
+    /// Which way the energy this session measured was flowing, when its
+    /// register says so `[OCMF Tab. 25]`.
+    ///
+    /// The claim the CDR is cross-checked against. A session recorded as a draw
+    /// whose signed register says `C2` is a V2G discharge being billed as
+    /// consumption, and the two directions must never net.
+    #[must_use]
+    pub fn direction(&self) -> Option<emob_core::Direction> {
+        self.chain.as_ref()?.direction
+    }
+
+    /// The cable loss compensated out of this session's register, when the
+    /// meter reported it `[OCMF Tab. 7, CL]`.
+    #[must_use]
+    pub fn compensated_loss(&self) -> Option<Energy> {
+        self.chain.as_ref()?.compensated_loss
+    }
+
+    /// How strongly the signed records say the user was identified.
+    ///
+    /// The weakest level any record asserted. `None` when no record carries a
+    /// user assignment, or when the chain did not hold up.
+    ///
+    /// This is the number the CDR cross-check reads. Taking it from the signed
+    /// record rather than from whatever a caller passed in is the difference
+    /// between a check and a formality: a hand-filled field can be filled with
+    /// the answer that makes the CDR build.
+    #[must_use]
+    pub fn identification_strength(&self) -> Option<IdentificationStrength> {
+        self.chain.as_ref()?.identification
+    }
+
+    /// The SHA-256 digest of every verified record's payload, in order.
+    #[must_use]
+    pub fn payload_digests(&self) -> Vec<[u8; 32]> {
+        self.verified.iter().map(|v| v.payload_digest).collect()
+    }
+
+    /// Whether this session's energy may be billed at all.
     #[must_use]
     pub fn is_billable(&self) -> bool {
         self.billable_energy().is_some()
+    }
+
+    /// Whether a time-priced tariff may be applied to this session.
+    #[must_use]
+    pub fn is_billable_for_time(&self) -> bool {
+        self.billable_duration().is_some()
     }
 
     /// A one-line reason per problem, for an operator queue.
@@ -275,6 +348,54 @@ mod tests {
         );
         // …and the session still does not bill.
         assert!(!evidence.is_billable());
+    }
+
+    #[test]
+    fn a_bad_clock_is_a_problem_that_still_bills_the_energy() {
+        // The reason `problems` is not the same list as "reasons this cannot be
+        // invoiced": OCMF states the trustworthiness of the clock separately
+        // from the register, and so does the verdict.
+        let unsynchronised: Vec<OcmfRecord> = [
+            payload(1, "B", "2935.600", 0),
+            payload(2, "E", "2965.100", 20),
+        ]
+        .iter()
+        .map(|p| ocmf::parse(&sign(&p.replace(":00,000+0100 S", ":00,000+0100 U"))).unwrap())
+        .collect();
+
+        let evidence = Evidence::assemble(&unsynchronised, &registry(), AT);
+
+        assert!(!evidence.problems.is_empty(), "there is something to say");
+        assert_eq!(
+            evidence.billable_energy().unwrap().to_string(),
+            "29.500 kWh",
+            "…and it is not about the register"
+        );
+        assert!(!evidence.is_billable_for_time());
+        assert!(
+            evidence
+                .reasons()
+                .any(|r| r.contains("energy is unaffected")),
+            "the message has to say so, or an operator escalates a session that bills"
+        );
+    }
+
+    #[test]
+    fn the_identification_comes_off_the_records() {
+        let records: Vec<OcmfRecord> = [
+            r#"{"PG":"T1","MS":"BQ1","IS":true,"IL":"TRUSTED","IT":"CENTRAL","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":2935.600,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}"#,
+            r#"{"PG":"T2","MS":"BQ1","IS":true,"IL":"HEARSAY","IT":"ISO14443","RD":[{"TM":"2026-01-02T10:20:00,000+0100 S","TX":"E","RV":2965.100,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}"#,
+        ]
+        .iter()
+        .map(|p| ocmf::parse(&sign(p)).unwrap())
+        .collect();
+
+        let evidence = Evidence::assemble(&records, &registry(), AT);
+        assert_eq!(
+            evidence.identification_strength(),
+            Some(emob_core::IdentificationStrength::Hearsay),
+            "a chain is only as strong as its weakest claim"
+        );
     }
 
     #[test]

@@ -1,0 +1,115 @@
+name: Release
+
+# `cargo publish` cannot be undone: a version number is spent the moment it is
+# accepted, and a wrong one is fixed only by burning the next. So the tag is the
+# trigger, and everything before the upload is a gate.
+on:
+  push:
+    tags: ["v*"]
+  # For rehearsing the whole gate against any commit. Defaults to a dry run, so
+  # the manual path cannot publish by accident.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Actually publish to crates.io (otherwise dry-run only)"
+        type: boolean
+        default: false
+
+# Two releases racing each other would interleave their uploads, and the loser
+# fails halfway through a dependency-ordered publish. Never cancel a run that
+# may already have uploaded a crate.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v3
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # The one version every publishable crate carries, read from the same
+      # `[workspace.package]` field the justfile reads.
+      - id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "emob-core") | .version')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "workspace version: $version"
+
+      # A tag naming a version the manifests do not carry publishes something
+      # nobody asked for, under a name nobody can reissue.
+      - name: The tag names the version the workspace carries
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          if [ "$tag" != "${{ steps.version.outputs.version }}" ]; then
+            echo "::error::tag v$tag does not match workspace version ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
+      # The same gate CI runs, re-run here rather than trusted from an earlier
+      # commit: a tag can be pushed at any revision, including one CI never saw.
+      - run: just ci
+
+      # Packages every publishable crate in dependency order and builds each
+      # from its own tarball — the half of the decision that is still cheap.
+      - run: cargo publish --workspace --locked --dry-run
+
+  publish:
+    name: Publish to crates.io
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
+    runs-on: ubuntu-latest
+    # Scopes the token to this environment and is where a required reviewer
+    # goes, so an irreversible upload can be held behind an approval.
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/emob-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `--workspace` resolves the publish order itself and waits for each crate
+      # to appear in the index before the one that depends on it, which is the
+      # part a hand-rolled loop gets wrong.
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace --locked
+
+  github-release:
+    name: GitHub release
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF#refs/tags/}" \
+            --title "${GITHUB_REF#refs/tags/}" \
+            --generate-notes \
+            --verify-tag

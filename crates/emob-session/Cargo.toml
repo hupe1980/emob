@@ -21,7 +21,7 @@ time         = { workspace = true }
 [features]
 default = ["serde"]
 ## Serialize/deserialize every public type.
-serde = ["dep:serde", "emob-core/serde", "rust_decimal/serde", "time/serde"]
+serde = ["dep:serde", "emob-core/serde", "rust_decimal/serde", "time/serde-well-known"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

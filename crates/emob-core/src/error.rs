@@ -43,18 +43,57 @@ pub enum IdError {
     BadInstance,
 
     /// The power-outlet section is empty, too long, or has illegal characters.
-    #[error("the power outlet id must be 1 to 30 alphanumeric characters or '*'")]
+    #[error(
+        "the power outlet id must be 1 to 30 alphanumeric characters once its optional '*' separators are removed"
+    )]
     BadOutlet,
 
     /// The `E` that marks an EVSE id is missing.
     #[error("not an EVSE id: the outlet section must start with 'E' (a contract id has no 'E')")]
     NotAnEvse,
 
-    /// A contract id is neither 14 nor 15 characters once separators are gone.
-    #[error("a contract id is 14 or 15 characters, got {len}")]
+    /// A contract id fits none of the three grammars' lengths.
+    #[error(
+        "a contract id is 11 or 12 characters (DIN SPEC 91286) or 14 or 15 (ISO 15118-1 / EMI3), got {len}"
+    )]
     BadContractLength {
         /// The length that was actually seen.
         len: usize,
+    },
+
+    /// The check digit does not match the one the grammar computes.
+    ///
+    /// The digit exists to catch exactly this: a character read wrong, a digit
+    /// lost in a form, a column shifted in an export. An identifier that has
+    /// lost one still parses and still routes — to somebody else's contract.
+    #[error(
+        "the {grammar} check digit is {computed}, not {given}: this contract id has a transcription error and would bill the wrong contract"
+    )]
+    BadCheckDigit {
+        /// Which grammar's algorithm was applied.
+        grammar: &'static str,
+        /// What the identifier claimed.
+        given: char,
+        /// What the algorithm says it should be.
+        computed: char,
+    },
+
+    /// The identifier parsed as a different grammar than the caller required.
+    #[error("expected a {expected} contract id, got a {found} one")]
+    WrongContractGrammar {
+        /// The grammar the caller asked for.
+        expected: &'static str,
+        /// The grammar the identifier actually fits.
+        found: &'static str,
+    },
+
+    /// An ISO/EMI3 contract id carries no DIN SPEC 91286 identifier inside it.
+    #[error(
+        "the instance {instance:?} carries no DIN SPEC 91286 identifier: only an EMI3 instance beginning 'C0' does, and inventing one would mint a contract nobody issued"
+    )]
+    NotConvertibleToDin {
+        /// The instance section that was offered.
+        instance: String,
     },
 }
 
@@ -69,15 +108,6 @@ pub enum QuantityError {
         what: &'static str,
         /// The value that was rejected.
         value: String,
-    },
-
-    /// Two quantities in different units were combined.
-    #[error("cannot combine {left} with {right}")]
-    UnitMismatch {
-        /// The left-hand unit.
-        left: &'static str,
-        /// The right-hand unit.
-        right: &'static str,
     },
 
     /// Two money amounts in different currencies were combined.
@@ -107,10 +137,6 @@ pub enum CoreError {
     /// A quantity was inconsistent.
     #[error(transparent)]
     Quantity(#[from] QuantityError),
-
-    /// An obligation was asked about outside any validity window it has.
-    #[error("no version of obligation {0} is in force on the given date")]
-    NoObligationInForce(&'static str),
 }
 
 impl fmt::Display for crate::ids::Spelling {

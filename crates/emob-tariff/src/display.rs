@@ -8,10 +8,10 @@
 //! comes from a CMS field somebody typed, and the price on the invoice comes
 //! from the tariff engine, and one of them was updated.
 //!
-//! Here the description is **derived from the tariff that rates**. There is no
-//! second source, so there is nothing to drift from — and
-//! [`describe`] and [`crate::rating::rate`] read the same
-//! [`PriceComponent`](crate::tariff::PriceComponent) values.
+//! Here the description is **derived from the tariff that rates**, through the
+//! same element-selection function — [`crate::rating::element_matches`] — that
+//! [`crate::rating::rate`] uses for a session's first period. There is no
+//! second source and no parallel rule, so there is nothing to drift from.
 //!
 //! # The order is the regulation's, not a designer's
 //!
@@ -21,19 +21,29 @@
 //! > — price per kWh; — price per minute; — price per session; and — any other
 //! > price component that applies.
 //!
-//! [`Dimension`] is declared in exactly that order
-//! and derives [`Ord`], so sorting the components *is* complying. A display
-//! that lists them any other way is not a styling choice, it is a breach.
+//! [`Dimension`] is declared in exactly that order and derives [`Ord`], so
+//! sorting the components *is* complying. A display that lists them any other
+//! way is not a styling choice, it is a breach.
 //!
 //! # Per minute, not per hour
 //!
 //! Tariffs are quoted per hour internally, because that is what OCPI carries.
 //! The article says "price per minute". The conversion is exact and happens
 //! here, once, so nobody is tempted to store the same rate twice in two units.
+//!
+//! # A tariff with tiers cannot be described by one set of numbers
+//!
+//! The article asks for "all its price components", and a tariff that charges
+//! the first ten kilowatt-hours at one price has two. Showing only the one that
+//! applies at the moment of asking is the failure mode that leaves a driver
+//! arriving at 21:58 quoted the day rate for a session billed at the night one.
+//! So [`PriceDescription`] carries a [`Tier`] per element — each with the
+//! conditions in words — alongside the lines that apply right now.
 
 use emob_core::quantity::Currency;
 use rust_decimal::Decimal;
 
+use crate::rating::SessionState;
 use crate::tariff::{Dimension, Tariff, TariffElement};
 
 /// One line of what the driver is shown.
@@ -65,12 +75,41 @@ impl core::fmt::Display for DisplayLine {
     }
 }
 
+/// One element of a tariff, as a driver has to be able to read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Tier {
+    /// The conditions under which these prices apply, in words. Empty when the
+    /// element is unrestricted.
+    pub condition: String,
+    /// The prices, in the order the article prescribes.
+    pub lines: Vec<DisplayLine>,
+    /// Whether this is the tier that applies at the instant asked about.
+    pub applies_now: bool,
+}
+
+impl Tier {
+    /// A one-line rendering of this tier's prices.
+    #[must_use]
+    pub fn prices(&self, currency: Currency) -> String {
+        self.lines
+            .iter()
+            .map(|l| format!("{} {currency} / {}", l.price, l.unit()))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+}
+
 /// What a driver must be able to see before starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PriceDescription {
-    /// The lines, in the order `[AFIR Art. 5(4)]` prescribes.
+    /// The lines that apply at the instant asked about, in the order
+    /// `[AFIR Art. 5(4)]` prescribes.
     pub lines: Vec<DisplayLine>,
+    /// Every element of the tariff, with its conditions — because "all its
+    /// price components" means all of them.
+    pub tiers: Vec<Tier>,
     /// The currency.
     pub currency: Currency,
     /// Whether the prices include tax.
@@ -79,25 +118,16 @@ pub struct PriceDescription {
     pub min_price: Option<Decimal>,
     /// The maximum, when it sets one.
     pub max_price: Option<Decimal>,
-    /// True when the tariff has more than one element and the description shows
-    /// only the one that applies right now.
-    ///
-    /// A time-of-day tariff cannot be described by a single set of numbers, and
-    /// pretending otherwise is how a driver arriving at 21:58 is shown the day
-    /// rate for a session that will be billed at the night one. The flag exists
-    /// so a display can say "prices change at 22:00" rather than quietly
-    /// misleading.
-    pub varies_by_condition: bool,
 }
 
 impl PriceDescription {
-    /// The price per kWh, when the tariff has one.
+    /// The price per kWh that applies now, when the tariff has one.
     #[must_use]
     pub fn per_kwh(&self) -> Option<Decimal> {
         self.line(Dimension::Energy).map(|l| l.price)
     }
 
-    /// The occupancy fee per minute, when the tariff has one.
+    /// The occupancy fee per minute that applies now, when the tariff has one.
     ///
     /// `[AFIR Art. 5(4)]` calls this out separately at 50 kW and above: the fee
     /// a fast charger may add "to discourage long occupancy of the recharging
@@ -113,7 +143,18 @@ impl PriceDescription {
         self.lines.iter().find(|l| l.dimension == dimension)
     }
 
-    /// A one-line rendering, components in the prescribed order.
+    /// Whether the price depends on something other than the quantities — a
+    /// time of day, a tier, a power band.
+    ///
+    /// True whenever more than one tier can apply, so a display can say "the
+    /// price changes at 22:00" rather than quietly misleading.
+    #[must_use]
+    pub fn varies_by_condition(&self) -> bool {
+        self.tiers.len() > 1
+    }
+
+    /// A one-line rendering of the prices that apply now, components in the
+    /// prescribed order.
     ///
     /// ```text
     /// 0.49 EUR / kWh · 0.10 EUR / min · 0.50 EUR / session
@@ -126,13 +167,29 @@ impl PriceDescription {
             .collect::<Vec<_>>()
             .join(" · ")
     }
+
+    /// Every tier, one line each, with its conditions — the full disclosure
+    /// `[AFIR Art. 5(4)]` third subparagraph asks for below 50 kW.
+    #[must_use]
+    pub fn full_disclosure(&self) -> Vec<String> {
+        self.tiers
+            .iter()
+            .map(|tier| {
+                if tier.condition.is_empty() {
+                    tier.prices(self.currency)
+                } else {
+                    format!("{} ({})", tier.prices(self.currency), tier.condition)
+                }
+            })
+            .collect()
+    }
 }
 
 /// Describe what a driver is shown, from the tariff that will rate them.
 ///
-/// `at` selects the element, because a tariff with time-of-day elements
-/// describes differently at different hours — and describing it at a time other
-/// than now is exactly what a driver approaching at 21:58 needs.
+/// `at` selects the tier that applies, because a tariff with time-of-day
+/// elements describes differently at different hours — and describing it at a
+/// time other than now is exactly what a driver approaching at 21:58 needs.
 ///
 /// ```
 /// use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, describe};
@@ -160,31 +217,59 @@ impl PriceDescription {
 /// ```
 #[must_use]
 pub fn describe(tariff: &Tariff, at: time::OffsetDateTime) -> PriceDescription {
-    let element = element_at(tariff, at);
+    // The state a session is in at its first period: nothing delivered, no time
+    // elapsed, no power yet. Exactly what `rate` asks the same predicate with,
+    // so the tier shown is the tier the first kilowatt-hour is billed at.
+    let opening = SessionState {
+        energy_kwh: Decimal::ZERO,
+        elapsed_seconds: 0,
+        at,
+        power_kw: None,
+    };
 
-    let mut lines: Vec<DisplayLine> = element
-        .map(|e| {
-            let mut components: Vec<_> = e.components.iter().collect();
-            components.sort_by_key(|c| c.dimension);
-            components
-                .into_iter()
-                .map(|c| DisplayLine {
-                    dimension: c.dimension,
-                    price: price_in_display_unit(c.dimension, c.price),
-                })
-                .collect()
+    let applicable = tariff
+        .elements
+        .iter()
+        .position(|e| crate::rating::element_matches(e, &opening));
+
+    let tiers: Vec<Tier> = tariff
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| Tier {
+            condition: element.restrictions.describe(),
+            lines: lines_of(element),
+            applies_now: applicable == Some(index),
         })
+        .collect();
+
+    let lines = applicable
+        .and_then(|index| tiers.get(index))
+        .map(|tier| tier.lines.clone())
         .unwrap_or_default();
-    lines.sort_by_key(|l| l.dimension);
 
     PriceDescription {
         lines,
+        tiers,
         currency: tariff.currency,
         tax_included: tariff.tax_included,
         min_price: tariff.min_price,
         max_price: tariff.max_price,
-        varies_by_condition: tariff.elements.len() > 1,
     }
+}
+
+/// One element's prices, in the order the article prescribes.
+fn lines_of(element: &TariffElement) -> Vec<DisplayLine> {
+    let mut lines: Vec<DisplayLine> = element
+        .components
+        .iter()
+        .map(|c| DisplayLine {
+            dimension: c.dimension,
+            price: price_in_display_unit(c.dimension, c.price),
+        })
+        .collect();
+    lines.sort_by_key(|l| l.dimension);
+    lines
 }
 
 /// The unit a dimension is *displayed* in.
@@ -201,32 +286,17 @@ const fn display_unit(dimension: Dimension) -> &'static str {
 }
 
 /// Convert a stored price into its display unit.
-fn price_in_display_unit(dimension: Dimension, price: Decimal) -> Decimal {
+pub(crate) fn price_in_display_unit(dimension: Dimension, price: Decimal) -> Decimal {
     match dimension {
         Dimension::Time | Dimension::ParkingTime => price / Decimal::from(60),
         Dimension::Energy | Dimension::Flat => price,
     }
 }
 
-/// The element that applies at an instant, by the same rule the rating uses.
-fn element_at(tariff: &Tariff, at: time::OffsetDateTime) -> Option<&TariffElement> {
-    let probe = crate::rating::Chargeable {
-        energy: emob_core::Energy::ZERO,
-        charging_seconds: 0,
-        parking_seconds: 0,
-        started_at: at,
-    };
-    tariff
-        .elements
-        .iter()
-        .find(|e| crate::rating::element_matches(e, &probe))
-        .or_else(|| tariff.elements.first())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rating::{Chargeable, rate};
+    use crate::rating::{Chargeable, Period, rate};
     use crate::tariff::{PriceComponent, Restrictions, TariffElement, TariffKind, TaxIncluded};
     use emob_core::Energy;
     use rust_decimal::prelude::FromStr;
@@ -258,7 +328,12 @@ mod tests {
         let shown = describe(&t, at()).per_kwh().unwrap();
         let charged = rate(
             &t,
-            &Chargeable::energy_only(Energy::from_kwh(dec("1")).unwrap(), at()),
+            &Chargeable::energy_only(
+                Energy::from_kwh(dec("1")).unwrap(),
+                at(),
+                at() + time::Duration::minutes(30),
+            )
+            .unwrap(),
         )
         .lines[0]
             .unit_price;
@@ -289,8 +364,6 @@ mod tests {
 
     #[test]
     fn time_is_shown_per_minute_not_per_hour() {
-        // Stored per hour because OCPI carries it that way; shown per minute
-        // because the article asks for that.
         let t = ad_hoc(vec![PriceComponent::new(
             Dimension::ParkingTime,
             dec("6.00"),
@@ -301,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn a_time_varying_tariff_admits_that_it_varies() {
+    fn a_time_varying_tariff_discloses_both_sides_rather_than_only_now() {
         let night = TariffElement {
             components: vec![PriceComponent::new(Dimension::Energy, dec("0.29"))],
             restrictions: Restrictions {
@@ -324,17 +397,117 @@ mod tests {
             ],
             min_price: None,
             max_price: None,
+            valid_from: None,
+            valid_until: None,
         };
 
         let at_noon = describe(&t, datetime!(2026-01-02 12:00 +1));
         assert_eq!(at_noon.per_kwh(), Some(dec("0.49")));
-        assert!(
-            at_noon.varies_by_condition,
-            "a driver arriving at 21:58 must not be shown the day rate as if it were the whole story"
+        assert!(at_noon.varies_by_condition());
+
+        // A driver arriving at 21:58 can be shown *both* prices and when each
+        // applies, rather than only the one that expires in two minutes.
+        assert_eq!(
+            at_noon.full_disclosure(),
+            vec![
+                "0.29 EUR / kWh (22:00–06:00)".to_owned(),
+                "0.49 EUR / kWh".to_owned(),
+            ]
         );
 
         let at_23 = describe(&t, datetime!(2026-01-02 23:00 +1));
         assert_eq!(at_23.per_kwh(), Some(dec("0.29")));
+        assert!(at_23.tiers[0].applies_now);
+        assert!(!at_23.tiers[1].applies_now);
+    }
+
+    #[test]
+    fn a_tiered_tariff_discloses_its_tiers() {
+        let t = Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            tax_included: TaxIncluded::Yes,
+            elements: vec![
+                TariffElement {
+                    components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                    restrictions: Restrictions {
+                        max_kwh: Some(dec("10")),
+                        ..Restrictions::default()
+                    },
+                },
+                TariffElement::unrestricted(vec![PriceComponent::new(
+                    Dimension::Energy,
+                    dec("0.59"),
+                )]),
+            ],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+
+        let shown = describe(&t, at());
+        assert_eq!(
+            shown.per_kwh(),
+            Some(dec("0.39")),
+            "the first kilowatt-hour is billed at the first tier, so that is what is shown"
+        );
+        assert_eq!(
+            shown.full_disclosure(),
+            vec![
+                "0.39 EUR / kWh (first 10 kWh)".to_owned(),
+                "0.59 EUR / kWh".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_shown_tier_is_the_tier_the_first_kilowatt_hour_is_billed_at() {
+        // The two must not be chosen by different rules, and the only way to
+        // guarantee that is for them to call the same predicate.
+        let t = Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            tax_included: TaxIncluded::Yes,
+            elements: vec![
+                TariffElement {
+                    components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                    restrictions: Restrictions {
+                        max_kwh: Some(dec("10")),
+                        ..Restrictions::default()
+                    },
+                },
+                TariffElement::unrestricted(vec![PriceComponent::new(
+                    Dimension::Energy,
+                    dec("0.59"),
+                )]),
+            ],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+
+        let session = Chargeable::new(vec![
+            Period::charging(
+                at(),
+                at() + time::Duration::minutes(15),
+                Energy::from_kwh(dec("5")).unwrap(),
+            ),
+            Period::charging(
+                at() + time::Duration::minutes(15),
+                at() + time::Duration::minutes(30),
+                Energy::from_kwh(dec("20")).unwrap(),
+            ),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            describe(&t, at()).per_kwh().unwrap(),
+            rate(&t, &session).lines[0].unit_price
+        );
     }
 
     #[test]
@@ -357,10 +530,19 @@ mod tests {
         ]);
         let shown = describe(&t, at());
 
-        let mut s = Chargeable::energy_only(Energy::from_kwh(dec("1")).unwrap(), at());
-        s.charging_seconds = 3600;
-        s.parking_seconds = 3600;
-        let rated = rate(&t, &s);
+        let session = Chargeable::new(vec![
+            Period::charging(
+                at(),
+                at() + time::Duration::hours(1),
+                Energy::from_kwh(dec("1")).unwrap(),
+            ),
+            Period::parked(
+                at() + time::Duration::hours(1),
+                at() + time::Duration::hours(2),
+            ),
+        ])
+        .unwrap();
+        let rated = rate(&t, &session);
 
         for line in &rated.lines {
             let displayed = shown
@@ -374,6 +556,38 @@ mod tests {
             );
         }
         assert_eq!(shown.lines.len(), rated.lines.len());
+    }
+
+    #[test]
+    fn an_element_nobody_can_evaluate_never_shows_as_applying() {
+        let t = Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            tax_included: TaxIncluded::Yes,
+            elements: vec![
+                TariffElement {
+                    components: vec![PriceComponent::new(Dimension::Energy, dec("0.19"))],
+                    restrictions: Restrictions {
+                        unevaluable: vec!["reservation=RESERVATION".to_owned()],
+                        ..Restrictions::default()
+                    },
+                },
+                TariffElement::unrestricted(vec![PriceComponent::new(
+                    Dimension::Energy,
+                    dec("0.49"),
+                )]),
+            ],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+
+        let shown = describe(&t, at());
+        assert_eq!(shown.per_kwh(), Some(dec("0.49")));
+        assert!(!shown.tiers[0].applies_now);
+        assert!(shown.tiers[0].condition.contains("unevaluable"));
     }
 
     #[test]

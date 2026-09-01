@@ -26,6 +26,22 @@
 //! | Is this key *this charge point's* key? | [`registry::KeyRegistry`] |
 //! | Are any records missing from the session? | [`chain::validate()`] |
 //! | May these readings be billed at all? | [`chain::validate()`], via [`ocmf::MeterState`] |
+//! | May the *duration* be billed too? | [`chain::validate()`], via [`ocmf::TimeStatus`] |
+//! | Who was charging, and did the assignment hold? | [`chain::validate()`], via [`ocmf::IdentificationLevel`] |
+//! | Can the **customer** repeat all of that? | [`mod@transparency`] |
+//!
+//! The last one is the one the law actually asks for. `[MessEG §33]` does not
+//! require a measured value to be correct, it requires the affected party to be
+//! able to **check** it — so a platform that verifies internally and reports
+//! "verified" has satisfied nobody. [`transparency::to_xml`] emits the
+//! container the S.A.F.E. Transparenzsoftware reads, holding each record
+//! verbatim beside the key it was checked against.
+//!
+//! [`transparency::from_xml`] reads one back, because the export is only half
+//! of the duty: the other half arrives when a driver disputes a bill and sends
+//! the file back, and an operator has to check its records against **its own**
+//! registry and say whether the key inside it is the key the station was
+//! provisioned with.
 //!
 //! # A whole session
 //!
@@ -71,9 +87,11 @@ pub mod error;
 pub mod evidence;
 pub mod ocmf;
 pub mod registry;
+pub mod transparency;
 
 pub use chain::{ChainFinding, ChainReport};
 pub use error::{OcmfError, VerifyError};
 pub use evidence::{Evidence, EvidenceProblem, VerifiedRecord};
 pub use ocmf::{KeyType, OcmfRecord, PublicKey};
 pub use registry::{ComponentRef, KeyRegistry, RegisteredKey};
+pub use transparency::{TransparencyError, TransparencyValue};

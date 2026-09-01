@@ -18,11 +18,6 @@ pub enum OcmfError {
         section: &'static str,
     },
 
-    /// More than three sections: a pipe appeared inside one of them, which the
-    /// format forbids.
-    #[error("the record has more than three sections: '|' must not appear inside a section")]
-    TooManySections,
-
     /// A section is not valid JSON.
     #[error("the {section} section is not valid JSON: {detail}")]
     BadJson {
@@ -37,6 +32,17 @@ pub enum OcmfError {
     MissingField {
         /// The field's OCMF key.
         field: &'static str,
+    },
+
+    /// One half of a field group is present and the other is not.
+    #[error(
+        "{present} is present but {missing} is not: OCMF fields of a group are either all present together or omitted together"
+    )]
+    IncompleteGroup {
+        /// The field that was there.
+        present: &'static str,
+        /// The one that was not.
+        missing: &'static str,
     },
 
     /// A field has the wrong JSON type.

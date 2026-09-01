@@ -33,9 +33,10 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 
 use super::model::{
-    CurrentType, ErrorFlags, Identification, IdentificationLevel, MeterState, OcmfTime, Pagination,
-    Payload, Reading, ReadingUnit, TimeStatus, TransactionMarker,
+    CurrentType, ErrorFlags, Identification, IdentificationLevel, LossCompensation, MeterState,
+    OcmfTime, Pagination, Payload, Reading, ReadingUnit, TimeStatus, TransactionMarker,
 };
+use super::obis::ObisCode;
 use crate::error::OcmfError;
 
 /// The signature section of a record `[OCMF Tab. 8]`.
@@ -62,13 +63,16 @@ impl SignatureSection {
     pub const DEFAULT_MIME_TYPE: &'static str = "application/x-der";
 }
 
-/// A parsed OCMF record: the typed view, and the bytes the signature covers.
+/// A parsed OCMF record: the typed view, the bytes the signature covers, and
+/// the whole record as it arrived.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OcmfRecord {
     /// The payload, typed.
     pub payload: Payload,
     /// The signature section.
     pub signature: SignatureSection,
+    /// The record exactly as it arrived, all three sections.
+    raw: String,
     /// The payload section exactly as it arrived — what the signature covers.
     signed: String,
 }
@@ -87,6 +91,17 @@ impl OcmfRecord {
     #[must_use]
     pub fn signed_str(&self) -> &str {
         &self.signed
+    }
+
+    /// The whole record as it arrived — header, payload and signature.
+    ///
+    /// Kept because it is the artefact, not a debugging convenience. What a
+    /// customer feeds to the S.A.F.E. Transparenzsoftware to check a bill under
+    /// `[MessEG §33]` is this string, and a record reassembled from the typed
+    /// view would be a different string that hashes differently.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.raw
     }
 }
 
@@ -109,16 +124,22 @@ impl OcmfRecord {
 /// [`OcmfError`] when the framing, the JSON or any typed field is malformed.
 pub fn parse(raw: &str) -> Result<OcmfRecord, OcmfError> {
     // ── Framing ─────────────────────────────────────────────────────────────
-    // Exactly three sections. The pipe is forbidden *inside* a section by the
-    // specification, which is what makes this split unambiguous — and what
-    // makes a fourth section a malformed record rather than a trailing
-    // extension to ignore.
-    let mut sections = raw.splitn(3, '|');
-    let header = sections.next().unwrap_or_default();
-    let payload_raw = sections
-        .next()
+    // `OCMF|<payload>|<signature>` `[OCMF §Sections]`. The header is taken at
+    // the **first** pipe and the signature after the **last**, which is not the
+    // same as splitting three ways and is deliberately so: the payload is a
+    // JSON object with free-text fields in it — `TT`, the tariff designation
+    // for the direct-payment case, is up to 250 characters of anything
+    // `[OCMF Tab. 4]` — and a tariff called "Tarif A | B" is a record a station
+    // may legitimately sign. Splitting at the second pipe would tear that
+    // record in half and report it as malformed.
+    //
+    // The signature section never contains a pipe: it is a small JSON object
+    // of hex or base64 fields, so the last pipe is unambiguously its opening
+    // delimiter.
+    let (header, rest) = raw
+        .split_once('|')
         .ok_or(OcmfError::MissingSection { section: "payload" })?;
-    let signature_raw = sections.next().ok_or(OcmfError::MissingSection {
+    let (payload_raw, signature_raw) = rest.rsplit_once('|').ok_or(OcmfError::MissingSection {
         section: "signature",
     })?;
 
@@ -126,9 +147,6 @@ pub fn parse(raw: &str) -> Result<OcmfRecord, OcmfError> {
         return Err(OcmfError::BadHeader {
             found: header.trim().to_owned(),
         });
-    }
-    if signature_raw.contains('|') {
-        return Err(OcmfError::TooManySections);
     }
 
     let payload_json: Value =
@@ -148,6 +166,7 @@ pub fn parse(raw: &str) -> Result<OcmfRecord, OcmfError> {
     Ok(OcmfRecord {
         payload,
         signature,
+        raw: raw.to_owned(),
         // The span as it arrived. Not `payload_json.to_string()`, which would
         // reorder keys, drop whitespace and reformat numbers — and produce a
         // hash the station never signed.
@@ -155,8 +174,24 @@ pub fn parse(raw: &str) -> Result<OcmfRecord, OcmfError> {
     })
 }
 
+/// A field the specification types as `String`, read tolerantly.
+///
+/// The same corpus that quotes its numbers also unquotes its strings: the
+/// `TwinCharger` record signs `"FV": 1.0` and `"CT": 0`, both typed `String` in
+/// `[OCMF Tab. 1]` and `[OCMF Tab. 6]`. Dropping them — which returning `None`
+/// for a non-string does — silently loses the charge-point identification type,
+/// and with it one of the four ways [`crate::registry`] can find a key.
+///
+/// So a scalar is rendered as its own literal. Nothing is invented: the literal
+/// is what the station signed, and an object or an array is still refused by
+/// falling through to `None`, because there is no honest scalar reading of one.
 fn str_field(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(Value::as_str).map(ToOwned::to_owned)
+    match v.get(key)? {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 fn parse_payload(v: &Value) -> Result<Payload, OcmfError> {
@@ -186,10 +221,54 @@ fn parse_payload(v: &Value) -> Result<Payload, OcmfError> {
         meter_firmware: str_field(v, "MF"),
         controller_firmware: str_field(v, "CF"),
         identification,
+        loss_compensation: parse_loss_compensation(v)?,
         charge_point_id_type: str_field(v, "CT"),
         charge_point_id: str_field(v, "CI"),
         readings,
     })
+}
+
+/// `LC` — the cable-loss compensation parameters `[OCMF Tab. 24]`.
+///
+/// `LR` and `LU` are mandatory inside the object, and `LU` may only name a
+/// resistance unit. A compensation whose parameters are missing or nonsensical
+/// is one nobody can reproduce, which is the opposite of what the field is for.
+fn parse_loss_compensation(v: &Value) -> Result<Option<LossCompensation>, OcmfError> {
+    let Some(lc) = v.get("LC") else {
+        return Ok(None);
+    };
+    if !lc.is_object() {
+        return Err(OcmfError::BadFieldType {
+            field: "LC",
+            expected: "object",
+        });
+    }
+
+    let resistance = match lc.get("LR") {
+        Some(value) => parse_exact_number("LR", value)?,
+        None => return Err(OcmfError::MissingField { field: "LR" }),
+    };
+    let unit_raw = lc
+        .get("LU")
+        .and_then(Value::as_str)
+        .ok_or(OcmfError::MissingField { field: "LU" })?;
+    let resistance_unit = ReadingUnit::parse(unit_raw)?;
+    if !resistance_unit.is_resistance() {
+        return Err(OcmfError::BadFieldType {
+            field: "LU",
+            expected: "a resistance unit (mOhm or uOhm)",
+        });
+    }
+
+    Ok(Some(LossCompensation {
+        naming: str_field(lc, "LN"),
+        identification: match lc.get("LI") {
+            Some(value) => Some(parse_exact_number("LI", value)?),
+            None => None,
+        },
+        resistance,
+        resistance_unit,
+    }))
 }
 
 fn parse_identification(v: &Value) -> Result<Option<Identification>, OcmfError> {
@@ -220,11 +299,16 @@ fn parse_identification(v: &Value) -> Result<Option<Identification>, OcmfError> 
         })
         .unwrap_or_default();
 
+    // `IT` is mandatory whenever the section is present [OCMF Tab. 4].
+    // Substituting an empty string would turn a malformed record into one that
+    // silently claims an identification type nobody stated.
+    let id_type = str_field(v, "IT").ok_or(OcmfError::MissingField { field: "IT" })?;
+
     Ok(Some(Identification {
         assigned,
         level,
         flags,
-        id_type: str_field(v, "IT").unwrap_or_default(),
+        id_type,
         id_data: str_field(v, "ID"),
         tariff_text: str_field(v, "TT"),
     }))
@@ -234,7 +318,7 @@ fn parse_readings(items: &[Value]) -> Result<Vec<Reading>, OcmfError> {
     // Carried forward within this record only: "for the readings, fields that
     // have an identical value to the previous reading are omitted. However,
     // this only applies within a signed record" [OCMF Tab. 7 preamble].
-    let mut last_obis: Option<String> = None;
+    let mut last_obis: Option<ObisCode> = None;
     let mut last_unit: Option<ReadingUnit> = None;
     let mut last_current: Option<CurrentType> = None;
     let mut last_tx: Option<TransactionMarker> = None;
@@ -257,14 +341,28 @@ fn parse_readings(items: &[Value]) -> Result<Vec<Reading>, OcmfError> {
         };
 
         let value = match item.get("RV") {
-            Some(v) => Some(parse_exact_number(v)?),
+            Some(v) => Some(parse_exact_number("RV", v)?),
             None => None,
         };
 
+        // "The fields `RI` and `RU` form a group. Fields of a group are either
+        // all present together or omitted together." [OCMF Tab. 7 preamble] —
+        // so a reading naming a register without a unit, or a unit without a
+        // register, is malformed rather than half-abbreviated.
+        let obis_present = item.get("RI").is_some();
+        let unit_present = item.get("RU").is_some();
+        if obis_present != unit_present {
+            return Err(OcmfError::IncompleteGroup {
+                present: if obis_present { "RI" } else { "RU" },
+                missing: if obis_present { "RU" } else { "RI" },
+            });
+        }
+
         let obis = match item.get("RI").and_then(Value::as_str) {
             Some(raw) => {
-                last_obis = Some(raw.to_owned());
-                Some(raw.to_owned())
+                let code = ObisCode::new(raw);
+                last_obis = Some(code.clone());
+                Some(code)
             }
             None => last_obis.clone(),
         };
@@ -296,7 +394,7 @@ fn parse_readings(items: &[Value]) -> Result<Vec<Reading>, OcmfError> {
         };
 
         let cumulated_loss = match item.get("CL") {
-            Some(v) => Some(parse_exact_number(v)?),
+            Some(v) => Some(parse_exact_number("CL", v)?),
             None => None,
         };
 
@@ -331,15 +429,47 @@ fn parse_readings(items: &[Value]) -> Result<Vec<Reading>, OcmfError> {
 /// directly; without it, `Value::Number` still preserves the literal in its
 /// `Display`, which is what this uses. Going through `f64` would turn
 /// `2935.600` into `2935.6` and, worse, `0.1` into something that is not `0.1`.
-fn parse_exact_number(v: &Value) -> Result<Decimal, OcmfError> {
-    let n = v.as_number().ok_or(OcmfError::BadFieldType {
-        field: "RV",
-        expected: "number",
-    })?;
-    n.to_string()
+///
+/// `field` is the OCMF key being read — `RV`, `CL`, `LR`, `LI` — so a malformed
+/// cable-loss parameter does not report itself as a bad meter reading.
+///
+/// # A quoted number is still a number
+///
+/// `[OCMF Tab. 7]` types `RV` as `Number`, and two vendors in the S.A.F.E.
+/// reference corpus write it as a **string** anyway: a DZG DVH4013 behind a
+/// Nano gateway signs `"RV" : "       9.038"`, leading spaces and all, and a
+/// `TwinCharger` Pro signs `"RV": "1.304"`. Both are ordinary German hardware,
+/// both are in the data set the reference verifier ships as its own test
+/// fixtures, and both verify there.
+///
+/// Refusing them buys nothing. The signature covers the payload bytes as
+/// written, so the quoting cannot have been tampered with without breaking it;
+/// and the one property that matters about `RV` — that its representation is
+/// not transformed, so `9.038` keeps three decimal places `[OCMF Tab. 7, RV]` —
+/// is preserved exactly as well by parsing the string's own text as by parsing
+/// a token's. The alternative is a verifier that rejects a meter the reference
+/// implementation accepts, for a reason that has nothing to do with whether the
+/// value was tampered with. That is the same trade as the non-canonical DER
+/// wrapper one layer down, and it gets the same answer.
+///
+/// What is *not* relaxed: the text still has to be a number. A quoted `"abc"`
+/// is refused exactly as an unquoted one would be.
+fn parse_exact_number(field: &'static str, v: &Value) -> Result<Decimal, OcmfError> {
+    let literal = match v {
+        Value::Number(n) => n.to_string(),
+        // Trimmed, because the DZG record pads its value to a fixed width.
+        Value::String(s) => s.trim().to_owned(),
+        _ => {
+            return Err(OcmfError::BadFieldType {
+                field,
+                expected: "number",
+            });
+        }
+    };
+    literal
         .parse::<Decimal>()
         .map_err(|e| OcmfError::BadNumber {
-            value: n.to_string(),
+            value: literal.clone(),
             detail: e.to_string(),
         })
 }
@@ -460,6 +590,16 @@ mod tests {
     }
 
     #[test]
+    fn the_whole_record_survives_as_well_as_the_signed_span() {
+        // The signed span is what the signature covers; the whole record is
+        // what a customer hands to the Transparenzsoftware.
+        let r = parse(SPEC_EXAMPLE).unwrap();
+        assert_eq!(r.as_str(), SPEC_EXAMPLE);
+        assert!(r.as_str().starts_with("OCMF|"));
+        assert!(r.as_str().ends_with('}'));
+    }
+
+    #[test]
     fn the_signed_span_is_the_text_that_arrived() {
         let r = parse(SPEC_EXAMPLE).unwrap();
         // Whitespace and key order intact — a re-serialisation would have
@@ -490,7 +630,7 @@ mod tests {
         let r = parse(SPEC_EXAMPLE).unwrap();
         // The second reading omits RI, RU and RT.
         assert_eq!(
-            r.payload.readings[1].obis.as_deref(),
+            r.payload.readings[1].obis.as_ref().map(ObisCode::as_str),
             Some("01-0B:01.08.00*FF")
         );
         assert_eq!(r.payload.readings[1].unit, Some(ReadingUnit::KWh));
@@ -518,7 +658,7 @@ mod tests {
 
     #[test]
     fn base64_signatures_decode_too() {
-        let raw = r#"OCMF|{"PG":"T1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RU":"kWh","ST":"G"}]}|{"SE":"base64","SD":"EjSrzQ=="}"#;
+        let raw = r#"OCMF|{"PG":"T1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}]}|{"SE":"base64","SD":"EjSrzQ=="}"#;
         let r = parse(raw).unwrap();
         assert_eq!(r.signature.data, vec![0x12, 0x34, 0xAB, 0xCD]);
     }
@@ -533,17 +673,43 @@ mod tests {
             parse("OCMF|{}"),
             Err(OcmfError::MissingSection { .. })
         ));
-        // A pipe is forbidden inside a section, so a fourth section is
-        // malformed rather than an extension to ignore.
+        assert!(matches!(
+            parse("OCMF"),
+            Err(OcmfError::MissingSection { .. })
+        ));
+        // The signature is whatever follows the last pipe, so a trailing
+        // fourth section leaves a payload that is not a JSON object — which is
+        // reported as exactly that rather than swallowed.
         assert!(matches!(
             parse(r#"OCMF|{"PG":"T1","RD":[]}|{"SD":"00"}|extra"#),
-            Err(OcmfError::TooManySections)
+            Err(OcmfError::BadJson {
+                section: "payload",
+                ..
+            })
         ));
     }
 
     #[test]
+    fn a_pipe_inside_a_tariff_text_does_not_tear_the_record_in_half() {
+        // `TT` is up to 250 characters of free text [OCMF Tab. 4], so a tariff
+        // called "Tarif A | B" is a record a station may legitimately sign.
+        // Splitting at the second pipe would report it as malformed.
+        let raw = r#"OCMF|{"PG":"T1","MS":"BQ1","IS":true,"IT":"ISO14443","TT":"Tarif A | B","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":1,"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}]}|{"SD":"00"}"#;
+        let r = parse(raw).unwrap();
+
+        assert_eq!(
+            r.payload.identification.as_ref().unwrap().tariff_text,
+            Some("Tarif A | B".to_owned())
+        );
+        // …and the signed span is still the whole payload, pipe included, which
+        // is what the station hashed.
+        assert!(r.signed_str().contains("Tarif A | B"));
+        assert_eq!(r.as_str(), raw);
+    }
+
+    #[test]
     fn a_fiscal_record_has_no_identification_section() {
-        let raw = r#"OCMF|{"PG":"F7","MS":"M1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RU":"kWh","ST":"G"}]}|{"SD":"00"}"#;
+        let raw = r#"OCMF|{"PG":"F7","MS":"M1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}]}|{"SD":"00"}"#;
         let r = parse(raw).unwrap();
         assert!(r.payload.identification.is_none());
         assert_eq!(r.payload.pagination.context, PaginationContext::Fiscal);
@@ -552,7 +718,7 @@ mod tests {
 
     #[test]
     fn a_malformed_field_names_itself() {
-        let raw = r#"OCMF|{"PG":"T1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RU":"kWh","ST":"Z"}]}|{"SD":"00"}"#;
+        let raw = r#"OCMF|{"PG":"T1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"Z"}]}|{"SD":"00"}"#;
         assert!(matches!(
             parse(raw),
             Err(OcmfError::UnknownMeterState { .. })

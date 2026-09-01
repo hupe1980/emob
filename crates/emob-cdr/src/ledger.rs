@@ -181,6 +181,17 @@ fn describe_difference(existing: &Cdr, incoming: &Cdr) -> String {
     if existing.evidence != incoming.evidence {
         differences.push("the signed evidence differs".to_owned());
     }
+    match (existing.total_cost(), incoming.total_cost()) {
+        (Some(before), Some(after)) if before != after => {
+            differences.push(format!("total cost {before} → {after}"));
+        }
+        (Some(_), None) => differences.push("the price was dropped".to_owned()),
+        (None, Some(after)) => differences.push(format!("a price of {after} was added")),
+        _ if existing.cost != incoming.cost => {
+            differences.push("the price breakdown differs".to_owned());
+        }
+        _ => {}
+    }
 
     if differences.is_empty() {
         // Equality already failed, so something differs; saying "identical"
@@ -222,7 +233,7 @@ mod tests {
             Authorization::ad_hoc(),
             at(0),
         );
-        s.transition_to(SessionState::Charging).unwrap();
+        s.transition_to(SessionState::Charging, at(0)).unwrap();
         s.attach_series(
             MeterSeries::new(
                 Direction::Import,
@@ -309,8 +320,11 @@ mod tests {
 
         let mut changed = original;
         changed.periods.push(ChargingPeriod {
+            quarter_hour: emob_session::QuarterHour::containing(at(45)),
             start: at(45),
+            end: at(60),
             energy: kwh("0"),
+            charging: true,
             provenance: emob_session::Provenance::Measured,
         });
 

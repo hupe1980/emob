@@ -39,8 +39,8 @@ cargo xtask <task>
   no-floats         no f32/f64 anywhere in the workspace: every quantity here
                     either is money or becomes money, and a binary float
                     cannot represent 0.10
-  check-citations   every regulatory citation in the code names a document that
-                    specs/README.md actually indexes
+  check-citations   every regulatory citation in the code *and the docs* names a
+                    document that specs/README.md actually indexes
   check-manifests   every publishable crate can be packaged: the files its
                     manifest promises exist
   check-all         all of the above
@@ -64,13 +64,34 @@ fn workspace_root() -> Result<PathBuf> {
 fn rust_sources(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for top in ["crates", "services", "xtask"] {
-        collect(&root.join(top), &mut files)?;
+        collect(&root.join(top), "rs", &mut files)?;
     }
     files.sort();
     Ok(files)
 }
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+/// Every prose file that makes regulatory claims: the READMEs, the site, and
+/// the architecture notes when they are present.
+///
+/// A citation in a document is the same promise as a citation in a comment —
+/// "this rule comes from that paragraph of that text" — and a reader who cannot
+/// follow it is in exactly the position the guard exists to prevent. `concepts/`
+/// and `specs/` are gitignored, so this finds them on a working copy and skips
+/// them on a fresh clone.
+fn prose_sources(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let readme = root.join("README.md");
+    if readme.exists() {
+        files.push(readme);
+    }
+    for top in ["crates", "site/content", "concepts"] {
+        collect(&root.join(top), "md", &mut files)?;
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn collect(dir: &Path, extension: &str, out: &mut Vec<PathBuf>) -> Result<()> {
     if !dir.exists() {
         return Ok(());
     }
@@ -80,8 +101,8 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             if path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
-            collect(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "rs") {
+            collect(&path, extension, out)?;
+        } else if path.extension().is_some_and(|e| e == extension) {
             out.push(path);
         }
     }
@@ -109,6 +130,11 @@ fn code_part(line: &str) -> &str {
 /// The failure it prevents: a workspace that is exact everywhere it was
 /// reviewed and approximate in the one helper nobody looked at, reconciling
 /// against nothing and losing the dispute.
+///
+/// Two shapes are checked, because one of them a token search cannot see:
+/// the tokens `f32`/`f64` themselves, and **`Decimal::try_from`**, which
+/// accepts an `f64` and therefore launders a dependency's float field into an
+/// exact type without the word appearing anywhere here.
 fn no_floats(root: &Path) -> Result<()> {
     let mut offenders = Vec::new();
 
@@ -150,6 +176,26 @@ fn no_floats(root: &Path) -> Result<()> {
                         line.trim()
                     ));
                 }
+            }
+
+            // The hole a token search cannot see. `Decimal::try_from` accepts an
+            // `f64`, so a value laundered out of a dependency's float field —
+            // `Decimal::try_from(event.meter_wh?)` — reaches an exact type
+            // without the word `f64` appearing anywhere in this workspace. The
+            // guard would pass and the invoice would be wrong.
+            //
+            // Every other `Decimal::try_from` conversion has an infallible
+            // spelling (`Decimal::from` for the integers, `from_str_exact` for
+            // text), so refusing the whole name costs nothing and closes the
+            // one path a token search misses.
+            if let Some(col) = code.find("Decimal::try_from") {
+                offenders.push(format!(
+                    "{}:{}:{} — {} (use Decimal::from or from_str_exact: try_from accepts an f64)",
+                    file.strip_prefix(root).unwrap_or(&file).display(),
+                    n + 1,
+                    col + 1,
+                    line.trim()
+                ));
             }
         }
     }
@@ -193,6 +239,33 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// The bracketed phrases in a line that look like regulatory citations.
+///
+/// A citation here is `[` … `]` with no nesting, starting with an upper-case
+/// letter or a digit, containing one of [`CITATION_MARKERS`], and holding no
+/// backtick — which is what separates `[MessEG §33]` from a Rust doc link like
+/// ``[`Self::foo`]`` and from a markdown reference.
+fn citation_phrases(line: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(']') else { break };
+        let phrase = &after[..close];
+        rest = &after[close + 1..];
+
+        let starts_right = phrase
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+        let looks_cited = CITATION_MARKERS.iter().any(|m| phrase.contains(m));
+        if starts_right && looks_cited && !phrase.contains('`') && !phrase.contains('[') {
+            found.push(phrase.to_owned());
+        }
+    }
+    found
+}
+
 // ── check-citations ─────────────────────────────────────────────────────────
 
 /// Which document each citation prefix belongs to, and a string that must
@@ -209,6 +282,11 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
         "afir-da-2025-656",
     ),
     ("[LSV26", "Ladesäulenverordnung 2026", "lsv-2026"),
+    (
+        "[DATEX-II-Profil",
+        "the Mobilithek AFIR DATEX II Recharging profile",
+        "AFIR-DATEX-II-Recharging-Profil",
+    ),
     ("[MessEG ", "MessEG", "messeg.pdf"),
     ("[MessEV", "MessEV", "messev.pdf"),
     ("[PTB-A ", "PTB-A 50.7", "ptb-a-50.7"),
@@ -217,18 +295,38 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
     ("[UStG ", "UStG", "ustg.pdf"),
     ("[PAngV", "PAngV", "pangv.pdf"),
     ("[OCMF ", "OCMF", "ocmf-master.zip"),
+    (
+        "[OCA SMV",
+        "the OCA application note on signed meter values",
+        "oca-signed-meter-values",
+    ),
     ("[NIS2", "NIS2", "nis2-2022-2555"),
     ("[CRA", "Cyber Resilience Act", "cra-2024-2847"),
     // The NZR-EMob corpus lives in the sibling `mako` workspace, which
     // specs/README.md points at rather than duplicating.
     ("[A6 ", "BK6-20-160 Anlage 6", "mako/regulatories"),
     ("[M2 ", "BDEW AWH „Zum Modell 2\"", "mako/regulatories"),
+    // The protocol corpora live in the sibling kits, which specs/README.md
+    // points at rather than duplicating.
+    ("[OCPI ", "the OCPI specifications", "ocpi-kit/specs"),
+    ("[OCPP ", "the OCPP specifications", "ocpp-kit/specs"),
+    ("[BGB ", "Bürgerliches Gesetzbuch", "bgb.pdf"),
 ];
+
+/// The markers that make a bracketed phrase a citation rather than a doc link,
+/// an array type or a markdown reference.
+///
+/// Deliberately narrow. A citation this misses is one the prefix table still
+/// checks; a false positive here would fail the build over a Rust doc link,
+/// which is how a guard gets switched off.
+const CITATION_MARKERS: &[&str] = &["§", "Art. ", "Tab. ", "Anh. "];
 
 /// Every regulatory claim in emob cites its source in the form `[AFIR Art. 5(1)]`
 /// or `[OCMF Tab. 7]`. This checks that the documents those refer to are indexed
 /// in `specs/README.md`, so a citation can always be followed to a file and a
-/// retrieval URL.
+/// retrieval URL — in the **documentation** as well as the code, because a
+/// README that cites a paragraph is making the same promise a comment does and
+/// is read by more people.
 ///
 /// The failure it prevents: a rule that cites a Verordnung nobody can produce,
 /// which is indistinguishable from a rule somebody invented.
@@ -242,11 +340,20 @@ fn check_citations(root: &Path) -> Result<()> {
 
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
     let mut missing = Vec::new();
+    let mut unknown = Vec::new();
 
-    for file in rust_sources(root)? {
-        if file.ends_with("xtask/src/main.rs") {
+    // Code and prose alike: a citation in a README is the same promise as one
+    // in a comment, and a site page nobody can follow to a document is the
+    // failure this guard is named after.
+    let mut sources = rust_sources(root)?;
+    sources.extend(prose_sources(root)?);
+    let mut scanned = 0;
+
+    for file in sources {
+        if file.ends_with("xtask/src/main.rs") || file.ends_with("specs/README.md") {
             continue;
         }
+        scanned += 1;
         let text = std::fs::read_to_string(&file)?;
         for (n, line) in text.lines().enumerate() {
             for (prefix, document, needle) in CITATION_SOURCES {
@@ -261,6 +368,23 @@ fn check_citations(root: &Path) -> Result<()> {
                     }
                 }
             }
+
+            // …and the other half of the promise. Until now a citation whose
+            // prefix was not in the table above was not checked *at all*: the
+            // guard reported success because it had nothing to say, which is
+            // the failure it exists to prevent, wearing its own uniform.
+            for phrase in citation_phrases(line) {
+                if !CITATION_SOURCES
+                    .iter()
+                    .any(|(prefix, _, _)| phrase.starts_with(prefix.trim_start_matches('[')))
+                {
+                    unknown.push(format!(
+                        "{}:{} cites [{phrase}], whose document is not in the source table",
+                        file.strip_prefix(root).unwrap_or(&file).display(),
+                        n + 1,
+                    ));
+                }
+            }
         }
     }
 
@@ -271,8 +395,20 @@ fn check_citations(root: &Path) -> Result<()> {
         }
         bail!("{} unindexed citation(s)", missing.len());
     }
+    if !unknown.is_empty() {
+        unknown.sort();
+        unknown.dedup();
+        eprintln!("❌ citations to documents this guard does not know:");
+        for u in &unknown {
+            eprintln!("   {u}");
+        }
+        eprintln!(
+            "   add the document to specs/README.md and its prefix to CITATION_SOURCES, \n                or the citation is a claim nobody can follow"
+        );
+        bail!("{} unrecognised citation(s)", unknown.len());
+    }
     println!(
-        "📚 check-citations: {} document families cited, every one indexed in specs/README.md",
+        "📚 check-citations: {} document families cited across {scanned} files, every one indexed in specs/README.md",
         seen.len()
     );
     Ok(())
@@ -346,10 +482,47 @@ mod tests {
         assert!(find_type_token("let x: f64 = 1.0;", "f64").is_some());
         assert!(find_type_token("(f64, f64)", "f64").is_some());
         assert!(find_type_token("Decimal::from_f64(x)", "f64").is_some());
+
+        // …and the shape the token search cannot see at all: `try_from` takes
+        // an `f64`, so a value laundered out of a dependency's float field
+        // reaches an exact type without the word appearing in this workspace.
+        // Checked by name in `no_floats` rather than here, because there is no
+        // type to look at.
+        assert!(find_type_token("Decimal::try_from(x)", "f64").is_none());
         // …but not a substring of a longer identifier.
         assert!(find_type_token("let sf64x = 1;", "f64").is_none());
         assert!(find_type_token("my_f64_helper()", "f64").is_none());
         assert!(find_type_token("let float64 = 1;", "f64").is_none());
+    }
+
+    #[test]
+    fn a_citation_is_told_apart_from_a_doc_link_and_an_array() {
+        // The guard's second half only works if this is tight: a false
+        // positive fails the build over a Rust doc link, which is how a guard
+        // gets switched off rather than fixed.
+        assert_eq!(
+            citation_phrases("see [MessEG §33] for this"),
+            ["MessEG §33"]
+        );
+        assert_eq!(citation_phrases("`[OCMF Tab. 25]`"), ["OCMF Tab. 25"]);
+        assert_eq!(
+            citation_phrases("[DA-656 Anh. 2.1.1] and [AFIR Art. 5(1)]"),
+            ["DA-656 Anh. 2.1.1", "AFIR Art. 5(1)"]
+        );
+
+        for not_a_citation in [
+            "[`Self::foo`] links to a method",
+            "let bytes: [u8; 32] = digest;",
+            "[a markdown link](https://example.com)",
+            "[lower case prose]",
+            "an unclosed [bracket",
+            "[MessEG] with no section marker",
+        ] {
+            assert!(
+                citation_phrases(not_a_citation).is_empty(),
+                "{not_a_citation:?} is not a citation"
+            );
+        }
     }
 
     #[test]

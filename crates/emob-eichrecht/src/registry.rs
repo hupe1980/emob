@@ -93,9 +93,17 @@ impl core::fmt::Display for ComponentRef {
 pub struct RegisteredKey {
     /// The key material.
     pub key: PublicKey,
-    /// First instant this key is valid for, if bounded.
+    /// First instant this key is valid for, **inclusive**, if bounded.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339::option"))]
     pub valid_from: Option<time::OffsetDateTime>,
-    /// Last instant this key is valid for, if bounded.
+    /// The instant this key stops being valid, **exclusive**, if bounded.
+    ///
+    /// Half-open on purpose. With two inclusive bounds, a meter exchanged at
+    /// midnight has two keys covering that instant and the registry answers
+    /// with whichever was inserted first — so the same session verifies or does
+    /// not depending on insertion order. `[from, until)` makes consecutive
+    /// windows partition the timeline exactly, which is what a key history is.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339::option"))]
     pub valid_until: Option<time::OffsetDateTime>,
     /// Where this binding came from — a type approval, a provisioning run.
     /// Free text, and part of the evidence: a key nobody can say the origin of
@@ -115,11 +123,11 @@ impl RegisteredKey {
         }
     }
 
-    /// Whether this key was the component's key at `at`.
+    /// Whether this key was the component's key at `at` — `[from, until)`.
     #[must_use]
     pub fn covers(&self, at: time::OffsetDateTime) -> bool {
         self.valid_from.is_none_or(|from| at >= from)
-            && self.valid_until.is_none_or(|until| at <= until)
+            && self.valid_until.is_none_or(|until| at < until)
     }
 }
 
@@ -253,7 +261,7 @@ mod tests {
             fields.push(format!(r#""MS":"{m}""#));
         }
         let raw = format!(
-            r#"OCMF|{{{},"RD":[{{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RU":"kWh","ST":"G"}}]}}|{{"SD":"00"}}"#,
+            r#"OCMF|{{{},"RD":[{{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}}]}}|{{"SD":"00"}}"#,
             fields.join(",")
         );
         ocmf::parse(&raw).unwrap()
@@ -355,6 +363,51 @@ mod tests {
                 .unwrap()
                 .key,
             key(2)
+        );
+
+        // The windows are half-open, so the swap instant belongs to exactly one
+        // of them and the answer does not depend on insertion order.
+        assert_eq!(
+            registry
+                .key_at(&component, datetime!(2026-06-01 0:00 UTC))
+                .unwrap()
+                .key,
+            key(2)
+        );
+    }
+
+    #[test]
+    fn a_gap_between_windows_is_a_gap_rather_than_a_guess() {
+        // A component whose key history has a hole in it must fail to resolve
+        // in the hole, not silently fall through to a neighbouring key.
+        let mut registry = KeyRegistry::new();
+        let component = ComponentRef::Meter {
+            serial: "BQ1".into(),
+        };
+        registry.insert(
+            component.clone(),
+            RegisteredKey {
+                key: key(1),
+                valid_from: None,
+                valid_until: Some(datetime!(2026-06-01 0:00 UTC)),
+                provenance: "original".into(),
+            },
+        );
+        registry.insert(
+            component.clone(),
+            RegisteredKey {
+                key: key(2),
+                valid_from: Some(datetime!(2026-07-01 0:00 UTC)),
+                valid_until: None,
+                provenance: "after the exchange".into(),
+            },
+        );
+
+        assert!(
+            registry
+                .key_at(&component, datetime!(2026-06-15 12:00 UTC))
+                .is_none(),
+            "June has no registered key, and inventing one is how a forged record verifies"
         );
     }
 

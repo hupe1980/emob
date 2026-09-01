@@ -39,7 +39,7 @@ lint:
 purity:
     #!/usr/bin/env bash
     set -uo pipefail
-    pure="emob-core emob-eichrecht emob-session emob-cdr emob-tariff"
+    pure="emob-core emob-eichrecht emob-session emob-cdr emob-tariff emob-ocpp emob-poi emob-roam emob-sim"
     fail=0
     for crate in $pure; do
         [ -d "crates/$crate/src" ] || continue
@@ -75,9 +75,17 @@ deny:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
-# 🔒 Minimum supported Rust version
+# The MSRV is a promise to the crates downstream, and it is not one number any
+# more: `emob-roam` speaks to `ocpi-kit`, which asks for 1.96, and the crates
+# `mako` and `hems` consume still promise 1.94. So this checks that the promise
+# holds where it is made rather than asserting one floor for everything.
+#
+# 🔒 Minimum supported Rust version, where it is promised
 msrv:
-    cargo +{{ msrv }} check --workspace --all-features
+    cargo +{{ msrv }} check --all-features \
+        -p emob-core -p emob-eichrecht -p emob-session -p emob-cdr \
+        -p emob-tariff -p emob-ocpp -p emob-poi -p emob-sim
+    @echo "🔒 the crates that promise {{ msrv }} build on {{ msrv }}"
 
 # `cargo publish` cannot be undone, so the dry run is the cheap half of the
 # decision: it packages the publishable crates in dependency order and verifies

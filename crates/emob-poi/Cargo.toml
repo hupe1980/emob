@@ -1,0 +1,29 @@
+[package]
+name        = "emob-poi"
+description = "The charge point register and its national access point feed: a DATEX II AFIR Recharging publication generated from the same tariff that prices the session, so the price a route planner shows and the price on the invoice cannot disagree"
+keywords    = ["ev-charging", "afir", "datex2", "charging-infrastructure", "open-data"]
+categories  = ["science", "data-structures"]
+readme      = "README.md"
+
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+# `serde` and `serde_json` are **not** optional here, unlike everywhere else in
+# this workspace. The other crates model a domain and can serialise it or not;
+# this one exists to emit one specific JSON document, and a build of it without
+# a serialiser would have nothing to do.
+[dependencies]
+emob-core    = { workspace = true }
+emob-tariff  = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[dev-dependencies]
+time = { workspace = true, features = ["macros"] }

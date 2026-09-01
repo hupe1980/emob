@@ -47,69 +47,10 @@
 //! 92- and 100-slot days of a clock change are simply days with fewer or more
 //! instants in them. Nothing here counts to 96, and there is no DST branch.
 
-use emob_core::{Direction, Energy};
+use emob_core::{Direction, Energy, QuarterHour};
 use rust_decimal::Decimal;
 
 use crate::meter::{MeterSeries, ReadingContext};
-
-/// Fifteen minutes of real time, starting at an instant on a quarter-hour
-/// boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
-pub struct QuarterHour(time::OffsetDateTime);
-
-impl QuarterHour {
-    /// Fifteen minutes, in seconds.
-    pub const SECONDS: i64 = 900;
-
-    /// The quarter hour that contains `at`.
-    #[must_use]
-    pub fn containing(at: time::OffsetDateTime) -> Self {
-        // Truncate towards negative infinity on the UTC timeline, so a session
-        // that starts at 10:07:30 belongs to the slot beginning 10:00 whatever
-        // the local offset happens to be.
-        let unix = at.unix_timestamp();
-        let floored = unix.div_euclid(Self::SECONDS) * Self::SECONDS;
-        Self(
-            time::OffsetDateTime::from_unix_timestamp(floored)
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
-                .to_offset(at.offset()),
-        )
-    }
-
-    /// The instant this quarter hour begins.
-    #[must_use]
-    pub const fn start(self) -> time::OffsetDateTime {
-        self.0
-    }
-
-    /// The instant it ends, which is the next one's start.
-    #[must_use]
-    pub fn end(self) -> time::OffsetDateTime {
-        self.0 + time::Duration::seconds(Self::SECONDS)
-    }
-
-    /// The quarter hour after this one.
-    #[must_use]
-    pub fn next(self) -> Self {
-        Self(self.end())
-    }
-}
-
-impl core::fmt::Display for QuarterHour {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "{:04}-{:02}-{:02}T{:02}:{:02}",
-            self.0.year(),
-            u8::from(self.0.month()),
-            self.0.day(),
-            self.0.hour(),
-            self.0.minute()
-        )
-    }
-}
 
 /// Where a number came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -140,17 +81,52 @@ impl Provenance {
 }
 
 /// One quarter hour's worth of a session.
+///
+/// The settlement slot and the measured window are separate fields, and that is
+/// the whole point of the type. A session whose readings run 10:07 to 10:23 has
+/// its first slot reported under the quarter hour beginning **10:00** — that is
+/// the settlement period the energy belongs to `[A6 §IV.1]` — while the energy
+/// itself was measured over **10:07 to 10:15**. Both statements are true and
+/// they are different instants, and a consumer that reconstructs one from the
+/// other has to guess.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Slot {
-    /// Which quarter hour.
+    /// Which quarter hour this energy settles in.
     pub quarter_hour: QuarterHour,
+    /// The first instant the meter series covers inside that quarter hour.
+    ///
+    /// Equal to [`QuarterHour::start`] for every slot but the first, and to the
+    /// first reading's instant for that one.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
+    pub from: time::OffsetDateTime,
+    /// The last instant it covers — [`QuarterHour::end`] except in the final
+    /// slot, which stops at the last reading.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
+    pub to: time::OffsetDateTime,
     /// How much energy the session moved inside it.
     pub energy: Energy,
     /// Which way.
     pub direction: Direction,
     /// How the number was arrived at.
     pub provenance: Provenance,
+}
+
+impl Slot {
+    /// How long the measured window lasted.
+    #[must_use]
+    pub fn duration(&self) -> time::Duration {
+        self.to - self.from
+    }
+
+    /// Whether the slot's readings cover its whole quarter hour.
+    ///
+    /// False for the first and last slot of a session that began or ended
+    /// mid-quarter — which is most of them.
+    #[must_use]
+    pub fn covers_the_whole_quarter_hour(&self) -> bool {
+        self.from == self.quarter_hour.start() && self.to == self.quarter_hour.end()
+    }
 }
 
 /// A session, split across the quarter hours it touched.
@@ -193,13 +169,34 @@ impl SessionSplit {
             .iter()
             .all(|s| s.provenance == Provenance::Measured)
     }
+
+    /// The series in the form the market side reads it: each period labelled by
+    /// its **end**.
+    ///
+    /// The one conversion that separates this workspace's grid from a German
+    /// load profile. Internally a quarter hour is named by its start, because
+    /// that is the only spelling in which `containing()` is a truncation;
+    /// `[PTB-A 50.7 §3.1.7.2]` labels a Messperiode by its end, and so do
+    /// MSCONS and `mako-emob`. Mixing the two shifts every slot by fifteen
+    /// minutes — an error that sums to zero across the session and is wrong for
+    /// every individual balance group `[A6 §IV.1]`.
+    ///
+    /// So the conversion happens once, here, rather than in each adapter that
+    /// needs it.
+    #[must_use]
+    pub fn market_series(&self) -> Vec<(time::OffsetDateTime, Energy)> {
+        self.slots
+            .iter()
+            .map(|slot| (slot.quarter_hour.metering_timestamp(), slot.energy))
+            .collect()
+    }
 }
 
 /// Split a session's meter series across quarter hours.
 ///
 /// ```
 /// use emob_session::{MeterReading, MeterSeries, ReadingContext, split};
-/// use emob_core::{Direction, Energy};
+/// use emob_core::{Direction, Energy, QuarterHour};
 /// use rust_decimal::Decimal;
 /// use std::str::FromStr;
 /// use time::macros::datetime;
@@ -272,6 +269,12 @@ pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitErr
         })?;
         slots.push(Slot {
             quarter_hour: QuarterHour::containing(boundaries[i]),
+            // The window the readings actually cover, which is the boundary
+            // pair this slot's energy was taken between — never the quarter
+            // hour clamped to the session, because the two differ whenever the
+            // session's own window is wider than its meter series.
+            from: boundaries[i],
+            to: boundaries[i + 1],
             energy,
             direction: series.direction(),
             provenance: from_prov.weaker(to_prov),
@@ -326,9 +329,15 @@ fn cumulative_at(series: &MeterSeries, at: time::OffsetDateTime) -> (Decimal, Pr
                 return (before.register.kwh(), Provenance::Interpolated);
             }
             let delta = after.register.kwh() - before.register.kwh();
-            let fraction = Decimal::from(offset) / Decimal::from(gap);
+            // Multiply, then divide. `delta × offset / gap` keeps every digit
+            // the arithmetic allows; `delta × (offset / gap)` has already spent
+            // the decimal's precision on a repeating fraction before the
+            // multiplication — 7 kWh two thirds of the way through a gap is
+            // 4.666… either way, but the first form is exact wherever the
+            // ratio terminates and the second is not. The same rule as the
+            // rating engine's, for the same reason.
             return (
-                before.register.kwh() + delta * fraction,
+                before.register.kwh() + delta * Decimal::from(offset) / Decimal::from(gap),
                 Provenance::Interpolated,
             );
         }
@@ -420,6 +429,33 @@ mod tests {
         assert_eq!(split.slots[1].energy.to_string(), "8.000 kWh");
         assert!(split.fully_measured());
         assert!(split.conserves());
+        assert!(
+            split.slots.iter().all(Slot::covers_the_whole_quarter_hour),
+            "a session on the boundaries covers every slot it touches"
+        );
+    }
+
+    #[test]
+    fn interpolation_multiplies_before_it_divides() {
+        // The boundary at 10:15 falls 14/21 of the way through 10:01 → 10:22.
+        // `7 × 14 / 21` is 4.666… to the decimal's full precision; `7 × (14/21)`
+        // spends that precision on the ratio first and loses the last digits.
+        // Conservation holds either way — the sum telescopes — so the only
+        // thing that shows the difference is the slot value itself.
+        let s = series(&[
+            (1, "0", ReadingContext::TransactionBegin),
+            (22, "7", ReadingContext::TransactionEnd),
+        ]);
+        let split = into_quarter_hours(&s).unwrap();
+
+        let expected = Decimal::from(7) * Decimal::from(14) / Decimal::from(21);
+        assert_eq!(split.slots[0].energy.kwh(), expected);
+        assert_ne!(
+            expected,
+            Decimal::from(7) * (Decimal::from(14) / Decimal::from(21)),
+            "the two orders genuinely differ, which is why the order is fixed"
+        );
+        assert!(split.conserves());
     }
 
     #[test]
@@ -434,6 +470,16 @@ mod tests {
         assert_eq!(split.slots.len(), 2);
         assert_eq!(split.slots[0].quarter_hour.to_string(), "2026-01-02T10:00");
         assert_eq!(split.slots[1].quarter_hour.to_string(), "2026-01-02T10:15");
+
+        // The settlement slot and the measured window are different instants,
+        // and the slot carries both rather than leaving a consumer to guess.
+        assert_eq!(split.slots[0].from, at(7), "the readings begin at 10:07");
+        assert_eq!(split.slots[0].to, at(15));
+        assert_eq!(split.slots[0].duration(), time::Duration::minutes(8));
+        assert!(!split.slots[0].covers_the_whole_quarter_hour());
+        assert_eq!(split.slots[1].from, at(15));
+        assert_eq!(split.slots[1].to, at(23));
+
         assert!(split.conserves());
         // Nothing measured 10:15, so both slots inherit the interpolation.
         assert!(!split.fully_measured());
@@ -509,6 +555,41 @@ mod tests {
             }
         }
         assert_eq!(checked, 144);
+    }
+
+    #[test]
+    fn the_market_series_labels_each_period_by_its_end() {
+        // `[PTB-A 50.7 §3.1.7.2]`: "der Zeitstempel 00:15:00 [gehört] zur
+        // ersten Messperiode eines Tages". Handing `mako-emob` a series
+        // labelled by the start would shift every slot by a quarter hour — an
+        // error that sums to zero and is wrong for every balance group.
+        let s = series(&[
+            (0, "100.000", ReadingContext::TransactionBegin),
+            (15, "110.000", ReadingContext::SampleClock),
+            (30, "118.000", ReadingContext::TransactionEnd),
+        ]);
+        let split = into_quarter_hours(&s).unwrap();
+
+        assert_eq!(
+            split.market_series(),
+            vec![(at(15), kwh("10.000")), (at(30), kwh("8.000"))],
+            "the first period ends at 10:15 and is labelled 10:15"
+        );
+        assert_eq!(
+            split.slots[0].quarter_hour.start(),
+            at(0),
+            "…and starts at 10:00"
+        );
+
+        // The energy is the same energy either way round.
+        assert_eq!(
+            split
+                .market_series()
+                .iter()
+                .map(|(_, e)| *e)
+                .sum::<Energy>(),
+            split.total
+        );
     }
 
     #[test]

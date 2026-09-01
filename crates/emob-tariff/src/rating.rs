@@ -1,91 +1,276 @@
 //! Turning a session into money.
 //!
-//! # What is charged, and what it is charged against
+//! # A session is a sequence of periods, and that is not a detail
 //!
-//! Four dimensions, each with its own quantity:
+//! Rating the whole session against one tariff element is the reading almost
+//! every implementation starts with, and it is wrong in a way that only shows
+//! up on tiered tariffs. "The first 10 kWh at 0.39, the rest at 0.59" is a
+//! restriction on *how much has been delivered so far* `[OCPI 2.3.0 §Tariff]`.
+//! Judged against the session total instead, a 50 kWh session reprices all
+//! 50 kWh at 0.59 — including the first ten, which the driver was quoted at
+//! 0.39.
+//!
+//! So [`rate`] walks [`Chargeable::periods`] in order, carries the cumulative
+//! energy and duration, and asks which element applies **at the start of each
+//! period**. The quarter-hour slots the settlement layer already produces are
+//! exactly the right periods, so the split that conserves energy is also the
+//! input that prices it.
+//!
+//! # …and the period is cut at the threshold, not at the quarter hour
+//!
+//! Asking at the start of each period is not enough on its own. A period that
+//! delivers 15 kWh under "the first 10 kWh at 0.39, the rest at 0.59" begins
+//! in the first tier, so all fifteen would be priced at 0.39 — the same
+//! retroactive-repricing bug as before, moved down a level and made to depend
+//! on how finely the caller happened to slice the session.
+//!
+//! [`rate`] therefore **cuts every period at each threshold that falls inside
+//! it** before pricing anything. The energy is divided exactly at the
+//! threshold, because the energy is the quantity being tiered and the quantity
+//! being settled; the time is divided in proportion, to the second. Ten of the
+//! fifteen are charged at 0.39 and five at 0.59, and the answer no longer
+//! depends on whether the session arrived as one period or ninety-six.
+//!
+//! # What is charged, and what it is charged against
 //!
 //! | Dimension | Quantity | Unit |
 //! |---|---|---|
 //! | `Energy` | delivered energy | kWh |
-//! | `Time` | time charging | hours |
-//! | `ParkingTime` | time connected but not charging | hours |
-//! | `Flat` | the session itself | once |
+//! | `Time` | time in periods that were charging | hours |
+//! | `ParkingTime` | time in periods that were not | hours |
+//! | `Flat` | the session itself, once | once |
 //!
 //! # Every number the total is made of is kept
 //!
-//! [`rate`] returns a [`Rated`] carrying one [`Line`] per component that
-//! applied, each with its quantity, its unit price and its amount. The total is
-//! the sum of the lines, and nothing else — there is no term in the total that
-//! is not a line, so "why is this €14.46" is answerable by reading the
-//! structure rather than by re-deriving it.
-//!
-//! That is the same rule the sibling `hems` workspace applies to its optimiser:
-//! every term the plan may spend is a term the report charges.
+//! [`rate`] returns a [`Rated`] carrying one [`Line`] per *distinct price* that
+//! applied — so a tiered session yields two energy lines at two prices, which
+//! is what a tiered invoice has to show. The total is the sum of the lines plus
+//! at most one [`Adjustment`], and nothing else: there is no term in the total
+//! that is not one of those two things, so "why is this €14.46" is answerable
+//! by reading the structure rather than by re-deriving it.
 //!
 //! # Rounding happens once, at the end
 //!
-//! Each line is computed exactly and kept exact. Only [`Rated::total`] rounds,
-//! to the currency's minor unit, half away from zero. Rounding per line and
-//! then summing gives a different answer, and which of the two is correct is a
-//! tax question rather than an arithmetic one — so the exact figures survive
-//! and the caller can do either.
+//! Each line is computed exactly and kept exact. Only [`Rated::total`] and the
+//! tax breakdown round, to the currency's minor unit, half away from zero.
+//! Rounding per line and then summing gives a different answer, and which of
+//! the two is correct is a tax question rather than an arithmetic one — so the
+//! exact figures survive and the caller can do either.
 
 use emob_core::Energy;
 use emob_core::quantity::{Currency, Money};
 use rust_decimal::Decimal;
 
-use crate::tariff::{Dimension, PriceComponent, Restrictions, Tariff, TariffElement};
+use crate::tariff::{Dimension, PriceComponent, Restrictions, Tariff, TariffElement, TaxIncluded};
 
-/// What a session did, in the terms a tariff prices.
+/// Seconds in an hour, as a decimal.
+const SECONDS_PER_HOUR: Decimal = Decimal::from_parts(3600, 0, 0, false, 0);
+/// Watt-hours in a kilowatt-hour, as a decimal.
+const WH_PER_KWH: Decimal = Decimal::from_parts(1000, 0, 0, false, 0);
+/// Percent, as a decimal.
+const HUNDRED: Decimal = Decimal::from_parts(100, 0, 0, false, 0);
+
+/// One slice of a session, in the terms a tariff prices.
+///
+/// `charging` is the distinction `[AFIR Art. 5(4)]` turns on: an occupancy fee
+/// is a price for *not* charging, and folding the two together is how a fast
+/// charger ends up charging twice for the same minute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Period {
+    /// When the slice begins.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
+    pub start: time::OffsetDateTime,
+    /// When it ends.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
+    pub end: time::OffsetDateTime,
+    /// The energy delivered inside it.
+    pub energy: Energy,
+    /// Whether energy was flowing. A period at zero energy that is still
+    /// marked `charging` is a taper, not an occupancy.
+    pub charging: bool,
+}
+
+impl Period {
+    /// A period in which energy flowed.
+    #[must_use]
+    pub const fn charging(
+        start: time::OffsetDateTime,
+        end: time::OffsetDateTime,
+        energy: Energy,
+    ) -> Self {
+        Self {
+            start,
+            end,
+            energy,
+            charging: true,
+        }
+    }
+
+    /// A period in which the vehicle was connected but not charging.
+    #[must_use]
+    pub const fn parked(start: time::OffsetDateTime, end: time::OffsetDateTime) -> Self {
+        Self {
+            start,
+            end,
+            energy: Energy::ZERO,
+            charging: false,
+        }
+    }
+
+    /// How long the period lasted, in whole seconds. Never negative.
+    #[must_use]
+    pub fn seconds(&self) -> u64 {
+        (self.end - self.start)
+            .whole_seconds()
+            .max(0)
+            .unsigned_abs()
+    }
+
+    /// The average power across the period, in kW — `None` for a period with
+    /// no duration, because a power restriction cannot be judged against it.
+    #[must_use]
+    pub fn average_power_kw(&self) -> Option<Decimal> {
+        let seconds = self.seconds();
+        if seconds == 0 {
+            return None;
+        }
+        Some(self.energy.kwh() * SECONDS_PER_HOUR / Decimal::from(seconds))
+    }
+}
+
+/// What a session did, period by period.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Chargeable {
-    /// Energy delivered.
-    pub energy: Energy,
-    /// Seconds spent charging.
-    pub charging_seconds: u64,
-    /// Seconds connected but not charging.
-    pub parking_seconds: u64,
-    /// When the session started, local to the station — what a time-of-day
-    /// restriction is evaluated against.
-    pub started_at: time::OffsetDateTime,
+    periods: Vec<Period>,
 }
 
 impl Chargeable {
-    /// A session that only delivered energy.
-    #[must_use]
-    pub const fn energy_only(energy: Energy, started_at: time::OffsetDateTime) -> Self {
-        Self {
-            energy,
-            charging_seconds: 0,
-            parking_seconds: 0,
-            started_at,
+    /// Build a chargeable session from its periods.
+    ///
+    /// # Errors
+    ///
+    /// [`ChargeableError`] when there are no periods, or when one ends before
+    /// it starts, or when two overlap — all of which would let the same minute
+    /// be charged twice.
+    pub fn new(mut periods: Vec<Period>) -> Result<Self, ChargeableError> {
+        if periods.is_empty() {
+            return Err(ChargeableError::Empty);
         }
+        periods.sort_by_key(|p| p.start);
+
+        for period in &periods {
+            if period.end < period.start {
+                return Err(ChargeableError::EndsBeforeItStarts {
+                    start: period.start,
+                });
+            }
+        }
+        for pair in periods.windows(2) {
+            if pair[1].start < pair[0].end {
+                return Err(ChargeableError::Overlap { at: pair[1].start });
+            }
+        }
+
+        Ok(Self { periods })
     }
 
-    /// The quantity a dimension is priced against, in the dimension's own unit.
+    /// A session that is one period of delivered energy.
+    ///
+    /// # Errors
+    ///
+    /// [`ChargeableError::EndsBeforeItStarts`] when `end` precedes `start`.
+    pub fn energy_only(
+        energy: Energy,
+        start: time::OffsetDateTime,
+        end: time::OffsetDateTime,
+    ) -> Result<Self, ChargeableError> {
+        Self::new(vec![Period::charging(start, end, energy)])
+    }
+
+    /// The periods, in time order.
     #[must_use]
-    pub fn quantity(&self, dimension: Dimension) -> Decimal {
-        match dimension {
-            Dimension::Energy => self.energy.kwh(),
-            Dimension::Time => seconds_to_hours(self.charging_seconds),
-            Dimension::ParkingTime => seconds_to_hours(self.parking_seconds),
-            Dimension::Flat => Decimal::ONE,
-        }
+    pub fn periods(&self) -> &[Period] {
+        &self.periods
+    }
+
+    /// When the session started.
+    #[must_use]
+    pub fn started_at(&self) -> time::OffsetDateTime {
+        self.periods[0].start
+    }
+
+    /// When it ended.
+    #[must_use]
+    pub fn ended_at(&self) -> time::OffsetDateTime {
+        self.periods[self.periods.len() - 1].end
+    }
+
+    /// The energy across every period.
+    #[must_use]
+    pub fn total_energy(&self) -> Energy {
+        self.periods.iter().map(|p| p.energy).sum()
+    }
+
+    /// Seconds spent in periods where energy was flowing.
+    #[must_use]
+    pub fn charging_seconds(&self) -> u64 {
+        self.periods
+            .iter()
+            .filter(|p| p.charging)
+            .map(Period::seconds)
+            .sum()
+    }
+
+    /// Seconds spent connected but not charging.
+    #[must_use]
+    pub fn parking_seconds(&self) -> u64 {
+        self.periods
+            .iter()
+            .filter(|p| !p.charging)
+            .map(Period::seconds)
+            .sum()
     }
 }
 
-/// Seconds as an exact fraction of an hour.
-///
-/// `Decimal` division by 3600 is exact for any second count that divides it and
-/// carries 28 significant digits otherwise, which is far beyond what a price
-/// can express — so no hour is lost the way `seconds as f64 / 3600.0` loses
-/// one.
-fn seconds_to_hours(seconds: u64) -> Decimal {
-    Decimal::from(seconds) / Decimal::from(3600)
+/// What can be wrong with a set of periods.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ChargeableError {
+    /// No periods at all.
+    #[error("a chargeable session needs at least one period")]
+    Empty,
+
+    /// A period ends before it starts.
+    #[error("the period beginning {start} ends before it starts")]
+    EndsBeforeItStarts {
+        /// Which period.
+        start: time::OffsetDateTime,
+    },
+
+    /// Two periods overlap, so a minute would be charged twice.
+    #[error("two periods overlap at {at}: the same minute would be charged twice")]
+    Overlap {
+        /// Where they overlap.
+        at: time::OffsetDateTime,
+    },
 }
 
-/// One priced line of a session.
+/// What the session had done when a period began — what the restrictions read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionState {
+    /// Energy delivered before this period.
+    pub energy_kwh: Decimal,
+    /// Seconds elapsed before this period.
+    pub elapsed_seconds: u64,
+    /// When the period begins.
+    pub at: time::OffsetDateTime,
+    /// The average power across this period, if it has a duration.
+    pub power_kw: Option<Decimal>,
+}
+
+/// One priced line of a session: one dimension at one price.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Line {
@@ -101,12 +286,66 @@ pub struct Line {
     pub vat: Option<Decimal>,
 }
 
-/// Something the rating had to assume.
+/// A minimum or maximum the tariff imposed on the total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Adjustment {
+    /// Whether the total was raised or capped.
+    pub kind: AdjustmentKind,
+    /// What the lines came to before it.
+    pub lines_total: Decimal,
+    /// The signed amount added to reach the bound. Positive for a minimum,
+    /// negative for a maximum.
+    pub amount: Decimal,
+    /// The VAT rate applied to it.
+    ///
+    /// Inherited from the largest line by amount, because a minimum charge is
+    /// economically more of whatever the session mostly was. It is a choice
+    /// rather than a derivation, which is why it is a field a reader can see
+    /// and an accountant can argue with, rather than an assumption buried in a
+    /// sum.
+    pub vat: Option<Decimal>,
+}
+
+/// Which bound moved the total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum AdjustmentKind {
+    /// The total was raised to the tariff's minimum.
+    Minimum,
+    /// The total was capped at the tariff's maximum.
+    Maximum,
+}
+
+/// Something the rating had to assume, or refused to assume.
+///
+/// Serialisable, and that is deliberate: a note travels with the record to the
+/// partner who settles against it. "This total was rounded up to a block size"
+/// and "this element could not be evaluated" are exactly the facts a settlement
+/// dispute turns on, and a note that stays behind in the process that produced
+/// it is a note nobody can invoke.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum RatingNote {
-    /// No element's restrictions matched, so nothing was charged.
-    NoMatchingElement,
+    /// No element's restrictions matched a period, so it was not charged.
+    NoMatchingElement {
+        /// When the unpriced period began.
+        #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
+        at: time::OffsetDateTime,
+    },
+    /// An element was skipped because it carries a restriction this build
+    /// cannot evaluate.
+    ///
+    /// Never silently treated as unrestricted: an element whose conditions
+    /// cannot be checked is one whose prices must not be applied.
+    UnevaluableRestriction {
+        /// Which element, by position.
+        index: usize,
+        /// The restrictions that could not be judged.
+        restrictions: Vec<String>,
+    },
     /// A quantity was rounded up to the component's block size.
     RoundedToBlock {
         /// Which dimension.
@@ -116,31 +355,43 @@ pub enum RatingNote {
         /// What was billed.
         billed: Decimal,
     },
-    /// The total was raised to the tariff's minimum.
-    RaisedToMinimum {
-        /// What the lines came to.
-        lines: Decimal,
-        /// The minimum applied.
-        minimum: Decimal,
-    },
-    /// The total was capped at the tariff's maximum.
-    CappedAtMaximum {
-        /// What the lines came to.
-        lines: Decimal,
-        /// The cap applied.
-        maximum: Decimal,
+    /// The total was moved by a minimum or maximum.
+    Adjusted(Adjustment),
+    /// A component carries a VAT rate no net-and-tax split can be computed
+    /// from.
+    ///
+    /// A gross amount is `net × (1 + rate/100)`, so at exactly −100 % the
+    /// factor is zero and no net grosses up to it. The amount is still charged
+    /// — the price is the price — but [`Rated::tax_summary`] reports it whole,
+    /// and an invoice built from it would state a taxable amount it cannot
+    /// justify. A tariff from a roaming partner is somebody else's document, so
+    /// the rate is data rather than a promise.
+    ///
+    /// Raised **only for a [`TaxIncluded::Yes`] tariff**, the one basis on which
+    /// that factor is a divisor: net prices multiply by it and zero multiplies
+    /// fine, and a party outside a tax regime never reads the rate at all.
+    VatRateNotUsable {
+        /// Which dimension carried it.
+        dimension: Dimension,
+        /// The rate that arrived.
+        rate: Decimal,
     },
 }
 
 impl core::fmt::Display for RatingNote {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoMatchingElement => {
-                write!(
-                    f,
-                    "no tariff element matched this session; nothing was charged"
-                )
-            }
+            Self::NoMatchingElement { at } => write!(
+                f,
+                "no tariff element matched the period beginning {at}; it was not charged"
+            ),
+            Self::UnevaluableRestriction {
+                index,
+                restrictions,
+            } => write!(
+                f,
+                "element {index} carries restrictions this build cannot evaluate and was skipped: {restrictions:?}"
+            ),
             Self::RoundedToBlock {
                 dimension,
                 actual,
@@ -150,45 +401,91 @@ impl core::fmt::Display for RatingNote {
                 "{dimension:?} rounded up from {actual} to {billed} {}",
                 dimension.unit()
             ),
-            Self::RaisedToMinimum { lines, minimum } => {
-                write!(
+            Self::VatRateNotUsable { dimension, rate } => write!(
+                f,
+                "{dimension:?} carries a VAT rate of {rate} %, from which no net and tax can be computed: the amount is reported whole"
+            ),
+            Self::Adjusted(adjustment) => match adjustment.kind {
+                AdjustmentKind::Minimum => write!(
                     f,
-                    "the lines came to {lines}, raised to the minimum {minimum}"
-                )
-            }
-            Self::CappedAtMaximum { lines, maximum } => {
-                write!(
+                    "the lines came to {}, raised by {} to the tariff minimum",
+                    adjustment.lines_total, adjustment.amount
+                ),
+                AdjustmentKind::Maximum => write!(
                     f,
-                    "the lines came to {lines}, capped at the maximum {maximum}"
-                )
-            }
+                    "the lines came to {}, capped by {} at the tariff maximum",
+                    adjustment.lines_total, adjustment.amount
+                ),
+            },
         }
     }
+}
+
+/// One VAT category of a rated session.
+///
+/// EN 16931 wants the breakdown, not one number: a session whose electricity
+/// and whose service fee sit in different categories has two taxable amounts
+/// and two tax amounts, and an invoice that states only the gross cannot be
+/// checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TaxLine {
+    /// The rate, as a percentage. Zero for anything untaxed.
+    pub rate: Decimal,
+    /// The taxable amount, rounded to the minor unit.
+    pub net: Decimal,
+    /// The tax on it, rounded to the minor unit.
+    pub tax: Decimal,
+    /// Net plus tax.
+    pub gross: Decimal,
 }
 
 /// A rated session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rated {
-    /// One line per component that applied.
+    /// One line per dimension-and-price that applied, in the order
+    /// `[AFIR Art. 5(4)]` prescribes.
     pub lines: Vec<Line>,
     /// The currency.
     pub currency: Currency,
-    /// Anything the rating had to assume.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    /// Whether the line amounts are gross or net.
+    pub tax_included: TaxIncluded,
+    /// The minimum or maximum that moved the total, if one did.
+    pub adjustment: Option<Adjustment>,
+    /// Anything the rating had to assume, or refused to. Travels with the
+    /// record.
     pub notes: Vec<RatingNote>,
-    /// The total after any minimum or maximum, exact and unrounded.
-    subtotal: Decimal,
 }
 
 impl Rated {
+    /// The sum of the lines, exact and unrounded, before any bound.
+    #[must_use]
+    pub fn lines_total(&self) -> Decimal {
+        self.lines.iter().map(|l| l.amount).sum()
+    }
+
     /// The exact total, before rounding to the minor unit.
     #[must_use]
-    pub const fn exact_total(&self) -> Money {
-        Money::new(self.subtotal, self.currency)
+    pub fn exact_total(&self) -> Money {
+        let adjustment = self.adjustment.map_or(Decimal::ZERO, |a| a.amount);
+        Money::new(self.lines_total() + adjustment, self.currency)
     }
 
     /// The total, rounded to the currency's minor unit.
+    ///
+    /// In the basis the tariff states: gross when
+    /// [`TaxIncluded::Yes`], net when [`TaxIncluded::No`]. Use
+    /// [`Self::gross`] when the number has to be what the driver pays.
+    ///
+    /// # This is the tariff's total, not the invoice's
+    ///
+    /// It rounds **once**, at the end. [`Self::gross`] rounds each VAT category
+    /// and sums, because EN 16931 states a taxable and a tax amount per rate
+    /// and an invoice's total has to be the sum of what it shows. With one VAT
+    /// rate the two agree; with several they can differ by a minor unit, and
+    /// the invoice's figure is the one that has to reconcile — so a billing
+    /// layer reads [`Self::gross`] and this is what a price quote uses.
     #[must_use]
     pub fn total(&self) -> Money {
         self.exact_total().round_to_minor_unit()
@@ -196,21 +493,136 @@ impl Rated {
 
     /// Whether the lines sum to the total.
     ///
-    /// False exactly when a minimum or maximum moved it, and then the note says
-    /// which. There is no other way for the two to differ: the invariant is
-    /// that **every term of the total is a line, or a note**.
+    /// False exactly when a minimum or maximum moved it, and then
+    /// [`Self::adjustment`] says by how much. There is no other way for the two
+    /// to differ: the invariant is that **every term of the total is a line or
+    /// the adjustment**.
     #[must_use]
     pub fn lines_sum_to_total(&self) -> bool {
-        self.lines.iter().map(|l| l.amount).sum::<Decimal>() == self.subtotal
+        self.adjustment.is_none()
     }
 
-    /// The amount charged for one dimension.
+    /// The amount charged for one dimension, across every price it was charged
+    /// at.
     #[must_use]
     pub fn amount_for(&self, dimension: Dimension) -> Option<Decimal> {
+        let matching: Vec<Decimal> = self
+            .lines
+            .iter()
+            .filter(|l| l.dimension == dimension)
+            .map(|l| l.amount)
+            .collect();
+        if matching.is_empty() {
+            None
+        } else {
+            Some(matching.into_iter().sum())
+        }
+    }
+
+    /// The quantity charged for one dimension, across every price.
+    #[must_use]
+    pub fn quantity_for(&self, dimension: Dimension) -> Decimal {
         self.lines
             .iter()
-            .find(|l| l.dimension == dimension)
-            .map(|l| l.amount)
+            .filter(|l| l.dimension == dimension)
+            .map(|l| l.quantity)
+            .sum()
+    }
+
+    /// The VAT breakdown, one entry per rate, rounded to the minor unit.
+    ///
+    /// A line with no VAT percentage, and every line under
+    /// [`TaxIncluded::NotApplicable`], falls into the zero-rate entry.
+    #[must_use]
+    pub fn tax_summary(&self) -> Vec<TaxLine> {
+        let mut groups: Vec<(Decimal, Decimal)> = Vec::new();
+        let mut add = |rate: Option<Decimal>, amount: Decimal| {
+            let rate = match self.tax_included {
+                TaxIncluded::NotApplicable => Decimal::ZERO,
+                TaxIncluded::Yes | TaxIncluded::No => rate.unwrap_or(Decimal::ZERO),
+            };
+            match groups.iter_mut().find(|(r, _)| *r == rate) {
+                Some((_, total)) => *total += amount,
+                None => groups.push((rate, amount)),
+            }
+        };
+
+        for line in &self.lines {
+            add(line.vat, line.amount);
+        }
+        if let Some(adjustment) = self.adjustment {
+            add(adjustment.vat, adjustment.amount);
+        }
+
+        groups.sort_by_key(|group| group.0);
+        groups
+            .into_iter()
+            .map(|(rate, amount)| self.split_tax(rate, amount))
+            .collect()
+    }
+
+    /// Split one group's amount into net, tax and gross.
+    ///
+    /// # The rate that has no split
+    ///
+    /// A gross amount is `net × (1 + rate/100)`, so recovering the net divides
+    /// by that factor — and at a rate of exactly −100 % the factor is zero.
+    /// There is no net that grosses up to a non-zero amount at −100 %, so the
+    /// question has no answer, and `Decimal`'s division **panics** rather than
+    /// saying so. A tariff arriving from a roaming partner is not a document
+    /// this crate wrote, so the rate has to be treated as untrusted input: the
+    /// amount is reported unsplit, and [`rate`] has already recorded a
+    /// [`RatingNote::VatRateNotUsable`] beside it so the fact travels with the
+    /// record rather than being swallowed here.
+    fn split_tax(&self, rate: Decimal, amount: Decimal) -> TaxLine {
+        let round = |d: Decimal| Money::new(d, self.currency).round_to_minor_unit().amount();
+        let factor = Decimal::ONE + rate / HUNDRED;
+        let (net, gross) = match self.tax_included {
+            // The amounts are gross: strip the tax out of them.
+            TaxIncluded::Yes if !factor.is_zero() => (round(amount / factor), round(amount)),
+            // The amounts are net: add the tax on.
+            TaxIncluded::No => (round(amount), round(amount * factor)),
+            // …and the rate that cannot be split, reported whole.
+            TaxIncluded::Yes | TaxIncluded::NotApplicable => (round(amount), round(amount)),
+        };
+        TaxLine {
+            rate,
+            net,
+            tax: gross - net,
+            gross,
+        }
+    }
+
+    /// The taxable amount across every category.
+    #[must_use]
+    pub fn net(&self) -> Money {
+        Money::new(
+            self.tax_summary().iter().map(|t| t.net).sum(),
+            self.currency,
+        )
+    }
+
+    /// The tax across every category.
+    #[must_use]
+    pub fn tax(&self) -> Money {
+        Money::new(
+            self.tax_summary().iter().map(|t| t.tax).sum(),
+            self.currency,
+        )
+    }
+
+    /// What the driver pays.
+    #[must_use]
+    pub fn gross(&self) -> Money {
+        Money::new(
+            self.tax_summary().iter().map(|t| t.gross).sum(),
+            self.currency,
+        )
+    }
+
+    /// One line per note, for an operator queue.
+    pub fn reasons(&self) -> impl Iterator<Item = String> + '_ {
+        self.notes.iter().map(ToString::to_string)
     }
 }
 
@@ -234,7 +646,8 @@ impl Rated {
 /// let session = Chargeable::energy_only(
 ///     Energy::from_kwh(dec("29.500"))?,
 ///     datetime!(2026-01-02 10:00 +1),
-/// );
+///     datetime!(2026-01-02 10:30 +1),
+/// )?;
 ///
 /// let rated = rate(&tariff, &session);
 /// assert_eq!(rated.total().to_string(), "14.46 EUR");
@@ -245,134 +658,569 @@ impl Rated {
 pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
     let mut notes = Vec::new();
 
-    let Some(element) = matching_element(tariff, session) else {
-        notes.push(RatingNote::NoMatchingElement);
-        return Rated {
-            lines: Vec::new(),
-            currency: tariff.currency,
-            notes,
-            subtotal: Decimal::ZERO,
-        };
-    };
-
-    let mut lines = Vec::new();
-    // Sorted so the lines come out in the order `[AFIR Art. 5(4)]` prescribes,
-    // which means an invoice and a price display list the same things the same
-    // way round without either having to know about the other.
-    let mut components: Vec<&PriceComponent> = element.components.iter().collect();
-    components.sort_by_key(|c| c.dimension);
-
-    for component in components {
-        let actual = session.quantity(component.dimension);
-        if actual.is_zero() && component.dimension != Dimension::Flat {
-            continue;
+    for (index, element) in tariff.elements.iter().enumerate() {
+        if !element.restrictions.is_evaluable() {
+            notes.push(RatingNote::UnevaluableRestriction {
+                index,
+                restrictions: element.restrictions.unevaluable.clone(),
+            });
         }
-        let billed = apply_step(component, actual, &mut notes);
-        lines.push(Line {
-            dimension: component.dimension,
-            quantity: billed,
-            unit_price: component.price,
-            amount: billed * component.price,
-            vat: component.vat,
-        });
+        // A rate of exactly -100 % makes the gross-to-net factor zero, and no
+        // net grosses up to a non-zero amount at that rate. Said once here,
+        // rather than discovered by `tax_summary` where there is nowhere to
+        // put it.
+        //
+        // Only on a gross tariff, where the factor is a divisor. Net prices
+        // multiply by it and zero multiplies fine; a party outside a tax regime
+        // never reads the rate at all.
+        if tariff.tax_included == TaxIncluded::Yes {
+            for component in &element.components {
+                if let Some(rate) = component.vat
+                    && (Decimal::ONE + rate / HUNDRED).is_zero()
+                {
+                    notes.push(RatingNote::VatRateNotUsable {
+                        dimension: component.dimension,
+                        rate,
+                    });
+                }
+            }
+        }
     }
 
-    let mut subtotal: Decimal = lines.iter().map(|l| l.amount).sum();
+    // One accumulator per (dimension, price, vat): a tiered session charges the
+    // same dimension at two prices and the invoice has to show both.
+    let mut accumulators: Vec<Accumulator> = Vec::new();
+    let mut cumulative_energy = Decimal::ZERO;
+    let mut elapsed_seconds: u64 = 0;
+    let mut flat_charged = false;
 
-    if let Some(minimum) = tariff.min_price
-        && subtotal < minimum
-    {
-        notes.push(RatingNote::RaisedToMinimum {
-            lines: subtotal,
-            minimum,
-        });
-        subtotal = minimum;
+    let periods = subdivide_at_thresholds(tariff, session.periods());
+    for period in &periods {
+        let state = SessionState {
+            energy_kwh: cumulative_energy,
+            elapsed_seconds,
+            at: period.start,
+            power_kw: period.average_power_kw(),
+        };
+
+        if let Some(element) = matching_element(tariff, &state) {
+            let seconds = Decimal::from(period.seconds());
+            for component in &element.components {
+                // In the dimension's *base* unit: kWh for energy, whole seconds
+                // for the two time dimensions, one for a flat fee. Time is
+                // accumulated in seconds rather than hours so that the division
+                // by 3600 happens once, after the multiplication by the price —
+                // 35 minutes at 6.00/h is 3.50 exactly that way and
+                // 3.4999999999999999999999999998 the other.
+                let quantity = match component.dimension {
+                    Dimension::Energy => period.energy.kwh(),
+                    Dimension::Time if period.charging => seconds,
+                    Dimension::ParkingTime if !period.charging => seconds,
+                    Dimension::Time | Dimension::ParkingTime => Decimal::ZERO,
+                    Dimension::Flat => {
+                        if flat_charged {
+                            continue;
+                        }
+                        flat_charged = true;
+                        Decimal::ONE
+                    }
+                };
+                if quantity.is_zero() {
+                    continue;
+                }
+                accumulate(&mut accumulators, component, quantity);
+            }
+        } else {
+            notes.push(RatingNote::NoMatchingElement { at: period.start });
+        }
+
+        cumulative_energy += period.energy.kwh();
+        elapsed_seconds += period.seconds();
     }
-    if let Some(maximum) = tariff.max_price
-        && subtotal > maximum
-    {
-        notes.push(RatingNote::CappedAtMaximum {
-            lines: subtotal,
-            maximum,
-        });
-        subtotal = maximum;
+
+    // Block rounding applies to what was actually billed for a price, not to
+    // each period of it — rounding every quarter hour up to a block would bill
+    // a two-hour session eight times over.
+    let mut lines: Vec<Line> = accumulators
+        .into_iter()
+        .map(|acc| {
+            let billed = apply_step(acc.dimension, acc.step_size, acc.quantity, &mut notes);
+            // Multiply, then divide. `price × seconds / 3600` is exact wherever
+            // the arithmetic allows it to be; `price × (seconds / 3600)` has
+            // already lost the last digits to a repeating decimal.
+            let per_display_unit = match acc.dimension {
+                Dimension::Time | Dimension::ParkingTime => SECONDS_PER_HOUR,
+                Dimension::Energy | Dimension::Flat => Decimal::ONE,
+            };
+            Line {
+                dimension: acc.dimension,
+                quantity: billed / per_display_unit,
+                unit_price: acc.price,
+                amount: billed * acc.price / per_display_unit,
+                vat: acc.vat,
+            }
+        })
+        .collect();
+    // Stable, so a tier keeps the order it was first charged in, inside the
+    // dimension order `[AFIR Art. 5(4)]` prescribes.
+    lines.sort_by_key(|l| l.dimension);
+
+    let lines_total: Decimal = lines.iter().map(|l| l.amount).sum();
+    let adjustment = bound(tariff, lines_total, adjustment_vat(tariff, &lines));
+    if let Some(adjustment) = adjustment {
+        notes.push(RatingNote::Adjusted(adjustment));
     }
 
     Rated {
         lines,
         currency: tariff.currency,
+        tax_included: tariff.tax_included,
+        adjustment,
         notes,
-        subtotal,
     }
 }
 
-/// Round a quantity up to the component's block size.
+/// Cut every period wherever a tariff threshold falls inside it.
 ///
-/// The block is expressed in the dimension's base unit — one Wh for energy, one
-/// second for time — so the arithmetic converts into that unit, rounds up, and
-/// converts back. Rounding *up* is what the field does and it is always against
-/// the customer, which is why it produces a note.
-fn apply_step(component: &PriceComponent, actual: Decimal, notes: &mut Vec<RatingNote>) -> Decimal {
-    if component.step_size <= 1 || component.dimension == Dimension::Flat {
+/// # Why this is not the caller's job
+///
+/// A tariff's energy and duration restrictions are read against what the
+/// session has done **so far**, which is what makes tiers tier. Judged only at
+/// the start of each period, the tier boundary lands wherever the caller's
+/// periods happen to land: hand [`rate`] one period of 15 kWh under "the first
+/// 10 kWh at 0.39, the rest at 0.59" and all fifteen are charged at 0.39, and
+/// hand it the same session as three periods of five and it charges ten and
+/// five correctly. A price that depends on the granularity of the input is not
+/// a price.
+///
+/// So the thresholds themselves become the cut points, and the answer stops
+/// depending on how the session was sliced.
+///
+/// **The wall clock is one of them**, and in this market the common one: "0.30
+/// from 22:00" restricts *when the period is* and fails the same way judged only
+/// at a period's start. [`Restrictions::start_time`], [`Restrictions::end_time`]
+/// and the midnight a [`Restrictions::start_date`] or [`Restrictions::end_date`]
+/// turns on cut on equal footing with the kilowatt-hours — read off the local
+/// clock the period carries, because that is the frame
+/// [`matches_restrictions`] judges them in, and on every day the period spans.
+///
+/// # What is divided exactly, and what is divided proportionally
+///
+/// **Energy is exact at an energy threshold.** A cut at a 10 kWh threshold puts
+/// exactly 10 kWh before it, whatever the arithmetic of the surrounding period —
+/// and the sub-periods' energies are differences of cumulative values, so they
+/// telescope back to the original total to the last digit, the same construction
+/// the quarter-hour split uses.
+///
+/// **Time is exact at a clock threshold**, for the mirror-image reason: a 22:00
+/// boundary is 22:00, and it is the energy either side of it that is
+/// interpolated. Splitting a quarter hour at a kilowatt-hour boundary — or a
+/// kilowatt-hour at a clock boundary — assumes constant power across it, which a
+/// tapering charge curve does not deliver; the residual is under a second of a
+/// per-minute fee, and the alternative — sub-second period boundaries — would
+/// lose whole seconds to `whole_seconds()` and stop the durations summing.
+fn subdivide_at_thresholds(tariff: &Tariff, periods: &[Period]) -> Vec<Period> {
+    let mut energy_thresholds: Vec<Decimal> = Vec::new();
+    let mut duration_thresholds: Vec<u64> = Vec::new();
+    let mut clock_thresholds: Vec<time::Time> = Vec::new();
+    let mut date_thresholds: Vec<time::Date> = Vec::new();
+    for element in &tariff.elements {
+        let r = &element.restrictions;
+        energy_thresholds.extend(r.min_kwh.into_iter().chain(r.max_kwh));
+        duration_thresholds.extend(r.min_duration_s.into_iter().chain(r.max_duration_s));
+        clock_thresholds.extend(r.start_time.into_iter().chain(r.end_time));
+        date_thresholds.extend(r.start_date.into_iter().chain(r.end_date));
+    }
+    if energy_thresholds.is_empty()
+        && duration_thresholds.is_empty()
+        && clock_thresholds.is_empty()
+        && date_thresholds.is_empty()
+    {
+        return periods.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(periods.len());
+    let mut cumulative_energy = Decimal::ZERO;
+    let mut elapsed_seconds: u64 = 0;
+
+    for period in periods {
+        let seconds = period.seconds();
+        let energy = period.energy.kwh();
+
+        // A period with no duration cannot be cut in time, and one that
+        // delivered nothing has no energy boundary inside it.
+        let mut cuts: Vec<(u64, Decimal)> = Vec::new();
+        if seconds > 0 {
+            // A duration threshold and a wall-clock threshold are the same kind
+            // of cut — an offset into the period — and the energy at either is
+            // interpolated the same way.
+            let by_offset = |offset: u64, cuts: &mut Vec<(u64, Decimal)>| {
+                if offset > 0 && offset < seconds {
+                    // Multiply before dividing, as everywhere else here.
+                    let at_cut =
+                        cumulative_energy + energy * Decimal::from(offset) / Decimal::from(seconds);
+                    cuts.push((offset, at_cut));
+                }
+            };
+
+            for &threshold in &duration_thresholds {
+                let Some(offset) = threshold.checked_sub(elapsed_seconds) else {
+                    continue;
+                };
+                by_offset(offset, &mut cuts);
+            }
+            for offset in clock_cut_offsets(&clock_thresholds, &date_thresholds, period) {
+                by_offset(offset, &mut cuts);
+            }
+            if energy > Decimal::ZERO {
+                for &threshold in &energy_thresholds {
+                    let delta = threshold - cumulative_energy;
+                    if delta > Decimal::ZERO && delta < energy {
+                        let offset = seconds_for(delta, energy, seconds);
+                        cuts.push((offset, threshold));
+                    }
+                }
+            }
+        }
+
+        // Only cuts that advance **both** the clock and the register survive.
+        // An energy threshold and a duration threshold can land in the same
+        // second and disagree about how much had been delivered by it, and a
+        // piece whose energy ran backwards would be a negative quantity — so
+        // the sweep keeps the first of any such pair and drops the rest. The
+        // window it gives up is under a second either way.
+        cuts.sort_unstable();
+        let ceiling = cumulative_energy + energy;
+        let mut boundary = (0_u64, cumulative_energy);
+        cuts.retain(|&(offset, at_cut)| {
+            let usable = offset > boundary.0
+                && offset < seconds
+                && at_cut >= boundary.1
+                && at_cut <= ceiling;
+            if usable {
+                boundary = (offset, at_cut);
+            }
+            usable
+        });
+
+        // A period nothing cuts is passed through untouched, so nothing can
+        // drift: `seconds` truncates, and rebuilding a whole period out of
+        // whole seconds would lose the sub-second remainder of one that has
+        // one.
+        if cuts.is_empty() {
+            out.push(period.clone());
+            cumulative_energy = ceiling;
+            elapsed_seconds += seconds;
+            continue;
+        }
+
+        // Differences of cumulative values, so the pieces telescope back to the
+        // period's own energy exactly. The last piece ends at the period's own
+        // end rather than at a whole-second offset, for the same reason.
+        let mut previous = (0_u64, cumulative_energy);
+        for &(offset, at_cut) in &cuts {
+            out.push(Period {
+                start: period.start + time::Duration::seconds(i64_of(previous.0)),
+                end: period.start + time::Duration::seconds(i64_of(offset)),
+                // Non-negative by the sweep above; the clamp is unreachable and
+                // is here so this cannot become a panic if that ever changes.
+                energy: Energy::from_kwh((at_cut - previous.1).max(Decimal::ZERO))
+                    .unwrap_or(Energy::ZERO),
+                charging: period.charging,
+            });
+            previous = (offset, at_cut);
+        }
+        out.push(Period {
+            start: period.start + time::Duration::seconds(i64_of(previous.0)),
+            end: period.end,
+            energy: Energy::from_kwh((ceiling - previous.1).max(Decimal::ZERO))
+                .unwrap_or(Energy::ZERO),
+            charging: period.charging,
+        });
+
+        cumulative_energy = ceiling;
+        elapsed_seconds += seconds;
+    }
+
+    // The property the whole function rests on: cutting a session divides it,
+    // it does not change it.
+    debug_assert_eq!(
+        out.iter().map(|p| p.energy).sum::<Energy>().kwh(),
+        periods.iter().map(|p| p.energy).sum::<Energy>().kwh(),
+        "subdividing at thresholds must conserve the session's energy"
+    );
+    out
+}
+
+/// The offsets, in whole seconds from the period's start, at which a wall-clock
+/// restriction changes which element applies.
+///
+/// Computed in the period's own UTC offset, because [`matches_restrictions`]
+/// judges the times and dates against `state.at` — a cut in any other frame
+/// would split a period into two pieces that price identically and leave the
+/// real boundary uncut. Every day the period spans is walked: an overnight
+/// session crosses `22:00` and `06:00` on different dates.
+fn clock_cut_offsets(times: &[time::Time], dates: &[time::Date], period: &Period) -> Vec<u64> {
+    // A corruption guard rather than a rule — a period spanning more than a year
+    // is a clock fault, and the same bound the session split refuses one at.
+    const MAX_DAYS: u16 = 366;
+
+    if times.is_empty() && dates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let offset = period.start.offset();
+    let mut push_if_inside = |candidate: time::OffsetDateTime| {
+        if candidate > period.start
+            && candidate < period.end
+            && let Ok(seconds) = u64::try_from((candidate - period.start).whole_seconds())
+        {
+            out.push(seconds);
+        }
+    };
+
+    // A date restriction turns on at midnight of the date it names, in the same
+    // local frame. The `push_if_inside` filter does the rest, so a date outside
+    // the period costs one comparison and contributes nothing.
+    for &date in dates {
+        push_if_inside(time::OffsetDateTime::new_in_offset(
+            date,
+            time::Time::MIDNIGHT,
+            offset,
+        ));
+    }
+
+    // Every day the period touches, in its own local calendar.
+    let last = period.end.to_offset(offset).date();
+    let mut date = period.start.date();
+    for _ in 0..MAX_DAYS {
+        for &clock in times {
+            push_if_inside(time::OffsetDateTime::new_in_offset(date, clock, offset));
+        }
+        if date >= last {
+            break;
+        }
+        let Some(next) = date.next_day() else { break };
+        date = next;
+    }
+
+    out
+}
+
+/// How many whole seconds into a period `delta` kWh of its `energy` lands.
+fn seconds_for(delta: Decimal, energy: Decimal, seconds: u64) -> u64 {
+    use rust_decimal::prelude::ToPrimitive as _;
+    (Decimal::from(seconds) * delta / energy)
+        .round()
+        .to_u64()
+        .unwrap_or(0)
+        .clamp(0, seconds)
+}
+
+/// Seconds as the signed count `time::Duration` takes. A period longer than
+/// `i64::MAX` seconds cannot exist — `SplitError::ImplausiblyLong` refuses one
+/// at a year — so the saturation is unreachable rather than lossy.
+fn i64_of(seconds: u64) -> i64 {
+    i64::try_from(seconds).unwrap_or(i64::MAX)
+}
+
+/// A dimension charged at one price, accumulating across periods.
+///
+/// `quantity` is in the dimension's **base** unit — kWh for energy, seconds for
+/// the two time dimensions, one for a flat fee — which is also the unit
+/// `step_size` is expressed in for time. The conversion to the displayed unit
+/// happens once, at the end, after the multiplication by the price.
+struct Accumulator {
+    dimension: Dimension,
+    price: Decimal,
+    vat: Option<Decimal>,
+    step_size: u32,
+    quantity: Decimal,
+}
+
+fn accumulate(into: &mut Vec<Accumulator>, component: &PriceComponent, quantity: Decimal) {
+    if let Some(existing) = into.iter_mut().find(|a| {
+        a.dimension == component.dimension && a.price == component.price && a.vat == component.vat
+    }) {
+        existing.quantity += quantity;
+        // A tariff that prices the same dimension twice at one price with two
+        // block sizes is a tariff whose author meant the larger one.
+        existing.step_size = existing.step_size.max(component.step_size);
+    } else {
+        into.push(Accumulator {
+            dimension: component.dimension,
+            price: component.price,
+            vat: component.vat,
+            step_size: component.step_size,
+            quantity,
+        });
+    }
+}
+
+/// The VAT rate a minimum or maximum inherits.
+///
+/// # Two cases, and the second is the one that bites
+///
+/// Normally it is the rate of the **largest line by amount**, because a minimum
+/// charge is economically more of whatever the session mostly was. That is a
+/// choice rather than a derivation, which is why [`Adjustment::vat`] is a field
+/// a reader can see and an accountant can argue with.
+///
+/// But a minimum charge is at its most load-bearing on a session with **no
+/// lines at all** — a driver who plugged in, drew nothing and left — and there
+/// the largest line does not exist. Falling back to `None` there put the whole
+/// minimum charge in the zero-rate group: a €0.50 minimum on a 19 % tariff came
+/// out as €0.50 net and €0.00 tax, which is an invoice that under-declares its
+/// own VAT.
+///
+/// So with no lines the rate comes from the tariff's own components, when they
+/// agree on one. When they do not, there is genuinely no answer and `None` is
+/// the honest one — a tariff mixing rates and charging a minimum for nothing
+/// has a question for its author, not for this function.
+fn adjustment_vat(tariff: &Tariff, lines: &[Line]) -> Option<Decimal> {
+    if let Some(largest) = lines.iter().max_by_key(|l| l.amount.abs()) {
+        return largest.vat;
+    }
+
+    let mut rates = tariff
+        .elements
+        .iter()
+        .flat_map(|e| e.components.iter())
+        .map(|c| c.vat);
+    let first = rates.next()?;
+    rates.all(|rate| rate == first).then_some(first).flatten()
+}
+
+/// Apply the tariff's minimum and maximum to the line total.
+fn bound(tariff: &Tariff, lines_total: Decimal, vat: Option<Decimal>) -> Option<Adjustment> {
+    if let Some(minimum) = tariff.min_price
+        && lines_total < minimum
+    {
+        return Some(Adjustment {
+            kind: AdjustmentKind::Minimum,
+            lines_total,
+            amount: minimum - lines_total,
+            vat,
+        });
+    }
+    if let Some(maximum) = tariff.max_price
+        && lines_total > maximum
+    {
+        return Some(Adjustment {
+            kind: AdjustmentKind::Maximum,
+            lines_total,
+            amount: maximum - lines_total,
+            vat,
+        });
+    }
+    None
+}
+
+/// Round an accumulated quantity up to a component's block size.
+///
+/// `actual` is in the dimension's base unit, and so is `step_size`: one Wh for
+/// energy — hence the factor of a thousand, which is exact in decimal — and one
+/// second for time. Rounding *up* is what the field does and it is always
+/// against the customer, which is why it produces a note.
+fn apply_step(
+    dimension: Dimension,
+    step_size: u32,
+    actual: Decimal,
+    notes: &mut Vec<RatingNote>,
+) -> Decimal {
+    if step_size <= 1 || dimension == Dimension::Flat {
         return actual;
     }
-    let per_base_unit = match component.dimension {
-        Dimension::Energy => Decimal::from(1000), // kWh → Wh
-        Dimension::Time | Dimension::ParkingTime => Decimal::from(3600), // h → s
+    let per_base_unit = match dimension {
+        Dimension::Energy => WH_PER_KWH,
+        Dimension::Time | Dimension::ParkingTime => Decimal::ONE,
         Dimension::Flat => return actual,
     };
-    let step = Decimal::from(component.step_size);
-    let in_base = actual * per_base_unit;
-    let blocks = (in_base / step).ceil();
+    let step = Decimal::from(step_size);
+    let blocks = (actual * per_base_unit / step).ceil();
     let billed = blocks * step / per_base_unit;
 
     if billed != actual {
+        // The note reports the displayed unit, because that is what a driver
+        // reads: "0.58 h rounded up to 1 h", not "2100 s rounded to 3600 s".
+        let to_display = match dimension {
+            Dimension::Time | Dimension::ParkingTime => SECONDS_PER_HOUR,
+            Dimension::Energy | Dimension::Flat => Decimal::ONE,
+        };
         notes.push(RatingNote::RoundedToBlock {
-            dimension: component.dimension,
-            actual,
-            billed,
+            dimension,
+            actual: actual / to_display,
+            billed: billed / to_display,
         });
     }
     billed
 }
 
-/// The first element whose restrictions the session satisfies.
-fn matching_element<'a>(tariff: &'a Tariff, session: &Chargeable) -> Option<&'a TariffElement> {
-    tariff.elements.iter().find(|e| element_matches(e, session))
+/// The first element whose restrictions the session state satisfies.
+#[must_use]
+pub fn matching_element<'a>(tariff: &'a Tariff, state: &SessionState) -> Option<&'a TariffElement> {
+    tariff.elements.iter().find(|e| element_matches(e, state))
 }
 
-/// Whether an element's restrictions admit a session.
+/// Whether an element's restrictions admit a session state.
 ///
 /// Public so [`crate::display`] selects the element by *this* rule rather than
 /// a parallel one. Two implementations of "which element applies" is exactly
 /// the drift this crate exists to prevent, one level down.
 #[must_use]
-pub fn element_matches(element: &TariffElement, session: &Chargeable) -> bool {
-    matches_restrictions(&element.restrictions, session)
+pub fn element_matches(element: &TariffElement, state: &SessionState) -> bool {
+    matches_restrictions(&element.restrictions, state)
 }
 
-fn matches_restrictions(r: &Restrictions, session: &Chargeable) -> bool {
+fn matches_restrictions(r: &Restrictions, state: &SessionState) -> bool {
+    // An element whose conditions cannot be checked is one whose prices must
+    // not be applied. Treating it as unrestricted would apply a night rate at
+    // noon on the strength of a field this build did not understand.
+    if !r.is_evaluable() {
+        return false;
+    }
     if r.is_unrestricted() {
         return true;
     }
 
-    let kwh = session.energy.kwh();
-    if r.min_kwh.is_some_and(|min| kwh < min) || r.max_kwh.is_some_and(|max| kwh >= max) {
-        return false;
-    }
-
-    let duration = session.charging_seconds + session.parking_seconds;
-    if r.min_duration_s.is_some_and(|min| duration < min)
-        || r.max_duration_s.is_some_and(|max| duration >= max)
+    if r.min_kwh.is_some_and(|min| state.energy_kwh < min)
+        || r.max_kwh.is_some_and(|max| state.energy_kwh >= max)
     {
         return false;
     }
 
-    if !r.days_of_week.is_empty() && !r.days_of_week.contains(&session.started_at.weekday()) {
+    if r.min_duration_s
+        .is_some_and(|min| state.elapsed_seconds < min)
+        || r.max_duration_s
+            .is_some_and(|max| state.elapsed_seconds >= max)
+    {
         return false;
     }
 
-    let clock = session.started_at.time();
+    if r.min_power_kw.is_some() || r.max_power_kw.is_some() {
+        // A period with no duration has no power, and a power restriction
+        // cannot be judged against it.
+        let Some(power) = state.power_kw else {
+            return false;
+        };
+        if r.min_power_kw.is_some_and(|min| power < min)
+            || r.max_power_kw.is_some_and(|max| power >= max)
+        {
+            return false;
+        }
+    }
+
+    let date = state.at.date();
+    if r.start_date.is_some_and(|from| date < from) || r.end_date.is_some_and(|to| date >= to) {
+        return false;
+    }
+
+    if !r.days_of_week.is_empty() && !r.days_of_week.contains(&state.at.weekday()) {
+        return false;
+    }
+
+    let clock = state.at.time();
     match (r.start_time, r.end_time) {
         (Some(from), Some(to)) if from <= to => {
             // An ordinary window inside one day.
@@ -410,6 +1258,10 @@ mod tests {
         Energy::from_kwh(dec(s)).unwrap()
     }
 
+    fn at(minute: i64) -> time::OffsetDateTime {
+        datetime!(2026-01-02 10:00 +1) + time::Duration::minutes(minute)
+    }
+
     fn ad_hoc(components: Vec<PriceComponent>) -> Tariff {
         Tariff::simple(
             "t".parse().unwrap(),
@@ -419,8 +1271,22 @@ mod tests {
         )
     }
 
+    fn tiered(elements: Vec<TariffElement>) -> Tariff {
+        Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            tax_included: TaxIncluded::Yes,
+            elements,
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        }
+    }
+
     fn session(energy: &str) -> Chargeable {
-        Chargeable::energy_only(kwh(energy), datetime!(2026-01-02 10:00 +1))
+        Chargeable::energy_only(kwh(energy), at(0), at(30)).unwrap()
     }
 
     #[test]
@@ -436,22 +1302,411 @@ mod tests {
     }
 
     #[test]
+    fn a_tiered_tariff_charges_each_tier_at_its_own_price() {
+        // The correction this rewrite exists for. "The first 10 kWh at 0.39,
+        // the rest at 0.59" — rated against the session total, a 30 kWh session
+        // would be repriced entirely at 0.59, including the ten kilowatt-hours
+        // the driver was quoted at 0.39.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("10")),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.59"))]),
+        ]);
+
+        // Three ten-kilowatt-hour periods: the first crosses into the second
+        // tier, the rest sit in it.
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(15), kwh("10")),
+            Period::charging(at(15), at(30), kwh("10")),
+            Period::charging(at(30), at(45), kwh("10")),
+        ])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.lines.len(), 2, "two prices, two lines: {:?}", r.lines);
+        assert_eq!(r.lines[0].unit_price, dec("0.39"));
+        assert_eq!(r.lines[0].quantity, dec("10"));
+        assert_eq!(r.lines[1].unit_price, dec("0.59"));
+        assert_eq!(r.lines[1].quantity, dec("20"));
+        assert_eq!(r.exact_total().amount(), dec("15.70")); // 3.90 + 11.80
+        assert_eq!(
+            r.quantity_for(Dimension::Energy),
+            dec("30"),
+            "and the energy still conserves across the tiers"
+        );
+    }
+
+    #[test]
+    fn a_tier_boundary_inside_a_period_is_cut_at_the_threshold() {
+        // The whole session as one period. Asking only at the start of it, the
+        // first tier matches and all thirty kilowatt-hours are charged at 0.39
+        // — a price that depends on how the caller happened to slice the
+        // session, which is not a price.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("10")),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.59"))]),
+        ]);
+
+        let one_period = Chargeable::new(vec![Period::charging(at(0), at(45), kwh("30"))]).unwrap();
+        let r = rate(&t, &one_period);
+
+        assert_eq!(r.lines.len(), 2, "{:?}", r.lines);
+        assert_eq!(r.lines[0].quantity, dec("10"), "exactly at the threshold");
+        assert_eq!(r.lines[0].unit_price, dec("0.39"));
+        assert_eq!(r.lines[1].quantity, dec("20"));
+        assert_eq!(r.lines[1].unit_price, dec("0.59"));
+        assert_eq!(r.exact_total().amount(), dec("15.70"));
+    }
+
+    #[test]
+    fn the_same_session_costs_the_same_however_it_is_sliced() {
+        // The property that makes the cut worth making: one period, three
+        // periods, or ninety-six quarter hours all come to the same money, and
+        // the energy still conserves across the tiers.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("10")),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("25")),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.59"))]),
+        ]);
+
+        let expected = rate(
+            &t,
+            &Chargeable::new(vec![Period::charging(at(0), at(48), kwh("36"))]).unwrap(),
+        )
+        .exact_total()
+        .amount();
+        // 10 × 0.39 + 15 × 0.49 + 11 × 0.59 = 3.90 + 7.35 + 6.49
+        assert_eq!(expected, dec("17.74"));
+
+        for slices in [2_i64, 3, 4, 6, 12, 16, 48] {
+            let step = 48 / slices;
+            let periods: Vec<Period> = (0..slices)
+                .map(|i| {
+                    Period::charging(
+                        at(i * step),
+                        at((i + 1) * step),
+                        kwh(&(dec("36") / Decimal::from(slices)).to_string()),
+                    )
+                })
+                .collect();
+            let r = rate(&t, &Chargeable::new(periods).unwrap());
+            assert_eq!(
+                r.exact_total().amount(),
+                expected,
+                "{slices} slices priced differently"
+            );
+            assert_eq!(
+                r.quantity_for(Dimension::Energy),
+                dec("36"),
+                "{slices} slices lost energy across the tiers"
+            );
+        }
+    }
+
+    #[test]
+    fn a_time_of_day_boundary_inside_a_period_is_cut_too() {
+        // A night rate that begins at 22:00 begins at 22:00, whatever periods
+        // the caller hands over. Judged only at a period's start, one period
+        // running 21:00 to 23:00 takes the day rate throughout — a quarter of
+        // the session, decided by slicing.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.30"))],
+                restrictions: Restrictions {
+                    start_time: Some(time::macros::time!(22:00)),
+                    end_time: Some(time::macros::time!(06:00)),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.50"))]),
+        ]);
+
+        let evening =
+            |minute: i64| datetime!(2026-01-02 21:00 +1) + time::Duration::minutes(minute);
+
+        // 21:00 → 23:00, 20 kWh, as one period and as two. 10 × 0.50 + 10 × 0.30.
+        let coarse =
+            Chargeable::new(vec![Period::charging(evening(0), evening(120), kwh("20"))]).unwrap();
+        let fine = Chargeable::new(vec![
+            Period::charging(evening(0), evening(60), kwh("10")),
+            Period::charging(evening(60), evening(120), kwh("10")),
+        ])
+        .unwrap();
+
+        assert_eq!(rate(&t, &coarse).exact_total().amount(), dec("8.00"));
+        assert_eq!(
+            rate(&t, &coarse).exact_total(),
+            rate(&t, &fine).exact_total(),
+            "a price that depends on the granularity of the input is not a price"
+        );
+        // Two prices applied, so a tiered invoice has two lines to show.
+        assert_eq!(rate(&t, &coarse).lines.len(), 2);
+        assert_eq!(
+            rate(&t, &coarse).quantity_for(Dimension::Energy),
+            dec("20"),
+            "the cut divides the session, it does not change it"
+        );
+    }
+
+    #[test]
+    fn a_clock_boundary_is_cut_on_every_day_a_period_spans() {
+        // A 22:00 threshold is a threshold on every day there is. An overnight
+        // session crosses 22:00 once and 06:00 once, on different dates, and
+        // walking only the first day would leave the morning boundary uncut.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.30"))],
+                restrictions: Restrictions {
+                    start_time: Some(time::macros::time!(22:00)),
+                    end_time: Some(time::macros::time!(06:00)),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.50"))]),
+        ]);
+
+        // 21:00 Friday → 07:00 Saturday: one hour day, eight hours night, one
+        // hour day. 1 kWh an hour, so 2 × 0.50 + 8 × 0.30 = 3.40.
+        let start = datetime!(2026-01-02 21:00 +1);
+        let s = Chargeable::new(vec![Period::charging(
+            start,
+            start + time::Duration::hours(10),
+            kwh("10"),
+        )])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.exact_total().amount(), dec("3.40"));
+        assert_eq!(r.quantity_for(Dimension::Energy), dec("10"));
+    }
+
+    #[test]
+    fn a_date_restriction_is_cut_at_its_own_midnight() {
+        // A price that starts on the third does not reach back into the second.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.60"))],
+                restrictions: Restrictions {
+                    start_date: Some(time::macros::date!(2026 - 01 - 03)),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.40"))]),
+        ]);
+
+        // 23:00 → 01:00 across midnight, 2 kWh. One at 0.40, one at 0.60.
+        let start = datetime!(2026-01-02 23:00 +1);
+        let s = Chargeable::new(vec![Period::charging(
+            start,
+            start + time::Duration::hours(2),
+            kwh("2"),
+        )])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.exact_total().amount(), dec("1.00"));
+        assert_eq!(r.quantity_for(Dimension::Energy), dec("2"));
+    }
+
+    #[test]
+    fn a_duration_threshold_inside_a_period_is_cut_too() {
+        // "The first thirty minutes are free" has the same shape as an energy
+        // tier and the same failure without the cut.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Time, dec("0.00"))],
+                restrictions: Restrictions {
+                    max_duration_s: Some(1800),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Time, dec("6.00"))]),
+        ]);
+
+        // One hour as a single period: thirty free minutes, then thirty at
+        // 6.00 an hour.
+        let s = Chargeable::new(vec![Period::charging(at(0), at(60), kwh("20"))]).unwrap();
+        let r = rate(&t, &s);
+        assert_eq!(r.amount_for(Dimension::Time), Some(dec("3.00")));
+        // Two lines, because the free half hour is a term of the price the
+        // driver is entitled to see rather than a gap in it.
+        assert_eq!(r.lines.len(), 2, "{:?}", r.lines);
+        assert_eq!(r.lines[0].unit_price, dec("0.00"));
+        assert_eq!(r.lines[0].quantity, dec("0.5"));
+        assert_eq!(r.lines[1].unit_price, dec("6.00"));
+        assert_eq!(r.lines[1].quantity, dec("0.5"));
+        assert_eq!(
+            r.quantity_for(Dimension::Time),
+            dec("1.0"),
+            "one whole hour"
+        );
+    }
+
+    #[test]
+    fn thresholds_landing_in_the_same_second_do_not_produce_negative_energy() {
+        // An energy threshold and a duration threshold can land in the same
+        // second and disagree about how much had been delivered by it. Emitting
+        // both would give one piece a negative quantity; the sweep keeps the
+        // first and the session still conserves.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("5.001")),
+                    max_duration_s: Some(450),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.59"))]),
+        ]);
+        let s = Chargeable::new(vec![Period::charging(at(0), at(15), kwh("10"))]).unwrap();
+        let r = rate(&t, &s);
+
+        assert_eq!(r.quantity_for(Dimension::Energy), dec("10"));
+        assert!(
+            r.lines.iter().all(|l| l.quantity >= Decimal::ZERO),
+            "{:?}",
+            r.lines
+        );
+    }
+
+    #[test]
+    fn a_period_no_threshold_touches_is_passed_through_untouched() {
+        // Sub-second remainders survive, because rebuilding a whole period out
+        // of whole seconds would drop them.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("100")),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.59"))]),
+        ]);
+        let odd_end = at(15) + time::Duration::milliseconds(500);
+        let s = Chargeable::new(vec![Period::charging(at(0), odd_end, kwh("10"))]).unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.lines.len(), 1);
+        assert_eq!(r.lines[0].unit_price, dec("0.39"));
+        assert_eq!(r.quantity_for(Dimension::Energy), dec("10"));
+    }
+
+    #[test]
+    fn cutting_a_period_conserves_its_energy_and_its_duration() {
+        // Awkward on purpose: thresholds that do not land on a whole second,
+        // and a total that does not divide.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("3.7")),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![
+                PriceComponent::new(Dimension::Energy, dec("0.59")),
+                PriceComponent::new(Dimension::Time, dec("1.20")),
+            ]),
+        ]);
+        let s = Chargeable::new(vec![Period::charging(at(0), at(21), kwh("13.37"))]).unwrap();
+        let r = rate(&t, &s);
+
+        assert_eq!(
+            r.quantity_for(Dimension::Energy),
+            dec("13.37"),
+            "every kilowatt-hour is priced exactly once"
+        );
+        assert_eq!(
+            r.lines
+                .iter()
+                .find(|l| l.dimension == Dimension::Energy && l.unit_price == dec("0.39"))
+                .map(|l| l.quantity),
+            Some(dec("3.7")),
+            "the cut lands on the threshold, not near it"
+        );
+    }
+
+    #[test]
+    fn a_flat_fee_is_charged_once_however_many_periods_there_are() {
+        let t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")),
+            PriceComponent::new(Dimension::Flat, dec("0.50")),
+        ]);
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(15), kwh("5")),
+            Period::charging(at(15), at(30), kwh("5")),
+            Period::charging(at(30), at(45), kwh("5")),
+        ])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.amount_for(Dimension::Flat), Some(dec("0.50")));
+        assert_eq!(r.quantity_for(Dimension::Flat), Decimal::ONE);
+    }
+
+    #[test]
+    fn charging_time_and_occupancy_are_different_minutes() {
+        // The distinction AFIR Art. 5(4) turns on: an occupancy fee is a price
+        // for *not* charging, and folding them together charges twice for one
+        // minute.
+        let t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")),
+            PriceComponent::new(Dimension::Time, dec("3.60")),
+            PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
+        ]);
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(60), kwh("20")),
+            Period::parked(at(60), at(90)),
+        ])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.amount_for(Dimension::Time), Some(dec("3.60")), "one hour");
+        assert_eq!(
+            r.amount_for(Dimension::ParkingTime),
+            Some(dec("3.00")),
+            "half an hour"
+        );
+        assert_eq!(s.charging_seconds(), 3600);
+        assert_eq!(s.parking_seconds(), 1800);
+    }
+
+    #[test]
     fn every_term_of_the_total_is_a_line() {
         let t = ad_hoc(vec![
             PriceComponent::new(Dimension::Energy, dec("0.49")),
             PriceComponent::new(Dimension::Flat, dec("0.50")),
             PriceComponent::new(Dimension::Time, dec("0.06")),
         ]);
-        let mut s = session("10");
-        s.charging_seconds = 1800;
-
-        let r = rate(&t, &s);
+        let r = rate(&t, &session("10"));
         assert_eq!(r.lines.len(), 3);
         assert!(r.lines_sum_to_total());
-        assert_eq!(
-            r.lines.iter().map(|l| l.amount).sum::<Decimal>(),
-            r.exact_total().amount()
-        );
+        assert_eq!(r.lines_total(), r.exact_total().amount());
     }
 
     #[test]
@@ -462,9 +1717,11 @@ mod tests {
             PriceComponent::new(Dimension::Energy, dec("0.49")),
             PriceComponent::new(Dimension::Time, dec("0.06")),
         ]);
-        let mut s = session("10");
-        s.charging_seconds = 1800;
-        s.parking_seconds = 600;
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(30), kwh("10")),
+            Period::parked(at(30), at(40)),
+        ])
+        .unwrap();
 
         let r = rate(&t, &s);
         assert_eq!(
@@ -486,32 +1743,27 @@ mod tests {
             PriceComponent::new(Dimension::ParkingTime, dec("0.10")),
             PriceComponent::new(Dimension::Flat, dec("0.50")),
         ]);
-        // No parking time at all: no parking line, rather than a line of zero.
         let r = rate(&t, &session("10"));
         assert_eq!(r.amount_for(Dimension::ParkingTime), None);
         assert_eq!(r.amount_for(Dimension::Flat), Some(dec("0.50")));
     }
 
     #[test]
-    fn seconds_become_exact_hours() {
-        let t = ad_hoc(vec![PriceComponent::new(Dimension::Time, dec("6.00"))]);
-        let mut s = session("0");
-        s.charging_seconds = 3600;
-        assert_eq!(rate(&t, &s).exact_total().amount(), dec("6.00"));
-
-        s.charging_seconds = 1800;
-        assert_eq!(rate(&t, &s).exact_total().amount(), dec("3.000"));
-    }
-
-    #[test]
-    fn block_rounding_is_reported_because_it_favours_the_operator() {
-        // A kWh billed in blocks of 1000 Wh: 10.4 kWh becomes 11.
+    fn block_rounding_applies_once_to_the_session_not_once_per_period() {
+        // Rounding every quarter hour up to a block would bill an eight-slot
+        // session eight blocks it never used.
         let t = ad_hoc(vec![
             PriceComponent::new(Dimension::Energy, dec("0.50")).with_step_size(1000),
         ]);
-        let r = rate(&t, &session("10.4"));
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(15), kwh("3.4")),
+            Period::charging(at(15), at(30), kwh("3.5")),
+            Period::charging(at(30), at(45), kwh("3.5")),
+        ])
+        .unwrap();
 
-        assert_eq!(r.lines[0].quantity, dec("11"));
+        let r = rate(&t, &s);
+        assert_eq!(r.lines[0].quantity, dec("11"), "10.4 kWh billed as 11");
         assert_eq!(r.exact_total().amount(), dec("5.50"));
         assert!(
             r.notes
@@ -519,7 +1771,6 @@ mod tests {
                 .any(|n| matches!(n, RatingNote::RoundedToBlock { .. })),
             "rounding up is always against the customer, so it is said out loud"
         );
-        assert!(r.notes[0].to_string().contains("10.4"));
     }
 
     #[test]
@@ -531,32 +1782,217 @@ mod tests {
     }
 
     #[test]
-    fn a_minimum_moves_the_total_and_says_so() {
+    fn a_minimum_moves_the_total_and_shows_its_own_term() {
         let mut t = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
         t.min_price = Some(dec("5.00"));
         let r = rate(&t, &session("1"));
 
         assert_eq!(r.total().amount(), dec("5.00"));
         assert!(!r.lines_sum_to_total(), "and the report admits it");
+        let adjustment = r.adjustment.expect("a minimum was applied");
+        assert_eq!(adjustment.kind, AdjustmentKind::Minimum);
+        assert_eq!(adjustment.amount, dec("4.51"));
+        assert_eq!(adjustment.lines_total, dec("0.49"));
+    }
+
+    #[test]
+    fn a_minimum_on_a_session_with_no_lines_still_carries_its_tax() {
+        // The case a minimum charge exists *for*: a driver plugged in, drew
+        // nothing and left. There is no largest line to inherit a rate from, and
+        // falling back to none put the whole charge in the zero-rate group —
+        // €0.50 net, €0.00 tax, on a tariff that is 19 % throughout. An invoice
+        // built from that under-declares its own VAT.
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+        ]);
+        t.min_price = Some(dec("0.50"));
+        let r = rate(&t, &session("0"));
+
+        assert!(r.lines.is_empty(), "nothing was delivered to charge for");
+        assert_eq!(
+            r.adjustment.expect("a minimum was applied").vat,
+            Some(dec("19"))
+        );
+
+        let summary = r.tax_summary();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].rate, dec("19"));
+        assert_eq!(summary[0].gross, dec("0.50"), "the driver still pays 0.50");
+        assert_eq!(summary[0].net, dec("0.42"));
+        assert_eq!(summary[0].tax, dec("0.08"));
+        assert_eq!(r.gross().amount(), dec("0.50"));
+    }
+
+    #[test]
+    fn a_minimum_under_rates_that_disagree_inherits_none_rather_than_guessing() {
+        // The honest half of the same rule. Two components at two rates and no
+        // line to choose between them is a question for the tariff's author.
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+            PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_vat(dec("7")),
+        ]);
+        t.min_price = Some(dec("5.00"));
+        // A charging period that delivered nothing: no energy to charge for and
+        // no occupancy either, so neither component produces a line.
+        let r = rate(&t, &session("0"));
+
+        assert!(r.lines.is_empty(), "{:?}", r.lines);
+        assert_eq!(r.adjustment.expect("a minimum was applied").vat, None);
+    }
+
+    #[test]
+    fn a_vat_rate_with_no_split_is_reported_rather_than_a_panic() {
+        // `net × (1 + rate/100)` is the gross, so at exactly −100 % the factor
+        // is zero and no net grosses up to a non-zero amount. `Decimal` answers
+        // a division by zero with a panic; a tariff from a roaming partner is
+        // somebody else's document, so the rate is untrusted input and the
+        // rating has to survive it.
+        let t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("-100")),
+        ]);
+        let r = rate(&t, &session("10"));
+
         assert!(
-            r.notes
-                .iter()
-                .any(|n| matches!(n, RatingNote::RaisedToMinimum { .. }))
+            r.reasons().any(|note| note.contains("no net and tax")),
+            "{:?}",
+            r.reasons().collect::<Vec<_>>()
+        );
+        // The price is still the price — only the split is unavailable.
+        assert_eq!(r.total().amount(), dec("4.90"));
+        let summary = r.tax_summary();
+        assert_eq!(summary[0].gross, dec("4.90"));
+        assert_eq!(summary[0].net, dec("4.90"), "reported whole");
+        assert_eq!(summary[0].tax, Decimal::ZERO);
+    }
+
+    #[test]
+    fn the_unsplittable_rate_is_only_unsplittable_on_a_gross_tariff() {
+        // The factor is a *divisor* only when the prices are gross. On a net
+        // tariff it is a multiplier, and zero multiplies fine — so the note
+        // that says "reported whole" must not be attached to a breakdown that
+        // was computed exactly. A partner reads these notes to decide whether a
+        // taxable amount can be justified, and a false one is worse than none.
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("-100")),
+        ]);
+        t.tax_included = TaxIncluded::No;
+        let r = rate(&t, &session("10"));
+
+        assert!(
+            !r.reasons().any(|note| note.contains("no net and tax")),
+            "{:?}",
+            r.reasons().collect::<Vec<_>>()
+        );
+        let summary = r.tax_summary();
+        assert_eq!(summary[0].net, dec("4.90"));
+        assert_eq!(summary[0].gross, Decimal::ZERO, "net × 0 is defined");
+        assert_eq!(summary[0].tax, dec("-4.90"));
+
+        // …and a party outside a tax regime never reads the rate at all.
+        t.tax_included = TaxIncluded::NotApplicable;
+        assert!(
+            !rate(&t, &session("10"))
+                .reasons()
+                .any(|note| note.contains("no net and tax"))
         );
     }
 
     #[test]
-    fn a_maximum_caps_the_total_and_says_so() {
+    fn a_maximum_caps_the_total_and_shows_its_own_term() {
         let mut t = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
         t.max_price = Some(dec("10.00"));
         let r = rate(&t, &session("100"));
 
         assert_eq!(r.total().amount(), dec("10.00"));
-        assert!(
-            r.notes
-                .iter()
-                .any(|n| matches!(n, RatingNote::CappedAtMaximum { .. }))
+        let adjustment = r.adjustment.expect("a maximum was applied");
+        assert_eq!(adjustment.kind, AdjustmentKind::Maximum);
+        assert_eq!(adjustment.amount, dec("-39.00"));
+    }
+
+    #[test]
+    fn gross_prices_have_their_tax_stripped_out() {
+        // The German case: 19 % included, and the invoice has to show the
+        // taxable amount separately [UStG §14].
+        let t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+        ]);
+        let r = rate(&t, &session("29.500"));
+
+        let summary = r.tax_summary();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].rate, dec("19"));
+        assert_eq!(summary[0].gross, dec("14.46"));
+        assert_eq!(summary[0].net, dec("12.15"));
+        assert_eq!(summary[0].tax, dec("2.31"));
+        assert_eq!(r.gross().to_string(), "14.46 EUR");
+        assert_eq!((r.net().amount() + r.tax().amount()), r.gross().amount());
+    }
+
+    #[test]
+    fn net_prices_have_the_tax_added_on() {
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("1.00")).with_vat(dec("19")),
+        ]);
+        t.tax_included = TaxIncluded::No;
+        let r = rate(&t, &session("100"));
+
+        assert_eq!(
+            r.total().to_string(),
+            "100.00 EUR",
+            "the stated basis is net"
         );
+        assert_eq!(r.net().amount(), dec("100.00"));
+        assert_eq!(r.tax().amount(), dec("19.00"));
+        assert_eq!(r.gross().amount(), dec("119.00"));
+    }
+
+    #[test]
+    fn two_vat_rates_produce_two_taxable_amounts() {
+        // Lawful and not rare: delivered electricity and a service fee can sit
+        // in different categories, and EN 16931 wants both.
+        let t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.50")).with_vat(dec("19")),
+            PriceComponent::new(Dimension::Flat, dec("1.07")).with_vat(dec("7")),
+        ]);
+        let r = rate(&t, &session("100"));
+
+        let summary = r.tax_summary();
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0].rate, dec("7"));
+        assert_eq!(summary[0].gross, dec("1.07"));
+        assert_eq!(summary[0].net, dec("1.00"));
+        assert_eq!(summary[1].rate, dec("19"));
+        assert_eq!(summary[1].gross, dec("50.00"));
+        assert_eq!(r.gross().amount(), dec("51.07"));
+    }
+
+    #[test]
+    fn an_untaxed_component_lands_in_the_zero_rate_category() {
+        let t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.50")).with_vat(dec("19")),
+            PriceComponent::new(Dimension::Flat, dec("2.00")),
+        ]);
+        let r = rate(&t, &session("10"));
+        let summary = r.tax_summary();
+        assert_eq!(summary.len(), 2);
+        assert_eq!(summary[0].rate, Decimal::ZERO);
+        assert_eq!(summary[0].tax, Decimal::ZERO);
+        assert_eq!(summary[0].net, dec("2.00"));
+    }
+
+    #[test]
+    fn an_adjustment_is_taxed_at_the_rate_of_the_largest_line() {
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+        ]);
+        t.min_price = Some(dec("5.00"));
+        let r = rate(&t, &session("1"));
+
+        let summary = r.tax_summary();
+        assert_eq!(summary.len(), 1, "the minimum joins the line it tops up");
+        assert_eq!(summary[0].rate, dec("19"));
+        assert_eq!(summary[0].gross, dec("5.00"));
+        assert_eq!(r.adjustment.unwrap().vat, Some(dec("19")));
     }
 
     #[test]
@@ -572,51 +2008,139 @@ mod tests {
         };
         let day =
             TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
-        let t = Tariff {
-            id: "t".parse().unwrap(),
-            currency: Currency::EUR,
-            kind: TariffKind::AdHoc,
-            tax_included: TaxIncluded::Yes,
-            elements: vec![night, day],
-            min_price: None,
-            max_price: None,
-        };
+        let t = tiered(vec![night, day]);
 
-        let at_23 = Chargeable::energy_only(kwh("10"), datetime!(2026-01-02 23:00 +1));
+        let at_23 = Chargeable::energy_only(
+            kwh("10"),
+            datetime!(2026-01-02 23:00 +1),
+            datetime!(2026-01-02 23:30 +1),
+        )
+        .unwrap();
         assert_eq!(rate(&t, &at_23).lines[0].unit_price, dec("0.29"));
 
-        let at_03 = Chargeable::energy_only(kwh("10"), datetime!(2026-01-02 03:00 +1));
+        let at_03 = Chargeable::energy_only(
+            kwh("10"),
+            datetime!(2026-01-02 03:00 +1),
+            datetime!(2026-01-02 03:30 +1),
+        )
+        .unwrap();
         assert_eq!(rate(&t, &at_03).lines[0].unit_price, dec("0.29"));
 
-        let at_noon = Chargeable::energy_only(kwh("10"), datetime!(2026-01-02 12:00 +1));
+        let at_noon = Chargeable::energy_only(
+            kwh("10"),
+            datetime!(2026-01-02 12:00 +1),
+            datetime!(2026-01-02 12:30 +1),
+        )
+        .unwrap();
         assert_eq!(rate(&t, &at_noon).lines[0].unit_price, dec("0.49"));
     }
 
     #[test]
-    fn energy_restrictions_select_the_element() {
-        let first_ten = TariffElement {
-            components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+    fn a_session_that_crosses_into_the_night_rate_is_priced_on_both_sides() {
+        // Which the whole-session reading cannot express at all.
+        let night = TariffElement {
+            components: vec![PriceComponent::new(Dimension::Energy, dec("0.29"))],
             restrictions: Restrictions {
-                max_kwh: Some(dec("10")),
+                start_time: Some(time::macros::time!(22:00)),
+                end_time: Some(time::macros::time!(06:00)),
+                ..Restrictions::default()
+            },
+        };
+        let day =
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        let t = tiered(vec![night, day]);
+
+        let s = Chargeable::new(vec![
+            Period::charging(
+                datetime!(2026-01-02 21:30 +1),
+                datetime!(2026-01-02 22:00 +1),
+                kwh("10"),
+            ),
+            Period::charging(
+                datetime!(2026-01-02 22:00 +1),
+                datetime!(2026-01-02 22:30 +1),
+                kwh("10"),
+            ),
+        ])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.lines.len(), 2);
+        assert_eq!(r.amount_for(Dimension::Energy), Some(dec("7.80"))); // 4.90 + 2.90
+    }
+
+    #[test]
+    fn a_power_restriction_selects_the_element() {
+        let fast = TariffElement {
+            components: vec![PriceComponent::new(Dimension::Energy, dec("0.79"))],
+            restrictions: Restrictions {
+                min_power_kw: Some(dec("50")),
+                ..Restrictions::default()
+            },
+        };
+        let slow =
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        let t = tiered(vec![fast, slow]);
+
+        // 30 kWh in a quarter hour is 120 kW.
+        let quick = Chargeable::new(vec![Period::charging(at(0), at(15), kwh("30"))]).unwrap();
+        assert_eq!(rate(&t, &quick).lines[0].unit_price, dec("0.79"));
+
+        // 3 kWh in a quarter hour is 12 kW.
+        let gentle = Chargeable::new(vec![Period::charging(at(0), at(15), kwh("3"))]).unwrap();
+        assert_eq!(rate(&t, &gentle).lines[0].unit_price, dec("0.49"));
+    }
+
+    #[test]
+    fn a_date_window_selects_the_element() {
+        let winter = TariffElement {
+            components: vec![PriceComponent::new(Dimension::Energy, dec("0.59"))],
+            restrictions: Restrictions {
+                start_date: Some(time::macros::date!(2026 - 01 - 01)),
+                end_date: Some(time::macros::date!(2026 - 03 - 01)),
                 ..Restrictions::default()
             },
         };
         let rest =
-            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.59"))]);
-        let t = Tariff {
-            id: "t".parse().unwrap(),
-            currency: Currency::EUR,
-            kind: TariffKind::AdHoc,
-            tax_included: TaxIncluded::Yes,
-            elements: vec![first_ten, rest],
-            min_price: None,
-            max_price: None,
-        };
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        let t = tiered(vec![winter, rest]);
 
-        assert_eq!(rate(&t, &session("5")).lines[0].unit_price, dec("0.39"));
-        assert_eq!(rate(&t, &session("50")).lines[0].unit_price, dec("0.59"));
-        // The boundary is exclusive at the top, so 10 kWh falls to the second.
         assert_eq!(rate(&t, &session("10")).lines[0].unit_price, dec("0.59"));
+
+        let in_march = Chargeable::energy_only(
+            kwh("10"),
+            datetime!(2026-03-02 10:00 +1),
+            datetime!(2026-03-02 10:30 +1),
+        )
+        .unwrap();
+        assert_eq!(rate(&t, &in_march).lines[0].unit_price, dec("0.49"));
+    }
+
+    #[test]
+    fn an_element_with_an_unevaluable_restriction_is_skipped_not_assumed_open() {
+        // A partner sends a restriction this build has never heard of. Treating
+        // it as absent applies the price under conditions nobody checked.
+        let unknown = TariffElement {
+            components: vec![PriceComponent::new(Dimension::Energy, dec("0.19"))],
+            restrictions: Restrictions {
+                unevaluable: vec!["reservation=RESERVATION_EXPIRES".to_owned()],
+                ..Restrictions::default()
+            },
+        };
+        let ordinary =
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        let t = tiered(vec![unknown, ordinary]);
+
+        let r = rate(&t, &session("10"));
+        assert_eq!(r.lines[0].unit_price, dec("0.49"));
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| matches!(n, RatingNote::UnevaluableRestriction { .. })),
+            "{:?}",
+            r.notes
+        );
+        assert!(r.reasons().any(|s| s.contains("reservation")));
     }
 
     #[test]
@@ -628,49 +2152,71 @@ mod tests {
                 ..Restrictions::default()
             },
         };
-        let t = Tariff {
-            id: "t".parse().unwrap(),
-            currency: Currency::EUR,
-            kind: TariffKind::AdHoc,
-            tax_included: TaxIncluded::Yes,
-            elements: vec![
-                weekend,
-                TariffElement::unrestricted(vec![PriceComponent::new(
-                    Dimension::Energy,
-                    dec("0.49"),
-                )]),
-            ],
-            min_price: None,
-            max_price: None,
-        };
+        let t = tiered(vec![
+            weekend,
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]),
+        ]);
 
         // 2026-01-02 is a Friday; 2026-01-03 a Saturday.
-        let friday = Chargeable::energy_only(kwh("10"), datetime!(2026-01-02 10:00 +1));
-        let saturday = Chargeable::energy_only(kwh("10"), datetime!(2026-01-03 10:00 +1));
-        assert_eq!(rate(&t, &friday).lines[0].unit_price, dec("0.49"));
+        assert_eq!(rate(&t, &session("10")).lines[0].unit_price, dec("0.49"));
+        let saturday = Chargeable::energy_only(
+            kwh("10"),
+            datetime!(2026-01-03 10:00 +1),
+            datetime!(2026-01-03 10:30 +1),
+        )
+        .unwrap();
         assert_eq!(rate(&t, &saturday).lines[0].unit_price, dec("0.29"));
     }
 
     #[test]
-    fn nothing_matching_charges_nothing_and_says_so() {
-        let t = Tariff {
-            id: "t".parse().unwrap(),
-            currency: Currency::EUR,
-            kind: TariffKind::AdHoc,
-            tax_included: TaxIncluded::Yes,
-            elements: vec![TariffElement {
-                components: vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
-                restrictions: Restrictions {
-                    min_kwh: Some(dec("100")),
-                    ..Restrictions::default()
-                },
-            }],
-            min_price: None,
-            max_price: None,
-        };
+    fn a_period_nothing_matches_is_named_rather_than_swallowed() {
+        let t = tiered(vec![TariffElement {
+            components: vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+            restrictions: Restrictions {
+                min_kwh: Some(dec("100")),
+                ..Restrictions::default()
+            },
+        }]);
         let r = rate(&t, &session("10"));
         assert!(r.lines.is_empty());
         assert_eq!(r.total().amount(), Decimal::ZERO);
-        assert!(r.notes.contains(&RatingNote::NoMatchingElement));
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| matches!(n, RatingNote::NoMatchingElement { .. }))
+        );
+        assert!(r.reasons().any(|s| s.contains("was not charged")));
+    }
+
+    #[test]
+    fn overlapping_periods_are_refused_before_anything_is_billed_twice() {
+        let err = Chargeable::new(vec![
+            Period::charging(at(0), at(30), kwh("10")),
+            Period::charging(at(15), at(45), kwh("10")),
+        ])
+        .unwrap_err();
+        assert!(matches!(err, ChargeableError::Overlap { .. }));
+        assert!(err.to_string().contains("charged twice"));
+
+        assert!(matches!(
+            Chargeable::new(vec![]),
+            Err(ChargeableError::Empty)
+        ));
+        assert!(matches!(
+            Chargeable::energy_only(kwh("1"), at(30), at(0)),
+            Err(ChargeableError::EndsBeforeItStarts { .. })
+        ));
+    }
+
+    #[test]
+    fn periods_are_sorted_so_the_cumulative_state_is_the_real_one() {
+        let s = Chargeable::new(vec![
+            Period::charging(at(15), at(30), kwh("5")),
+            Period::charging(at(0), at(15), kwh("10")),
+        ])
+        .unwrap();
+        assert_eq!(s.started_at(), at(0));
+        assert_eq!(s.ended_at(), at(30));
+        assert_eq!(s.total_energy(), kwh("15"));
     }
 }

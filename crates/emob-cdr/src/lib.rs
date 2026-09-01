@@ -18,22 +18,28 @@
 //!   at once, separated into what blocks settlement and what is worth knowing,
 //!   and nothing repaired behind the caller's back.
 //!
-//! # The cross-check nobody runs
+//! # The two cross-checks nobody runs
 //!
-//! A session records *how* it was authorised; the signed meter record states
-//! *how strongly* the driver was identified `[OCMF Tab. 11]`. Those are two
-//! statements about one event, and they can disagree — a session claiming Plug
-//! & Charge whose signed record reports a bare RFID UID, for instance. When
-//! they do, the one with a signature behind it is the one to believe, and the
-//! CDR is refused rather than billed at the stronger claim's tariff.
+//! **Who was charging.** A session records *how* it was authorised; the signed
+//! meter record states *how strongly* the driver was identified
+//! `[OCMF Tab. 11]`. Those are two statements about one event, and they can
+//! disagree — a session claiming Plug & Charge whose signed record reports a
+//! bare RFID UID, for instance. When they do, the one with a signature behind
+//! it is the one to believe, and the CDR is refused rather than billed at the
+//! stronger claim's tariff.
 //!
-//! ```
-//! # use emob_cdr::{CdrBuilder, EvidenceRef};
-//! # use emob_session::IdentificationStrength;
-//! // An ad-hoc session — a card at the point — cannot have established a
-//! // secure, certificate-backed identity. Building this CDR fails.
-//! # let _ = IdentificationStrength::Secure;
-//! ```
+//! The strength is read off the evidence by
+//! [`EvidenceRef::from_evidence`](cdr::EvidenceRef::from_evidence), never
+//! filled in by a caller: a hand-filled field can be filled with whatever value
+//! makes the record build, which is the opposite of a check.
+//!
+//! **Whether a duration may be billed at all.** OCMF states how far the
+//! station's clock can be trusted `[OCMF Tab. 19]` and flags a time value as
+//! unusable separately from an energy one. A tariff charging per minute — the
+//! occupancy fee `[AFIR Art. 5(4)]` permits at 50 kW and above — is billing a
+//! duration, and a duration billed off a clock the signed record does not vouch
+//! for is a number nobody can defend. The energy is unaffected, so the builder
+//! names the fix: price the session per kWh.
 //!
 //! # No I/O, no clock
 //!
@@ -50,7 +56,7 @@ pub mod error;
 pub mod ledger;
 pub mod validate;
 
-pub use cdr::{Cdr, CdrBuilder, CdrKey, ChargingPeriod, EvidenceRef};
+pub use cdr::{Cdr, CdrBuilder, CdrKey, ChargingPeriod, Cost, EvidenceRef};
 pub use error::CdrError;
 pub use ledger::{Acceptance, CdrLedger};
 pub use validate::{Finding, Report, Severity, validate};

@@ -13,7 +13,8 @@
 //!   construction** and records for every slot whether it was measured or
 //!   interpolated.
 //! - [`session`] — the session itself, as a state machine that refuses what the
-//!   protocol forbids.
+//!   protocol forbids and keeps **when** each state was entered, because
+//!   "suspended" is an interval a tariff prices rather than a status light.
 //!
 //! # The one idea worth reading about
 //!
@@ -60,7 +61,10 @@ pub mod meter;
 pub mod session;
 pub mod split;
 
-pub use auth::{AuthError, AuthPath, Authorization, IdentificationStrength, Subject, TokenRef};
+pub use auth::{AuthError, AuthPath, Authorization, Subject, TokenRef};
 pub use meter::{MeterError, MeterReading, MeterSeries, ReadingContext};
-pub use session::{EndReason, Session, SessionError, SessionState};
-pub use split::{Provenance, QuarterHour, SessionSplit, Slot, SplitError};
+pub use session::{EndReason, Session, SessionError, SessionState, StateChange};
+pub use split::{Provenance, SessionSplit, Slot, SplitError};
+// The settlement grid is market vocabulary and lives in `emob-core`; it is
+// re-exported because every consumer of a `Slot` needs it in the same breath.
+pub use emob_core::QuarterHour;
