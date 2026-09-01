@@ -1,7 +1,7 @@
 [package]
 name        = "emob-poi"
 description = "The charge point register and its national access point feed: a DATEX II AFIR Recharging publication generated from the same tariff that prices the session, so the price a route planner shows and the price on the invoice cannot disagree"
-keywords    = ["ev-charging", "afir", "datex2", "charging-infrastructure", "open-data"]
+keywords    = ["ev-charging", "afir", "datex2", "mobilithek", "open-data"]
 categories  = ["science", "data-structures"]
 readme      = "README.md"
 
