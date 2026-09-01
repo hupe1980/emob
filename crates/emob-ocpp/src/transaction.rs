@@ -15,6 +15,24 @@
 //! protocol and every number from the signature, which is the seam rule stated
 //! as a construction rather than as a policy.
 //!
+//! # …except where the signature has a second opinion
+//!
+//! One row of that table is not quite a monopoly. `[OCMF Tab. 7, TX]` defines
+//! `S` — "Suspended = Transaction active, but currently not charging" — so a
+//! signature component *can* state the occupancy interval, and some do.
+//!
+//! It does not replace the protocol's account, and the reason is in the
+//! specification: `S` is a marker a station "can be used optionally", so its
+//! absence says nothing and cannot be read as a contradiction. Most of the fleet
+//! never emits one.
+//!
+//! Where it *is* emitted and disagrees, that is worth an operator's attention
+//! rather than a silent preference for either side: `[AFIR Art. 5(4)]` prices
+//! those minutes differently, and the party that issues the invoice controls
+//! only one of the two accounts. [`Assembled::charging_disagreements`] is that
+//! comparison — the same shape as the CDR layer's check of a claimed
+//! authorisation against the identification the record actually signed.
+//!
 //! # A retry is not a reading
 //!
 //! OCPP transports retry. A `MeterValues.req` that does not get its
@@ -182,6 +200,47 @@ pub struct Transaction {
     pub events: Vec<TransactionEvent>,
 }
 
+/// Where the protocol and the signature tell different stories about whether
+/// the vehicle was charging.
+///
+/// Both sources describe one interval and only one of them is signed. OCPP's
+/// `chargingState` is the operator's own assertion; `[OCMF Tab. 7, TX]`'s `S`
+/// marker is the signature component's — "Suspended = Transaction active, but
+/// currently not charging" — and the two disagreeing is the same shape as a
+/// session claiming Plug & Charge over a record reporting a bare RFID UID.
+///
+/// It is a **note rather than a refusal**, and the reason is in the
+/// specification: `S` is documented as one a station "can be used optionally",
+/// so its absence says nothing at all and cannot be read as a contradiction. Its
+/// *presence* against a contrary protocol claim is worth an operator's attention
+/// — `[AFIR Art. 5(4)]` prices those minutes differently, and the party that
+/// issues the invoice controls only one of the two accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChargingDisagreement {
+    /// The signed record marks the transaction suspended over an interval the
+    /// OCPP events say it was charging.
+    SignedSuspensionNotInProtocol {
+        /// When the signed suspension began.
+        from: time::OffsetDateTime,
+        /// When it ended.
+        to: time::OffsetDateTime,
+    },
+}
+
+impl core::fmt::Display for ChargingDisagreement {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::SignedSuspensionNotInProtocol { from, to } => write!(
+                f,
+                "the signed records mark the transaction suspended from {from} to {to} \
+                 [OCMF Tab. 7, TX=S] and the OCPP events report it charging: an occupancy fee \
+                 prices exactly the minutes the two disagree about, and only one of the accounts \
+                 is signed"
+            ),
+        }
+    }
+}
+
 /// A transaction turned into the two artefacts the rest of the workspace reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assembled {
@@ -200,6 +259,13 @@ pub struct Assembled {
     /// operator wants to know about, and the number is otherwise invisible
     /// once the duplicates are dropped.
     pub duplicates_dropped: usize,
+    /// Where the protocol and the signature disagree about whether the vehicle
+    /// was charging.
+    ///
+    /// Empty for the ordinary station, which never emits `TX=S` — the marker is
+    /// optional. Non-empty is the one case where the operator's own account of
+    /// the occupancy interval is contradicted by a signed one.
+    pub charging_disagreements: Vec<ChargingDisagreement>,
 }
 
 impl Transaction {
@@ -223,19 +289,21 @@ impl Transaction {
 
     /// Each record with the OCPP context it arrived under, de-duplicated.
     fn deduplicated_records(&self) -> Result<(Vec<Delivered>, usize), SeamError> {
-        let mut seen: Vec<[u8; 32]> = Vec::new();
+        // A set rather than a list: a long session on a retrying link delivers
+        // thousands of records, and a linear scan per record makes assembling
+        // one quadratic in the number of readings — in the function that runs
+        // before anything can be billed.
+        let mut seen: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
         let mut delivered: Vec<Delivered> = Vec::new();
         let mut duplicates = 0;
 
         for event in &self.events {
             for reading in &event.signed {
                 let record = record_of(&reading.value)?;
-                let digest = ocmf::payload_digest(&record);
-                if seen.contains(&digest) {
+                if !seen.insert(ocmf::payload_digest(&record)) {
                     duplicates += 1;
                     continue;
                 }
-                seen.push(digest);
                 delivered.push((record, reading.context.clone()));
             }
         }
@@ -323,12 +391,35 @@ impl Transaction {
             ending.stopped_because.unwrap_or(EndReason::Other),
         )?;
 
+        let records: Vec<OcmfRecord> = delivered.into_iter().map(|(record, _)| record).collect();
+        let charging_disagreements = charging_disagreements(&records, &session);
+
         Ok(Assembled {
             session,
-            records: delivered.into_iter().map(|(record, _)| record).collect(),
+            records,
             duplicates_dropped,
+            charging_disagreements,
         })
     }
+}
+
+/// Compare the signature component's account of the suspensions with the
+/// protocol's.
+///
+/// The chain is asked rather than the records directly, because a suspension is
+/// an *interval* between two markers and reading one out of a record on its own
+/// would rebuild that logic in a second place — which is the drift this
+/// workspace refuses everywhere else. Nothing here verifies a signature: the
+/// markers are read from records whose signatures `emob-eichrecht` checks
+/// against a registry one layer up, and a disagreement about the shape of the
+/// session is worth reporting either way.
+fn charging_disagreements(records: &[OcmfRecord], session: &Session) -> Vec<ChargingDisagreement> {
+    emob_eichrecht::chain::validate(records)
+        .suspended_intervals()
+        .into_iter()
+        .filter(|&(from, to)| !session.suspended_throughout(from, to))
+        .map(|(from, to)| ChargingDisagreement::SignedSuspensionNotInProtocol { from, to })
+        .collect()
 }
 
 /// The OCMF record inside a signed meter value.
@@ -451,6 +542,89 @@ mod tests {
                 vec![oca_reading(Some("Transaction.End".to_owned()))],
                 EndReason::Local,
             ))
+    }
+
+    /// A record carrying one reading with a chosen marker, at a chosen minute.
+    fn marked(pagination: u64, marker: &str, kwh: &str, minute: u8) -> SignedReading {
+        let raw = format!(
+            r#"OCMF|{{"PG":"T{pagination}","MS":"SIM-1","RD":[{{"TM":"2023-05-19T15:{minute:02}:00,000+0200 S","TX":"{marker}","RV":{kwh},"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}}]}}|{{"SD":"00"}}"#
+        );
+        SignedReading::new(SignedMeterValue::new(raw), None)
+    }
+
+    fn stamp(minute: u8) -> time::OffsetDateTime {
+        time::macros::datetime!(2023-05-19 15:00:00 +2) + time::Duration::minutes(i64::from(minute))
+    }
+
+    #[test]
+    fn a_signed_suspension_the_protocol_denies_is_reported() {
+        // `[OCMF Tab. 7, TX]`: "S – Suspended = Transaction active, but
+        // currently not charging". `[AFIR Art. 5(4)]` prices exactly those
+        // minutes, and only one of the two accounts of them is signed.
+        //
+        // Here the station's OCPP events claim it charged throughout and its
+        // own signature component says otherwise.
+        let transaction = Transaction::new("t-1".parse().unwrap(), evse(), Authorization::ad_hoc())
+            .with(TransactionEvent::started(
+                stamp(10),
+                vec![marked(1, "B", "100.000", 10)],
+            ))
+            .with(TransactionEvent::updated(
+                stamp(20),
+                vec![marked(2, "S", "110.000", 20)],
+            ))
+            .with(TransactionEvent::ended(
+                stamp(40),
+                vec![marked(3, "E", "110.000", 40)],
+                EndReason::Local,
+            ));
+
+        let assembled = transaction.assemble(Direction::Import).unwrap();
+        assert_eq!(
+            assembled.charging_disagreements,
+            vec![ChargingDisagreement::SignedSuspensionNotInProtocol {
+                from: stamp(20),
+                to: stamp(40),
+            }]
+        );
+        assert!(
+            assembled.charging_disagreements[0]
+                .to_string()
+                .contains("only one of the accounts")
+        );
+
+        // …and when the protocol agrees — the same events with the update
+        // marked suspended — there is nothing to report.
+        let agreeing = Transaction::new("t-2".parse().unwrap(), evse(), Authorization::ad_hoc())
+            .with(TransactionEvent::started(
+                stamp(10),
+                vec![marked(1, "B", "100.000", 10)],
+            ))
+            .with(
+                TransactionEvent::updated(stamp(20), vec![marked(2, "S", "110.000", 20)])
+                    .suspended(),
+            )
+            .with(TransactionEvent::ended(
+                stamp(40),
+                vec![marked(3, "E", "110.000", 40)],
+                EndReason::Local,
+            ));
+        assert!(
+            agreeing
+                .assemble(Direction::Import)
+                .unwrap()
+                .charging_disagreements
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_station_that_never_marks_a_suspension_reports_nothing() {
+        // `S` is a marker a station "can be used optionally", so its absence
+        // says nothing at all and must never read as a contradiction. Most of
+        // the fleet is this case.
+        let assembled = oca_transaction().assemble(Direction::Import).unwrap();
+        assert!(assembled.charging_disagreements.is_empty());
     }
 
     #[test]

@@ -58,25 +58,27 @@ fn signed_record(pagination: u64, marker: &str, register: &str, minute: i64) -> 
 
 fn registry() -> KeyRegistry {
     let mut registry = KeyRegistry::new();
-    registry.insert(
-        // A gateway serving one charge point, identified by both serials —
-        // the case the specification says needs the pair.
-        ComponentRef::GatewayAndMeter {
-            gateway: "GW-1".into(),
-            meter: METER_SERIAL.into(),
-        },
-        RegisteredKey::unbounded(
-            PublicKey {
-                algorithm: KeyType::Secp256r1,
-                bytes: signing_key()
-                    .verifying_key()
-                    .to_encoded_point(false)
-                    .as_bytes()
-                    .to_vec(),
+    registry
+        .insert(
+            // A gateway serving one charge point, identified by both serials —
+            // the case the specification says needs the pair.
+            ComponentRef::GatewayAndMeter {
+                gateway: "GW-1".into(),
+                meter: METER_SERIAL.into(),
             },
-            "type approval 2026-01",
-        ),
-    );
+            RegisteredKey::unbounded(
+                PublicKey {
+                    algorithm: KeyType::Secp256r1,
+                    bytes: signing_key()
+                        .verifying_key()
+                        .to_encoded_point(false)
+                        .as_bytes()
+                        .to_vec(),
+                },
+                "type approval 2026-01",
+            ),
+        )
+        .unwrap();
     registry
 }
 
@@ -811,15 +813,17 @@ const EBZ_LD3_KEY: &str = concat!(
 
 fn ebz_evidence() -> Evidence {
     let mut registry = KeyRegistry::new();
-    registry.insert(
-        ComponentRef::Meter {
-            serial: "1EBZ0300034628".into(),
-        },
-        RegisteredKey::unbounded(
-            PublicKey::from_hex(KeyType::Secp192r1, EBZ_LD3_KEY).unwrap(),
-            "S.A.F.E. reference data set",
-        ),
-    );
+    registry
+        .insert(
+            ComponentRef::Meter {
+                serial: "1EBZ0300034628".into(),
+            },
+            RegisteredKey::unbounded(
+                PublicKey::from_hex(KeyType::Secp192r1, EBZ_LD3_KEY).unwrap(),
+                "S.A.F.E. reference data set",
+            ),
+        )
+        .unwrap();
     let record = ocmf::parse(EBZ_LD3_RECORD).unwrap();
     Evidence::assemble(&[record], &registry, datetime!(2022-10-27 19:38 +2))
 }

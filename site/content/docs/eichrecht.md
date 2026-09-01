@@ -26,15 +26,15 @@ own:
 
 ```mermaid
 flowchart LR
-    RAW["OCMF records<br/><i>from the station</i>"] --> P["parse<br/><small>signed bytes kept verbatim</small>"]
-    P --> V["verify<br/><small>ECDSA, four curves</small>"]
-    KR[("key registry<br/><small>out of band</small>")] -.->|the key, never<br/>the record's own| V
-    V --> C["chain<br/><small>pagination, markers, states</small>"]
+    RAW["OCMF records<br/>from the station"] --> P["parse<br/>signed bytes kept verbatim"]
+    P --> V["verify<br/>ECDSA, four curves"]
+    KR[("key registry<br/>out of band")] -.->|the key, never<br/>the record's own| V
+    V --> C["chain<br/>pagination, markers, states"]
     C --> E["evidence"]
     E --> Q{"billable?"}
-    Q -->|yes| BILL["energy · duration<br/><small>each answered separately</small>"]
-    Q -->|no| WHY["reasons<br/><small>naming what failed</small>"]
-    E --> TX["transparency file<br/><small>the driver's own verifier</small>"]
+    Q -->|yes| BILL["energy · duration<br/>each answered separately"]
+    Q -->|no| WHY["reasons<br/>naming what failed"]
+    E --> TX["transparency file<br/>the driver's own verifier"]
 
     classDef gate fill:#b8410f22,stroke:#b8410f
     classDef out fill:#0a7d3322,stroke:#0a7d33
@@ -99,6 +99,23 @@ reason, and reads every value as an exact decimal from the token's own text.
 ```rust
 assert_eq!(record.payload.readings[0].value.unwrap().to_string(), "2935.600");
 ```
+
+### An omitted field is unchanged, not absent
+
+"For the readings, fields that have an identical value to the previous reading
+are omitted. However, this only applies within a signed record"
+`[OCMF Tab. 7 preamble]`. The rule is over **fields**; `RI` and `TX` are its
+examples, not its list. `RU`, `RT`, `ST` and `EF` carry forward on the same
+footing.
+
+```rust
+// The first reading is flagged `E`, the second omits `EF`. Still flagged.
+assert!(record.payload.readings[1].error_flags.energy_unusable);
+```
+
+`EF` is the one that decides money: reading the omission as "no fault" would
+clear something the station signed. On the first reading there is nothing to
+carry, so an absent `EF` is genuinely no flags.
 
 ## The questions, kept apart
 
@@ -168,6 +185,10 @@ was inserted first — so the same session verifies or does not depending on
 insertion order, which is not a property anybody wants to defend in a dispute.
 Half-open windows partition the timeline exactly, which is what a key history is.
 
+The partition is enforced rather than assumed: `insert` refuses a window that
+overlaps one the component already holds — two unbounded keys for one meter being
+the ordinary form of the mistake.
+
 A *gap* between two windows stays a gap. A record from a month with no
 registered key fails to resolve rather than falling through to a neighbouring
 key, because inventing a binding is how a forged record verifies.
@@ -203,6 +224,12 @@ A session on an unsynchronised clock has perfectly good energy and a duration
 nobody can defend — so a per-kWh tariff bills it and the per-minute occupancy fee
 `[AFIR Art. 5(4)]` permits must not. A faulty register is the mirror image: no
 energy, and the car was still plugged in for twenty minutes.
+
+And a register from the range `[OCMF Tab. 25]` **reserves and does not define** —
+`B4`–`BF`, `C4`–`C7` — is a third case, taking the energy and leaving the clock.
+An unrecognised manufacturer code is still evidence and still bills; a reserved
+one is a billing-relevant quantity the specification has claimed and not
+published.
 
 `ChainFinding::disqualifies()` says which quantity each finding takes away, and
 a test asserts that every finding takes away at least one — a finding that
@@ -270,6 +297,25 @@ Two `TX=B` markers mean two charging processes were concatenated. Pagination
 stays contiguous across the join, so nothing else sees it, and subtracting the
 last register value from the first spans both sessions — a number larger than
 either and belonging to neither.
+
+## The records also state the shape of the session
+
+Eight of `[OCMF Tab. 7, TX]`'s ten markers are structure. Two are facts nothing
+else in the evidence carries, and they are the intervals money turns on: `S`
+("Suspended = Transaction active, but currently not charging") and `T` (a tariff
+change).
+
+```rust
+for (from, to) in evidence.suspended_intervals() { /* signed occupancy */ }
+```
+
+`[AFIR Art. 5(4)]` prices those minutes per minute, and the only other account of
+them is OCPP's `chargingState` — a protocol field asserted by the same party that
+issues the invoice. `emob-ocpp` compares the two.
+
+A **note, never a refusal**: `S` is optional, so its absence says nothing and
+most of the fleet never emits one. Its presence against a contrary protocol claim
+is two stories about one event, and only one of them is signed.
 
 ## The transparency file
 
@@ -355,15 +401,24 @@ entity it does not know. A transparency file is machine-generated, and a
 verifier that silently accepts a shape it half-understands is the failure the
 file exists to prevent, pointed inward.
 
-### Four vendors, and each one broke something
+## Tested against meters that exist
 
-A verifier tested against its own fixtures proves the code agrees with itself.
-The suite now runs records from four sources it did not write, and three of the
-four cost a defect:
+Every other fixture on this page is signed at test time with a key the test also
+holds, which proves the code agrees with itself — not the question anybody is
+asking. So the suite runs records from four sources `emob` did not write, each
+checked against the key it is published with:
+
+```rust
+// an eBZ LD3 from the S.A.F.E. reference data set
+assert_eq!(evidence.billable_energy().unwrap().to_string(), "0.268 kWh");
+assert!(!evidence.is_billable_for_time());   // its clock is only informative
+```
+
+Three of the four cost a defect:
 
 | Record | What it broke |
 |---|---|
-| eBZ LD3 (secp192r1) | a curve the build refused, and a DER wrapper it rejected (D34–D35) |
+| eBZ LD3 (secp192r1) | a curve the build refused, and a DER wrapper it rejected — both below (D34–D35) |
 | DZG DVH4013 / Nano (secp256k1) | a signature with `s` in the **high half** of the curve order, which `k256` refuses on Bitcoin's malleability rule and plain ECDSA allows (D82) |
 | DZG + TwinCharger Pro | `RV` written as a **quoted string**, padded with spaces (D83) |
 | TwinCharger Pro | `FV` and `CT` written as **numbers** where the tables say String (D83) |
@@ -373,32 +428,8 @@ naturally produces low `s`, so no amount of self-signed corpus contains the
 high-`s` case — and the failure it produces is `SignatureMismatch`, the
 diagnostic for tampering, on a meter that has done nothing wrong.
 
-
-
-## Tested against a meter that exists
-
-Every other fixture on this page is signed at test time with a key the test also
-holds, which proves the code agrees with itself — not the question anybody is
-asking. So the suite also runs a record `emob` did not write: an **eBZ LD3**,
-ordinary German charging hardware, from the reference data set the S.A.F.E.
-Transparenzsoftware ships, checked against the key it is published with.
-
-```rust
-assert_eq!(evidence.billable_energy().unwrap().to_string(), "0.268 kWh");
-assert!(!evidence.is_billable_for_time());   // its clock is only informative
-```
-
-It broke three things on the way in, none of them reachable from a fixture this
-codebase produced:
-
-- it is signed on **secp192r1**, which the build recognised and refused — so
-  every session from such a fleet would have been unbillable;
-- its DER signature pads both integers to a fixed 24 bytes, so a strict parser
-  must read `r` as a negative number;
-- a pipe inside a free-text tariff name would have torn the framing in half.
-
-Three defects from one artefact is not a rate that suggests the list is
-finished, which is why every format this workspace claims to read now carries at
+Three defects from four records is not a rate that suggests the list is
+finished, which is why every format this workspace claims to read carries at
 least one third-party sample in its tests.
 
 ## What the customer is paying for, when it is not only electricity

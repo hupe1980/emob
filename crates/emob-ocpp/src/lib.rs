@@ -46,25 +46,19 @@
 //!
 //! # Why this is a crate and not a module
 //!
-//! It used to be a quarantine. About 560 of its ~950 lines were OCPP rather
-//! than `emob` — `[OCA SMV §3.2.1]`'s 1.6 nesting, `[OCA SMV §3.2.2]`'s
-//! `publicKey` envelope, extracting a signed value from three generations of
-//! typed message — and the note here said the crate should be deleted once
-//! upstream absorbed them. `OCPP-KIT_FEEDBACK.md` records what happened:
-//! upstream did, so it was, and the crate is now a little over a third of what
-//! it was.
+//! It holds one job, and it is a boundary rather than a quarantine. The protocol
+//! knowledge that once lived here — `[OCA SMV §3.2.1]`'s 1.6 nesting,
+//! `[OCA SMV §3.2.2]`'s `publicKey` envelope, lifting a signed value out of three
+//! generations of typed message — belongs to `ocpp-kit` and lives there.
 //!
-//! What survives is one job, and it is not the one the old note predicted.
-//! Folding the rest into `emob-cdr` would put **`ocpp-kit` in the dependency
-//! graph of every crate that decides money** — and `ocpp-kit` 0.1 is a path
-//! dependency on an unreleased sibling checkout. Today `emob-core`,
-//! `emob-session`, `emob-eichrecht`, `emob-tariff` and `emob-cdr` build with no
-//! OCPP anywhere in their tree, and the seam is the reason: it is the only
-//! crate on both sides.
+//! Folding what is left into `emob-cdr` would put **`ocpp-kit` in the dependency
+//! graph of every crate that decides money**. `emob-core`, `emob-session`,
+//! `emob-eichrecht`, `emob-tariff` and `emob-cdr` build with no OCPP anywhere in
+//! their tree, and the seam is the reason: it is the only crate on both sides.
 //!
-//! That is worth a crate on its own terms. The billing chain should be
-//! buildable, testable and auditable without a protocol implementation in it,
-//! and a boundary the compiler enforces is the only kind that stays true.
+//! The billing chain should be buildable, testable and auditable without a
+//! protocol implementation in it, and a boundary the compiler enforces is the
+//! only kind that stays true.
 //!
 //! # A whole transaction
 //!

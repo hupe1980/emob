@@ -3,26 +3,18 @@
 //! # One funnel, not three
 //!
 //! [`ocpp_kit::csms::events`] reduces OCPP 1.6, 2.0.1 and 2.1 to one
-//! [`DomainEvent`], and it now carries everything a billable session needs: the
-//! signed meter values verbatim, the reading context each one arrived under,
-//! whether energy was flowing, and which EVSE. So this module is a `match` —
-//! about eighty lines where it used to be three version-specific extractions of
-//! a field the funnel dropped.
+//! [`DomainEvent`] carrying everything a billable session needs: the signed
+//! meter values verbatim, the reading context each one arrived under, whether
+//! energy was flowing, and which EVSE. So this module is a `match`.
 //!
-//! Everything it used to do lives upstream now:
+//! The unwrapping is protocol knowledge and lives in the protocol crate:
 //!
-//! | Was here | Is now |
+//! | Fact | Where |
 //! |---|---|
 //! | OCPP 1.6's `SignedMeterValueType` serialised into a `SampledValue.value` string `[OCA SMV §3.2.1]` | `v1_6::SampledValue::signed_meter_value` |
 //! | `signedMeterData` as Base64 or plain | `metering::SignedMeterValue::decoded_str` |
 //! | The `publicKey` envelope, in both shapes the field is sent in `[OCA SMV §3.2.2]` | `metering::decode_public_key` |
-//! | Reaching past the funnel for the signed values | `DomainEvent`'s own `signed` field |
-//!
-//! That is protocol knowledge and it belongs in the protocol crate — where it
-//! is also better than what was here: the envelope decoder splits on the first
-//! two colons, and a key printed by `openssl` is colon-separated, so the
-//! `base16` case the note exists for is exactly the one this crate used to get
-//! wrong.
+//! | The signed values themselves | `DomainEvent`'s own `signed` field |
 //!
 //! # What is still a judgement
 //!

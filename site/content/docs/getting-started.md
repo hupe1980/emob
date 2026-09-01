@@ -57,7 +57,7 @@ registry.insert(
         PublicKey::from_hex(KeyType::Secp256r1, station_public_key)?,
         "type approval 2026-01",
     ),
-);
+)?;   // refuses a window overlapping one this component already holds
 
 let records = raw_records
     .iter()
@@ -137,7 +137,8 @@ chain check sees it.
 ```rust
 use emob_session::split;
 
-let split = split::into_quarter_hours(&series)?;
+let split = split::into_quarter_hours(&series)?;   // the grid alone
+let split = session.split(Direction::Import)?;     // …and the state changes too
 
 assert!(split.conserves());        // exactly, for every session
 assert!(split.fully_measured());   // …and every boundary had a reading on it

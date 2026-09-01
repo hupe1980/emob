@@ -67,23 +67,25 @@ fn signed_record(pagination: u64, marker: &str, register: &str, minute: i64) -> 
 
 fn registry() -> KeyRegistry {
     let mut registry = KeyRegistry::new();
-    registry.insert(
-        ComponentRef::GatewayAndMeter {
-            gateway: "GW-1".into(),
-            meter: METER_SERIAL.into(),
-        },
-        RegisteredKey::unbounded(
-            PublicKey {
-                algorithm: KeyType::Secp256r1,
-                bytes: signing_key()
-                    .verifying_key()
-                    .to_encoded_point(false)
-                    .as_bytes()
-                    .to_vec(),
+    registry
+        .insert(
+            ComponentRef::GatewayAndMeter {
+                gateway: "GW-1".into(),
+                meter: METER_SERIAL.into(),
             },
-            "type approval 2026-01",
-        ),
-    );
+            RegisteredKey::unbounded(
+                PublicKey {
+                    algorithm: KeyType::Secp256r1,
+                    bytes: signing_key()
+                        .verifying_key()
+                        .to_encoded_point(false)
+                        .as_bytes()
+                        .to_vec(),
+                },
+                "type approval 2026-01",
+            ),
+        )
+        .unwrap();
     registry
 }
 

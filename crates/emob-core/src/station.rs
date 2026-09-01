@@ -281,10 +281,10 @@ pub struct DataPublication {
 /// Something that happened to a point, and the notice the regulator is owed
 /// for it.
 ///
-/// `[LSV26 §4(1)]` names **three** notifiable events, not one, and the
-/// calendar used to carry only the first. All three are filed the same way and
-/// all three hang off § 5(3), which lets the Bundesnetzagentur forbid the
-/// operation of a point whose notice was never made.
+/// `[LSV26 §4(1)]` names **three** notifiable events, not one. All three are
+/// filed the same way and all three hang off § 5(3), which lets the
+/// Bundesnetzagentur forbid the operation of a point whose notice was never
+/// made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Notice {

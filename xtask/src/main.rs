@@ -41,8 +41,9 @@ cargo xtask <task>
                     cannot represent 0.10
   check-citations   every regulatory citation in the code *and the docs* names a
                     document that specs/README.md actually indexes
-  check-manifests   every publishable crate can be packaged: the files its
-                    manifest promises exist
+  check-manifests   every publishable crate can be packaged *and accepted*: the
+                    files its manifest promises exist, and its keywords and
+                    categories are within what the registry takes
   check-all         all of the above
 "
     );
@@ -416,6 +417,37 @@ fn check_citations(root: &Path) -> Result<()> {
 
 // ── check-manifests ─────────────────────────────────────────────────────────
 
+/// What crates.io accepts. Enforced server-side, on upload, one crate at a time.
+const MAX_KEYWORDS: usize = 5;
+const MAX_KEYWORD_CHARS: usize = 20;
+const MAX_CATEGORIES: usize = 5;
+
+/// The string items of a TOML array field, whether it is written on one line or
+/// several. Deliberately not a TOML parse: this guard reads the manifest as text
+/// so that it keeps working on a field `cargo metadata` does not surface.
+fn array_field(text: &str, field: &str) -> Option<Vec<String>> {
+    let start = text
+        .lines()
+        .position(|l| l.trim_start().starts_with(field) && l.contains('='))?;
+    let mut body = String::new();
+    for line in text.lines().skip(start) {
+        body.push_str(line);
+        body.push('\n');
+        if line.contains(']') {
+            break;
+        }
+    }
+    let inner = body.split_once('[')?.1;
+    let inner = inner.rsplit_once(']')?.0;
+    Some(
+        inner
+            .split(',')
+            .map(|item| item.trim().trim_matches('"').to_owned())
+            .filter(|item| !item.is_empty())
+            .collect(),
+    )
+}
+
 /// `cargo publish` cannot be undone, and it fails on a `readme` that is not
 /// there — after the version has already been consumed on the registry.
 fn check_manifests(root: &Path) -> Result<()> {
@@ -460,6 +492,48 @@ fn check_manifests(root: &Path) -> Result<()> {
                 }
             }
         }
+
+        // The registry's own limits on `keywords` and `categories`. A field
+        // that merely *exists* still fails the upload if its contents break a
+        // rule, and it fails at the far end — after the version has been spent
+        // on every crate published ahead of this one in the same run.
+        let where_ = manifest.strip_prefix(root).unwrap_or(&manifest).display();
+        if let Some(keywords) = array_field(&text, "keywords") {
+            if keywords.len() > MAX_KEYWORDS {
+                problems.push(format!(
+                    "{where_}: {} keywords, and crates.io takes at most {MAX_KEYWORDS}",
+                    keywords.len()
+                ));
+            }
+            for keyword in &keywords {
+                if keyword.chars().count() > MAX_KEYWORD_CHARS {
+                    problems.push(format!(
+                        "{where_}: keyword {keyword:?} is {} characters, and crates.io takes at most {MAX_KEYWORD_CHARS}",
+                        keyword.chars().count()
+                    ));
+                }
+                let shape = keyword
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+                    && keyword
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'));
+                if !shape {
+                    problems.push(format!(
+                        "{where_}: keyword {keyword:?} must begin with a letter or digit and hold only letters, digits, `_`, `-` or `+`"
+                    ));
+                }
+            }
+        }
+        if let Some(categories) = array_field(&text, "categories")
+            && categories.len() > MAX_CATEGORIES
+        {
+            problems.push(format!(
+                "{where_}: {} categories, and crates.io takes at most {MAX_CATEGORIES}",
+                categories.len()
+            ));
+        }
     }
 
     if !problems.is_empty() {
@@ -493,6 +567,30 @@ mod tests {
         assert!(find_type_token("let sf64x = 1;", "f64").is_none());
         assert!(find_type_token("my_f64_helper()", "f64").is_none());
         assert!(find_type_token("let float64 = 1;", "f64").is_none());
+    }
+
+    #[test]
+    fn a_manifest_field_that_exists_can_still_be_rejected_on_upload() {
+        // The limits are the registry's, enforced server-side, one crate at a
+        // time — so a keyword three characters too long fails the *upload*,
+        // after every crate published ahead of it has already spent its version.
+        assert_eq!(
+            array_field(r#"keywords = ["ev-charging", "afir"]"#, "keywords"),
+            Some(vec!["ev-charging".to_owned(), "afir".to_owned()])
+        );
+        // …written across several lines, which is how a long list is kept
+        // readable and is exactly where a text guard usually stops looking.
+        assert_eq!(
+            array_field(
+                "keywords = [\n  \"ocmf\",\n  \"eichrecht\",\n]\n",
+                "keywords"
+            ),
+            Some(vec!["ocmf".to_owned(), "eichrecht".to_owned()])
+        );
+        assert_eq!(array_field("description = \"x\"", "keywords"), None);
+
+        // The one that got through: 23 characters against a limit of 20.
+        assert!("charging-infrastructure".chars().count() > MAX_KEYWORD_CHARS);
     }
 
     #[test]

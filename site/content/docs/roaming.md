@@ -25,16 +25,16 @@ it with the cost written down:
 ```mermaid
 flowchart LR
     subgraph canon["canonical model"]
-        CDR["Cdr<br/><small>exact decimals, direction,<br/>signed evidence, its own price</small>"]
+        CDR["Cdr<br/>exact decimals, direction,<br/>signed evidence, its own price"]
     end
 
     CDR --> X23["OCPI 2.3.0"]
     CDR --> X22["OCPI 2.2.1"]
-    CDR --> SELF["self-roaming<br/><small>own EMP</small>"]
-    CDR -.->|📐| OICP["OICP · Hubject"]
-    CDR -.->|📐| EMIP["eMIP · GIREVE"]
+    CDR --> SELF["self-roaming<br/>own EMP"]
+    CDR -.-> OICP["OICP · Hubject"]
+    CDR -.-> EMIP["eMIP · GIREVE"]
 
-    X23 --> ACC["Crossing&lt;T&gt;<br/><small>the value <b>and</b> the account,<br/>by JSON Pointer</small>"]
+    X23 --> ACC["Crossing&lt;T&gt;<br/>the value and the account,<br/>by JSON Pointer"]
     X22 --> ACC
     SELF --> ACC
 
@@ -43,6 +43,8 @@ flowchart LR
     class X23,X22,SELF,ACC built
     class OICP,EMIP planned
 ```
+
+Solid is built; dashed is designed and not yet written.
 
 A session between an operator's own CPO and its own EMP takes the same path as a
 stranger's. Going multi-party then changes the transport and nothing else, which

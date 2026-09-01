@@ -16,7 +16,7 @@ provider.
 
 ```mermaid
 flowchart TB
-    EV["🚗 vehicle"] -->|"ISO 15118 · PWM"| CS["charging station"]
+    EV["vehicle"] -->|"ISO 15118 · PWM"| CS["charging station"]
 
     subgraph cpo["CPO — operating the points"]
         CS -->|"OCPP 1.6J · 2.0.1 · 2.1"| CSMS["csmsd"]
@@ -28,12 +28,12 @@ flowchart TB
 
     subgraph roam["roaming"]
         P2P["OCPI peers"]
-        HUB["Hubject · GIREVE 📐"]
+        HUB["Hubject · GIREVE"]
     end
 
     subgraph emp["EMP — holding the driver contract"]
-        TOK["contracts · tokens · eMAIDs 📐"]
-        INV["invoicing 📐"]
+        TOK["contracts · tokens · eMAIDs"]
+        INV["invoicing"]
     end
 
     CDR --> P2P & HUB
@@ -47,6 +47,8 @@ flowchart TB
     class CS,CSMS,SES,EICH,CDR,POI,P2P built
     class HUB,TOK,INV planned
 ```
+
+Solid is built; dashed is designed and not yet written.
 
 A session between an operator's own EMP and its own CPO is **self-roaming
 through the same canonical model** — same validation, same pricing, same
@@ -67,7 +69,7 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `csmsd` | The CSMS socket: OCPP on `ocpp-kit` transport, the two ledgers side by side |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-579 tests, no I/O, no clock, no binary floats. `just ci` green.
+599 tests, no I/O, no clock, no binary floats. `just ci` green.
 
 An end-to-end test drives the whole chain: OCMF records signed with a real key
 at test time, verified, assembled into evidence, matched against a session, split

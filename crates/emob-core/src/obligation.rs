@@ -58,8 +58,7 @@
 //! | "nach der Inbetriebnahme", restarted when a point becomes public | [`ChargePointProfile::notifiable_commissioning_date`] | `[LSV26 §4]` |
 //!
 //! A renovation is not a deployment. Treating it as one drags untouched 2019
-//! hardware into duties written for new equipment, and it is the reading this
-//! module used to have.
+//! hardware into duties written for new equipment.
 //!
 //! [`ProviderProfile`]: crate::station::ProviderProfile
 
@@ -211,8 +210,7 @@ impl core::fmt::Display for ObligationId {
 /// `[AFIR Art. 5(5)]` binds the *mobility service provider*. Judging that
 /// against a [`ChargePointProfile`] would be a category error; leaving it out
 /// of the calendar would let it be forgotten; and stubbing it out to always
-/// return `false` — the shape this module used to have — is worse than either,
-/// because it looks assessable and is not.
+/// return `false` is worse than either, because it looks assessable and is not.
 ///
 /// So a rule carries the two functions it needs, typed to the profile it reads.
 #[derive(Clone, Copy)]
@@ -501,6 +499,19 @@ pub const CALENDAR: &[Obligation] = &[
         remedy: "charge providers and end users alike, or record the proportionate, objectively justified reason the article requires",
     },
     // ── AFIR Art. 5(4): price shape and price transparency ──────────────────
+    //
+    // All three duties below are gated on `requires_payment`, and **not** by the
+    // exemption in Art. 5(1). That one is worded "the requirements laid down in
+    // *this paragraph*" and reaches paragraph 1 and nothing else; copying it
+    // here would be exactly the misreading this calendar exists to prevent.
+    //
+    // The argument is one level further back, in the definitions. Every duty in
+    // paragraph 4 is a duty about "the ad hoc price", and `[AFIR Art. 2(2)]`
+    // defines that as "the price **charged** by the operator of a recharging
+    // point to an end user for recharging on an ad hoc basis". A point that
+    // charges nothing has no such price, so the duties have no subject rather
+    // than an unmet one — the same distinction between *applicable* and
+    // *satisfied* the whole module turns on.
     Obligation {
         id: ObligationId::AfirEnergyBasedAdHocPrice,
         title: "At 50 kW and above the ad-hoc price must be based on a price per kWh",

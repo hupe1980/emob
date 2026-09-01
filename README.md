@@ -12,7 +12,7 @@ value survives in, and the driver contract all of it turns into an invoice.
 > [`emob-session`](crates/emob-session), [`emob-cdr`](crates/emob-cdr),
 > [`emob-tariff`](crates/emob-tariff), [`emob-ocpp`](crates/emob-ocpp),
 > [`emob-poi`](crates/emob-poi), [`emob-roam`](crates/emob-roam) and
-> [`emob-sim`](crates/emob-sim) — with **579 tests**, an end-to-end test that
+> [`emob-sim`](crates/emob-sim) — with **599 tests**, an end-to-end test that
 > drives the Open Charge Alliance's own OCPP example message from the wire to a
 > taxable amount and back out again as a file the driver's verifier reads,
 > records from **five** vendors this workspace did not write, one session that
@@ -35,7 +35,7 @@ that already exist as siblings rather than re-implemented: [`ocpp-kit`],
 
 ```mermaid
 flowchart LR
-    EV["🚗"] --> CS["station"]
+    EV["vehicle"] --> CS["station"]
     CS -->|OCPP| SES["session"]
     CS -->|"signed OCMF"| EICH["Eichrecht<br/>chain"]
     EICH -->|"verified, or a reason"| CDR
@@ -43,7 +43,7 @@ flowchart LR
     TAR["tariff"] --> CDR
     TAR --> DISP["price shown"]
     CDR --> ROAM["roaming<br/>OCPI"]
-    CDR --> INV["💶 invoice"]
+    CDR --> INV["invoice"]
     RULES["obligation<br/>calendar"] -.->|dated · cited| CS
     RULES -.-> TAR
 ```
@@ -59,7 +59,7 @@ Every arrow is a place a kilowatt-hour can quietly become the wrong number.
 [`iso15118`]: https://github.com/hupe1980/iso15118
 [`eebus`]: https://github.com/hupe1980/eebus
 
-## The eighteen properties that decide quality
+## The twenty properties that decide quality
 
 ### A value that does not verify does not bill
 
@@ -211,6 +211,28 @@ fee is refused **by name**, with the fix in the message: price it per kWh. A
 signed record reporting `INVALID` — the certificate did not check out — blocks
 both, because the energy was measured and there is nobody provably behind it.
 
+An omitted field is **unchanged**, not absent — "fields that have an identical
+value to the previous reading are omitted" `[OCMF Tab. 7 preamble]` is a rule
+over fields, and `RI`/`TX` are its examples rather than its list. A reading that
+omits `EF` after a flagged one is still flagged; reading the omission as "no
+fault" would clear something the station signed.
+
+A register from the range `[OCMF Tab. 25]` **reserves and does not define** —
+`B4`–`BF`, `C4`–`C7` — blocks the energy. An unrecognised manufacturer code is
+still evidence and still bills; a reserved one is a billing-relevant quantity the
+specification has claimed and not published.
+
+### The signed record also says when the car stopped charging
+
+`[OCMF Tab. 7, TX]` defines `S` — "Suspended = Transaction active, but currently
+not charging" — which is the interval `[AFIR Art. 5(4)]` prices per minute.
+`evidence.suspended_intervals()` reads it, and the OCPP seam compares it against
+`chargingState`, the protocol's account of the same minutes.
+
+A **note, never a refusal**: `S` is optional, so its absence says nothing and
+most of the fleet never emits one. Its presence against a contrary protocol claim
+is two stories about one event, and only one of them is signed.
+
 ### Import and export never net, and now the register says so
 
 `[OCMF Tab. 25]` reserves the OBIS range `B0`–`B3` for import and `C0`–`C3` for
@@ -340,6 +362,23 @@ boundary is invisible in the total and lands entirely on the supplier who held
 that quarter hour. Each boundary therefore multiplies before it divides —
 `delta × offset / gap`, never `delta × (offset / gap)` — which is the same rule
 the rating engine follows for the same reason.
+
+### …and the grid that settles the energy does not price the minutes
+
+The quarter hour is where the energy settles `[A6 §IV.1]`. It is **not** where
+the price changes: `[AFIR Art. 5(4)]` prices the time a vehicle is connected and
+not charging *per minute*, and a vehicle stops charging when it stops charging
+rather than at `:15:00`. One `charging` flag per quarter hour cannot describe the
+one a charge finishes in.
+
+```rust
+let split = session.split(Direction::Import)?;   // cut at the grid and at
+                                                 // the session's state changes
+```
+
+Since the sum telescopes whatever the boundaries are, an extra boundary costs
+nothing. A quarter hour may then hold two slots, and `market_series()` sums them
+back — the market settles a whole Messperiode against one balance group.
 
 ### The identification is read, not asked for
 

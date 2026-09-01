@@ -51,6 +51,7 @@
 //! | The user assignment did not fail | `[OCMF Tab. 11]` | both |
 //! | No `EF` flag this build does not understand | `[OCMF Tab. 7, EF]` | both |
 //! | The billed register runs forward, on one OBIS code, in an energy unit | `[OCMF Tab. 7]` | energy |
+//! | No register from a range OCMF reserved and did not define | `[OCMF Tab. 25]` | energy |
 //! | Both ends of the subtraction are in the **same** unit | `[OCMF Tab. 7, RU]` | energy |
 //! | No `EF` energy flag | `[OCMF Tab. 7, EF]` | energy |
 //! | No `EF` time flag | `[OCMF Tab. 7, EF]` | duration |
@@ -252,6 +253,22 @@ pub enum ChainFinding {
         cumulated: Decimal,
     },
 
+    /// A reading names a register `[OCMF Tab. 25]` has reserved and not defined.
+    ///
+    /// `B4`–`BF` and `C4`–`C7` sit inside the range OCMF carved out to make
+    /// billing-relevant data identifiable, and carry no published meaning. A
+    /// station emitting one is stating a billing-relevant quantity nobody can
+    /// look up — so this is not an unrecognised manufacturer register, which is
+    /// still evidence and still bills, but a register whose *specification* is
+    /// absent. A future revision must not be able to widen what gets billed by
+    /// defining a code an older build read as "some register or other".
+    ReservedRegister {
+        /// The pagination counter of the record.
+        pagination: u64,
+        /// The register it named.
+        register: ObisCode,
+    },
+
     /// No usable energy reading pair was found.
     NoBillableEnergy,
 
@@ -329,6 +346,10 @@ impl ChainFinding {
             | Self::ObisMismatch { .. }
             | Self::UnitChanged { .. }
             | Self::NoBillableEnergy
+            // A register OCMF has reserved and not defined measures something
+            // nobody can name. The clock is unaffected — the reading still has
+            // a timestamp and a status.
+            | Self::ReservedRegister { .. }
             | Self::NotAnEnergyUnit { .. } => Disqualifies::Energy,
 
             // …and the clock says nothing about the register.
@@ -420,12 +441,46 @@ impl core::fmt::Display for ChainFinding {
                 f,
                 "the transaction opens with {cumulated} of cumulated cable loss already on the meter; CL must be reset at TX=B"
             ),
+            Self::ReservedRegister {
+                pagination,
+                register,
+            } => write!(
+                f,
+                "record {pagination} reads {register}, which [OCMF Tab. 25] reserves for future use: the specification has claimed the code and not said what it measures"
+            ),
             Self::NoBillableEnergy => write!(f, "no usable pair of energy readings"),
             Self::NotAnEnergyUnit { unit } => {
                 write!(f, "the reading is not in an energy unit: {unit:?}")
             }
         }
     }
+}
+
+/// One transaction marker a signed reading carried, and when.
+///
+/// `[OCMF Tab. 7, TX]` names ten markers and most of them are structure — `B`
+/// opens, `E`/`L`/`R`/`A`/`P` close, `C` is an ordinary reading. Two are
+/// **facts about the session** that nothing else in the evidence states:
+///
+/// - `S` — "Suspended = Transaction active, but currently not charging";
+/// - `T` — a tariff change.
+///
+/// Both are exactly the intervals money turns on. `[AFIR Art. 5(4)]` prices the
+/// time a vehicle is connected and not charging per minute, and until now that
+/// interval reached a CDR only from OCPP's `chargingState` — a protocol field,
+/// asserted by the same party that issues the invoice. When the meter's
+/// signature component states it too, the occupancy fee has evidence behind it
+/// rather than an assertion, and the two can be compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct SignedMarker {
+    /// The pagination counter of the record that carried it.
+    pub pagination: u64,
+    /// When the reading was taken.
+    #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
+    pub at: time::OffsetDateTime,
+    /// Which marker.
+    pub marker: TransactionMarker,
 }
 
 /// What a chain of records adds up to.
@@ -479,6 +534,13 @@ pub struct ChainReport {
     pub register: Option<ObisCode>,
     /// The signing component the chain belongs to.
     pub signing_component: Option<String>,
+    /// Every transaction marker the readings carried, in the order they were
+    /// signed `[OCMF Tab. 7, TX]`.
+    ///
+    /// The signed account of the session's own *shape*, beside the signed
+    /// account of its energy. [`Self::suspended_intervals`] is the part that
+    /// prices.
+    pub timeline: Vec<SignedMarker>,
     /// When the session began.
     pub started_at: Option<time::OffsetDateTime>,
     /// When it ended.
@@ -505,6 +567,65 @@ impl ChainReport {
             Disqualifies::Duration => f.disqualifies().duration(),
             Disqualifies::Both => f.disqualifies() == Disqualifies::Both,
         })
+    }
+
+    /// The intervals the **signed records** say the transaction was active and
+    /// not charging `[OCMF Tab. 7, TX]`.
+    ///
+    /// An `S` marker opens one and the next reading of any other kind closes
+    /// it, because `TX` carries forward: a reading that does not restate the
+    /// marker is still suspended, and the first that does restate it — `C`,
+    /// `E`, anything — is where charging resumed or the session ended.
+    ///
+    /// This is what `[AFIR Art. 5(4)]`'s occupancy fee prices, stated by the
+    /// component that signed the meter values rather than by the protocol the
+    /// operator also controls. Empty for the ordinary station that never emits
+    /// `S`, which is most of them — the marker is "can be used optionally" —
+    /// and that is why it is evidence *for* a fee rather than a precondition of
+    /// one.
+    #[must_use]
+    pub fn suspended_intervals(&self) -> Vec<(time::OffsetDateTime, time::OffsetDateTime)> {
+        let mut intervals = Vec::new();
+        let mut opened: Option<time::OffsetDateTime> = None;
+        for entry in &self.timeline {
+            match (opened, entry.marker) {
+                // Already suspended and still suspended: one interval, not two.
+                (Some(_), TransactionMarker::Suspended) => {}
+                (None, TransactionMarker::Suspended) => opened = Some(entry.at),
+                (Some(from), _) => {
+                    if entry.at > from {
+                        intervals.push((from, entry.at));
+                    }
+                    opened = None;
+                }
+                (None, _) => {}
+            }
+        }
+        // A chain whose last marker is `S` has no closing reading, so the
+        // session end closes it — and a chain with neither closes nothing
+        // rather than inventing an end.
+        if let (Some(from), Some(to)) = (opened, self.ended_at)
+            && to > from
+        {
+            intervals.push((from, to));
+        }
+        intervals
+    }
+
+    /// The instants the signed records mark a tariff change at
+    /// `[OCMF Tab. 7, TX]`.
+    ///
+    /// `[PTB-A 50.7 §3.1.7.2]` requires a tariff change to land on a settlement
+    /// boundary, and `TX=T` is the station's own record of where it landed. A
+    /// change the meter signed at an instant no price version starts at is a
+    /// disagreement worth having before an invoice, not after.
+    #[must_use]
+    pub fn tariff_change_instants(&self) -> Vec<time::OffsetDateTime> {
+        self.timeline
+            .iter()
+            .filter(|entry| entry.marker == TransactionMarker::TariffChange)
+            .map(|entry| entry.at)
+            .collect()
     }
 
     /// One line per finding, for an operator queue.
@@ -551,6 +672,7 @@ pub fn validate(records: &[OcmfRecord]) -> ChainReport {
             compensated_loss: None,
             register: None,
             signing_component: None,
+            timeline: Vec::new(),
             started_at: None,
             ended_at: None,
         };
@@ -600,9 +722,31 @@ pub fn validate(records: &[OcmfRecord]) -> ChainReport {
         compensated_loss,
         register,
         signing_component,
+        timeline: timeline_of(records),
         started_at,
         ended_at,
     }
+}
+
+/// Every transaction marker the readings carried, in signed order.
+///
+/// Unconditional: the timeline is what the records *say*, and a chain that does
+/// not bill still has one — a dispute about an occupancy fee is exactly the case
+/// where the fee was refused and somebody wants to know what the meter recorded.
+fn timeline_of(records: &[OcmfRecord]) -> Vec<SignedMarker> {
+    records
+        .iter()
+        .flat_map(|record| {
+            let pagination = record.payload.pagination.number;
+            record.payload.readings.iter().filter_map(move |reading| {
+                reading.transaction.map(|marker| SignedMarker {
+                    pagination,
+                    at: reading.time.instant,
+                    marker,
+                })
+            })
+        })
+        .collect()
 }
 
 /// The user assignment across the chain: every failure reported, and the
@@ -825,6 +969,16 @@ fn check_reading_states(records: &[OcmfRecord], findings: &mut Vec<ChainFinding>
                 && !register.is_accumulation_register()
             {
                 findings.push(ChainFinding::LossOnNonAccumulationRegister {
+                    pagination,
+                    register: register.clone(),
+                });
+            }
+            // A code inside OCMF's own reserved range names a billing-relevant
+            // quantity the specification has not published [OCMF Tab. 25].
+            if let Some(register) = &reading.obis
+                && register.is_reserved_for_future_use()
+            {
+                findings.push(ChainFinding::ReservedRegister {
                     pagination,
                     register: register.clone(),
                 });
@@ -1109,6 +1263,132 @@ mod tests {
                 .any(|f| matches!(f, ChainFinding::UnknownErrorFlag { .. }))
         );
         assert!(!report.is_billable());
+    }
+
+    #[test]
+    fn the_signed_records_state_when_the_vehicle_stopped_charging() {
+        // `[OCMF Tab. 7, TX]`: "S – Suspended = Transaction active, but
+        // currently not charging". That is precisely the interval
+        // `[AFIR Art. 5(4)]` prices per minute, and until it is read the
+        // occupancy fee rests on OCPP alone — a field asserted by the party
+        // that issues the invoice.
+        let session = vec![
+            record(1, "B", "100.000", "G", 0),
+            record(2, "S", "110.000", "G", 20),
+            record(3, "C", "110.000", "G", 40),
+            record(4, "E", "118.000", "G", 55),
+        ];
+        let report = validate(&session);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+
+        assert_eq!(report.timeline.len(), 4);
+        assert_eq!(report.timeline[1].marker, TransactionMarker::Suspended);
+        assert_eq!(report.timeline[1].pagination, 2);
+
+        let suspended = report.suspended_intervals();
+        assert_eq!(suspended.len(), 1);
+        assert_eq!(
+            (
+                (suspended[0].1 - suspended[0].0).whole_minutes(),
+                suspended[0].0.minute()
+            ),
+            (20, 20),
+            "10:20 to 10:40, from the marker to the reading that resumed"
+        );
+
+        // The energy is unaffected: a suspension is a fact about the session,
+        // not a fault.
+        assert_eq!(report.billable_energy.unwrap().to_string(), "18.000 kWh");
+    }
+
+    #[test]
+    fn a_suspension_that_is_never_resumed_closes_at_the_session_end() {
+        // The ordinary shape: the car finishes, the driver comes back later,
+        // and the last thing the meter signs is the end of the transaction.
+        let session = vec![
+            record(1, "B", "100.000", "G", 0),
+            record(2, "S", "110.000", "G", 20),
+            record(3, "E", "110.000", "G", 45),
+        ];
+        let report = validate(&session);
+        let suspended = report.suspended_intervals();
+        assert_eq!(suspended.len(), 1);
+        assert_eq!((suspended[0].1 - suspended[0].0).whole_minutes(), 25);
+
+        // Two consecutive `S` readings are one interval, not two — `TX` carries
+        // forward and a station may restate it.
+        let session = vec![
+            record(1, "B", "100.000", "G", 0),
+            record(2, "S", "110.000", "G", 20),
+            record(3, "S", "110.000", "G", 30),
+            record(4, "E", "110.000", "G", 45),
+        ];
+        let report = validate(&session);
+        let suspended = report.suspended_intervals();
+        assert_eq!(suspended.len(), 1, "{suspended:?}");
+        assert_eq!((suspended[0].1 - suspended[0].0).whole_minutes(), 25);
+
+        // …and a station that never emits `S` — most of them — reports none,
+        // which is why this is evidence for a fee rather than a precondition.
+        let report = validate(&good_session());
+        assert!(report.suspended_intervals().is_empty());
+        assert!(report.tariff_change_instants().is_empty());
+    }
+
+    #[test]
+    fn a_signed_tariff_change_is_an_instant_a_price_version_has_to_start_at() {
+        // `[PTB-A 50.7 §3.1.7.2]` puts a tariff change on a settlement
+        // boundary, and `TX=T` is the station's own record of where it landed.
+        let session = vec![
+            record(1, "B", "100.000", "G", 0),
+            record(2, "T", "110.000", "G", 15),
+            record(3, "E", "118.000", "G", 30),
+        ];
+        let report = validate(&session);
+        let changes = report.tariff_change_instants();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].minute(), 15);
+        assert!(
+            emob_core::QuarterHour::is_boundary(changes[0]),
+            "and this one lands where the metrology document requires"
+        );
+    }
+
+    #[test]
+    fn a_register_ocmf_reserved_and_never_defined_blocks_the_energy() {
+        // The same argument as the unknown error flag, one field over: a future
+        // OCMF revision must not be able to widen what gets billed by defining
+        // a code an older build read as "some register or other".
+        let session = vec![
+            ocmf::parse(r#"OCMF|{"PG":"T1","MS":"BQ1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":10.000,"RI":"01-00:B4.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}|{"SD":"00"}"#).unwrap(),
+            ocmf::parse(r#"OCMF|{"PG":"T2","MS":"BQ1","RD":[{"TM":"2026-01-02T10:20:00,000+0100 S","TX":"E","RV":20.000,"RI":"01-00:B4.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}|{"SD":"00"}"#).unwrap(),
+        ];
+        let report = validate(&session);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f, ChainFinding::ReservedRegister { .. })),
+            "{:?}",
+            report.findings
+        );
+        assert!(!report.is_billable());
+        assert!(
+            report.is_billable_for_time(),
+            "the clock is unaffected: the reading still has a timestamp and a status"
+        );
+
+        // A *manufacturer* register this crate has never seen is a different
+        // thing, and still bills — it is evidence, just evidence that states no
+        // direction.
+        let manufacturer = vec![
+            ocmf::parse(r#"OCMF|{"PG":"T1","MS":"BQ1","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":10.000,"RI":"01-00:99.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}|{"SD":"00"}"#).unwrap(),
+            ocmf::parse(r#"OCMF|{"PG":"T2","MS":"BQ1","RD":[{"TM":"2026-01-02T10:20:00,000+0100 S","TX":"E","RV":20.000,"RI":"01-00:99.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}|{"SD":"00"}"#).unwrap(),
+        ];
+        let report = validate(&manufacturer);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.billable_energy.unwrap().to_string(), "10.000 kWh");
+        assert_eq!(report.direction, None, "and it states no direction");
     }
 
     #[test]

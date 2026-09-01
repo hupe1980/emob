@@ -30,6 +30,21 @@
 //! cannot classify is not an import register by default; it is a register whose
 //! direction the evidence does not state, and a caller that needs one has to
 //! get it from elsewhere and know that it did.
+//!
+//! # …and the range that is unknown on purpose
+//!
+//! `[OCMF Tab. 25]` does not stop at the eight codes it defines. It also
+//! reserves `B4`–`BF` and `C4`–`C7` "for future use" — inside the very range it
+//! carved out to make billing-relevant data identifiable.
+//!
+//! Those are not manufacturer codes and they are not unrecognised codes. They
+//! are codes OCMF has claimed and not yet given a meaning, so a station emitting
+//! one is stating a billing-relevant quantity the specification has not
+//! published — and a future revision must not be able to widen what gets billed
+//! by defining a code an older build read as "some register or other". That is
+//! the same argument [`crate::chain::ChainFinding::UnknownErrorFlag`] makes
+//! about a character, and [`ObisCode::is_reserved_for_future_use`] is what lets
+//! the chain make it about a register.
 
 use emob_core::Direction;
 
@@ -132,6 +147,37 @@ impl ObisCode {
         }
     }
 
+    /// Whether the `C` field sits in a range `[OCMF Tab. 25]` has reserved and
+    /// not yet defined — `B4`–`BF` or `C4`–`C7`.
+    ///
+    /// Distinct from an unrecognised code, and the distinction is the point. A
+    /// manufacturer register this crate has never seen is still evidence and
+    /// still bills; a code inside OCMF's own reserved range is a billing-
+    /// relevant quantity the specification has claimed and not published, so
+    /// nothing can say what was measured.
+    #[must_use]
+    pub fn is_reserved_for_future_use(&self) -> bool {
+        let Some(group) = self.value_group() else {
+            return false;
+        };
+        let group = group.to_ascii_uppercase();
+        let mut chars = group.chars();
+        let (Some(letter), Some(digit), None) = (chars.next(), chars.next(), chars.next()) else {
+            return false;
+        };
+        let Some(value) = digit.to_digit(16) else {
+            return false;
+        };
+        match letter {
+            // B0–B3 are defined; B4–BF are not.
+            'B' => value >= 4,
+            // C0–C3 are defined; C4–C7 are reserved, and C8–CF are outside the
+            // range the table claims at all.
+            'C' => (4..=7).contains(&value),
+            _ => false,
+        }
+    }
+
     /// Whether this is an accumulation register — a time integral, `D = 8`.
     ///
     /// `[OCMF Tab. 7, CL]` allows cable-loss compensation to be reported "only
@@ -218,6 +264,55 @@ mod tests {
             assert_eq!(ObisCode::new(raw).as_str(), raw);
         }
         assert_eq!(ObisCode::new("").direction(), None);
+    }
+
+    #[test]
+    fn the_range_ocmf_reserved_is_not_the_same_as_a_code_nobody_recognises() {
+        // `[OCMF Tab. 25]` defines eight codes and reserves `B4`–`BF` and
+        // `C4`–`C7` "for future use". A station emitting one of those is
+        // stating a billing-relevant quantity the specification has claimed and
+        // not published.
+        for reserved in [
+            "01-00:B4.08.00*FF",
+            "01-00:B9.08.00*FF",
+            "01-00:BF.08.00*FF",
+            "01-00:C4.08.00*FF",
+            "01-00:C7.08.00*FF",
+        ] {
+            let code = ObisCode::new(reserved);
+            assert!(code.is_reserved_for_future_use(), "{reserved}");
+            assert_eq!(code.direction(), None, "{reserved}");
+        }
+
+        // The eight defined codes are not reserved…
+        for defined in [
+            "01-00:B0.08.00*FF",
+            "01-00:B3.08.00*FF",
+            "01-00:C0.08.00*FF",
+            "01-00:C3.08.00*FF",
+        ] {
+            assert!(
+                !ObisCode::new(defined).is_reserved_for_future_use(),
+                "{defined}"
+            );
+        }
+
+        // …and neither is an ordinary IEC code or a manufacturer register,
+        // which is the distinction that matters: those are still evidence and
+        // still bill.
+        for ordinary in [
+            "1-b:1.8.0",
+            "01-00:01.08.00*FF",
+            "01-00:99.07.00*FF",
+            "C8",
+            "",
+            "nonsense",
+        ] {
+            assert!(
+                !ObisCode::new(ordinary).is_reserved_for_future_use(),
+                "{ordinary}"
+            );
+        }
     }
 
     #[test]

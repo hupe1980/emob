@@ -77,15 +77,17 @@ fn registry() -> KeyRegistry {
 
 fn registry_holding(key_hex: &str, provenance: &str) -> KeyRegistry {
     let mut registry = KeyRegistry::new();
-    registry.insert(
-        ComponentRef::Meter {
-            serial: "1DZG0028225179".into(),
-        },
-        RegisteredKey::unbounded(
-            PublicKey::from_hex(KeyType::Secp256k1, key_hex).unwrap(),
-            provenance,
-        ),
-    );
+    registry
+        .insert(
+            ComponentRef::Meter {
+                serial: "1DZG0028225179".into(),
+            },
+            RegisteredKey::unbounded(
+                PublicKey::from_hex(KeyType::Secp256k1, key_hex).unwrap(),
+                provenance,
+            ),
+        )
+        .unwrap();
     registry
 }
 

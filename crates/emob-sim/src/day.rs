@@ -184,7 +184,9 @@ impl ReferenceDay {
         // provisioning gap that opens mid-day is the realistic version.
         let mut registry = KeyRegistry::new();
         for station in &fleet {
-            registry.insert(station.component(), station.registered_key());
+            registry
+                .insert(station.component(), station.registered_key())
+                .expect("each virtual station is registered once, unbounded");
         }
         let empty_registry = KeyRegistry::new();
 

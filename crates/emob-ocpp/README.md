@@ -4,47 +4,38 @@
 that can be billed, with the rule that no float from the telemetry ledger ever
 becomes a kilowatt-hour on an invoice.
 
+```console
+cargo add emob-ocpp
+```
+
 Part of [emob](https://github.com/hupe1980/emob), the open-source e-mobility
-operating stack. Not on crates.io yet: it depends on
-[`ocpp-kit`](https://github.com/hupe1980/ocpp-kit) `0.1`, which is unreleased,
-so building this crate needs that repository checked out beside the workspace.
-The five crates that decide money have no such dependency — see *Why this is a
-crate* below.
+operating stack. It is the only crate here that depends on
+[`ocpp-kit`](https://github.com/hupe1980/ocpp-kit); the five that decide money do
+not — see *Why this is a crate* below.
 
 ## The rule this crate makes structural
 
 OCPP carries two kinds of meter value, and only one of them is money.
 
 The **numeric** ones — `meterStart`, `meterStop`, `SampledValue.value` — are
-operational telemetry. They answer whether every event arrived and whether the
-sequence is complete.
+operational telemetry: they answer whether every event arrived and whether the
+sequence is complete. They are exact, not floating point, because `ocpp-kit`
+carries every OCPP number as a decimal. **Exact is not billable.**
 
-They are exact, not floating point: `ocpp-kit` carries every OCPP number as a
-decimal, so its CSMS ledger holds `meter_wh: Option<Decimal>` and the scale a
-meter claimed survives the wire. That closes one failure and does not touch this
-one. **Exact is not billable.**
-The Open Charge Alliance's own example message carries `meterStop: 108814` — an
-exact integer, and the meter's *lifetime* register in watt-hours, while the
-signed data set beside it reports `0.636 kWh` for the transaction. A CSMS
-billing the protocol's number would bill a figure nothing signed, from a
-register that is not the session's, out by a factor of a hundred and seventy
-`[OCA SMV §5.2]`, and every digit of it correct.
+The Open Charge Alliance's own example message makes the point. Its `meterStop`
+is **108814** — the meter's *lifetime* register, in watt-hours — while the
+transaction's signed difference is **0.636 kWh**. A CSMS billing the protocol's
+number would bill a figure nothing signed, from a register that is not the
+session's, out by a factor of a hundred and seventy `[OCA SMV §5.2]`, and every
+digit of it correct.
 
 The **signed** one is a `SignedMeterValueType` carrying an OCMF data set, and it
 is the only thing here that becomes a billed kilowatt-hour.
 
-This crate makes that a property of the types rather than a rule somebody
-remembers: **its input vocabulary has no numeric meter value in it at all.**
-`TransactionEvent` carries signed values, instants, and whether energy was
-flowing. There is no field to put a float in, so there is no path from one to a
-`Cdr`.
-
-The Open Charge Alliance's own example message is what makes the point concrete.
-Its `meterStop` is **108814** — the meter's *lifetime* register, in watt-hours —
-while the transaction's signed difference is **0.636 kWh**. A CSMS billing the
-protocol's number would bill a figure nothing signed, from a register that is
-not the session's, and be out by a factor of a hundred and seventy
-`[OCA SMV §5.2]`.
+That is a property of the types rather than a rule somebody remembers: **the
+input vocabulary has no numeric meter value in it at all.** `TransactionEvent`
+carries signed values, instants, and whether energy was flowing. There is no
+field to put a float in, so there is no path from one to a `Cdr`.
 
 ## The protocol half is not here any more
 
@@ -64,8 +55,7 @@ Eichrecht has to reimplement, which is the definition of something belonging in
 the protocol kit, so `ocpp-kit` owns it: `metering::SignedMeterValue::decoded_str`,
 `metering::decode_public_key`, and a version-neutral `csms::events::DomainEvent`
 that carries the signed values through. One `match` covers all three versions
-here. `OCPP-KIT_FEEDBACK.md` records what was asked for and what
-landed.
+here.
 
 The public key is still a **claim**, wherever it is decoded: OCMF is explicit
 that the key travels out of band, and a key arriving on the same socket as the
@@ -99,6 +89,24 @@ Two sources describe one charging process and neither is sufficient alone.
 
 So `Transaction::assemble` takes the *shape* of the session from the protocol
 and every *number* from the signature.
+
+### …except where the signature has a second opinion
+
+One row is not quite a monopoly. `[OCMF Tab. 7, TX]` defines `S` — "Suspended =
+Transaction active, but currently not charging" — so a signature component can
+state the occupancy interval too, and some do.
+
+```rust
+for disagreement in &assembled.charging_disagreements {
+    // the signed records say suspended; the OCPP events say charging
+}
+```
+
+It does not replace the protocol's account: `S` is optional, so its absence says
+nothing and most of the fleet never emits one. Where it is emitted and disagrees,
+that is worth an operator's attention rather than a silent preference for either
+side — `[AFIR Art. 5(4)]` prices those minutes differently, and the invoicing
+party controls only one of the two accounts.
 
 ## What it does not do
 

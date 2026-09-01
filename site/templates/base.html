@@ -152,7 +152,12 @@ figure.diagram figcaption{font-size:.88rem;color:var(--muted);text-align:center;
      diffable in the Markdown source. The renderer is fetched only on pages that
      actually contain one, and the page is fully readable without it. -->
 <script type="module">
-  const blocks = document.querySelectorAll("pre > code.language-mermaid");
+  // Zola emits `<code data-lang="mermaid">`; the class form is what most other
+  // Markdown pipelines produce. Match both so a diagram cannot go silently
+  // unrendered if the generator changes.
+  const blocks = document.querySelectorAll(
+    'pre > code[data-lang="mermaid"], pre > code.language-mermaid'
+  );
   if (blocks.length) {
     const { default: mermaid } = await import(
       "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs"
@@ -160,16 +165,20 @@ figure.diagram figcaption{font-size:.88rem;color:var(--muted);text-align:center;
     const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     mermaid.initialize({
       startOnLoad: false,
-      // Every diagram is authored in this repository's own Markdown; there is
-      // no user-supplied content on this site. `loose` is what lets a node
-      // label carry a `<br/>` and a `<small>` subtitle instead of printing the
-      // tags as text.
       securityLevel: "loose",
       theme: dark ? "dark" : "neutral",
-      themeVariables: { fontFamily: "inherit", fontSize: "14px" },
-      flowchart: { curve: "basis", useMaxWidth: true },
+      // An explicit stack, never `inherit`: mermaid measures each label to size
+      // the box it draws around it, and measuring in one font while rendering
+      // in another clips the last characters off every node.
+      themeVariables: {
+        fontFamily:
+          '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        fontSize: "14px",
+      },
+      flowchart: { curve: "basis", useMaxWidth: true, htmlLabels: true },
       sequence: { useMaxWidth: true },
     });
+    const swapped = [];
     for (const code of blocks) {
       const figure = document.createElement("figure");
       figure.className = "diagram";
@@ -177,9 +186,21 @@ figure.diagram figcaption{font-size:.88rem;color:var(--muted);text-align:center;
       target.className = "mermaid";
       target.textContent = code.textContent;
       figure.append(target);
-      code.parentElement.replaceWith(figure);
+      const pre = code.parentElement;
+      swapped.push([figure, pre]);
+      pre.replaceWith(figure);
     }
-    await mermaid.run({ querySelector: ".mermaid" });
+    try {
+      await mermaid.run({ querySelector: ".mermaid" });
+    } catch (e) {
+      // A diagram that fails to render is hidden by the stylesheet until it
+      // carries `data-processed`, so put the source back rather than leaving a
+      // blank gap where a picture should be.
+      console.error("mermaid:", e);
+      for (const [figure, pre] of swapped) {
+        if (!figure.querySelector("svg")) figure.replaceWith(pre);
+      }
+    }
   }
 </script>
 </body>

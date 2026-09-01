@@ -23,11 +23,30 @@
 //!
 //! # Abbreviated readings
 //!
-//! Within one record, a reading may omit `RI`, `RU`, `RT` and `TX` when they
-//! are unchanged from the reading before it. The parser resolves that
-//! carry-forward so consumers never see the abbreviation — but only within a
-//! record, because the specification scopes it that way and carrying a unit
-//! across a signature boundary would be inventing data.
+//! "For the readings, fields that have an identical value to the previous
+//! reading are omitted. However, this only applies within a signed record"
+//! `[OCMF Tab. 7 preamble]`. The rule is stated over *fields*, and `RI` and `TX`
+//! are the examples it gives rather than the list it defines — so `RU`, `RT`,
+//! **`ST` and `EF`** carry forward on exactly the same footing.
+//!
+//! The parser resolves the carry-forward so consumers never see the
+//! abbreviation, and only within a record, because the specification scopes it
+//! that way and carrying a unit across a signature boundary would be inventing
+//! data.
+//!
+//! **`EF` is the one that decides money.** An omitted `EF` on a *later* reading
+//! means the flags are unchanged, so a record whose first reading is flagged
+//! `E` and whose second omits the field is a record whose second reading is
+//! still flagged. Reading the omission as "no error" clears a fault the station
+//! signed, and the only direction that error runs is towards billing a
+//! kilowatt-hour the meter disowned. On the **first** reading there is no
+//! previous value, so an omitted `EF` is genuinely no flags.
+//!
+//! `ST` runs the other way and is an availability fault rather than a money one:
+//! it was required on every reading, so a record that abbreviated it — which the
+//! rule permits — did not parse at all, and a lawful session became unbillable
+//! for a schema reason. The same shape as the non-canonical DER wrapper and the
+//! quoted `RV` one layer down, and it gets the same answer.
 
 use rust_decimal::Decimal;
 use serde_json::Value;
@@ -322,6 +341,11 @@ fn parse_readings(items: &[Value]) -> Result<Vec<Reading>, OcmfError> {
     let mut last_unit: Option<ReadingUnit> = None;
     let mut last_current: Option<CurrentType> = None;
     let mut last_tx: Option<TransactionMarker> = None;
+    let mut last_state: Option<MeterState> = None;
+    // The error flags and the characters this build did not recognise are one
+    // field and carry forward together: splitting them would let an unknown
+    // flag be cleared by an abbreviation while a known one survived it.
+    let mut last_flags: Option<(ErrorFlags, Vec<char>)> = None;
 
     let mut readings = Vec::with_capacity(items.len());
     for item in items {
@@ -398,14 +422,29 @@ fn parse_readings(items: &[Value]) -> Result<Vec<Reading>, OcmfError> {
             None => None,
         };
 
-        let (error_flags, unknown_error_flags) =
-            ErrorFlags::parse(item.get("EF").and_then(Value::as_str).unwrap_or(""));
+        // An omitted `EF` means *unchanged*, not *cleared* — so a fault the
+        // station flagged on one reading survives an abbreviation on the next.
+        // Only on the first reading, where there is nothing to carry, does the
+        // absence mean no flags.
+        let (error_flags, unknown_error_flags) = match item.get("EF").and_then(Value::as_str) {
+            Some(raw) => {
+                let parsed = ErrorFlags::parse(raw);
+                last_flags = Some(parsed.clone());
+                parsed
+            }
+            None => last_flags.clone().unwrap_or_default(),
+        };
 
-        let state = MeterState::parse(
-            item.get("ST")
-                .and_then(Value::as_str)
-                .ok_or(OcmfError::MissingField { field: "ST" })?,
-        )?;
+        // `ST` abbreviates like every other field. It was required outright,
+        // which refused a record the specification permits.
+        let state = match item.get("ST").and_then(Value::as_str) {
+            Some(raw) => {
+                let parsed = MeterState::parse(raw)?;
+                last_state = Some(parsed);
+                parsed
+            }
+            None => last_state.ok_or(OcmfError::MissingField { field: "ST" })?,
+        };
 
         readings.push(Reading {
             time,
@@ -722,6 +761,77 @@ mod tests {
         assert!(matches!(
             parse(raw),
             Err(OcmfError::UnknownMeterState { .. })
+        ));
+    }
+
+    #[test]
+    fn an_omitted_error_flag_is_unchanged_rather_than_cleared() {
+        // `[OCMF Tab. 7 preamble]`: fields identical to the previous reading are
+        // omitted. So a record whose first reading is flagged `E` and whose
+        // second omits `EF` is a record whose second reading is *still* flagged.
+        // Reading the omission as "no error" clears a fault the station signed,
+        // and the only direction that error runs is towards billing a
+        // kilowatt-hour the meter disowned.
+        let raw = concat!(
+            r#"OCMF|{"PG":"T1","MS":"BQ1","RD":["#,
+            r#"{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":10,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"E","ST":"G"},"#,
+            r#"{"TM":"2026-01-02T10:20:00,000+0100 S","TX":"E","RV":20}"#,
+            r#"]}|{"SD":"00"}"#,
+        );
+        let r = parse(raw).unwrap();
+        assert!(r.payload.readings[0].error_flags.energy_unusable);
+        assert!(
+            r.payload.readings[1].error_flags.energy_unusable,
+            "the flag carries forward; an abbreviation does not clear a fault"
+        );
+
+        // …and it is genuinely cleared when the station says so.
+        let cleared = raw.replace(r#""TX":"E","RV":20"#, r#""TX":"E","RV":20,"EF":"""#);
+        let r = parse(&cleared).unwrap();
+        assert!(!r.payload.readings[1].error_flags.energy_unusable);
+
+        // An unknown flag rides along with the known ones, because they are one
+        // field: splitting them would let an abbreviation clear the half this
+        // build cannot interpret.
+        let unknown = raw.replace(r#""EF":"E""#, r#""EF":"Q""#);
+        let r = parse(&unknown).unwrap();
+        assert_eq!(r.payload.readings[1].unknown_error_flags, vec!['Q']);
+
+        // On the *first* reading there is nothing to carry, so an absent `EF`
+        // is genuinely no flags.
+        let none = raw.replace(r#""EF":"E","#, "");
+        let r = parse(&none).unwrap();
+        assert!(!r.payload.readings[0].error_flags.any());
+        assert!(!r.payload.readings[1].error_flags.any());
+    }
+
+    #[test]
+    fn an_omitted_status_carries_forward_like_every_other_field() {
+        // `ST` was required on every reading, which refused a record the
+        // abbreviation rule permits — a lawful session made unbillable for a
+        // schema reason.
+        let raw = concat!(
+            r#"OCMF|{"PG":"T1","MS":"BQ1","RD":["#,
+            r#"{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":10,"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"},"#,
+            r#"{"TM":"2026-01-02T10:20:00,000+0100 S","TX":"E","RV":20}"#,
+            r#"]}|{"SD":"00"}"#,
+        );
+        let r = parse(raw).unwrap();
+        assert_eq!(r.payload.readings[1].state, MeterState::Ok);
+
+        // A substitute value carries forward too — the abbreviation cannot be
+        // used to launder one into a billable reading.
+        let substitute = raw.replace(r#""ST":"G""#, r#""ST":"S""#);
+        let r = parse(&substitute).unwrap();
+        assert_eq!(r.payload.readings[1].state, MeterState::Substitute);
+        assert!(!r.payload.readings[1].state.is_billable());
+
+        // …and the *first* reading still has to state one, because there is
+        // nothing behind it to carry.
+        let none = raw.replace(r#","ST":"G""#, "");
+        assert!(matches!(
+            parse(&none),
+            Err(OcmfError::MissingField { field: "ST" })
         ));
     }
 

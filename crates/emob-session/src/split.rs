@@ -30,6 +30,24 @@
 //! last digit, always. [`SessionSplit::conserves`] proves it, and a property
 //! test runs it over hundreds of generated sessions.
 //!
+//! # The grid is not the only thing that cuts a session
+//!
+//! A quarter hour is where the *energy* settles. It is not where the *price*
+//! changes: `[AFIR Art. 5(4)]` lets a fast charger add an occupancy fee per
+//! minute for the time a vehicle is connected and **not** charging, and a
+//! vehicle stops charging when it stops charging, not at `:15:00`. A slot that
+//! ran from 10:15 to 10:30 with the charge finishing at 10:20 is ten minutes of
+//! occupancy and five minutes of charging, and one flag cannot say so.
+//!
+//! So [`into_periods`] takes extra cut instants beside the grid — the session's
+//! own state changes, for the caller that has them — and every one of them is
+//! just another boundary in the same telescoping sum. Conservation is
+//! unaffected: interior boundaries cancel whatever they were rounded to,
+//! wherever they fall. [`Session::split`] passes the session's history, so a
+//! CDR built from it prices each minute at the rate that minute earned.
+//!
+//! [`Session::split`]: crate::Session::split
+//!
 //! # Where the numbers come from is recorded
 //!
 //! A boundary that a `Sample.Clock` reading landed on exactly is
@@ -80,7 +98,7 @@ impl Provenance {
     }
 }
 
-/// One quarter hour's worth of a session.
+/// One slice of a session, inside one quarter hour.
 ///
 /// The settlement slot and the measured window are separate fields, and that is
 /// the whole point of the type. A session whose readings run 10:07 to 10:23 has
@@ -89,6 +107,12 @@ impl Provenance {
 /// itself was measured over **10:07 to 10:15**. Both statements are true and
 /// they are different instants, and a consumer that reconstructs one from the
 /// other has to guess.
+///
+/// One quarter hour may hold **more than one slot**, whenever a cut passed to
+/// [`into_periods`] falls inside it — a session that stops charging at 10:20
+/// yields a charging slice and an occupancy slice, both under the quarter hour
+/// beginning 10:15. [`SessionSplit::market_series`] sums them back together for
+/// the market side, which settles per period and not per slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Slot {
@@ -122,7 +146,8 @@ impl Slot {
     /// Whether the slot's readings cover its whole quarter hour.
     ///
     /// False for the first and last slot of a session that began or ended
-    /// mid-quarter — which is most of them.
+    /// mid-quarter — which is most of them — and for every slice of a quarter
+    /// hour a cut divided.
     #[must_use]
     pub fn covers_the_whole_quarter_hour(&self) -> bool {
         self.from == self.quarter_hour.start() && self.to == self.quarter_hour.end()
@@ -183,12 +208,23 @@ impl SessionSplit {
     ///
     /// So the conversion happens once, here, rather than in each adapter that
     /// needs it.
+    ///
+    /// Slices of one quarter hour are summed back together. A cut at a state
+    /// change divides a slot for *pricing* — an occupancy fee is a price per
+    /// minute `[AFIR Art. 5(4)]` — and the market side settles a whole
+    /// Messperiode against one balance group, so handing it two entries for one
+    /// timestamp would be a file no `mako-emob` allocation can read.
     #[must_use]
     pub fn market_series(&self) -> Vec<(time::OffsetDateTime, Energy)> {
-        self.slots
-            .iter()
-            .map(|slot| (slot.quarter_hour.metering_timestamp(), slot.energy))
-            .collect()
+        let mut series: Vec<(time::OffsetDateTime, Energy)> = Vec::new();
+        for slot in &self.slots {
+            let at = slot.quarter_hour.metering_timestamp();
+            match series.last_mut() {
+                Some((last, energy)) if *last == at => *energy += slot.energy,
+                _ => series.push((at, slot.energy)),
+            }
+        }
+        series
     }
 }
 
@@ -222,6 +258,51 @@ impl SessionSplit {
 /// [`SplitError`] when the series cannot be split — a zero-length session, or
 /// one so long that splitting it is a corruption rather than a charge.
 pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitError> {
+    into_periods(series, &[])
+}
+
+/// Split a session's meter series across quarter hours, cutting also at every
+/// instant in `cuts`.
+///
+/// The grid says where the *energy* settles `[A6 §IV.1]`; `cuts` say where
+/// anything else about the session changed. The caller with the session's own
+/// state machine passes its transition instants, and each resulting slice
+/// carries one answer to "was the vehicle charging here" instead of one answer
+/// for a quarter hour that held two.
+///
+/// Cuts outside the series, and cuts that land on a boundary the grid already
+/// produced, cost one comparison and change nothing. Conservation is unaffected
+/// whatever they are: every interior boundary still appears once positive and
+/// once negative in the telescoping sum.
+///
+/// ```
+/// use emob_session::{MeterReading, MeterSeries, ReadingContext, split};
+/// use emob_core::{Direction, Energy};
+/// use rust_decimal::Decimal;
+/// use time::macros::datetime;
+///
+/// # let kwh = |s: &str| Energy::from_kwh(<Decimal as std::str::FromStr>::from_str(s).unwrap()).unwrap();
+/// let series = MeterSeries::new(Direction::Import, vec![
+///     MeterReading::new(datetime!(2026-01-02 10:00 +1), kwh("100.000"), Direction::Import, ReadingContext::TransactionBegin),
+///     MeterReading::new(datetime!(2026-01-02 10:30 +1), kwh("110.000"), Direction::Import, ReadingContext::TransactionEnd),
+/// ])?;
+///
+/// // The charge finished at 10:20, in the middle of the second quarter hour.
+/// let split = split::into_periods(&series, &[datetime!(2026-01-02 10:20 +1)])?;
+/// assert_eq!(split.slots.len(), 3, "10:00–10:15, 10:15–10:20, 10:20–10:30");
+/// assert!(split.conserves());
+/// // …and the market side still sees two Messperioden.
+/// assert_eq!(split.market_series().len(), 2);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// The same as [`into_quarter_hours`].
+pub fn into_periods(
+    series: &MeterSeries,
+    cuts: &[time::OffsetDateTime],
+) -> Result<SessionSplit, SplitError> {
     let start = series.first().at;
     let end = series.last().at;
 
@@ -240,25 +321,27 @@ pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitErr
     }
 
     // The boundaries: the session start, every quarter-hour boundary strictly
-    // inside it, and the session end. Note that the first and last are *not*
-    // quarter-hour boundaries in general — a session starting at 10:07 has its
-    // first slot run 10:07 to 10:15, and that slot is still reported under the
-    // quarter hour beginning 10:00, because that is the settlement period the
-    // energy belongs to.
+    // inside it, every cut strictly inside it, and the session end. Note that
+    // the first and last are *not* quarter-hour boundaries in general — a
+    // session starting at 10:07 has its first slot run 10:07 to 10:15, and that
+    // slot is still reported under the quarter hour beginning 10:00, because
+    // that is the settlement period the energy belongs to.
     let mut boundaries: Vec<time::OffsetDateTime> = vec![start];
     let mut cursor = QuarterHour::containing(start).next();
     while cursor.start() < end {
         boundaries.push(cursor.start());
         cursor = cursor.next();
     }
+    boundaries.extend(cuts.iter().copied().filter(|&at| at > start && at < end));
     boundaries.push(end);
+    // A cut that coincides with a grid boundary is the same boundary, and a
+    // duplicate would produce a slice of no duration and no energy.
+    boundaries.sort_unstable();
+    boundaries.dedup();
 
     // Each boundary's cumulative register value, computed exactly once. This is
     // what makes the sum telescope.
-    let cumulative: Vec<(Decimal, Provenance)> = boundaries
-        .iter()
-        .map(|&at| cumulative_at(series, at))
-        .collect();
+    let cumulative = cumulative_along(series, &boundaries);
 
     let mut slots = Vec::with_capacity(boundaries.len().saturating_sub(1));
     for i in 0..boundaries.len() - 1 {
@@ -302,26 +385,44 @@ pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitErr
     Ok(split)
 }
 
-/// The register's cumulative value at an instant, and how it was arrived at.
-fn cumulative_at(series: &MeterSeries, at: time::OffsetDateTime) -> (Decimal, Provenance) {
+/// The register's cumulative value at every boundary, and how each was arrived
+/// at.
+///
+/// `boundaries` is ascending, and so are the readings, so the two are walked
+/// **together** rather than the readings being searched once per boundary. A
+/// month-long session sampled every five minutes has thousands of each, and
+/// the nested form is quadratic in a function that runs before anything is
+/// billed.
+fn cumulative_along(
+    series: &MeterSeries,
+    boundaries: &[time::OffsetDateTime],
+) -> Vec<(Decimal, Provenance)> {
     let readings = series.readings();
-
-    // Before the first or after the last reading: the endpoints. Both are
-    // measured — they *are* readings.
-    if at <= readings[0].at {
-        return (readings[0].register.kwh(), Provenance::Measured);
-    }
     let last = &readings[readings.len() - 1];
-    if at >= last.at {
-        return (last.register.kwh(), Provenance::Measured);
-    }
+    // The index of the last reading at or before the current boundary. It only
+    // ever moves forward, which is what makes the whole walk linear.
+    let mut index = 0usize;
 
-    for pair in readings.windows(2) {
-        let (before, after) = (&pair[0], &pair[1]);
-        if at == before.at {
-            return (before.register.kwh(), measured_if_useful(before.context));
-        }
-        if at > before.at && at < after.at {
+    boundaries
+        .iter()
+        .map(|&at| {
+            // Before the first or after the last reading: the endpoints. Both
+            // are measured — they *are* readings.
+            if at <= readings[0].at {
+                return (readings[0].register.kwh(), Provenance::Measured);
+            }
+            if at >= last.at {
+                return (last.register.kwh(), Provenance::Measured);
+            }
+            while index + 1 < readings.len() && readings[index + 1].at <= at {
+                index += 1;
+            }
+            let before = &readings[index];
+            if at == before.at {
+                return (before.register.kwh(), measured_if_useful(before.context));
+            }
+            let after = &readings[index + 1];
+
             // Linear interpolation: constant power across the gap.
             let gap = (after.at - before.at).whole_seconds();
             let offset = (at - before.at).whole_seconds();
@@ -336,14 +437,12 @@ fn cumulative_at(series: &MeterSeries, at: time::OffsetDateTime) -> (Decimal, Pr
             // 4.666… either way, but the first form is exact wherever the
             // ratio terminates and the second is not. The same rule as the
             // rating engine's, for the same reason.
-            return (
+            (
                 before.register.kwh() + delta * Decimal::from(offset) / Decimal::from(gap),
                 Provenance::Interpolated,
-            );
-        }
-    }
-
-    (last.register.kwh(), Provenance::Measured)
+            )
+        })
+        .collect()
 }
 
 /// A reading that lands on a boundary counts as measuring it only when it was
@@ -722,6 +821,71 @@ mod tests {
         let split = into_quarter_hours(&s).unwrap();
         assert_eq!(split.slots.len(), 2, "two quarter hours of real time");
         assert!(split.conserves());
+    }
+
+    #[test]
+    fn a_cut_divides_a_quarter_hour_without_moving_any_energy() {
+        // The charge finishes at 10:20, in the middle of the second quarter
+        // hour. Split on the grid alone, that whole quarter hour carries one
+        // answer to "was the vehicle charging"; cut, it carries two.
+        let s = series(&[
+            (0, "100.000", ReadingContext::TransactionBegin),
+            (20, "110.000", ReadingContext::InterruptionBegin),
+            (45, "110.000", ReadingContext::TransactionEnd),
+        ]);
+        let split = into_periods(&s, &[at(20)]).unwrap();
+
+        let windows: Vec<(i64, i64)> = split
+            .slots
+            .iter()
+            .map(|slot| {
+                (
+                    (slot.from - at(0)).whole_minutes(),
+                    (slot.to - at(0)).whole_minutes(),
+                )
+            })
+            .collect();
+        assert_eq!(windows, vec![(0, 15), (15, 20), (20, 30), (30, 45)]);
+        assert_eq!(split.slots[1].quarter_hour, split.slots[2].quarter_hour);
+        assert!(split.conserves());
+        assert_eq!(
+            split.slots.iter().map(|x| x.energy).sum::<Energy>(),
+            kwh("10.000")
+        );
+    }
+
+    #[test]
+    fn the_market_series_sums_the_slices_of_one_messperiode() {
+        // A cut divides a slot for *pricing*; the market side settles a whole
+        // Messperiode against one balance group `[A6 §IV.1]`, so two entries
+        // for one timestamp would be a file no allocation can read.
+        let s = series(&[
+            (0, "100.000", ReadingContext::TransactionBegin),
+            (30, "110.000", ReadingContext::TransactionEnd),
+        ]);
+        let split = into_periods(&s, &[at(20), at(25)]).unwrap();
+        assert_eq!(split.slots.len(), 4, "10:00, 10:15, 10:20, 10:25");
+
+        let market = split.market_series();
+        assert_eq!(
+            market,
+            vec![(at(15), kwh("5.000")), (at(30), kwh("5.000"))],
+            "two quarter hours, whatever the pricing cuts did inside them"
+        );
+        assert_eq!(market.iter().map(|(_, e)| *e).sum::<Energy>(), split.total);
+    }
+
+    #[test]
+    fn a_cut_outside_the_series_or_on_a_boundary_changes_nothing() {
+        let s = series(&[
+            (0, "100.000", ReadingContext::TransactionBegin),
+            (30, "118.000", ReadingContext::TransactionEnd),
+        ]);
+        let plain = into_quarter_hours(&s).unwrap();
+        // Before the start, after the end, on the start, on the end, and on a
+        // grid boundary the split already produced.
+        let cut = into_periods(&s, &[at(-5), at(0), at(15), at(30), at(99)]).unwrap();
+        assert_eq!(cut, plain);
     }
 
     #[test]

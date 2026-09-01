@@ -12,11 +12,11 @@ travels, from the meter to the money and out to another company.
 
 ```mermaid
 flowchart LR
-    M["⚡ meter<br/><small>signed OCMF</small>"] --> E["Eichrecht<br/>chain"]
+    M["meter<br/>signed OCMF"] --> E["Eichrecht<br/>chain"]
     E --> S["sessions &<br/>settlement"]
     S --> T["tariffs &<br/>pricing"]
     T --> R["roaming"]
-    R --> INV["💶 invoice"]
+    R --> INV["invoice"]
     C["compliance"] -.->|binds every step| E
     C -.-> S
     C -.-> T

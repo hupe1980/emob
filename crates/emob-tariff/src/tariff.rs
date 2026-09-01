@@ -187,6 +187,24 @@ impl Restrictions {
         self.unevaluable.is_empty()
     }
 
+    /// Whether anything here is read against the **wall clock** rather than
+    /// against a quantity.
+    ///
+    /// The distinction matters because a time of day, a weekday and a calendar
+    /// date can only be judged in the UTC offset a period carries — an
+    /// `OffsetDateTime` knows an offset, not a time zone — while kilowatt-hours,
+    /// seconds elapsed and kilowatts do not care. [`crate::rate`] reports a
+    /// session whose periods disagree about the offset only when a restriction
+    /// actually reads it.
+    #[must_use]
+    pub fn reads_the_wall_clock(&self) -> bool {
+        self.start_time.is_some()
+            || self.end_time.is_some()
+            || self.start_date.is_some()
+            || self.end_date.is_some()
+            || !self.days_of_week.is_empty()
+    }
+
     /// A one-line statement of what this element is restricted to, for a price
     /// display that has to admit the price depends on something.
     ///

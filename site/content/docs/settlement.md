@@ -26,13 +26,13 @@ gantt
     dateFormat HH:mm
     axisFormat %H:%M
     section Settlement grid
-    quarter hour 10:00     :done,  q1, 10:00, 15m
-    quarter hour 10:15     :done,  q2, 10:15, 15m
+    first quarter hour   :done, q1, 10:00, 15m
+    second quarter hour  :done, q2, 10:15, 15m
     section Measured
-    session 10:01 to 10:22 :active, s,  10:01, 21m
+    the session          :active, s, 10:01, 21m
     section Slots produced
-    4.666… kWh  (10:01–10:15) :crit, a, 10:01, 14m
-    2.333… kWh  (10:15–10:22) :crit, b, 10:15, 7m
+    4.666… kWh           :crit, a, 10:01, 14m
+    2.333… kWh           :crit, b, 10:15, 7m
 ```
 
 Neither slot value terminates as a decimal, and the two still add to exactly
@@ -83,6 +83,26 @@ delta × (offset / gap)   ❌ precision spent on the ratio first
 
 The same rule the rating engine follows, for the same reason — and the invariant
 this module is proudest of is exactly what would hide the difference.
+
+## The grid settles the energy; it does not price the minutes
+
+A quarter hour is where the energy settles `[A6 §IV.1]`. It is **not** where the
+price changes: `[AFIR Art. 5(4)]` prices the time a vehicle is connected and not
+charging **per minute**, and a vehicle stops charging when it stops charging
+rather than at `:15:00`.
+
+One `charging` flag per quarter hour cannot describe the one a charge finishes
+in, so the split cuts at the session's own state changes as well as at the grid:
+
+```rust
+let split = session.split(Direction::Import)?;    // grid + state changes
+let split = split::into_periods(&series, &cuts)?; // the primitive underneath
+```
+
+Every cut is another boundary in the same telescoping sum, so conservation is
+untouched. A quarter hour may then hold two slots — and `market_series()` sums
+them back, because the market settles a whole Messperiode against one balance
+group.
 
 ## The instant that names a period
 
@@ -327,13 +347,12 @@ Money computed for a different quantity than the record states is **blocking** �
 it is the settlement fault that costs the most to unwind.
 
 A blocking finding has to be a fault, not a shape the checker did not expect.
-`CostEnergyMismatch` compared the price's energy quantity against the record's
-total unconditionally, and "this tariff charges nothing per kWh" sums to zero the
-same way "this price was computed for 0 kWh" does — so every lawful per-minute
-tariff below 50 kW was refused as an arithmetic fault. The comparison now runs
-only where an energy price was actually charged, and the other case is a warning:
-a dropped energy line looks identical from the record alone, and the receiving
-party should be told rather than left to notice (D78).
+`CostEnergyMismatch` therefore runs only where an energy price was actually
+charged: "this tariff charges nothing per kWh" sums to zero the same way "this
+price was computed for 0 kWh" does, and a per-minute tariff below 50 kW is
+lawful. That case is a warning instead — a dropped energy line looks identical
+from the record alone, and the receiving party is told rather than left to
+notice (D78).
 
 Every note the rating made is surfaced as a warning, so a minimum charge or a
 block rounding reaches the receiving party as a term of the price rather than as

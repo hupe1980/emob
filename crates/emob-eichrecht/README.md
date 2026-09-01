@@ -60,6 +60,23 @@ assert_eq!(record.payload.readings[0].value.unwrap().to_string(), "2935.600");
 // which is correct, and which a re-serialising parser cannot tell you.
 ```
 
+### An omitted field is unchanged, not absent
+
+"For the readings, fields that have an identical value to the previous reading
+are omitted. However, this only applies within a signed record"
+`[OCMF Tab. 7 preamble]`. The rule is over **fields** — `RI` and `TX` are its
+examples, not its list — so `RU`, `RT`, `ST` and `EF` carry forward on the same
+footing.
+
+```rust
+// The first reading is flagged `E`, the second omits `EF`. Still flagged.
+assert!(record.payload.readings[1].error_flags.energy_unusable);
+```
+
+`EF` is the one that decides money: reading the omission as "no fault" would
+clear something the station signed. On the *first* reading there is nothing to
+carry, so an absent `EF` is no flags and an absent `ST` is still an error.
+
 ## The questions, kept apart
 
 Conflating these is how a "verified" session turns out to be a signed fragment
@@ -115,6 +132,10 @@ not depending on insertion order. Half-open windows partition the timeline
 exactly, which is what a key history is. A *gap* between two windows stays a gap:
 a record from a month with no registered key fails to resolve rather than
 falling through to a neighbouring one.
+
+The partition is **enforced**, not assumed: `insert` is fallible and refuses a
+window that overlaps one the component already holds — two unbounded keys for one
+meter being the ordinary form of the mistake.
 
 ## Four quantities, not one
 
@@ -179,6 +200,18 @@ back) and nothing about the scope. **Anything else states no direction at all** 
 not import by default, because a caller that needs one should have to get it from
 elsewhere and know that it did.
 
+The table also reserves `B4`–`BF` and `C4`–`C7` **for future use**, and a code
+from there is a third case again — it blocks the energy:
+
+```rust
+assert!(ObisCode::new("01-00:B4.08.00*FF").is_reserved_for_future_use());
+```
+
+An unrecognised manufacturer register is still evidence and still bills. A
+reserved code is a billing-relevant quantity the specification has claimed and
+not published — the same argument the unknown error flag makes about a
+character.
+
 Reading the `D` field is also what makes the cable-loss rules checkable: `CL`
 may be reported "only when RI is indicating an accumulation register reading",
 and it "must be reset at TX=B" `[OCMF Tab. 7]`. A transaction opening on a
@@ -239,6 +272,25 @@ back, and an operator has to check its records against **its own** registry.
 a binding — because verifying a record against a key the same file supplied
 proves only that whoever wrote the file owned a private key. The comparison
 against the registered key is the check worth making.
+
+## The records also state the shape of the session
+
+Eight of `[OCMF Tab. 7, TX]`'s ten markers are structure. Two are facts nothing
+else in the evidence carries, and they are the intervals money turns on: `S`
+("Suspended = Transaction active, but currently not charging") and `T` (a tariff
+change).
+
+```rust
+for (from, to) in evidence.suspended_intervals() { /* signed occupancy */ }
+```
+
+`[AFIR Art. 5(4)]` prices those minutes per minute, and the only other account of
+them is OCPP's `chargingState` — a protocol field asserted by the same party that
+issues the invoice. `emob-ocpp` compares the two.
+
+A **note, never a refusal**: `S` is optional, so its absence says nothing and
+most of the fleet never emits one. Its presence against a contrary protocol claim
+is two stories about one event, and only one of them is signed.
 
 ## The two ways a duration stops being billable
 

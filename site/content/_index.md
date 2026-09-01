@@ -15,15 +15,15 @@ product.
 
 ```mermaid
 flowchart LR
-    EV["🚗"] --> CS["station"]
+    EV["vehicle"] --> CS["station"]
     CS -->|OCPP| SES["session"]
     CS -->|"signed OCMF"| EICH["Eichrecht<br/>chain"]
     EICH -->|"verified, or a reason"| CDR
-    SES -->|"quarter-hour split"| CDR["CDR<br/><small>energy + price</small>"]
+    SES -->|"quarter-hour split"| CDR["CDR<br/>energy + price"]
     TAR["tariff"] --> CDR
-    TAR --> DISP["price shown<br/><small>same object</small>"]
-    CDR --> ROAM["roaming<br/><small>OCPI</small>"]
-    CDR --> INV["💶 invoice"]
+    TAR --> DISP["price shown<br/>same object"]
+    CDR --> ROAM["roaming<br/>OCPI"]
+    CDR --> INV["invoice"]
     RULES["obligation<br/>calendar"] -.->|dated · cited| CS
     RULES -.-> TAR
 
@@ -107,7 +107,7 @@ sessions unverifiable.
 
 Nine domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
 `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`, `emob-poi`, `emob-roam`
-and `emob-sim` — with **579 tests**, no I/O, no clock, no floats, and an
+and `emob-sim` — with **599 tests**, no I/O, no clock, no floats, and an
 end-to-end test that drives a genuinely signed session from the meter to a
 taxable amount, and back out again as a file the driver's own verifier reads —
 including one record `emob` did not write, from a real German meter, against the

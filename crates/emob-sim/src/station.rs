@@ -498,7 +498,9 @@ mod tests {
 
     fn registry(station: &VirtualStation) -> KeyRegistry {
         let mut registry = KeyRegistry::new();
-        registry.insert(station.component(), station.registered_key());
+        registry
+            .insert(station.component(), station.registered_key())
+            .unwrap();
         registry
     }
 

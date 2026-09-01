@@ -203,6 +203,32 @@ impl Evidence {
         self.verified.iter().map(|v| v.payload_digest).collect()
     }
 
+    /// The intervals the signed records say the transaction was active and not
+    /// charging `[OCMF Tab. 7, TX]`.
+    ///
+    /// What `[AFIR Art. 5(4)]`'s occupancy fee prices, stated by the component
+    /// that signed the meter values rather than by the protocol the operator
+    /// also controls. Empty for a station that never emits `TX=S`, which is
+    /// most of them — the marker is optional — so this is evidence *for* a fee
+    /// where it exists, never a precondition of one.
+    #[must_use]
+    pub fn suspended_intervals(&self) -> Vec<(time::OffsetDateTime, time::OffsetDateTime)> {
+        self.chain
+            .as_ref()
+            .map(ChainReport::suspended_intervals)
+            .unwrap_or_default()
+    }
+
+    /// The instants the signed records mark a tariff change at
+    /// `[OCMF Tab. 7, TX]`.
+    #[must_use]
+    pub fn tariff_change_instants(&self) -> Vec<time::OffsetDateTime> {
+        self.chain
+            .as_ref()
+            .map(ChainReport::tariff_change_instants)
+            .unwrap_or_default()
+    }
+
     /// Whether this session's energy may be billed at all.
     #[must_use]
     pub fn is_billable(&self) -> bool {
@@ -261,7 +287,8 @@ mod tests {
                 },
                 "test fixture",
             ),
-        );
+        )
+        .unwrap();
         r
     }
 

@@ -290,10 +290,27 @@ And the arithmetic divides last. 35 minutes at €6.00 an hour is
 `3.4999999999999999999999999998`. Time accumulates in whole seconds and converts
 once, after the multiplication.
 
+Which is why a `Line` carries **two** quantities. `unit_price` is per hour,
+because that is how a tariff is written, and twenty-five minutes is `0.41666…`
+hours — so `quantity × unit_price` is not the amount. `base_quantity` is the
+whole seconds, exact, and it is the figure the amount came from:
+
+```rust
+assert!(rated.lines_reconcile());   // base_quantity × unit_price / 3600 == amount
+```
+
 ## Restrictions, including the two everybody gets wrong
 
 Time-of-day, date, energy, duration, power and weekday restrictions select which
 element applies.
+
+They are read against the **UTC offset the period carries**, because an
+`OffsetDateTime` knows an offset and not a time zone. Every session
+`emob-session` assembles carries one per period, so that is exact — including
+across a clock change, where the periods either side carry the offsets their
+readings did. A session assembled from a partner's timestamps can carry two, and
+then `rate` reports `MixedUtcOffsets` rather than placing an hour of night rate
+on the wrong side of a boundary in silence.
 
 **A window that wraps midnight** — `22:00` to `06:00` — is the night tariff it
 is, rather than the empty range a naïve comparison makes of it.

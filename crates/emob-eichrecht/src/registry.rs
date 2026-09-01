@@ -129,6 +129,23 @@ impl RegisteredKey {
         self.valid_from.is_none_or(|from| at >= from)
             && self.valid_until.is_none_or(|until| at < until)
     }
+
+    /// Whether this key's window shares an instant with another's.
+    ///
+    /// Two half-open intervals overlap when each starts before the other ends,
+    /// with an absent bound reading as infinity in its own direction.
+    #[must_use]
+    pub fn overlaps(&self, other: &Self) -> bool {
+        let starts_before_other_ends = match (self.valid_from, other.valid_until) {
+            (Some(from), Some(until)) => from < until,
+            _ => true,
+        };
+        let other_starts_before_this_ends = match (other.valid_from, self.valid_until) {
+            (Some(from), Some(until)) => from < until,
+            _ => true,
+        };
+        starts_before_other_ends && other_starts_before_this_ends
+    }
 }
 
 /// An in-memory registry of signing components and their keys.
@@ -151,12 +168,51 @@ impl KeyRegistry {
     /// Register a key for a component.
     ///
     /// Several keys may be registered for one component; they are distinguished
-    /// by their validity windows.
-    pub fn insert(&mut self, component: ComponentRef, key: RegisteredKey) {
-        self.keys.entry(component).or_default().push(key);
+    /// by their validity windows, and the windows must not overlap.
+    ///
+    /// # Why an overlap is refused rather than resolved
+    ///
+    /// [`RegisteredKey::valid_until`] is exclusive so that consecutive windows
+    /// **partition** the timeline — that is the whole reason the bound is
+    /// half-open. Two windows covering one instant put that guarantee back
+    /// where it started: [`Self::key_at`] would answer with whichever key was
+    /// inserted first, so the same session verifies or does not depending on
+    /// the order a provisioning run happened to load the registry in. A
+    /// verification that depends on load order is not a verification, and
+    /// `[MessEG §33]` gives a customer years to ask for it again.
+    ///
+    /// A key that is genuinely being replaced has the old one's window closed
+    /// at the swap, which is a fact the operator has and the registry cannot
+    /// invent.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::OverlappingWindows`] when the component already holds a
+    /// key whose window shares an instant with this one.
+    pub fn insert(
+        &mut self,
+        component: ComponentRef,
+        key: RegisteredKey,
+    ) -> Result<(), RegistryError> {
+        let name = component.to_string();
+        let existing = self.keys.entry(component).or_default();
+        if let Some(clash) = existing.iter().find(|held| held.overlaps(&key)) {
+            return Err(RegistryError::OverlappingWindows {
+                component: name,
+                held: window_of(clash),
+                offered: window_of(&key),
+            });
+        }
+        existing.push(key);
+        // Ascending by start, so `key_at` walks a partition rather than a bag.
+        existing.sort_by_key(|held| held.valid_from);
+        Ok(())
     }
 
     /// The key that was valid for a component at an instant.
+    ///
+    /// At most one can be: [`Self::insert`] refuses an overlap, so the windows
+    /// partition the timeline.
     #[must_use]
     pub fn key_at(
         &self,
@@ -239,6 +295,32 @@ impl KeyRegistry {
     }
 }
 
+/// A validity window, rendered for an error message.
+fn window_of(key: &RegisteredKey) -> String {
+    let bound =
+        |at: Option<time::OffsetDateTime>| at.map_or_else(|| "…".to_owned(), |at| at.to_string());
+    format!("[{}, {})", bound(key.valid_from), bound(key.valid_until))
+}
+
+/// What can be wrong with a registration.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RegistryError {
+    /// Two keys for one component claim the same instant.
+    #[error(
+        "{component} already holds a key valid over {held}, which overlaps {offered}: \
+         a record inside both would verify against whichever was registered first"
+    )]
+    OverlappingWindows {
+        /// Which signing component.
+        component: String,
+        /// The window already registered.
+        held: String,
+        /// The window offered.
+        offered: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,12 +352,14 @@ mod tests {
     #[test]
     fn a_meter_serial_finds_its_key() {
         let mut registry = KeyRegistry::new();
-        registry.insert(
-            ComponentRef::Meter {
-                serial: "BQ1".into(),
-            },
-            RegisteredKey::unbounded(key(1), "type approval 2026-01"),
-        );
+        registry
+            .insert(
+                ComponentRef::Meter {
+                    serial: "BQ1".into(),
+                },
+                RegisteredKey::unbounded(key(1), "type approval 2026-01"),
+            )
+            .unwrap();
         let record = record_with(None, Some("BQ1"));
         let found = registry
             .key_for_record(&record, datetime!(2026-01-02 10:00 +1))
@@ -290,20 +374,24 @@ mod tests {
         // both charge points the same key and make either able to sign for the
         // other.
         let mut registry = KeyRegistry::new();
-        registry.insert(
-            ComponentRef::GatewayAndMeter {
-                gateway: "GW1".into(),
-                meter: "M1".into(),
-            },
-            RegisteredKey::unbounded(key(1), "provisioning"),
-        );
-        registry.insert(
-            ComponentRef::GatewayAndMeter {
-                gateway: "GW1".into(),
-                meter: "M2".into(),
-            },
-            RegisteredKey::unbounded(key(2), "provisioning"),
-        );
+        registry
+            .insert(
+                ComponentRef::GatewayAndMeter {
+                    gateway: "GW1".into(),
+                    meter: "M1".into(),
+                },
+                RegisteredKey::unbounded(key(1), "provisioning"),
+            )
+            .unwrap();
+        registry
+            .insert(
+                ComponentRef::GatewayAndMeter {
+                    gateway: "GW1".into(),
+                    meter: "M2".into(),
+                },
+                RegisteredKey::unbounded(key(2), "provisioning"),
+            )
+            .unwrap();
 
         let at = datetime!(2026-01-02 10:00 +1);
         assert_eq!(
@@ -331,24 +419,28 @@ mod tests {
         let component = ComponentRef::Meter {
             serial: "BQ1".into(),
         };
-        registry.insert(
-            component.clone(),
-            RegisteredKey {
-                key: key(1),
-                valid_from: None,
-                valid_until: Some(datetime!(2026-06-01 0:00 UTC)),
-                provenance: "original".into(),
-            },
-        );
-        registry.insert(
-            component.clone(),
-            RegisteredKey {
-                key: key(2),
-                valid_from: Some(datetime!(2026-06-01 0:00 UTC)),
-                valid_until: None,
-                provenance: "after the exchange".into(),
-            },
-        );
+        registry
+            .insert(
+                component.clone(),
+                RegisteredKey {
+                    key: key(1),
+                    valid_from: None,
+                    valid_until: Some(datetime!(2026-06-01 0:00 UTC)),
+                    provenance: "original".into(),
+                },
+            )
+            .unwrap();
+        registry
+            .insert(
+                component.clone(),
+                RegisteredKey {
+                    key: key(2),
+                    valid_from: Some(datetime!(2026-06-01 0:00 UTC)),
+                    valid_until: None,
+                    provenance: "after the exchange".into(),
+                },
+            )
+            .unwrap();
 
         assert_eq!(
             registry
@@ -384,24 +476,28 @@ mod tests {
         let component = ComponentRef::Meter {
             serial: "BQ1".into(),
         };
-        registry.insert(
-            component.clone(),
-            RegisteredKey {
-                key: key(1),
-                valid_from: None,
-                valid_until: Some(datetime!(2026-06-01 0:00 UTC)),
-                provenance: "original".into(),
-            },
-        );
-        registry.insert(
-            component.clone(),
-            RegisteredKey {
-                key: key(2),
-                valid_from: Some(datetime!(2026-07-01 0:00 UTC)),
-                valid_until: None,
-                provenance: "after the exchange".into(),
-            },
-        );
+        registry
+            .insert(
+                component.clone(),
+                RegisteredKey {
+                    key: key(1),
+                    valid_from: None,
+                    valid_until: Some(datetime!(2026-06-01 0:00 UTC)),
+                    provenance: "original".into(),
+                },
+            )
+            .unwrap();
+        registry
+            .insert(
+                component.clone(),
+                RegisteredKey {
+                    key: key(2),
+                    valid_from: Some(datetime!(2026-07-01 0:00 UTC)),
+                    valid_until: None,
+                    provenance: "after the exchange".into(),
+                },
+            )
+            .unwrap();
 
         assert!(
             registry
@@ -429,5 +525,92 @@ mod tests {
             registry.key_for_record(&record, datetime!(2026-01-02 10:00 +1)),
             Err(VerifyError::NoSigningComponent)
         ));
+    }
+
+    #[test]
+    fn two_keys_may_not_claim_one_instant() {
+        // The reason `valid_until` is exclusive is that consecutive windows
+        // partition the timeline. Two windows over one instant put that back
+        // where it started: `key_at` would answer with whichever was loaded
+        // first, so the same record verifies or does not depending on the order
+        // a provisioning run happened to run in.
+        let component = ComponentRef::Meter {
+            serial: "BQ1".into(),
+        };
+        let mut registry = KeyRegistry::new();
+        registry
+            .insert(
+                component.clone(),
+                RegisteredKey {
+                    key: key(1),
+                    valid_from: None,
+                    valid_until: Some(datetime!(2026-06-01 00:00 UTC)),
+                    provenance: "type approval".into(),
+                },
+            )
+            .unwrap();
+
+        // The replacement starting a day early overlaps by a day.
+        let err = registry
+            .insert(
+                component.clone(),
+                RegisteredKey {
+                    key: key(2),
+                    valid_from: Some(datetime!(2026-05-31 00:00 UTC)),
+                    valid_until: None,
+                    provenance: "meter exchange".into(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::OverlappingWindows { .. }));
+        assert!(err.to_string().contains("registered first"));
+
+        // …and starting exactly where the first one stops does not, because the
+        // bound is exclusive.
+        registry
+            .insert(
+                component.clone(),
+                RegisteredKey {
+                    key: key(2),
+                    valid_from: Some(datetime!(2026-06-01 00:00 UTC)),
+                    valid_until: None,
+                    provenance: "meter exchange".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            registry
+                .key_at(&component, datetime!(2026-06-01 00:00 UTC))
+                .unwrap()
+                .key,
+            key(2)
+        );
+        assert_eq!(
+            registry
+                .key_at(&component, datetime!(2026-05-31 23:59 UTC))
+                .unwrap()
+                .key,
+            key(1)
+        );
+    }
+
+    #[test]
+    fn an_unbounded_key_leaves_room_for_nothing_else() {
+        // An unbounded window covers every instant, so a second key for the
+        // same component is always an overlap — which is the honest answer: a
+        // registry holding two keys with no dates for one meter cannot say
+        // which signed a record.
+        let component = ComponentRef::Meter {
+            serial: "BQ1".into(),
+        };
+        let mut registry = KeyRegistry::new();
+        registry
+            .insert(component.clone(), RegisteredKey::unbounded(key(1), "a"))
+            .unwrap();
+        assert!(
+            registry
+                .insert(component, RegisteredKey::unbounded(key(2), "b"))
+                .is_err()
+        );
     }
 }

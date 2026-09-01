@@ -609,7 +609,8 @@ mod tests {
                 },
                 "type approval 2026-01",
             ),
-        );
+        )
+        .unwrap();
         r
     }
 

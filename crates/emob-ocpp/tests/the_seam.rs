@@ -42,15 +42,17 @@ fn ended() -> time::OffsetDateTime {
 /// never the one the station sent beside the record.
 fn registry() -> KeyRegistry {
     let mut registry = KeyRegistry::new();
-    registry.insert(
-        ComponentRef::Meter {
-            serial: "1DZG0028225179".into(),
-        },
-        RegisteredKey::unbounded(
-            PublicKey::from_hex(KeyType::Secp256k1, OCA_KEY_HEX).unwrap(),
-            "type approval — DZG GSH01.1K2L",
-        ),
-    );
+    registry
+        .insert(
+            ComponentRef::Meter {
+                serial: "1DZG0028225179".into(),
+            },
+            RegisteredKey::unbounded(
+                PublicKey::from_hex(KeyType::Secp256k1, OCA_KEY_HEX).unwrap(),
+                "type approval — DZG GSH01.1K2L",
+            ),
+        )
+        .unwrap();
     registry
 }
 

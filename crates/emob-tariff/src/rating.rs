@@ -49,6 +49,23 @@
 //! that is not one of those two things, so "why is this €14.46" is answerable
 //! by reading the structure rather than by re-deriving it.
 //!
+//! # The wall clock is read in the offset the period carries
+//!
+//! "0.30 from 22:00" is a statement about local civil time, and a
+//! `time::OffsetDateTime` carries a **UTC offset, not a time zone** — so the
+//! only frame this crate can judge it in is the one each period states. That is
+//! exact for every session `emob-session` assembles, because the quarter-hour
+//! split gives every period one offset, and it is exact across a clock change
+//! too as long as the periods either side carry the offsets their readings did.
+//!
+//! A session assembled from somebody else's timestamps can carry two, and then
+//! the cuts are all placed in the first period's frame. [`rate`] says so —
+//! [`RatingNote::MixedUtcOffsets`] — rather than letting an hour of night rate
+//! land on the wrong side of a boundary in silence. Nothing here consults a
+//! time-zone database: that would make a replayed rating depend on which
+//! version of `tzdata` was installed, which is the one thing a dispute two
+//! years old cannot afford.
+//!
 //! # Rounding happens once, at the end
 //!
 //! Each line is computed exactly and kept exact. Only [`Rated::total`] and the
@@ -271,19 +288,77 @@ pub struct SessionState {
 }
 
 /// One priced line of a session: one dimension at one price.
+///
+/// # Two quantities, because one of them cannot be exact
+///
+/// [`Self::quantity`] is in the unit the price is quoted in — kWh, hours, one
+/// session — which is what an invoice line and a driver read. For the two time
+/// dimensions that unit is the hour, and **a duration in hours is usually not a
+/// decimal**: 3600 has two factors of three, so twenty-five minutes is
+/// `0.41666…` and no scale states it. The same arithmetic makes an occupancy
+/// fee of €2.50 an hour unshowable per minute under `[AFIR Art. 5(4)]`, met
+/// from the other side.
+///
+/// So [`Self::amount`] is *not* computed from that figure. It is computed from
+/// [`Self::base_quantity`] — whole seconds — multiplied by the price before it
+/// is divided by 3600, which is exact wherever the arithmetic allows and is
+/// what makes €6.00 an hour for twenty-five minutes come out as €2.50 rather
+/// than €2.5000000000000000000000000002.
+///
+/// **The identity that holds is `base_quantity × unit_price / base_units_per_unit
+/// == amount`**, and [`Self::reconciles`] checks it. `quantity × unit_price`
+/// reproduces the amount only where the conversion terminates, so a billing
+/// layer that has to show a quantity and a unit price whose product is the line
+/// total has to quote the seconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Line {
     /// What was charged for.
     pub dimension: Dimension,
-    /// How much of it, in the dimension's unit — after any block rounding.
+    /// How much of it, in the unit [`Self::unit_price`] is quoted in — kWh,
+    /// hours, one session — after any block rounding.
+    ///
+    /// Carried at the arithmetic's full precision rather than rounded, because
+    /// rounding a quantity silently is how a line stops explaining its own
+    /// amount. See the type documentation for why it may not be exact.
     pub quantity: Decimal,
-    /// The price per unit that was applied.
+    /// The same quantity in the dimension's **base** unit: kWh for energy,
+    /// whole seconds for the two time dimensions, one for a flat fee.
+    ///
+    /// Exact by construction, and the figure [`Self::amount`] was computed
+    /// from.
+    pub base_quantity: Decimal,
+    /// The price per unit that was applied, in the unit [`Self::quantity`] is
+    /// stated in.
     pub unit_price: Decimal,
     /// The amount, exact and unrounded.
     pub amount: Decimal,
     /// The VAT percentage, when the component carried one.
     pub vat: Option<Decimal>,
+}
+
+impl Line {
+    /// How many base units make one of the unit the price is quoted in —
+    /// 3600 for the time dimensions, one for everything else.
+    #[must_use]
+    pub const fn base_units_per_unit(dimension: Dimension) -> Decimal {
+        match dimension {
+            Dimension::Time | Dimension::ParkingTime => SECONDS_PER_HOUR,
+            Dimension::Energy | Dimension::Flat => Decimal::ONE,
+        }
+    }
+
+    /// Whether the line's own numbers reproduce its amount.
+    ///
+    /// The invariant a receiving party checks before it disputes a total: the
+    /// amount is the base quantity at the unit price, exactly. Asserted in the
+    /// crate's tests over every line it produces, because a line that does not
+    /// explain its own amount is a line an invoice cannot be built from.
+    #[must_use]
+    pub fn reconciles(&self) -> bool {
+        self.base_quantity * self.unit_price / Self::base_units_per_unit(self.dimension)
+            == self.amount
+    }
 }
 
 /// A minimum or maximum the tariff imposed on the total.
@@ -376,6 +451,27 @@ pub enum RatingNote {
         /// The rate that arrived.
         rate: Decimal,
     },
+    /// The session's periods carry more than one UTC offset, and a wall-clock
+    /// restriction was judged in one of them.
+    ///
+    /// A `time::OffsetDateTime` carries an offset, not a time zone, so "0.30
+    /// from 22:00" can only be read against the offset the period itself
+    /// states. Where every period agrees — which is what the quarter-hour split
+    /// produces — that is exactly right. Where they do not, the session crossed
+    /// a clock change or was assembled from timestamps in two frames, and every
+    /// cut was placed in the first period's, so a boundary on the far side of
+    /// the change is an hour out.
+    ///
+    /// Not an error: the energy, the durations and the totals are unaffected,
+    /// and no session this workspace assembles carries mixed offsets. It is
+    /// reported because a session built from a partner's document can, and an
+    /// hour of night rate is worth more than the silence.
+    MixedUtcOffsets {
+        /// The offset the wall clock was judged in, in seconds east of UTC.
+        judged_in_seconds: i32,
+        /// An offset some other period carried.
+        also_seen_seconds: i32,
+    },
 }
 
 impl core::fmt::Display for RatingNote {
@@ -404,6 +500,13 @@ impl core::fmt::Display for RatingNote {
             Self::VatRateNotUsable { dimension, rate } => write!(
                 f,
                 "{dimension:?} carries a VAT rate of {rate} %, from which no net and tax can be computed: the amount is reported whole"
+            ),
+            Self::MixedUtcOffsets {
+                judged_in_seconds,
+                also_seen_seconds,
+            } => write!(
+                f,
+                "this session's periods carry more than one UTC offset ({judged_in_seconds} s and {also_seen_seconds} s); every time-of-day restriction was judged in the first period's, so a boundary on the far side of the change is placed an hour out"
             ),
             Self::Adjusted(adjustment) => match adjustment.kind {
                 AdjustmentKind::Minimum => write!(
@@ -519,7 +622,8 @@ impl Rated {
         }
     }
 
-    /// The quantity charged for one dimension, across every price.
+    /// The quantity charged for one dimension, across every price, in the unit
+    /// the prices are quoted in.
     #[must_use]
     pub fn quantity_for(&self, dimension: Dimension) -> Decimal {
         self.lines
@@ -527,6 +631,30 @@ impl Rated {
             .filter(|l| l.dimension == dimension)
             .map(|l| l.quantity)
             .sum()
+    }
+
+    /// The same, in the dimension's **base** unit — kWh, whole seconds, one —
+    /// which is exact.
+    ///
+    /// What a billing layer aggregates on. Summing [`Self::quantity_for`] over
+    /// several time lines accumulates the error of a division by 3600 once per
+    /// line; this does not, because there is no division in it.
+    #[must_use]
+    pub fn base_quantity_for(&self, dimension: Dimension) -> Decimal {
+        self.lines
+            .iter()
+            .filter(|l| l.dimension == dimension)
+            .map(|l| l.base_quantity)
+            .sum()
+    }
+
+    /// Whether every line reproduces its own amount from its own numbers.
+    ///
+    /// True by construction. Re-checkable, because a [`Rated`] can arrive over
+    /// the wire inside a CDR somebody else built.
+    #[must_use]
+    pub fn lines_reconcile(&self) -> bool {
+        self.lines.iter().all(Line::reconciles)
     }
 
     /// The VAT breakdown, one entry per rate, rounded to the minor unit.
@@ -656,36 +784,7 @@ impl Rated {
 /// ```
 #[must_use]
 pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
-    let mut notes = Vec::new();
-
-    for (index, element) in tariff.elements.iter().enumerate() {
-        if !element.restrictions.is_evaluable() {
-            notes.push(RatingNote::UnevaluableRestriction {
-                index,
-                restrictions: element.restrictions.unevaluable.clone(),
-            });
-        }
-        // A rate of exactly -100 % makes the gross-to-net factor zero, and no
-        // net grosses up to a non-zero amount at that rate. Said once here,
-        // rather than discovered by `tax_summary` where there is nowhere to
-        // put it.
-        //
-        // Only on a gross tariff, where the factor is a divisor. Net prices
-        // multiply by it and zero multiplies fine; a party outside a tax regime
-        // never reads the rate at all.
-        if tariff.tax_included == TaxIncluded::Yes {
-            for component in &element.components {
-                if let Some(rate) = component.vat
-                    && (Decimal::ONE + rate / HUNDRED).is_zero()
-                {
-                    notes.push(RatingNote::VatRateNotUsable {
-                        dimension: component.dimension,
-                        rate,
-                    });
-                }
-            }
-        }
-    }
+    let mut notes = preflight(tariff, session);
 
     // One accumulator per (dimension, price, vat): a tiered session charges the
     // same dimension at two prices and the invoice has to show both.
@@ -747,14 +846,14 @@ pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
             let billed = apply_step(acc.dimension, acc.step_size, acc.quantity, &mut notes);
             // Multiply, then divide. `price × seconds / 3600` is exact wherever
             // the arithmetic allows it to be; `price × (seconds / 3600)` has
-            // already lost the last digits to a repeating decimal.
-            let per_display_unit = match acc.dimension {
-                Dimension::Time | Dimension::ParkingTime => SECONDS_PER_HOUR,
-                Dimension::Energy | Dimension::Flat => Decimal::ONE,
-            };
+            // already lost the last digits to a repeating decimal — which is
+            // why `base_quantity` is the figure the amount comes from and
+            // `quantity` is the one a driver reads.
+            let per_display_unit = Line::base_units_per_unit(acc.dimension);
             Line {
                 dimension: acc.dimension,
                 quantity: billed / per_display_unit,
+                base_quantity: billed,
                 unit_price: acc.price,
                 amount: billed * acc.price / per_display_unit,
                 vat: acc.vat,
@@ -778,6 +877,69 @@ pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
         adjustment,
         notes,
     }
+}
+
+/// What is worth saying about a tariff and a session **before** either is
+/// touched — facts about the two documents rather than about the arithmetic.
+fn preflight(tariff: &Tariff, session: &Chargeable) -> Vec<RatingNote> {
+    let mut notes = Vec::new();
+
+    for (index, element) in tariff.elements.iter().enumerate() {
+        if !element.restrictions.is_evaluable() {
+            notes.push(RatingNote::UnevaluableRestriction {
+                index,
+                restrictions: element.restrictions.unevaluable.clone(),
+            });
+        }
+        // A rate of exactly -100 % makes the gross-to-net factor zero, and no
+        // net grosses up to a non-zero amount at that rate. Said once here,
+        // rather than discovered by `tax_summary` where there is nowhere to
+        // put it.
+        //
+        // Only on a gross tariff, where the factor is a divisor. Net prices
+        // multiply by it and zero multiplies fine; a party outside a tax regime
+        // never reads the rate at all.
+        if tariff.tax_included == TaxIncluded::Yes {
+            for component in &element.components {
+                if let Some(rate) = component.vat
+                    && (Decimal::ONE + rate / HUNDRED).is_zero()
+                {
+                    notes.push(RatingNote::VatRateNotUsable {
+                        dimension: component.dimension,
+                        rate,
+                    });
+                }
+            }
+        }
+    }
+
+    // A time-of-day restriction is read against the offset the period carries,
+    // because that is all an `OffsetDateTime` knows. Every period of a session
+    // this workspace assembles carries one; a session assembled from somebody
+    // else's timestamps need not, and then the cuts are all in the first one's
+    // frame. Said once, here, rather than left for a driver to find on a
+    // clock-change night.
+    if tariff
+        .elements
+        .iter()
+        .any(|element| element.restrictions.reads_the_wall_clock())
+        && let Some(first) = session.periods().first()
+    {
+        let judged_in = first.start.offset();
+        if let Some(other) = session
+            .periods()
+            .iter()
+            .flat_map(|period| [period.start.offset(), period.end.offset()])
+            .find(|offset| *offset != judged_in)
+        {
+            notes.push(RatingNote::MixedUtcOffsets {
+                judged_in_seconds: judged_in.whole_seconds(),
+                also_seen_seconds: other.whole_seconds(),
+            });
+        }
+    }
+
+    notes
 }
 
 /// Cut every period wherever a tariff threshold falls inside it.
@@ -2218,5 +2380,164 @@ mod tests {
         assert_eq!(s.started_at(), at(0));
         assert_eq!(s.ended_at(), at(30));
         assert_eq!(s.total_energy(), kwh("15"));
+    }
+
+    #[test]
+    fn a_session_in_two_offsets_says_which_one_the_clock_was_read_in() {
+        // An `OffsetDateTime` knows an offset, not a time zone, so a night rate
+        // can only be judged in the offset the period carries. Every period the
+        // split produces carries one; a session assembled from a partner's
+        // timestamps need not, and then a boundary on the far side of a clock
+        // change sits an hour out.
+        let night = Tariff {
+            id: "n".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            tax_included: TaxIncluded::Yes,
+            elements: vec![
+                TariffElement {
+                    components: vec![PriceComponent::new(Dimension::Energy, dec("0.30"))],
+                    restrictions: Restrictions {
+                        start_time: Some(time::macros::time!(22:00)),
+                        end_time: Some(time::macros::time!(06:00)),
+                        ..Restrictions::default()
+                    },
+                },
+                TariffElement::unrestricted(vec![PriceComponent::new(
+                    Dimension::Energy,
+                    dec("0.50"),
+                )]),
+            ],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+
+        // Europe/Berlin springs forward at 02:00 local on 2026-03-29: the
+        // readings either side of it are stamped +01:00 and +02:00.
+        let mixed = Chargeable::new(vec![
+            Period::charging(
+                datetime!(2026-03-29 01:30 +1),
+                datetime!(2026-03-29 02:00 +1),
+                kwh("5"),
+            ),
+            Period::charging(
+                datetime!(2026-03-29 03:00 +2),
+                datetime!(2026-03-29 03:30 +2),
+                kwh("5"),
+            ),
+        ])
+        .unwrap();
+        let rated = rate(&night, &mixed);
+        assert!(
+            rated
+                .notes
+                .iter()
+                .any(|n| matches!(n, RatingNote::MixedUtcOffsets { .. })),
+            "{:?}",
+            rated.notes
+        );
+
+        // …and a session in one offset says nothing, because there is nothing
+        // to say.
+        let single = Chargeable::energy_only(
+            kwh("10"),
+            datetime!(2026-01-02 23:00 +1),
+            datetime!(2026-01-03 01:00 +1),
+        )
+        .unwrap();
+        assert!(
+            !rate(&night, &single)
+                .notes
+                .iter()
+                .any(|n| matches!(n, RatingNote::MixedUtcOffsets { .. }))
+        );
+
+        // …and neither does a tariff that reads no clock at all.
+        let flat = Tariff::simple(
+            "f".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+        );
+        assert!(rate(&flat, &mixed).notes.is_empty());
+    }
+
+    #[test]
+    fn a_line_reproduces_its_own_amount_from_its_own_numbers() {
+        // Twenty-five minutes at 6.00 an hour is 2.50 exactly — and 25/60 of an
+        // hour is 0.41666… to the decimal's last digit, so a line whose amount
+        // came from *that* figure would be 2.5000000000000000000000000002 and
+        // would not reconcile against anything. The base quantity is the whole
+        // seconds, and the amount is computed from it.
+        let tariff = Tariff::simple(
+            "t".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![PriceComponent::new(Dimension::ParkingTime, dec("6.00"))],
+        );
+        let session = Chargeable::new(vec![Period::parked(at(0), at(25))]).unwrap();
+        let rated = rate(&tariff, &session);
+
+        let line = &rated.lines[0];
+        assert_eq!(line.base_quantity, dec("1500"), "whole seconds");
+        assert_eq!(line.amount, dec("2.50"));
+        assert!(line.reconciles());
+        assert_ne!(
+            line.quantity * line.unit_price,
+            line.amount,
+            "the hours figure genuinely cannot reproduce it, which is why there are two"
+        );
+    }
+
+    #[test]
+    fn every_line_of_every_shape_of_tariff_reconciles() {
+        // The invariant a receiving party checks before it disputes a total,
+        // over the shapes that reach it: energy, charging time, occupancy, a
+        // session fee, a block rounding and a tier.
+        let tariff = Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::Contract,
+            tax_included: TaxIncluded::Yes,
+            elements: vec![
+                TariffElement {
+                    components: vec![
+                        PriceComponent::new(Dimension::Energy, dec("0.39")),
+                        PriceComponent::new(Dimension::Time, dec("2.50")),
+                        PriceComponent::new(Dimension::ParkingTime, dec("6.00"))
+                            .with_step_size(900),
+                        PriceComponent::new(Dimension::Flat, dec("0.35")),
+                    ],
+                    restrictions: Restrictions {
+                        max_kwh: Some(dec("10")),
+                        ..Restrictions::default()
+                    },
+                },
+                TariffElement::unrestricted(vec![PriceComponent::new(
+                    Dimension::Energy,
+                    dec("0.59"),
+                )]),
+            ],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+        let session = Chargeable::new(vec![
+            Period::charging(at(0), at(22), kwh("15")),
+            Period::parked(at(22), at(53)),
+        ])
+        .unwrap();
+
+        let rated = rate(&tariff, &session);
+        assert!(rated.lines.len() >= 4, "{:?}", rated.lines);
+        assert!(rated.lines_reconcile(), "{:?}", rated.lines);
+        assert_eq!(
+            rated.base_quantity_for(Dimension::Energy),
+            dec("15"),
+            "the tiers divide the energy, they do not change it"
+        );
     }
 }

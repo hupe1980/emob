@@ -10,7 +10,7 @@ use emob_core::{Direction, Energy, EvseId, SessionId};
 
 use crate::auth::Authorization;
 use crate::meter::MeterSeries;
-use crate::split::{SessionSplit, SplitError, into_quarter_hours};
+use crate::split::{SessionSplit, SplitError, into_periods};
 
 /// Where a session is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -307,10 +307,25 @@ impl Session {
         self.ended_at.map(|end| end - self.started_at)
     }
 
-    /// Split a direction's energy across the quarter hours it touched.
+    /// Split a direction's energy across the quarter hours it touched, cut also
+    /// wherever the session changed state.
     ///
     /// The input `mako-emob` needs to assign each quarter hour to the balance
-    /// group of the supplier the driver chose `[A6 §IV.1]`.
+    /// group of the supplier the driver chose `[A6 §IV.1]` —
+    /// [`SessionSplit::market_series`] sums the slices of a quarter hour back
+    /// together for exactly that.
+    ///
+    /// # Why the state changes cut it
+    ///
+    /// A quarter hour is where the energy settles. It is not where the price
+    /// changes: `[AFIR Art. 5(4)]` prices time connected and **not** charging
+    /// separately from the energy, and a vehicle stops charging when it stops
+    /// charging rather than at `:15:00`. Split on the grid alone, the quarter
+    /// hour a charge finishes in carries one `charging` flag for fifteen
+    /// minutes that were not all the same — so up to a quarter hour of
+    /// occupancy is billed as charging, or the reverse, at every transition.
+    /// The session's own history says where the line falls, so it is drawn
+    /// there.
     ///
     /// # Errors
     ///
@@ -320,7 +335,8 @@ impl Session {
         let series = self
             .series_for(direction)
             .ok_or(SessionError::NoSeries { direction })?;
-        into_quarter_hours(series).map_err(SessionError::Split)
+        let cuts: Vec<time::OffsetDateTime> = self.history.iter().map(|change| change.at).collect();
+        into_periods(series, &cuts).map_err(SessionError::Split)
     }
 }
 

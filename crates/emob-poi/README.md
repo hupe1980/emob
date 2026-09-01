@@ -109,8 +109,7 @@ as `other`, and so does a DIN SPEC 70121 point: `none` means "No communication
 between vehicle and the grid", which is false about a charger that talks to the
 car over PLC.
 
-The ambiguity is in the profile's vocabulary, not in the protocol — see
-`ISO15118_FEEDBACK.md`.
+The ambiguity is in the profile's vocabulary, not in the protocol.
 
 ## Checked against the Mobilithek's own reference
 

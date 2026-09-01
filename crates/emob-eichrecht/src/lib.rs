@@ -89,9 +89,9 @@ pub mod ocmf;
 pub mod registry;
 pub mod transparency;
 
-pub use chain::{ChainFinding, ChainReport};
+pub use chain::{ChainFinding, ChainReport, SignedMarker};
 pub use error::{OcmfError, VerifyError};
 pub use evidence::{Evidence, EvidenceProblem, VerifiedRecord};
 pub use ocmf::{KeyType, OcmfRecord, PublicKey};
-pub use registry::{ComponentRef, KeyRegistry, RegisteredKey};
+pub use registry::{ComponentRef, KeyRegistry, RegisteredKey, RegistryError};
 pub use transparency::{TransparencyError, TransparencyValue};

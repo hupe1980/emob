@@ -332,6 +332,31 @@ And the order of operations matters. 35 minutes at €6.00 an hour is
 Time therefore accumulates in whole seconds and converts to hours once, after
 the multiplication by the price.
 
+Which is why a line carries **two** quantities. `unit_price` is per hour, because
+that is how a tariff is written, and twenty-five minutes is `0.41666…` hours — so
+`quantity × unit_price` cannot be the amount. `base_quantity` is the whole
+seconds, and it is what the amount comes from:
+
+```rust
+assert!(rated.lines_reconcile());   // base_quantity × unit_price / 3600 == amount
+```
+
+A billing layer that needs a quantity and a price whose product is the line total
+quotes the seconds; the hours figure is what a driver reads.
+
+## The clock a time-of-day restriction is read against
+
+"0.30 from 22:00" is local civil time, and an `OffsetDateTime` carries a **UTC
+offset, not a time zone** — so the only frame the rating can judge it in is the
+one each period states. That is exact for every session this workspace assembles,
+across a clock change included, as long as the periods either side carry the
+offsets their readings did.
+
+A session assembled from a partner's timestamps can carry two, and then every cut
+lands in the first period's frame. `rate` reports that as `MixedUtcOffsets`.
+Nothing consults a time-zone database: a replayed rating that depended on the
+installed `tzdata` is the one thing a two-year-old dispute cannot afford.
+
 ## The two restrictions everybody gets wrong
 
 **A window that wraps midnight** — `22:00` to `06:00` — is a night tariff, not

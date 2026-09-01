@@ -69,6 +69,26 @@ assert!(!split.slots[0].covers_the_whole_quarter_hour());
 A consumer that reconstructs one from the other has to guess, and guesses wrong
 whenever the session is wider than its meter series.
 
+## The grid is not the only thing that cuts a session
+
+A quarter hour is where the **energy** settles. It is not where the **price**
+changes: `[AFIR Art. 5(4)]` prices the time a vehicle is connected and *not*
+charging per minute, and a vehicle stops charging when it stops charging, not at
+`:15:00`. A slot running 10:15 to 10:30 with the charge finishing at 10:20 is ten
+minutes of occupancy and five of charging, which one `charging` flag cannot say.
+
+So `Session::split` cuts at the session's own state changes as well as at the
+grid, and each is another boundary in the same telescoping sum:
+
+```rust
+let split = session.split(Direction::Import)?;    // grid + state changes
+let split = split::into_periods(&series, &cuts)?; // the primitive underneath
+```
+
+Conservation is unaffected — interior boundaries cancel wherever they fall — and
+`market_series()` sums the slices of a quarter hour back together, so the market
+side still sees one entry per Messperiode.
+
 ## The instant that names a period
 
 `[PTB-A 50.7 §3.1.7.2]`, in a footnote: "Der Zeitstempel, der zu einer

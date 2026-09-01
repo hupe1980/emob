@@ -63,8 +63,8 @@ pub struct ChargingPeriod {
     /// for the time a vehicle is connected and *not* charging, so a period on
     /// the wrong side of this flag is billed at the wrong rate.
     ///
-    /// Deriving it from `energy == 0` — which this type used to do — gets a
-    /// taper wrong in exactly the case that matters. A car at 100 % state of
+    /// Deriving it from `energy == 0` gets a taper wrong in exactly the case
+    /// that matters. A car at 100 % state of
     /// charge draws a rounding error, and a quarter hour that genuinely
     /// measured `0.000 kWh` while the session's own state machine says
     /// `Charging` is a taper, not an occupancy. [`CdrBuilder`] takes this from
@@ -1243,6 +1243,100 @@ mod tests {
                 .amount_for(Dimension::ParkingTime),
             Some(dec("1.50"))
         );
+    }
+
+    #[test]
+    fn occupancy_is_measured_from_when_charging_stopped_not_from_the_next_quarter() {
+        // The fault this fixes. `[AFIR Art. 5(4)]` prices the time a vehicle is
+        // connected and not charging *per minute*, and a vehicle stops charging
+        // when it stops charging rather than at `:15:00`. Split on the
+        // settlement grid alone, the quarter hour a charge finishes in carries
+        // one `charging` flag for fifteen minutes that were not all the same —
+        // so the ten minutes of occupancy between 10:20 and 10:30 were billed
+        // as charging, and the driver paid 1.50 for 25 minutes of parking
+        // instead of 2.50.
+        let mut s = Session::open(
+            "s-taper".parse().unwrap(),
+            "DE*AB7*E840*6487".parse().unwrap(),
+            Authorization::ad_hoc(),
+            at(0),
+        );
+        s.transition_to(emob_session::SessionState::Charging, at(0))
+            .unwrap();
+        s.transition_to(emob_session::SessionState::Suspended, at(20))
+            .unwrap();
+        s.attach_series(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    MeterReading::new(
+                        at(0),
+                        kwh("100.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionBegin,
+                    ),
+                    MeterReading::new(
+                        at(20),
+                        kwh("113.000"),
+                        Direction::Import,
+                        ReadingContext::InterruptionBegin,
+                    ),
+                    MeterReading::new(
+                        at(45),
+                        kwh("113.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionEnd,
+                    ),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        s.end(at(45), EndReason::Local).unwrap();
+
+        let occupancy = Tariff::simple(
+            "ad-hoc-dc".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![
+                PriceComponent::new(Dimension::Energy, dec("0.49")),
+                PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
+            ],
+        );
+
+        let cdr = CdrBuilder::from_session(&s, Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-1".parse().unwrap())
+            .rated_with(&occupancy)
+            .build()
+            .unwrap();
+
+        let parked: i64 = cdr
+            .periods
+            .iter()
+            .filter(|p| !p.charging)
+            .map(|p| p.duration().whole_minutes())
+            .sum();
+        let charged: i64 = cdr
+            .periods
+            .iter()
+            .filter(|p| p.charging)
+            .map(|p| p.duration().whole_minutes())
+            .sum();
+        assert_eq!((charged, parked), (20, 25));
+
+        let rated = &cdr.cost.as_ref().unwrap().rated;
+        // Twenty-five minutes at 6.00 an hour, exactly — and the amount comes
+        // from the seconds, not from 25/60 of an hour.
+        assert_eq!(rated.amount_for(Dimension::ParkingTime), Some(dec("2.50")));
+        assert_eq!(rated.base_quantity_for(Dimension::ParkingTime), dec("1500"));
+        assert!(rated.lines_reconcile());
+        assert!(cdr.conserves());
+
+        // …and the market side still sees one entry per Messperiode, whatever
+        // the pricing cut did inside them `[A6 §IV.1]`.
+        let market = s.split(Direction::Import).unwrap().market_series();
+        assert_eq!(market.len(), 3, "10:15, 10:30, 10:45");
     }
 
     #[test]
