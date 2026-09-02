@@ -40,7 +40,7 @@
 use emob_cdr::{Cdr, ChargingPeriod, EvidenceRef};
 use emob_core::{Direction, Energy};
 use emob_session::{AuthPath, Provenance};
-use emob_tariff::{Dimension, Rated, TaxIncluded};
+use emob_tariff::{Dimension, Rated};
 use ocpi_kit::types::{CiString, Number, OcpiString};
 use ocpi_kit::v2_3_0::cdrs::{
     AuthMethod, CdrDimension, CdrDimensionType, CdrLocation, CdrToken, SignedData, SignedValue,
@@ -218,7 +218,10 @@ pub fn to_ocpi(
                 "{uncovered} s of this session are covered by no charging period, because the \
                  meter did not measure them. An OCPI period has a start and no end, so a reader \
                  attributes that time to whichever period precedes it — this record does not \
-                 claim it, and nothing was invented to fill it"
+                 claim it, and nothing was invented to fill it. The specification's own \
+                 `total_charging_time = total_time - total_parking_time` therefore counts those \
+                 {uncovered} s as charging, which no meter reading supports \
+                 [OCPI 2.3.0 §mod_cdrs_cdr_object]"
             ),
         );
     }
@@ -582,47 +585,27 @@ fn price(rated: &Rated) -> Price {
 fn component_price(
     rated: &Rated,
     dimension: Dimension,
-    currency: emob_core::Currency,
+    _currency: emob_core::Currency,
 ) -> Option<Price> {
-    let amount = rated.amount_for(dimension)?;
-    let vat = rated
-        .lines
-        .iter()
-        .find(|line| line.dimension == dimension)
-        .and_then(|line| line.vat);
-
-    let round = |value: Decimal| {
-        emob_core::Money::new(value, currency)
-            .round_to_minor_unit()
-            .amount()
-    };
-    let factor = vat.map_or(Decimal::ONE, |rate| {
-        Decimal::ONE + rate / Decimal::from(100)
-    });
-
-    let (net, tax) = match rated.tax_included {
-        // The amounts are gross: strip the tax out of them. A rate of exactly
-        // −100 % makes the factor zero and the question unanswerable, so the
-        // amount goes out unsplit — `rate` has already recorded a note beside
-        // it, and dividing would panic.
-        TaxIncluded::Yes if !factor.is_zero() => {
-            let net = round(amount / factor);
-            (net, round(amount) - net)
-        }
-        TaxIncluded::No => {
-            let net = round(amount);
-            (net, round(amount * factor) - net)
-        }
-        TaxIncluded::Yes | TaxIncluded::NotApplicable => (round(amount), Decimal::ZERO),
-    };
-
-    let mut price = Price::new(Number::new(net));
-    if !tax.is_zero()
-        && let Some(rate) = vat
-        && let Ok(line) = TaxAmount::new("VAT", Some(Number::new(rate)), Number::new(tax))
-    {
-        price.taxes = vec![line];
+    // Per VAT rate, not per dimension. One dimension can be charged at two
+    // prices — that is what a tier is — and the two tiers can sit in different
+    // tax categories. Reading the rate off the first line and applying it to
+    // the summed amount taxes the second tier at the first tier's rate, which
+    // is a number the partner's own accountant will not reproduce.
+    let taxes = rated.tax_summary_for(dimension);
+    if taxes.is_empty() {
+        return None;
     }
+
+    let net: Decimal = taxes.iter().map(|line| line.net).sum();
+    let mut price = Price::new(Number::new(net));
+    price.taxes = taxes
+        .iter()
+        .filter(|line| !line.tax.is_zero())
+        .filter_map(|line| {
+            TaxAmount::new("VAT", Some(Number::new(line.rate)), Number::new(line.tax)).ok()
+        })
+        .collect();
     Some(price)
 }
 

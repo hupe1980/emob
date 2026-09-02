@@ -202,6 +202,28 @@ pub enum VerifyError {
         serial: String,
     },
 
+    /// A key is registered for the component, and none of its windows covers
+    /// the instant the record was signed at.
+    ///
+    /// Distinct from [`Self::NoKeyForComponent`], and the distinction is what
+    /// an operator acts on: nothing registered is a provisioning gap, while a
+    /// key whose window has closed is a key that was replaced without the
+    /// replacement being registered — or a record from before the component
+    /// was commissioned. Both are answers; "no key" for the second is a
+    /// misdirection.
+    #[error(
+        "a public key is registered for signing component {component} but none of its validity \
+         windows covers {at}: {windows}"
+    )]
+    NoKeyValidAt {
+        /// The component the record identifies.
+        component: String,
+        /// The instant the key was needed for.
+        at: time::OffsetDateTime,
+        /// The windows the registry does hold, so the gap is visible.
+        windows: String,
+    },
+
     /// The record names no signing component at all, so no key can be found.
     #[error("the record names neither a meter serial nor a gateway serial")]
     NoSigningComponent,

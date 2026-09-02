@@ -40,6 +40,26 @@
 //! | `ParkingTime` | time in periods that were not | hours |
 //! | `Flat` | the session itself, once | once |
 //!
+//! # The element is chosen **per dimension**, not per period
+//!
+//! `[OCPI 2.3.0 §Tariff]`: "the first Tariff Element with a Price Component
+//! **for that dimension** in the list with matching Tariff Restrictions will be
+//! used. Only one Price Component per dimension can be active at any point in
+//! time, but multiple Price Components for different dimensions can be active
+//! at once."
+//!
+//! The shape that follows is the one partners send, because the specification
+//! recommends it: an unrestricted default per dimension after the restricted
+//! ones. A tariff written that way — `{FLAT 0.50}` then `{ENERGY 0.49}` — has
+//! two unrestricted elements, and an engine that stops at the first bills the
+//! session fee and *nothing else*: the kilowatt-hours vanish, no element failed
+//! to match, and no note is raised.
+//!
+//! So [`matching_component`] asks one dimension at a time, and
+//! [`RatingNote::Unpriced`] is per dimension too — the specification answers a
+//! dimension nothing matched with "there will be no costs for that Tariff
+//! Dimension", and the quantity that went unpriced is what a dispute turns on.
+//!
 //! # Every number the total is made of is kept
 //!
 //! [`rate`] returns a [`Rated`] carrying one [`Line`] per *distinct price* that
@@ -404,11 +424,28 @@ pub enum AdjustmentKind {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum RatingNote {
-    /// No element's restrictions matched a period, so it was not charged.
-    NoMatchingElement {
-        /// When the unpriced period began.
+    /// A quantity the tariff did not price.
+    ///
+    /// No element carrying this dimension had restrictions matching the
+    /// period — which `[OCPI 2.3.0 §Tariff]` answers with "there will be no
+    /// costs for that Tariff Dimension", so it is a price of zero rather than
+    /// an error. What makes it worth a note is the amount: a session that
+    /// delivered 40 kWh and priced 12 of them is a settlement dispute, and the
+    /// number that starts it belongs on the record.
+    ///
+    /// One note per dimension, however many periods it covered, because
+    /// ninety-six identical notes are the same fact reported ninety-six times.
+    Unpriced {
+        /// Which dimension went unpriced.
+        dimension: Dimension,
+        /// When the first unpriced period began.
         #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
         at: time::OffsetDateTime,
+        /// How many periods it covered.
+        periods: usize,
+        /// How much went unpriced, in the dimension's **base** unit — kWh,
+        /// whole seconds, one session — which is exact.
+        base_quantity: Decimal,
     },
     /// An element was skipped because it carries a restriction this build
     /// cannot evaluate.
@@ -477,9 +514,15 @@ pub enum RatingNote {
 impl core::fmt::Display for RatingNote {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoMatchingElement { at } => write!(
+            Self::Unpriced {
+                dimension,
+                at,
+                periods,
+                base_quantity,
+            } => write!(
                 f,
-                "no tariff element matched the period beginning {at}; it was not charged"
+                "no tariff element prices {dimension:?} under the conditions of {periods} period(s) beginning {at}: {base_quantity} {} was not charged",
+                dimension.base_unit()
             ),
             Self::UnevaluableRestriction {
                 index,
@@ -651,7 +694,10 @@ impl Rated {
     /// Whether every line reproduces its own amount from its own numbers.
     ///
     /// True by construction. Re-checkable, because a [`Rated`] can arrive over
-    /// the wire inside a CDR somebody else built.
+    /// the wire inside a CDR somebody else built — and it **is** checked there:
+    /// `emob_cdr::validate` asks it of each line rather than of the whole, so
+    /// the finding names the line that does not add up. This is the one-line
+    /// question, for a caller that only wants the answer.
     #[must_use]
     pub fn lines_reconcile(&self) -> bool {
         self.lines.iter().all(Line::reconciles)
@@ -663,8 +709,48 @@ impl Rated {
     /// [`TaxIncluded::NotApplicable`], falls into the zero-rate entry.
     #[must_use]
     pub fn tax_summary(&self) -> Vec<TaxLine> {
+        self.grouped_by_rate(
+            self.lines
+                .iter()
+                .map(|line| (line.vat, line.amount))
+                .chain(self.adjustment.map(|a| (a.vat, a.amount))),
+        )
+    }
+
+    /// The same breakdown for **one dimension's** lines.
+    ///
+    /// What a wire that states a cost per dimension needs — OCPI's
+    /// `total_energy_cost` and its siblings each carry their own tax list. It
+    /// is a breakdown rather than one rate for the same reason the whole
+    /// summary is: one dimension can be charged at two prices, and a tiered
+    /// tariff whose tiers sit in different VAT categories has two taxable
+    /// amounts under one heading. Reading the rate off the first line and
+    /// applying it to the sum quietly taxes the second tier at the first
+    /// tier's rate.
+    ///
+    /// The adjustment is **not** included. A minimum charge is a term of the
+    /// total rather than of any one dimension — [`Adjustment::vat`] records
+    /// which category it landed in — and attributing it to a heading here
+    /// would make the headings sum to more than the record's own lines.
+    #[must_use]
+    pub fn tax_summary_for(&self, dimension: Dimension) -> Vec<TaxLine> {
+        self.grouped_by_rate(
+            self.lines
+                .iter()
+                .filter(|line| line.dimension == dimension)
+                .map(|line| (line.vat, line.amount)),
+        )
+    }
+
+    /// Group amounts by VAT rate and split each group, in ascending rate order.
+    fn grouped_by_rate(
+        &self,
+        amounts: impl Iterator<Item = (Option<Decimal>, Decimal)>,
+    ) -> Vec<TaxLine> {
         let mut groups: Vec<(Decimal, Decimal)> = Vec::new();
-        let mut add = |rate: Option<Decimal>, amount: Decimal| {
+        for (rate, amount) in amounts {
+            // A party outside a tax regime never reads the rate at all, so
+            // every line falls into one zero-rated group.
             let rate = match self.tax_included {
                 TaxIncluded::NotApplicable => Decimal::ZERO,
                 TaxIncluded::Yes | TaxIncluded::No => rate.unwrap_or(Decimal::ZERO),
@@ -673,13 +759,6 @@ impl Rated {
                 Some((_, total)) => *total += amount,
                 None => groups.push((rate, amount)),
             }
-        };
-
-        for line in &self.lines {
-            add(line.vat, line.amount);
-        }
-        if let Some(adjustment) = self.adjustment {
-            add(adjustment.vat, adjustment.amount);
         }
 
         groups.sort_by_key(|group| group.0);
@@ -789,9 +868,16 @@ pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
     // One accumulator per (dimension, price, vat): a tiered session charges the
     // same dimension at two prices and the invoice has to show both.
     let mut accumulators: Vec<Accumulator> = Vec::new();
+    // What nothing priced, one entry per dimension rather than per period.
+    let mut unpriced: Vec<UnpricedTally> = Vec::new();
     let mut cumulative_energy = Decimal::ZERO;
     let mut elapsed_seconds: u64 = 0;
     let mut flat_charged = false;
+
+    // Asked once: the dimensions this tariff prices anywhere, in the order
+    // `[AFIR Art. 5(4)]` prescribes. A dimension no element carries is not a
+    // dimension this session can be short of.
+    let dimensions = tariff.dimensions();
 
     let periods = subdivide_at_thresholds(tariff, session.periods());
     for period in &periods {
@@ -801,41 +887,56 @@ pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
             at: period.start,
             power_kw: period.average_power_kw(),
         };
+        let seconds = Decimal::from(period.seconds());
 
-        if let Some(element) = matching_element(tariff, &state) {
-            let seconds = Decimal::from(period.seconds());
-            for component in &element.components {
-                // In the dimension's *base* unit: kWh for energy, whole seconds
-                // for the two time dimensions, one for a flat fee. Time is
-                // accumulated in seconds rather than hours so that the division
-                // by 3600 happens once, after the multiplication by the price —
-                // 35 minutes at 6.00/h is 3.50 exactly that way and
-                // 3.4999999999999999999999999998 the other.
-                let quantity = match component.dimension {
-                    Dimension::Energy => period.energy.kwh(),
-                    Dimension::Time if period.charging => seconds,
-                    Dimension::ParkingTime if !period.charging => seconds,
-                    Dimension::Time | Dimension::ParkingTime => Decimal::ZERO,
-                    Dimension::Flat => {
-                        if flat_charged {
-                            continue;
-                        }
-                        flat_charged = true;
-                        Decimal::ONE
-                    }
-                };
-                if quantity.is_zero() {
-                    continue;
+        for &dimension in &dimensions {
+            // In the dimension's *base* unit: kWh for energy, whole seconds for
+            // the two time dimensions, one for a flat fee. Time is accumulated
+            // in seconds rather than hours so that the division by 3600 happens
+            // once, after the multiplication by the price — 35 minutes at
+            // 6.00/h is 3.50 exactly that way and 3.4999999999999999999999999998
+            // the other.
+            let quantity = match dimension {
+                Dimension::Energy => period.energy.kwh(),
+                Dimension::Time if period.charging => seconds,
+                Dimension::ParkingTime if !period.charging => seconds,
+                Dimension::Time | Dimension::ParkingTime => Decimal::ZERO,
+                Dimension::Flat if flat_charged => Decimal::ZERO,
+                Dimension::Flat => Decimal::ONE,
+            };
+            if quantity.is_zero() {
+                continue;
+            }
+
+            // The per-dimension question `[OCPI 2.3.0 §Tariff]` asks, rather
+            // than "which element matches" — see the module documentation for
+            // the tariff shape that makes the difference the whole session's
+            // energy.
+            if let Some((_, component)) = matching_component(tariff, dimension, &state) {
+                if dimension == Dimension::Flat {
+                    flat_charged = true;
                 }
                 accumulate(&mut accumulators, component, quantity);
+            } else {
+                tally_unpriced(&mut unpriced, dimension, period.start, quantity);
             }
-        } else {
-            notes.push(RatingNote::NoMatchingElement { at: period.start });
         }
 
         cumulative_energy += period.energy.kwh();
         elapsed_seconds += period.seconds();
     }
+
+    // A flat fee that went unmatched early and matched later was charged, so
+    // the tally is a period that was overtaken rather than a fee that was lost.
+    if flat_charged {
+        unpriced.retain(|tally| tally.dimension != Dimension::Flat);
+    }
+    notes.extend(unpriced.into_iter().map(|tally| RatingNote::Unpriced {
+        dimension: tally.dimension,
+        at: tally.at,
+        periods: tally.periods,
+        base_quantity: tally.base_quantity,
+    }));
 
     // Block rounding applies to what was actually billed for a price, not to
     // each period of it — rounding every quarter hour up to a block would bill
@@ -1201,6 +1302,39 @@ struct Accumulator {
     quantity: Decimal,
 }
 
+/// One dimension's unpriced quantity, accumulating across periods.
+struct UnpricedTally {
+    dimension: Dimension,
+    at: time::OffsetDateTime,
+    periods: usize,
+    base_quantity: Decimal,
+}
+
+/// Record that a period's quantity in one dimension found no price.
+fn tally_unpriced(
+    into: &mut Vec<UnpricedTally>,
+    dimension: Dimension,
+    at: time::OffsetDateTime,
+    quantity: Decimal,
+) {
+    if let Some(existing) = into.iter_mut().find(|t| t.dimension == dimension) {
+        existing.periods += 1;
+        // A flat fee is one fee however many periods failed to match it.
+        // Everything else accumulates, because that is the quantity a dispute
+        // is about.
+        if dimension != Dimension::Flat {
+            existing.base_quantity += quantity;
+        }
+    } else {
+        into.push(UnpricedTally {
+            dimension,
+            at,
+            periods: 1,
+            base_quantity: quantity,
+        });
+    }
+}
+
 fn accumulate(into: &mut Vec<Accumulator>, component: &PriceComponent, quantity: Decimal) {
     if let Some(existing) = into.iter_mut().find(|a| {
         a.dimension == component.dimension && a.price == component.price && a.vat == component.vat
@@ -1319,10 +1453,32 @@ fn apply_step(
     billed
 }
 
-/// The first element whose restrictions the session state satisfies.
+/// The price component that prices one dimension in a given session state, and
+/// the index of the element it came from.
+///
+/// `[OCPI 2.3.0 §Tariff]`: "the first Tariff Element with a Price Component for
+/// that dimension in the list with matching Tariff Restrictions will be used".
+/// Elements that price other dimensions are stepped over rather than stopped
+/// at — which is the difference between reading a two-element `{FLAT}`,
+/// `{ENERGY}` tariff correctly and billing a session's fee without its
+/// kilowatt-hours.
+///
+/// Public so [`crate::display`] selects by *this* rule rather than a parallel
+/// one. Two implementations of "which price applies" is exactly the drift this
+/// crate exists to prevent, one level down.
 #[must_use]
-pub fn matching_element<'a>(tariff: &'a Tariff, state: &SessionState) -> Option<&'a TariffElement> {
-    tariff.elements.iter().find(|e| element_matches(e, state))
+pub fn matching_component<'a>(
+    tariff: &'a Tariff,
+    dimension: Dimension,
+    state: &SessionState,
+) -> Option<(usize, &'a PriceComponent)> {
+    tariff.elements.iter().enumerate().find_map(|(index, e)| {
+        // The dimension first, the restrictions second: an element that does
+        // not price this dimension is not a candidate at all, so whether its
+        // restrictions match is not a question worth asking.
+        let component = e.component(dimension)?;
+        element_matches(e, state).then_some((index, component))
+    })
 }
 
 /// Whether an element's restrictions admit a session state.
@@ -2342,12 +2498,249 @@ mod tests {
         let r = rate(&t, &session("10"));
         assert!(r.lines.is_empty());
         assert_eq!(r.total().amount(), Decimal::ZERO);
-        assert!(
-            r.notes
-                .iter()
-                .any(|n| matches!(n, RatingNote::NoMatchingElement { .. }))
+        // The quantity, not just the fact: a session that delivered ten
+        // kilowatt-hours and priced none of them is a dispute, and this is the
+        // number it is about.
+        assert_eq!(
+            r.notes,
+            vec![RatingNote::Unpriced {
+                dimension: Dimension::Energy,
+                at: at(0),
+                periods: 1,
+                base_quantity: dec("10"),
+            }]
         );
-        assert!(r.reasons().any(|s| s.contains("was not charged")));
+        assert!(r.reasons().any(|s| s.contains("10 kWh was not charged")));
+    }
+
+    #[test]
+    fn one_dimension_charged_at_two_vat_rates_is_two_taxable_amounts() {
+        // A tiered tariff whose tiers sit in different tax categories. Reading
+        // one rate off the first line and applying it to the summed amount —
+        // which is what a per-dimension cost on the wire used to do — taxes the
+        // second tier at the first tier's rate.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![
+                    PriceComponent::new(Dimension::Energy, dec("1.19")).with_vat(dec("19")),
+                ],
+                restrictions: Restrictions {
+                    max_kwh: Some(dec("10")),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![
+                PriceComponent::new(Dimension::Energy, dec("1.07")).with_vat(dec("7")),
+            ]),
+        ]);
+
+        let r = rate(&t, &session("20"));
+        let energy = r.tax_summary_for(Dimension::Energy);
+        assert_eq!(energy.len(), 2, "two categories: {energy:?}");
+        assert_eq!(energy[0].rate, dec("7"));
+        assert_eq!(energy[0].net, dec("10.00")); // 10 × 1.07 gross
+        assert_eq!(energy[0].tax, dec("0.70"));
+        assert_eq!(energy[1].rate, dec("19"));
+        assert_eq!(energy[1].net, dec("10.00")); // 10 × 1.19 gross
+        assert_eq!(energy[1].tax, dec("1.90"));
+
+        // …and it agrees with the whole-record summary, which has no other
+        // dimension to add.
+        assert_eq!(energy, r.tax_summary());
+    }
+
+    #[test]
+    fn a_dimensions_breakdown_leaves_the_adjustment_to_the_total() {
+        // A minimum charge is a term of the total, not of any one heading.
+        // Attributing it to one would make the headings sum to more than the
+        // record's own lines.
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+        ]);
+        t.min_price = Some(dec("10.00"));
+
+        let r = rate(&t, &session("1"));
+        assert!(r.adjustment.is_some());
+        assert_eq!(
+            r.tax_summary_for(Dimension::Energy)
+                .iter()
+                .map(|l| l.gross)
+                .sum::<Decimal>(),
+            dec("0.49"),
+            "the heading is the line, not the topped-up total"
+        );
+        assert_eq!(r.gross().amount(), dec("10.00"));
+    }
+
+    #[test]
+    fn one_note_per_dimension_however_many_periods_went_unpriced() {
+        // Ninety-six identical notes are the same fact reported ninety-six
+        // times, and a record that carries them is one nobody reads.
+        let t = tiered(vec![TariffElement {
+            components: vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+            restrictions: Restrictions {
+                min_kwh: Some(dec("100")),
+                ..Restrictions::default()
+            },
+        }]);
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(15), kwh("4")),
+            Period::charging(at(15), at(30), kwh("3")),
+            Period::charging(at(30), at(45), kwh("2.5")),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            rate(&t, &s).notes,
+            vec![RatingNote::Unpriced {
+                dimension: Dimension::Energy,
+                at: at(0),
+                periods: 3,
+                base_quantity: dec("9.5"),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_price_component_is_chosen_per_dimension_not_per_element() {
+        // The shape `[OCPI 2.3.0 §Tariff]` recommends and every partner sends:
+        // one unrestricted default element per dimension. Read as "the first
+        // element that matches, then all of its components", this bills the
+        // session fee and silently drops every kilowatt-hour — no element
+        // failed to match, so nothing is even reported.
+        let t = tiered(vec![
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Flat, dec("0.50"))]),
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]),
+        ]);
+
+        let r = rate(&t, &session("10"));
+        assert_eq!(r.lines.len(), 2, "{:?}", r.lines);
+        assert_eq!(r.amount_for(Dimension::Energy), Some(dec("4.90")));
+        assert_eq!(r.amount_for(Dimension::Flat), Some(dec("0.50")));
+        assert_eq!(r.exact_total().amount(), dec("5.40"));
+        assert!(r.notes.is_empty(), "nothing was assumed: {:?}", r.notes);
+    }
+
+    #[test]
+    fn a_restricted_element_shadows_only_the_dimension_it_prices() {
+        // A night rate on energy, a session fee that applies always, and a day
+        // rate behind both. The flat element sits *between* the two energy
+        // elements, which under a per-element reading would end the search.
+        let t = tiered(vec![
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.29"))],
+                restrictions: Restrictions {
+                    start_time: Some(time::macros::time!(22:00)),
+                    end_time: Some(time::macros::time!(6:00)),
+                    ..Restrictions::default()
+                },
+            },
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Flat, dec("0.50"))]),
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]),
+        ]);
+
+        // 10:00 is the day rate, and the fee applies beside it.
+        let day = rate(&t, &session("10"));
+        assert_eq!(day.amount_for(Dimension::Energy), Some(dec("4.90")));
+        assert_eq!(day.amount_for(Dimension::Flat), Some(dec("0.50")));
+
+        // …and at 23:00 the same tariff takes the night rate, still with the fee.
+        let night = Chargeable::energy_only(
+            kwh("10"),
+            datetime!(2026-01-02 23:00 +1),
+            datetime!(2026-01-02 23:30 +1),
+        )
+        .unwrap();
+        let night = rate(&t, &night);
+        assert_eq!(night.amount_for(Dimension::Energy), Some(dec("2.90")));
+        assert_eq!(night.amount_for(Dimension::Flat), Some(dec("0.50")));
+    }
+
+    #[test]
+    fn one_dimension_can_go_unpriced_while_another_is_charged() {
+        // `[OCPI 2.3.0 §Tariff]`: "there will be no costs for that Tariff
+        // Dimension" — a price of zero rather than an error, and a fact the
+        // record carries.
+        let t = tiered(vec![
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]),
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::ParkingTime, dec("6.00"))],
+                restrictions: Restrictions {
+                    min_duration_s: Some(3600),
+                    ..Restrictions::default()
+                },
+            },
+        ]);
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(15), kwh("10")),
+            Period::parked(at(15), at(30)),
+        ])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.amount_for(Dimension::Energy), Some(dec("4.90")));
+        assert_eq!(r.amount_for(Dimension::ParkingTime), None);
+        assert_eq!(
+            r.notes,
+            vec![RatingNote::Unpriced {
+                dimension: Dimension::ParkingTime,
+                at: at(15),
+                periods: 1,
+                base_quantity: dec("900"),
+            }],
+            "fifteen minutes of occupancy nothing priced, in seconds"
+        );
+    }
+
+    #[test]
+    fn a_flat_fee_is_one_fee_whether_it_is_charged_or_missed() {
+        // Charged late: the periods that missed it were overtaken, not lost.
+        let late = tiered(vec![TariffElement {
+            components: vec![PriceComponent::new(Dimension::Flat, dec("0.50"))],
+            restrictions: Restrictions {
+                min_duration_s: Some(900),
+                ..Restrictions::default()
+            },
+        }]);
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(15), kwh("5")),
+            Period::charging(at(15), at(30), kwh("5")),
+        ])
+        .unwrap();
+        let r = rate(&late, &s);
+        assert_eq!(r.amount_for(Dimension::Flat), Some(dec("0.50")));
+        assert!(r.notes.is_empty(), "{:?}", r.notes);
+
+        // Never charged: one note, one session, not one per period.
+        let never = tiered(vec![TariffElement {
+            components: vec![PriceComponent::new(Dimension::Flat, dec("0.50"))],
+            restrictions: Restrictions {
+                min_duration_s: Some(86_400),
+                ..Restrictions::default()
+            },
+        }]);
+        assert_eq!(
+            rate(&never, &s).notes,
+            vec![RatingNote::Unpriced {
+                dimension: Dimension::Flat,
+                at: at(0),
+                periods: 2,
+                base_quantity: Decimal::ONE,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_element_pricing_the_same_dimension_twice_charges_it_once() {
+        // Malformed — `[OCPI 2.3.0 §Tariff]` allows one active component per
+        // dimension — and charging both would double-bill the energy.
+        let t = tiered(vec![TariffElement::unrestricted(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")),
+            PriceComponent::new(Dimension::Energy, dec("0.59")),
+        ])]);
+        let r = rate(&t, &session("10"));
+        assert_eq!(r.lines.len(), 1);
+        assert_eq!(r.lines[0].unit_price, dec("0.49"), "the first one wins");
     }
 
     #[test]

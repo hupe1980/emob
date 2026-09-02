@@ -2,9 +2,12 @@
 //!
 //! `[DATEX-II-Profil]` ships two example documents with the profile — one per
 //! publication — and they are the only artefact in this domain that says what a
-//! conformant message actually looks like. There is no XSD in the release: the
-//! profile is JSON, and a producer that guesses at the nesting produces a
-//! document a consumer skips rather than rejects.
+//! conformant message actually *looks* like. The release does carry JSON
+//! Schemas beside them, and they are the better authority on **which attributes
+//! exist**; what they cannot show is the nesting a real message uses, and a
+//! producer that guesses at that produces a document a consumer skips rather
+//! than rejects. So the instance anchors the shape and the schema attests the
+//! leaves it does not happen to exercise — see [`ATTESTED_BY_DICTIONARY`].
 //!
 //! So the reference is what this crate is tested against, not a fixture written
 //! here. `TABLE_PATHS` and `STATUS_PATHS` below are the complete set of JSON
@@ -87,6 +90,18 @@ const ATTESTED_BY_DICTIONARY: &[&str] = &[
     "/energyRate[]/maximumDeliveryFee",
     "/energyRate[]/minimumDeliveryFee",
     "/energyRate[]/combinationWithParkingFee",
+    // A tiered tariff's bands. `timeBasedApplicability/fromMinute` is in the
+    // instance; the rest are attested by the release's own JSON Schema —
+    // `DATEXII_3_AfirEnergyInfrastructure.json`, where `EnergyPrice` declares
+    // both applicabilities and each declares its two `NonNegativeInteger`
+    // bounds. That file is a stronger contract than the example for *which
+    // attributes exist*, and the example exercises a sample of them.
+    "/energyPrice[]/energyBasedApplicability",
+    "/energyPrice[]/energyBasedApplicability/fromKWh",
+    "/energyPrice[]/energyBasedApplicability/toKWh",
+    "/energyPrice[]/timeBasedApplicability",
+    "/energyPrice[]/timeBasedApplicability/fromMinute",
+    "/energyPrice[]/timeBasedApplicability/toMinute",
 ];
 
 /// Whether a path is one the dictionary attests where the instance is silent.
@@ -234,6 +249,93 @@ fn every_path_the_table_publication_emits_is_one_the_reference_instance_contains
         emitted.len() > 40,
         "a feed this small would not be evidence of anything: {}",
         emitted.len()
+    );
+}
+
+#[test]
+fn a_tiered_tariff_publishes_the_band_each_price_applies_in() {
+    // A price published without its condition reads as unconditional, so a
+    // route planner shows the first tier's rate as *the* rate. The profile has
+    // the fields; the only question is whether the whole-unit bounds are
+    // narrowed the safe way.
+    let tiered = Tariff {
+        elements: vec![
+            emob_tariff::TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
+                restrictions: emob_tariff::Restrictions {
+                    max_kwh: Some(dec("10")),
+                    ..emob_tariff::Restrictions::default()
+                },
+            },
+            emob_tariff::TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.59"))],
+                restrictions: emob_tariff::Restrictions {
+                    min_kwh: Some(dec("10.5")),
+                    min_duration_s: Some(1800),
+                    ..emob_tariff::Restrictions::default()
+                },
+            },
+        ],
+        ..tariff()
+    };
+
+    let (published, notes) = rate::publish(&tiered, "74034E3E-RATE");
+    assert_eq!(published.prices.len(), 2);
+    assert_eq!(
+        published.prices[0].energy_applicability,
+        Some(rate::EnergyApplicability {
+            from_kwh: None,
+            to_kwh: Some(10),
+        })
+    );
+    // 10.5 kWh has no integer spelling. `fromKWh: 10` would claim the 0.59
+    // price applies over [10, 10.5), where it does not — so the bound moves the
+    // other way and the note carries the figure that moved.
+    assert_eq!(
+        published.prices[1].energy_applicability,
+        Some(rate::EnergyApplicability {
+            from_kwh: Some(11),
+            to_kwh: None,
+        })
+    );
+    assert_eq!(
+        published.prices[1].time_applicability,
+        Some(rate::TimeApplicability {
+            from_minute: Some(30),
+            to_minute: None,
+        })
+    );
+    assert!(
+        notes.iter().any(|note| matches!(
+            note,
+            rate::RateNote::BoundNarrowedToWholeUnits {
+                field: "fromKWh",
+                published: 11,
+                ..
+            }
+        )),
+        "{notes:#?}"
+    );
+
+    // …and the paths it emits are paths the profile defines.
+    let (feed, _) = feed_of(vec![site()], published);
+    let json = feed
+        .table(time::macros::datetime!(2026-04-14 12:00 UTC))
+        .expect("a consistent feed")
+        .to_json()
+        .expect("serialisable");
+    let emitted = paths(&serde_json::from_str(&json).expect("valid JSON"));
+    let reference: BTreeSet<&str> = TABLE_PATHS.iter().copied().collect();
+    let unknown: Vec<&String> = emitted
+        .iter()
+        .filter(|path| !reference.contains(path.as_str()) && !attested(path))
+        .collect();
+    assert!(unknown.is_empty(), "{unknown:#?}");
+    assert!(
+        emitted
+            .iter()
+            .any(|path| path.ends_with("/energyBasedApplicability/fromKWh")),
+        "the band has to actually reach the document"
     );
 }
 

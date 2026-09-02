@@ -35,6 +35,25 @@
 //!
 //! Neither is a reason to refuse to publish. Both are reasons to say so, which
 //! is what [`RateNote`] is for.
+//!
+//! # What the profile *can* say, in whole units
+//!
+//! A tiered tariff — "the first 10 kWh at 0.39, the rest at 0.59" — publishes
+//! two prices, and a price published without the condition it applies under
+//! reads as unconditional. The profile has the two fields for it:
+//! `EnergyPrice.energyBasedApplicability` (`fromKWh`, `toKWh`) and
+//! `EnergyPrice.timeBasedApplicability` (`fromMinute`, `toMinute`), and its own
+//! note that "all prices belonging to one rate are applied within their
+//! applicability".
+//!
+//! Both are **non-negative integers** and a tariff's thresholds are not, and
+//! the two roundings are not equally wrong: `fromKWh: 10` for a tier beginning
+//! at 10.5 claims the price applies over `[10, 10.5)`, where it does not. A
+//! lower bound rounds **up** and an upper bound rounds **down**, so the
+//! published band is a subset of the real one and every statement in the
+//! document is true. [`RateNote`] carries the figure that had to move.
+
+use core::cmp::Ordering;
 
 use emob_core::Currency;
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, TaxIncluded};
@@ -114,6 +133,50 @@ pub struct Price {
     pub additional_information: Option<String>,
     /// The window this price applies in, when the tariff bounds one.
     pub period: Option<Period>,
+    /// The delivered-energy band it applies in, when the tariff tiers on one.
+    pub energy_applicability: Option<EnergyApplicability>,
+    /// The elapsed-time band it applies in, when the tariff tiers on one.
+    pub time_applicability: Option<TimeApplicability>,
+}
+
+/// A price's delivered-energy band, in the whole kWh the profile carries
+/// `[DATEX-II-Profil]` (`EnergyPrice.energyBasedApplicability`).
+///
+/// The bounds are narrowed to integers rather than rounded to the nearest, so
+/// the published band is always a subset of the real one and the document never
+/// states a price where it does not apply. See the module documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EnergyApplicability {
+    /// `fromKWh` — the price is valid from this much delivered.
+    pub from_kwh: Option<u32>,
+    /// `toKWh` — and up to this much.
+    pub to_kwh: Option<u32>,
+}
+
+/// A price's elapsed-time band, in the whole minutes the profile carries
+/// `[DATEX-II-Profil]` (`EnergyPrice.timeBasedApplicability`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TimeApplicability {
+    /// `fromMinute` — the price is valid from this minute of the session.
+    pub from_minute: Option<u32>,
+    /// `toMinute` — and up to this one.
+    pub to_minute: Option<u32>,
+}
+
+impl EnergyApplicability {
+    /// Whether it bounds anything at all.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.from_kwh.is_none() && self.to_kwh.is_none()
+    }
+}
+
+impl TimeApplicability {
+    /// Whether it bounds anything at all.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.from_minute.is_none() && self.to_minute.is_none()
+    }
 }
 
 /// A validity window, as the profile's `overallPeriod` states one.
@@ -191,12 +254,46 @@ pub enum RateNote {
         /// What the feed states per minute.
         published: Decimal,
     },
+    /// A tier boundary had to be narrowed to reach a whole unit.
+    ///
+    /// `fromKWh`, `toKWh`, `fromMinute` and `toMinute` are non-negative
+    /// integers and a tariff's thresholds are not. A lower bound rounds up and
+    /// an upper bound rounds down, so the published band is a subset of the real
+    /// one — every statement in the document stays true, and the band it states
+    /// is narrower than the one that was charged. The exact figure is here so an
+    /// operator can see which tariff produced a feed it cannot state exactly.
+    BoundNarrowedToWholeUnits {
+        /// Which field — `fromKWh`, `toKWh`, `fromMinute` or `toMinute`.
+        field: &'static str,
+        /// What the tariff restricts on, in the unit the field is stated in —
+        /// kWh, or minutes for a duration the tariff itself holds in seconds.
+        exact: Decimal,
+        /// What the feed states.
+        published: u32,
+    },
+    /// A tier's whole band falls inside one unit, so the profile cannot state
+    /// it at all.
+    ///
+    /// Narrowing both ends of a band narrower than a kilowatt-hour — or than a
+    /// minute — leaves an empty one, and an empty band published as a bound is
+    /// a price that applies nowhere. It is omitted instead, which makes the
+    /// price read as unconditional; that is the honest failure and it is
+    /// reported here.
+    BandTooNarrowToPublish {
+        /// Which applicability — `energyBasedApplicability` or
+        /// `timeBasedApplicability`.
+        applicability: &'static str,
+        /// The lower bound, in the tariff's own unit.
+        from: Decimal,
+        /// The upper bound.
+        to: Decimal,
+    },
     /// A price applies only under conditions the published rate omits.
     ///
-    /// The profile has `EnergyBasedApplicability` and `TimeBasedApplicability`
-    /// for kWh and duration bounds; a tariff tier restricted by *power* or by
-    /// weekday has no equivalent, and a price published without its condition
-    /// reads as unconditional.
+    /// A tariff tier restricted by *power* or by *weekday* has no equivalent in
+    /// the profile — its `EnergyBasedApplicability` and `TimeBasedApplicability`
+    /// cover delivered energy and elapsed time and nothing else — and a price
+    /// published without its condition reads as unconditional.
     RestrictionNotPublished {
         /// Which condition was dropped.
         restriction: &'static str,
@@ -205,6 +302,10 @@ pub enum RateNote {
 
 /// Sixty minutes in an hour — the whole of the per-hour to per-minute problem.
 const MINUTES_PER_HOUR: Decimal = Decimal::from_parts(60, 0, 0, false, 0);
+
+/// Sixty seconds in a minute. `emob-tariff` restricts on seconds and the
+/// profile's `fromMinute`/`toMinute` are whole minutes.
+const SECONDS_PER_MINUTE: Decimal = Decimal::from_parts(60, 0, 0, false, 0);
 
 /// The rate a tariff publishes, and everything the profile could not carry.
 ///
@@ -227,6 +328,8 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
 
     for element in &tariff.elements {
         let period = period_of(tariff, element, &mut notes);
+        let energy = energy_applicability_of(&element.restrictions, &mut notes);
+        let time = time_applicability_of(&element.restrictions, &mut notes);
         for component in &element.components {
             if component.dimension == Dimension::ParkingTime {
                 prices_parking = true;
@@ -236,6 +339,8 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
                 tariff.currency,
                 tax_included,
                 period.clone(),
+                energy,
+                time,
                 &mut notes,
             ));
         }
@@ -263,6 +368,8 @@ fn price_of(
     currency: Currency,
     tax_included: Option<bool>,
     period: Option<Period>,
+    energy_applicability: Option<EnergyApplicability>,
+    time_applicability: Option<TimeApplicability>,
     notes: &mut Vec<RateNote>,
 ) -> Price {
     let (price_type, value, additional_information) = match component.dimension {
@@ -309,7 +416,108 @@ fn price_of(
         tax_included,
         additional_information,
         period: period.filter(|period| !period.is_empty()),
+        energy_applicability,
+        time_applicability,
     }
+}
+
+/// The delivered-energy band an element applies in, narrowed to whole kWh.
+///
+/// `fromKWh` rounds **up** and `toKWh` rounds **down**, so the published band is
+/// a subset of the tariff's: a document that states a narrower band than the one
+/// charged is imprecise, and one that states a wider band is wrong.
+fn energy_applicability_of(
+    restrictions: &emob_tariff::Restrictions,
+    notes: &mut Vec<RateNote>,
+) -> Option<EnergyApplicability> {
+    let from = restrictions
+        .min_kwh
+        .map(|min| whole_unit(min, "fromKWh", Bound::Lower, notes));
+    let to = restrictions
+        .max_kwh
+        .map(|max| whole_unit(max, "toKWh", Bound::Upper, notes));
+
+    let band = EnergyApplicability {
+        from_kwh: from,
+        to_kwh: to,
+    };
+    if band.is_empty() {
+        return None;
+    }
+    // Narrowing both ends of a band under a kilowatt-hour wide leaves an empty
+    // one, and a price bounded to nowhere is worse than an unbounded price.
+    if let (Some(from), Some(to)) = (from, to)
+        && from >= to
+    {
+        notes.push(RateNote::BandTooNarrowToPublish {
+            applicability: "energyBasedApplicability",
+            from: restrictions.min_kwh.unwrap_or_default(),
+            to: restrictions.max_kwh.unwrap_or_default(),
+        });
+        return None;
+    }
+    Some(band)
+}
+
+/// The elapsed-time band an element applies in, narrowed to whole minutes.
+fn time_applicability_of(
+    restrictions: &emob_tariff::Restrictions,
+    notes: &mut Vec<RateNote>,
+) -> Option<TimeApplicability> {
+    let minutes = |seconds: u64| Decimal::from(seconds) / SECONDS_PER_MINUTE;
+    let from = restrictions
+        .min_duration_s
+        .map(|min| whole_unit(minutes(min), "fromMinute", Bound::Lower, notes));
+    let to = restrictions
+        .max_duration_s
+        .map(|max| whole_unit(minutes(max), "toMinute", Bound::Upper, notes));
+
+    let band = TimeApplicability {
+        from_minute: from,
+        to_minute: to,
+    };
+    if band.is_empty() {
+        return None;
+    }
+    if let (Some(from), Some(to)) = (from, to)
+        && from >= to
+    {
+        notes.push(RateNote::BandTooNarrowToPublish {
+            applicability: "timeBasedApplicability",
+            from: Decimal::from(restrictions.min_duration_s.unwrap_or_default()),
+            to: Decimal::from(restrictions.max_duration_s.unwrap_or_default()),
+        });
+        return None;
+    }
+    Some(band)
+}
+
+/// Which way a bound has to move to keep the published band inside the real one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    /// A lower bound rounds up.
+    Lower,
+    /// An upper bound rounds down.
+    Upper,
+}
+
+/// One bound, narrowed to a whole unit, reporting the move.
+fn whole_unit(exact: Decimal, field: &'static str, bound: Bound, notes: &mut Vec<RateNote>) -> u32 {
+    use rust_decimal::prelude::ToPrimitive as _;
+
+    let narrowed = match bound {
+        Bound::Lower => exact.ceil(),
+        Bound::Upper => exact.floor(),
+    };
+    let published = narrowed.to_u32().unwrap_or(u32::MAX);
+    if narrowed.cmp(&exact) != Ordering::Equal {
+        notes.push(RateNote::BoundNarrowedToWholeUnits {
+            field,
+            exact,
+            published,
+        });
+    }
+    published
 }
 
 /// The window an element applies in, reporting what could not be carried.
@@ -320,13 +528,12 @@ fn period_of(
 ) -> Option<Period> {
     let restrictions = &element.restrictions;
 
+    // The energy and duration bounds are published, in whole units, by
+    // `energy_applicability_of` and `time_applicability_of`. What is left here
+    // is what the profile has no field for at all.
     for (present, name) in [
-        (restrictions.min_kwh.is_some(), "a minimum energy"),
-        (restrictions.max_kwh.is_some(), "a maximum energy"),
         (restrictions.min_power_kw.is_some(), "a minimum power"),
         (restrictions.max_power_kw.is_some(), "a maximum power"),
-        (restrictions.min_duration_s.is_some(), "a minimum duration"),
-        (restrictions.max_duration_s.is_some(), "a maximum duration"),
         (!restrictions.days_of_week.is_empty(), "certain weekdays"),
     ] {
         if present {

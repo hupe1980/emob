@@ -91,34 +91,92 @@ pub fn to_ocpi(
         .tax_included(tax_included(tariff.tax_included))
         .maybe_start_date_time(tariff.valid_from.map(ocpi_kit::types::DateTime::from))
         .maybe_end_date_time(tariff.valid_until.map(ocpi_kit::types::DateTime::from))
-        .maybe_min_price(tariff.min_price.map(|min| limit(min, tariff.tax_included)))
-        .maybe_max_price(tariff.max_price.map(|max| limit(max, tariff.tax_included)))
+        .maybe_min_price(
+            tariff
+                .min_price
+                .map(|min| limit(min, tariff, "/min_price", &mut crossing))
+                .transpose()?,
+        )
+        .maybe_max_price(
+            tariff
+                .max_price
+                .map(|max| limit(max, tariff, "/max_price", &mut crossing))
+                .transpose()?,
+        )
         .last_updated(last_updated)
         .build();
 
     Ok(crossing.map(|()| built))
 }
 
-/// A price bound, on the side of tax the tariff states its prices in.
+/// A price bound, in the two figures OCPI states one in.
 ///
-/// OCPI's `PriceLimit` carries both an excluding- and an including-VAT figure
-/// and requires whichever matches the tariff's own `tax_included`. Filling
-/// both would be inventing the other, and the rate that would convert between
-/// them belongs to the components rather than to the bound.
-fn limit(amount: rust_decimal::Decimal, tax: TaxIncluded) -> PriceLimit {
-    match tax {
-        // The prices are gross, so the bound is too, and `before_taxes` has to
-        // carry something: OCPI makes it required. Inventing a pre-tax figure
-        // would need a rate that belongs to the components rather than to the
-        // bound, so the gross amount is stated on both and the fact that they
-        // are equal is itself the statement that no rate was applied.
-        TaxIncluded::Yes => PriceLimit {
-            before_taxes: Number::new(amount),
-            after_taxes: Some(Number::new(amount)),
-            extensions: ocpi_kit::types::Extensions::new(),
-        },
+/// # `before_taxes` means before taxes
+///
+/// OCPI's `PriceLimit` requires `before_taxes` and makes `after_taxes`
+/// optional, and the requirement it expresses is a *net* one: "the total cost
+/// of a Charging Session before taxes can never be lower than the value of the
+/// `min_price`'s `before_taxes` field" `[OCPI 2.3.0 §Tariff]`. A gross bound
+/// written into that field is a bound the partner will enforce nineteen per
+/// cent too high, against the driver, out of a document we published — and no
+/// note can repair a number a partner is entitled to read at face value.
+///
+/// So a gross tariff's bound is converted, at the rate the tariff's own
+/// components carry. That rate exists exactly when they agree on one, which is
+/// the same condition [`emob_tariff::Tariff::uniform_vat`] answers and the same
+/// choice the rating engine makes when a minimum charge lands on a session with
+/// no lines. Where they do not agree there is no pre-tax figure to state, and
+/// this refuses rather than inventing one.
+///
+/// # Errors
+///
+/// [`RoamError::NoRateForPriceLimit`] when the tariff's prices are gross and
+/// its components carry more than one VAT rate, so no single taxable amount
+/// corresponds to the bound.
+fn limit(
+    amount: rust_decimal::Decimal,
+    tariff: &Tariff,
+    pointer: &str,
+    crossing: &mut Crossing<()>,
+) -> Result<PriceLimit, RoamError> {
+    match tariff.tax_included {
+        TaxIncluded::Yes => {
+            let rate = tariff
+                .uniform_vat()
+                .ok_or_else(|| RoamError::NoRateForPriceLimit {
+                    field: pointer.trim_start_matches('/').to_owned(),
+                })?;
+            let factor = rust_decimal::Decimal::ONE + rate / rust_decimal::Decimal::from(100);
+            // A rate of exactly −100 % makes the factor zero and no net grosses
+            // up to a non-zero amount at it — the same hole the rating engine
+            // reports rather than dividing into.
+            if factor.is_zero() {
+                return Err(RoamError::NoRateForPriceLimit {
+                    field: pointer.trim_start_matches('/').to_owned(),
+                });
+            }
+            let net = emob_core::Money::new(amount / factor, tariff.currency)
+                .round_to_minor_unit()
+                .amount();
+            if net * factor != amount {
+                crossing.note(
+                    format!("{pointer}/before_taxes"),
+                    format!(
+                        "this tariff's prices are gross, and OCPI states a bound before taxes: {amount} at {rate} % is {net} to the minor unit, which grosses back up to {}",
+                        net * factor
+                    ),
+                );
+            }
+            Ok(PriceLimit {
+                before_taxes: Number::new(net),
+                after_taxes: Some(Number::new(amount)),
+                extensions: ocpi_kit::types::Extensions::new(),
+            })
+        }
+        // The prices are already net, so the bound is the field's own figure
+        // and the gross one would need a rate to invent.
         TaxIncluded::No | TaxIncluded::NotApplicable => {
-            PriceLimit::before_taxes(Number::new(amount))
+            Ok(PriceLimit::before_taxes(Number::new(amount)))
         }
     }
 }
@@ -299,6 +357,82 @@ mod tests {
             ),
             "publishing it stripped makes the element match at the partner in conditions \
              nobody checked: {err}"
+        );
+    }
+
+    #[test]
+    fn a_gross_bound_crosses_as_the_bound_before_taxes_ocpi_asks_for() {
+        // OCPI's `min_price.before_taxes` constrains the session's cost
+        // **before taxes**. A gross figure written there is a minimum the
+        // partner enforces nineteen per cent too high, against the driver,
+        // from a document this operator published.
+        let mut tariff = simple();
+        tariff.min_price = Some(dec("5.95"));
+
+        let crossing = to_ocpi(&tariff, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
+        let min = crossing.value.min_price.as_ref().unwrap();
+        assert_eq!(min.before_taxes.get(), dec("5.00"), "5.95 gross at 19 %");
+        assert_eq!(min.after_taxes.as_ref().unwrap().get(), dec("5.95"));
+        assert!(
+            crossing.is_lossless(),
+            "5.00 grosses back up to exactly 5.95: {:?}",
+            crossing.notes()
+        );
+
+        // …and where the minor unit cannot hold the conversion exactly, the
+        // partner is told by how much their copy fails to round-trip.
+        let mut awkward = simple();
+        awkward.min_price = Some(dec("5.00"));
+        let crossing = to_ocpi(&awkward, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
+        assert_eq!(
+            crossing
+                .value
+                .min_price
+                .as_ref()
+                .unwrap()
+                .before_taxes
+                .get(),
+            dec("4.20")
+        );
+        assert!(
+            crossing
+                .reasons()
+                .any(|r| r.contains("/min_price/before_taxes")),
+            "{:?}",
+            crossing.notes()
+        );
+    }
+
+    #[test]
+    fn a_gross_bound_on_a_tariff_mixing_vat_rates_is_refused() {
+        // There is no single taxable amount the bound corresponds to, and OCPI
+        // makes the pre-tax figure mandatory — so the honest answer is that the
+        // tariff cannot state this bound, not a number a partner would enforce.
+        let mut mixed = simple();
+        mixed.elements[0]
+            .components
+            .push(Component::new(Dimension::Flat, dec("0.50")).with_vat(dec("7")));
+        mixed.max_price = Some(dec("40.00"));
+
+        let err = to_ocpi(&mixed, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap_err();
+        assert!(
+            matches!(err, RoamError::NoRateForPriceLimit { ref field } if field == "max_price"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_net_tariffs_bound_is_the_figure_it_already_states() {
+        let mut net = simple();
+        net.tax_included = TaxIncluded::No;
+        net.min_price = Some(dec("5.00"));
+
+        let crossing = to_ocpi(&net, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
+        let min = crossing.value.min_price.as_ref().unwrap();
+        assert_eq!(min.before_taxes.get(), dec("5.00"));
+        assert!(
+            min.after_taxes.is_none(),
+            "the gross figure would need a rate to invent"
         );
     }
 

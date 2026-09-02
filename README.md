@@ -12,7 +12,7 @@ value survives in, and the driver contract all of it turns into an invoice.
 > [`emob-session`](crates/emob-session), [`emob-cdr`](crates/emob-cdr),
 > [`emob-tariff`](crates/emob-tariff), [`emob-ocpp`](crates/emob-ocpp),
 > [`emob-poi`](crates/emob-poi), [`emob-roam`](crates/emob-roam) and
-> [`emob-sim`](crates/emob-sim) — with **599 tests**, an end-to-end test that
+> [`emob-sim`](crates/emob-sim) — with **621 tests**, an end-to-end test that
 > drives the Open Charge Alliance's own OCPP example message from the wire to a
 > taxable amount and back out again as a file the driver's verifier reads,
 > records from **five** vendors this workspace did not write, one session that
@@ -435,6 +435,27 @@ assert_eq!(rate(&tiered, &session).exact_total().amount(), dec("15.70"));
 
 A price that depends on how finely the session was sliced is not a price.
 
+And which price applies is asked **per dimension**, not per period. `[OCPI 2.3.0
+§Tariff]` says so in one sentence — "the first Tariff Element with a Price
+Component *for that dimension* … with matching Tariff Restrictions will be
+used" — and the shape that shows why is the one the specification itself
+recommends, one unrestricted default element per dimension:
+
+```rust
+let tariff = Tariff { elements: vec![
+    TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Flat,   dec("0.50"))]),
+    TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]),
+], ..t };
+
+// Both are in force. Stopping at the first bills the fee and drops the energy.
+assert_eq!(rate(&tariff, &session).exact_total().amount(), dec("5.40"));
+```
+
+A dimension nothing priced is not an error — the specification answers it with
+"there will be no costs for that Tariff Dimension" — but it is a *quantity*, so
+`RatingNote::Unpriced` carries how much of the session went unpriced rather than
+only that something did.
+
 And a tariff id is a name, so the record names the tariff by **content** too —
 the same answer the evidence chain gives one layer down. A CPO that edits a
 tariff in place keeps the id; a partner re-rating six weeks later gets a
@@ -689,6 +710,21 @@ saying whether charging and parking are one fee. Both go out as the nearest true
 statement the vocabulary allows, with the exact figure beside them, and both
 raise a note rather than being rounded away in silence.
 
+**And one thing the profile *can* say, which is easy to leave unsaid.** A tiered
+tariff publishes two prices per kWh, and a price published without the band it
+applies in reads as unconditional — a route planner shows the first tier as *the*
+price. `EnergyPrice` carries `energyBasedApplicability` and
+`timeBasedApplicability`, so the band goes out with the price; the only catch is
+that their bounds are whole integers and a tariff's thresholds are not. A lower
+bound rounds **up** and an upper bound rounds **down**, so the published band is
+a subset of the real one and no statement in the document is false:
+
+```rust
+// A tier from 10.5 kWh. `fromKWh: 10` would claim it applies over [10, 10.5).
+assert_eq!(published.prices[1].energy_applicability.unwrap().from_kwh, Some(11));
+// …and the figure that had to move travels in a note.
+```
+
 **The register decides what the feed may say.** `[LSV26 §4(1)]` makes
 commissioning, decommissioning and an operator change notifiable, so an operator
 meeting its duty knows which state every point is in. A point the register knows
@@ -801,6 +837,43 @@ zero answers the question permanently in the partner's favour. And so is a
 tariff element carrying a restriction this build cannot evaluate: dropping it
 does not narrow the element, it **widens** it, and the partner then prices the
 session under conditions nobody checked.
+
+The same shape catches a **price bound**. OCPI's `min_price`/`max_price` bound
+the session's cost *before taxes*, and the field is mandatory — so writing a
+gross tariff's own figure into it publishes a minimum the partner enforces a VAT
+rate too high, against the driver, out of a document this operator signed off.
+The bound is converted at the rate the tariff's components carry, and a gross
+tariff whose components carry more than one rate is refused: there is no pre-tax
+figure, and inventing one is the failure.
+
+**And the record comes back.** A crossing that only goes one way makes this
+workspace the billing side of a roaming relationship and never the paying one.
+`from_ocpi` reads a partner's CDR into the canonical model, and the property is
+the round trip — the document this crate writes is one it can read, with the
+same key, window, periods and energy at the far end:
+
+```rust
+// The receiver verifies the payloads against **its own** registry, never the
+// key inside the document, and only then reads the record in.
+let theirs = Evidence::assemble(&records, &my_registry, started_at);
+let back = from_ocpi(&wire, Some(EvidenceRef::from_evidence(&theirs, "OCMF")))?;
+
+assert_eq!(back.value.cdr.total_energy, original.total_energy);
+assert!(validate(&back.value.cdr).is_settleable());
+```
+
+What OCPI cannot carry is named rather than restored: a period's end comes from
+the next period's start, every period comes back **interpolated** because
+nothing states a provenance, and `charging` is read off the `TIME` and
+`PARKING_TIME` dimensions — with a period that states neither *reported*, since
+the only fallback left is the inference the canonical model refuses.
+
+The cost does not come back at all. A canonical price carries one line per
+distinct price, each reproducing its own amount; OCPI carries totals. Rebuilding
+one means inventing the numbers that make it add up, and the pre-flight would
+then be checking a document *this* crate wrote. So the record arrives unpriced
+with the partner's figure beside it, and an eMSP re-rates and compares — which
+is what an eMSP does anyway.
 
 **Routing is a question the identifier already answers.** `DE-ABC-C00122045-6`
 names its issuer in its first five characters — the party that holds the driver

@@ -134,6 +134,39 @@ pub enum RoamError {
         restriction: String,
     },
 
+    /// A gross tariff's price bound has no pre-tax figure to publish.
+    ///
+    /// OCPI requires `before_taxes` on a `min_price`/`max_price` and means it
+    /// literally: the bound constrains the session's cost **before taxes**
+    /// `[OCPI 2.3.0 §Tariff]`. Writing the gross amount into it publishes a
+    /// bound the partner will enforce a VAT rate too high, against the driver,
+    /// from a document this operator signed off — so the figure is converted at
+    /// the rate the tariff's components carry, and where they carry more than
+    /// one there is no such rate and no honest figure.
+    #[error(
+        "this tariff's prices are gross and its components carry more than one VAT rate, so \
+         `{field}` has no pre-tax figure: OCPI's bound constrains the cost before taxes, and \
+         publishing the gross amount there is a bound a partner enforces a VAT rate too high. \
+         State the bound on a tariff with one rate, or price the tariff net"
+    )]
+    NoRateForPriceLimit {
+        /// Which bound — `min_price` or `max_price`.
+        field: String,
+    },
+
+    /// A field of a partner's document is one this side's types refuse.
+    ///
+    /// A refusal rather than a repair. Every repair is a number invented on
+    /// behalf of somebody who will be invoiced for it, and a canonical record
+    /// built out of one is a record that reconciles against nothing.
+    #[error("`{field}` cannot be read into the canonical model: {detail}")]
+    UnreadableField {
+        /// Which field, by its OCPI name.
+        field: String,
+        /// Why this side's type refused it.
+        detail: String,
+    },
+
     /// Nothing in the registry can receive this record.
     #[error(
         "no partner routes a contract issued by {issuer}: a CDR sent to the wrong party is \

@@ -19,10 +19,11 @@
 //!   distinction the wire cannot carry, by JSON Pointer into the document the
 //!   partner will be reading.
 //! - [`ocpi`] — the wire itself: CDRs, tariffs and the location the national
-//!   access point publishes, onto OCPI 2.3.0 and down to 2.2.1 — and
-//!   [`ocpi::inbound`], the pre-flight an eMSP owes itself before paying a
-//!   partner's record, which asks OCPI's own questions of the document that
-//!   arrived rather than of a conversion that has already repaired it.
+//!   access point publishes, onto OCPI 2.3.0 and down to 2.2.1, and back.
+//!   [`ocpi::preflight`] asks OCPI's own questions of the document that
+//!   arrived — before [`ocpi::inbound`] converts it, because every conversion
+//!   repairs something and the pre-flight exists to find what would be
+//!   repaired.
 //!
 //! # Three things OCPI cannot say, and one it must not be allowed to
 //!
@@ -108,6 +109,7 @@ pub mod token;
 
 pub use crossing::{Crossing, Note};
 pub use error::RoamError;
-pub use ocpi::inbound::{Finding, Report, Severity, SignedDataPolicy, preflight};
+pub use ocpi::inbound::{Inbound, from_ocpi};
+pub use ocpi::preflight::{Finding, Report, Severity, SignedDataPolicy, preflight};
 pub use partner::{OcpiVersion, Partner, PartnerRegistry, Reach, Role};
 pub use token::{RoamingToken, TokenType};

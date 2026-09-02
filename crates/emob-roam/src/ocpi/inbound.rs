@@ -1,896 +1,367 @@
-//! The pre-flight an eMSP owes itself before paying a partner's record.
+//! A partner's CDR, read back into the canonical model.
 //!
-//! # Why this is not `emob_cdr::validate`
+//! [`super::cdr::to_ocpi`] carries a record out; this reads one in. The two are
+//! not mirror images, and the asymmetry is the whole content of this module.
 //!
-//! That function checks a **canonical** CDR: one this workspace's types have
-//! already accepted, whose energy is an [`emob_core::Energy`] and whose periods have both
-//! ends. The record that arrives from a partner is none of those things yet.
-//! It is JSON that decoded, and the questions worth asking of it are OCPI's
-//! own — whether the periods add up to the total, whether the durations agree
-//! with the timestamps, whether the parts of the cost add to the whole.
+//! # Read the document, then convert it — never the other way round
 //!
-//! Converting first and validating afterwards inverts the order. A conversion
-//! has to make decisions — what a period's end is, what a missing dimension
-//! means — and every one of those decisions *repairs* something, which is
-//! exactly what a pre-flight is for finding. So the questions are asked of the
-//! document that arrived.
+//! [`super::preflight::preflight`] asks OCPI's own questions of the document that
+//! arrived: do the periods sum to the total, do the durations agree with the
+//! timestamps, does the contract identifier survive its own check digit. Those
+//! questions have to be asked **first**, because every conversion makes
+//! decisions and every decision *repairs* something. A record whose periods run
+//! backwards has an obvious canonical form and no honest one.
 //!
-//! # Nothing here verifies a signature
+//! So [`from_ocpi`] assumes nothing about the document's coherence and refuses
+//! rather than repairs: what it cannot read, it names.
 //!
-//! [`payloads`](super::cdr::inbound_payloads) hands back the signed records and
-//! [`claimed_key`](super::cdr::claimed_key) hands back the key the document
-//! carries. Verifying is `emob-eichrecht`'s job, against the key **this side's**
-//! registry holds — never the one in the file, which is the artefact under
-//! examination. A reader that verified against the document's own key would
-//! prove only that whoever wrote it owned a private key.
+//! # What OCPI does not carry, and what this does about it
 //!
-//! What the key in the document *is* good for is the comparison: one that
-//! differs from the registered key is a dispute with an answer, and one that
-//! matches narrows the argument to the numbers. That is the same reading the
-//! transparency file's reader takes, one layer down.
+//! | Canonical | OCPI | What happens |
+//! |---|---|---|
+//! | a period's `end` | periods have a start only | taken from the next period's start, and the last from `end_date_time` — the reading the specification prescribes, and `ocpi-kit`'s `period_spans` implements |
+//! | `charging` | a period's *dimensions* | `TIME` says charging, `PARKING_TIME` says not. A period stating neither states nothing, and is reported rather than guessed |
+//! | `provenance` | nothing at all | [`Provenance::Interpolated`], because a number whose provenance nobody stated is not one this side may call measured |
+//! | `auth_path` | three `auth_method` values for six paths | narrowed with the token type, and noted where it cannot be |
+//! | `cost` | totals, with no unit prices | **not** reconstructed. See below |
+//!
+//! # The cost does not come back
+//!
+//! A canonical [`Cost`](emob_cdr::Cost) carries a [`Rated`](emob_tariff::Rated)
+//! — one line per distinct price, each reproducing its own amount from its own
+//! quantity and unit price. OCPI carries totals and no unit prices at all, so
+//! rebuilding one would mean inventing the numbers that make it add up, and
+//! `emob_cdr::validate` would then check the arithmetic of a document this
+//! crate wrote rather than of the one that arrived.
+//!
+//! An eMSP re-rates anyway: what it owes its driver is its own retail tariff,
+//! and what it owes the CPO is a comparison. So the canonical record comes back
+//! **unpriced**, and [`Inbound::stated_total`] carries what the partner says it
+//! costs, for exactly that comparison.
 
-use emob_core::Emaid;
-use ocpi_kit::types::{Number, Validate};
-use ocpi_kit::v2_3_0::cdrs::CdrDimensionType;
+use emob_cdr::{Cdr, CdrKey, ChargingPeriod, EvidenceRef};
+use emob_core::{Currency, Direction, Energy, Money, QuarterHour};
+use emob_session::{AuthPath, Provenance};
+use ocpi_kit::v2_3_0::cdrs::{AuthMethod, CdrDimensionType};
+use ocpi_kit::v2_3_0::tokens::TokenType;
 use rust_decimal::Decimal;
 
-use super::cdr::exact_hours;
+use crate::crossing::Crossing;
+use crate::error::RoamError;
 
-/// How bad a finding is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Severity {
-    /// Worth knowing; settlement may proceed.
-    Warning,
-    /// Settlement must not proceed on this record.
-    Blocking,
-}
-
-/// Something wrong with a record that arrived.
+/// A partner's record in the canonical model, with what the partner says it
+/// costs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Finding {
-    /// The charging periods do not sum to `total_energy`.
+pub struct Inbound {
+    /// The record, **unpriced** — see the module documentation.
+    pub cdr: Cdr,
+    /// What the partner's own document says the session came to, gross.
     ///
-    /// The first question to ask of a record somebody else built, and the one
-    /// a canonical [`Cdr`](emob_cdr::Cdr) answers by construction. A partner
-    /// whose periods do not sum to their own total is a partner whose
-    /// re-rating will not match theirs.
-    DoesNotConserve {
-        /// What the periods add up to.
-        periods: Decimal,
-        /// What the record claims.
-        total: Decimal,
-    },
-    /// `charging_periods` is empty, which OCPI's cardinality `+` forbids.
-    NoPeriods,
-    /// The record ends before it starts.
-    EndsBeforeItStarts,
-    /// A period starts outside the window the record states.
-    PeriodOutsideWindow {
-        /// Which period, by index.
-        index: usize,
-    },
-    /// The periods are not in time order.
-    ///
-    /// OCPI has no `end` on a period, so a reader derives every period's span
-    /// from the **next** one's start. Out of order, those spans are negative
-    /// and every duration computed from them is wrong — silently, because
-    /// nothing in the document is individually invalid.
-    PeriodsOutOfOrder {
-        /// The first index that goes backwards.
-        index: usize,
-    },
-    /// `total_time` disagrees with the record's own timestamps.
-    ///
-    /// Both are in the document and they are supposed to be the same fact.
-    /// A duration in hours often has to be rounded — see [`preflight`] for the
-    /// tolerance and why it is a choice rather than a derivation — but past
-    /// that, one of the two is wrong and the receiver cannot say which.
-    DurationDisagrees {
-        /// What `total_time` says, in hours.
-        stated: Decimal,
-        /// What `end_date_time - start_date_time` says, in hours.
-        implied: Decimal,
-    },
-    /// More of the session was spent not charging than the session lasted.
-    ParkingExceedsTotal {
-        /// `total_parking_time`.
-        parking: Decimal,
-        /// `total_time`.
-        total: Decimal,
-    },
-    /// The per-dimension costs do not add up to `total_cost`.
-    ///
-    /// A warning rather than a block: each part is rounded to the currency's
-    /// minor unit and the whole is rounded once, so with several dimensions
-    /// they can legitimately differ by a minor unit. It is worth knowing
-    /// because it is also what a made-up breakdown looks like.
-    CostsDoNotAddUp {
-        /// What the parts come to.
-        parts: Decimal,
-        /// What `total_cost` says.
-        total: Decimal,
-    },
-    /// The contract identifier fails its own check digit.
-    ///
-    /// The inbound half of the check the outbound crossing makes. An id that
-    /// lost a character in transcription still parses and still routes — to a
-    /// contract this provider does not hold, which is a payment about to be
-    /// applied to the wrong driver.
-    ContractCheckDigit {
-        /// The identifier as it arrived.
-        id: String,
-    },
-    /// The record carries no signed metering data.
-    ///
-    /// Blocking for a German session and not for every session, which is why
-    /// [`preflight`] takes the question as an argument: under `[MessEG §33]` a
-    /// measured value may be billed only where the affected party can check
-    /// it, and the eMSP is the party that has to answer the driver.
-    NoSignedData,
-    /// A signed value arrived with nothing in it.
-    EmptySignedValue {
-        /// Which one, by index.
-        index: usize,
-    },
-    /// `total_energy` is negative.
-    ///
-    /// OCPI has no direction on a CDR's total, so a negative one is either a
-    /// V2G discharge nobody agreed a sign convention for, or a fault. Either
-    /// way it is not a draw this provider should pay for.
-    NegativeEnergy {
-        /// The value that arrived.
-        energy: Decimal,
-    },
-    /// A period reports energy fed back to the grid.
-    ///
-    /// `ENERGY_EXPORT` is "Session Only" and [`Self::SchemaViolation`] reports
-    /// its presence. This is the half that moves money: `total_energy` is "Total
-    /// energy charged", so an export volume has nowhere in the record to go, and
-    /// neither answer is safe. Adding it nets a discharge against a draw —
-    /// what [`Direction`](emob_core::Direction) exists to prevent, leaving both
-    /// balance groups wrong `[A6 §IV.1]` — and dropping it settles a record
-    /// while ignoring energy the record reports.
-    ///
-    /// So it blocks, as the outbound crossing does with the same session going
-    /// the other way (`RoamError::ExportNotExpressible`).
-    ExportEnergyInCdr {
-        /// Which period, by index.
-        index: usize,
-        /// How much it reports.
-        energy: Decimal,
-    },
-    /// A non-credit record whose id is longer than the specification allows.
-    ///
-    /// *"Normal (non-credit) CDRs SHALL only have an ID with a maximum length
-    /// of 36"* — the extra three characters are room to append to a credit.
-    IdTooLongForNonCredit {
-        /// How long it is.
-        len: usize,
-    },
-    /// The record does not satisfy OCPI's own schema rules.
-    ///
-    /// Reported rather than fatal, and separately from everything above,
-    /// because `ocpi-kit` decodes permissively on purpose: a peer that
-    /// overruns a `string(45)` must not make a whole page of CDRs
-    /// undecodable. The violation still has to reach somebody.
-    SchemaViolation {
-        /// RFC 6901 pointer to the value.
-        pointer: String,
-        /// What is wrong with it.
-        message: String,
-    },
+    /// Kept beside the record rather than inside it, because it is the
+    /// partner's claim rather than this side's computation. Re-rating produces
+    /// the other number, and the pair is what a settlement conversation is
+    /// about.
+    pub stated_total: Money,
 }
 
-impl Finding {
-    /// Whether this finding blocks settlement.
-    #[must_use]
-    pub const fn severity(&self) -> Severity {
-        match self {
-            Self::DoesNotConserve { .. }
-            | Self::NoPeriods
-            | Self::EndsBeforeItStarts
-            | Self::PeriodsOutOfOrder { .. }
-            | Self::PeriodOutsideWindow { .. }
-            | Self::ContractCheckDigit { .. }
-            | Self::NoSignedData
-            | Self::NegativeEnergy { .. }
-            | Self::ExportEnergyInCdr { .. } => Severity::Blocking,
-            Self::DurationDisagrees { .. }
-            | Self::ParkingExceedsTotal { .. }
-            | Self::CostsDoNotAddUp { .. }
-            | Self::EmptySignedValue { .. }
-            | Self::IdTooLongForNonCredit { .. }
-            | Self::SchemaViolation { .. } => Severity::Warning,
-        }
-    }
-}
-
-impl core::fmt::Display for Finding {
-    #[allow(clippy::too_many_lines)]
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::DoesNotConserve { periods, total } => write!(
-                f,
-                "the charging periods sum to {periods} kWh and `total_energy` says {total}: one \
-                 of the two is wrong and this side cannot say which"
-            ),
-            Self::NoPeriods => f.write_str(
-                "the record has no charging periods, which OCPI's cardinality `+` forbids — a \
-                 total with nothing behind it cannot be re-rated",
-            ),
-            Self::EndsBeforeItStarts => f.write_str("`end_date_time` is before `start_date_time`"),
-            Self::PeriodOutsideWindow { index } => write!(
-                f,
-                "charging period {index} starts outside the window the record itself states"
-            ),
-            Self::PeriodsOutOfOrder { index } => write!(
-                f,
-                "charging period {index} starts before the one before it. An OCPI period has no \
-                 end, so every span is derived from the next period's start — out of order, \
-                 every duration in this record is wrong and nothing in it is individually invalid"
-            ),
-            Self::DurationDisagrees { stated, implied } => write!(
-                f,
-                "`total_time` says {stated} h and the record's own timestamps say {implied} h. \
-                 Both are in the document and they are the same fact"
-            ),
-            Self::ParkingExceedsTotal { parking, total } => write!(
-                f,
-                "`total_parking_time` is {parking} h and `total_time` is {total} h: more of the \
-                 session was spent not charging than the session lasted"
-            ),
-            Self::CostsDoNotAddUp { parts, total } => write!(
-                f,
-                "the per-dimension costs come to {parts} and `total_cost` says {total}. A minor \
-                 unit of difference is rounding; more than that is a breakdown that was not \
-                 computed from this total"
-            ),
-            Self::ContractCheckDigit { id } => write!(
-                f,
-                "the contract id `{id}` fails its own check digit, and it is what decides which \
-                 driver this is billed to"
-            ),
-            Self::NoSignedData => f.write_str(
-                "the record carries no signed metering data, so nothing here can be put in front \
-                 of a driver who disputes it [MessEG §33]",
-            ),
-            Self::EmptySignedValue { index } => {
-                write!(f, "signed value {index} carries no data")
-            }
-            Self::NegativeEnergy { energy } => write!(
-                f,
-                "`total_energy` is {energy}, and OCPI puts no sign convention on it — this is \
-                 either a discharge nobody agreed terms for or a fault, and neither is a draw to \
-                 pay for"
-            ),
-            Self::ExportEnergyInCdr { index, energy } => write!(
-                f,
-                "period {index} reports {energy} kWh fed back to the grid, which `total_energy` \
-                 cannot hold: adding it would net a discharge against a draw and dropping it \
-                 would settle a record while ignoring energy the record reports"
-            ),
-            Self::IdTooLongForNonCredit { len } => write!(
-                f,
-                "this is not a credit CDR and its id is {len} characters: the specification \
-                 allows 36, the extra three being room to append to a credit"
-            ),
-            Self::SchemaViolation { pointer, message } => write!(f, "{pointer}: {message}"),
-        }
-    }
-}
-
-/// Everything wrong with a record that arrived.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Report {
-    /// Every finding, in the order they were checked.
-    pub findings: Vec<Finding>,
-}
-
-impl Report {
-    /// The findings that block settlement.
-    pub fn blocking(&self) -> impl Iterator<Item = &Finding> {
-        self.findings
-            .iter()
-            .filter(|finding| finding.severity() == Severity::Blocking)
-    }
-
-    /// The findings that are merely worth knowing.
-    pub fn warnings(&self) -> impl Iterator<Item = &Finding> {
-        self.findings
-            .iter()
-            .filter(|finding| finding.severity() == Severity::Warning)
-    }
-
-    /// Whether this record may be paid.
-    #[must_use]
-    pub fn is_settleable(&self) -> bool {
-        self.blocking().next().is_none()
-    }
-
-    /// One line per finding, for an operator queue.
-    pub fn reasons(&self) -> impl Iterator<Item = String> + '_ {
-        self.findings.iter().map(ToString::to_string)
-    }
-}
-
-/// Whether this record has to carry signed metering data to be payable.
+/// Read a partner's OCPI CDR into the canonical model.
 ///
-/// An argument rather than a constant, because the same node peers with
-/// parties in jurisdictions that do not ask. Under `[MessEG §33]` a German
-/// session's measured value may be billed only where the affected party can
-/// check it, and a record without the signed data is one the eMSP cannot put
-/// in front of a driver who disputes it — but a provider settling elsewhere is
-/// not in breach of anything by accepting one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SignedDataPolicy {
-    /// A record without signed metering data is not payable.
-    Required,
-    /// Its absence is not this check's business.
-    #[default]
-    Optional,
-}
-
-/// Every problem with a partner's CDR at once, separated into what blocks
-/// settlement and what is worth knowing.
+/// `evidence` is supplied by the caller because producing it means **verifying**
+/// the signed records against the receiver's own key registry — which is
+/// `emob-eichrecht`'s job and needs a registry this crate has no business
+/// holding. [`super::cdr::inbound_payloads`] hands over the payloads to verify;
+/// `EvidenceRef::from_evidence` turns the result into the argument.
 ///
-/// Nothing is repaired. A pre-flight that quietly fixed what it found would
-/// make the record payable and leave the disagreement in place — which is the
-/// failure it exists to surface, wearing its own uniform.
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn preflight(cdr: &ocpi_kit::v2_3_0::Cdr, signed_data: SignedDataPolicy) -> Report {
-    let mut findings = Vec::new();
-
-    // ── The arithmetic ──────────────────────────────────────────────────
+/// Passing `None` is admissible and means what it says: no signed records back
+/// this claim. `emob_cdr::validate` grades that against the regime the billing
+/// layer is in.
+///
+/// # Errors
+///
+/// [`RoamError::NoPeriods`] for a record with nothing behind its total;
+/// [`RoamError::UnreadableField`] for an identifier, currency or quantity this
+/// side's types refuse — which is a refusal rather than a repair, because every
+/// repair is a number invented on behalf of somebody who will be invoiced for
+/// it.
+pub fn from_ocpi(
+    cdr: &ocpi_kit::v2_3_0::Cdr,
+    evidence: Option<EvidenceRef>,
+) -> Result<Crossing<Inbound>, RoamError> {
     if cdr.charging_periods.is_empty() {
-        findings.push(Finding::NoPeriods);
+        return Err(RoamError::NoPeriods);
     }
 
-    // Both spellings of *energy drawn*. `ENERGY` is the only one OCPI permits
-    // in a CDR and `SchemaViolation` reports `ENERGY_IMPORT` where it appears —
-    // but that report is a warning, and a warning must not carry a quantity out
-    // of the check that exists to find it: reading one spelling would hide a
-    // partner's own kilowatt-hours from their own conservation sum.
-    let summed: Decimal = cdr
-        .charging_periods
-        .iter()
-        .filter_map(|period| {
-            period
-                .volume(CdrDimensionType::Energy)
-                .or_else(|| period.volume(CdrDimensionType::EnergyImport))
+    let mut crossing = Crossing::lossless(());
+
+    let key = super::cdr::key_of(cdr).ok_or_else(|| RoamError::UnreadableField {
+        field: "id".to_owned(),
+        detail: format!(
+            "{}*{}/{} is not a party and a record id this side can key a ledger on",
+            cdr.country_code.as_str(),
+            cdr.party_id.as_str(),
+            cdr.id.as_str()
+        ),
+    })?;
+
+    let periods = periods_of(cdr, &mut crossing)?;
+    let total_energy =
+        Energy::from_kwh(cdr.total_energy.get()).map_err(|error| RoamError::UnreadableField {
+            field: "total_energy".to_owned(),
+            detail: error.to_string(),
+        })?;
+
+    let token_type = cdr.cdr_token.token_type.clone();
+    let auth_path = auth_path_of(cdr.auth_method, &token_type);
+    if let Some(reason) = auth_path_note(cdr.auth_method, &token_type) {
+        crossing.note("/auth_method", reason);
+    }
+
+    // Nothing states a provenance, so nothing may claim one — and a settlement
+    // process that treats an interpolated slot as authoritative is the reason
+    // the field exists. Said once here rather than once per period.
+    crossing.note(
+        "/charging_periods",
+        "OCPI has no field for how a period's energy was arrived at, so every period comes back \
+         interpolated. That is the weaker answer and the only honest one: a number whose \
+         provenance nobody stated is not one this side may call measured",
+    );
+
+    let currency =
+        Currency::new(cdr.currency.as_str()).map_err(|error| RoamError::UnreadableField {
+            field: "currency".to_owned(),
+            detail: error.to_string(),
+        })?;
+
+    let inbound = Inbound {
+        cdr: Cdr {
+            key,
+            session_id: session_id_of(cdr, &key_hint(cdr))?,
+            evse_id: emob_core::EvseId::parse(cdr.cdr_location.evse_id.as_str()).map_err(
+                |error| RoamError::UnreadableField {
+                    field: "cdr_location/evse_id".to_owned(),
+                    detail: error.to_string(),
+                },
+            )?,
+            started_at: cdr.start_date_time.into(),
+            ended_at: cdr.end_date_time.into(),
+            auth_path,
+            periods,
+            total_energy,
+            // OCPI's `ENERGY_EXPORT` is Session-only and `total_energy` carries
+            // no sign, so every CDR that arrives is a draw. `preflight` blocks
+            // a record that reports an export volume anyway, rather than this
+            // silently reading it as one.
+            direction: Direction::Import,
+            evidence,
+            cost: None,
+            supersedes: cdr
+                .credit_reference_id
+                .as_ref()
+                .and_then(|previous| previous.as_str().parse().ok())
+                .map(|id| CdrKey {
+                    party: key_party(cdr),
+                    id,
+                }),
+        },
+        stated_total: Money::new(cdr.total_cost.after_taxes().get(), currency),
+    };
+
+    Ok(crossing.map(|()| inbound))
+}
+
+/// The party a superseded record belongs to — the same CPO, by construction:
+/// OCPI keys a CDR per `country_code`/`party_id` and a credit reference names a
+/// record of the sender's own.
+fn key_party(cdr: &ocpi_kit::v2_3_0::Cdr) -> emob_core::PartyId {
+    emob_core::PartyId::new(cdr.country_code.as_str(), cdr.party_id.as_str())
+        .unwrap_or_else(|_| emob_core::PartyId::new("XX", "XXX").expect("a literal party"))
+}
+
+/// A description of the record, for an error that cannot name a field.
+fn key_hint(cdr: &ocpi_kit::v2_3_0::Cdr) -> String {
+    format!(
+        "{}*{}/{}",
+        cdr.country_code.as_str(),
+        cdr.party_id.as_str(),
+        cdr.id.as_str()
+    )
+}
+
+fn session_id_of(
+    cdr: &ocpi_kit::v2_3_0::Cdr,
+    hint: &str,
+) -> Result<emob_core::SessionId, RoamError> {
+    cdr.session_id
+        .as_ref()
+        .map_or_else(
+            // OCPI makes `session_id` optional — *"can be omitted when the CPO
+            // has no Session object"* — and the canonical model requires one,
+            // because a record that cannot name its session cannot be
+            // reconciled against one. The record's own id is the only other
+            // identifier that is unique within the sender, so it stands in.
+            || cdr.id.as_str(),
+            ocpi_kit::types::CiString::as_str,
+        )
+        .parse()
+        .map_err(|error: emob_core::IdError| RoamError::UnreadableField {
+            field: "session_id".to_owned(),
+            detail: format!("{hint}: {error}"),
         })
-        .map(Number::get)
-        .sum();
-    if summed != cdr.total_energy.get() {
-        findings.push(Finding::DoesNotConserve {
-            periods: summed,
-            total: cdr.total_energy.get(),
-        });
-    }
+}
 
-    // Energy in the other direction, which has nowhere in this record to go.
-    // Never added to the sum above: `total_energy` is "Total energy charged",
-    // and netting a discharge against a draw is the error `Direction` exists to
-    // prevent `[A6 §IV.1]`.
-    for (index, period) in cdr.charging_periods.iter().enumerate() {
-        if let Some(exported) = period.volume(CdrDimensionType::EnergyExport)
-            && !exported.get().is_zero()
-        {
-            findings.push(Finding::ExportEnergyInCdr {
-                index,
-                energy: exported.get(),
-            });
-        }
-    }
+/// The periods, with the ends OCPI does not carry and the charging flag it
+/// states in its dimensions.
+fn periods_of(
+    cdr: &ocpi_kit::v2_3_0::Cdr,
+    crossing: &mut Crossing<()>,
+) -> Result<Vec<ChargingPeriod>, RoamError> {
+    let mut periods = Vec::with_capacity(cdr.charging_periods.len());
+    let mut silent = 0_usize;
 
-    if cdr.total_energy.get().is_sign_negative() && !cdr.total_energy.get().is_zero() {
-        findings.push(Finding::NegativeEnergy {
-            energy: cdr.total_energy.get(),
-        });
-    }
+    for (index, span) in cdr.period_spans().enumerate() {
+        let kwh = span
+            .volume(CdrDimensionType::Energy)
+            .or_else(|| span.volume(CdrDimensionType::EnergyImport))
+            .map_or(Decimal::ZERO, ocpi_kit::types::Number::get);
+        let energy = Energy::from_kwh(kwh).map_err(|error| RoamError::UnreadableField {
+            field: format!("charging_periods/{index}/dimensions"),
+            detail: error.to_string(),
+        })?;
 
-    // ── The window, and the order inside it ─────────────────────────────
-    if cdr.end_date_time < cdr.start_date_time {
-        findings.push(Finding::EndsBeforeItStarts);
-    }
-
-    let mut previous: Option<ocpi_kit::types::DateTime> = None;
-    for (index, period) in cdr.charging_periods.iter().enumerate() {
-        if period.start_date_time < cdr.start_date_time
-            || period.start_date_time > cdr.end_date_time
-        {
-            findings.push(Finding::PeriodOutsideWindow { index });
-        }
-        if previous.is_some_and(|earlier| period.start_date_time < earlier) {
-            findings.push(Finding::PeriodsOutOfOrder { index });
-        }
-        previous = Some(period.start_date_time);
-    }
-
-    // ── The durations, which are in the document twice ──────────────────
-    if cdr.end_date_time >= cdr.start_date_time {
-        let seconds = cdr.end_date_time.unix_timestamp() - cdr.start_date_time.unix_timestamp();
-        let implied = Decimal::from(seconds) / Decimal::from(3600);
-        let stated = cdr.total_time.get();
-
-        // An exact duration has to match exactly: there was nothing to round,
-        // so a difference is a disagreement about the facts.
-        //
-        // One that is *not* exact was rounded by whoever sent it, and OCPI
-        // gives the field no scale — so there is no "largest rounding the
-        // field can hide" to use as a tolerance. Half a second is the line
-        // drawn here, and it is a choice rather than a derivation: it admits
-        // the four decimal places OCPI's own examples carry (which can be
-        // wrong by at most 0.18 s) and rejects a partner rounding to two
-        // (wrong by up to 18 s, which at an occupancy fee is real money and
-        // worth a warning rather than silence).
-        let tolerance = if exact_hours(seconds).is_some() {
-            Decimal::ZERO
-        } else {
-            Decimal::ONE / Decimal::from(2 * 3600)
+        // `charging` is **read**, not inferred from `energy == 0`: a car at 100 %
+        // state of charge draws a rounding error, and a period that genuinely
+        // measured nothing while still charging is a taper. OCPI states the
+        // answer in the dimensions — `TIME` is time charging, `PARKING_TIME` is
+        // time not charging `[OCPI 2.3.0 §mod_cdrs_cdrdimensiontype_enum]`.
+        let charging = match (
+            span.volume(CdrDimensionType::Time),
+            span.volume(CdrDimensionType::ParkingTime),
+        ) {
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            // Both, or neither. Both is a period the sender says was two things
+            // at once; neither is a period that says nothing. Energy is the
+            // only remaining evidence and it is weak — see the comment above —
+            // so the count is reported rather than each occurrence.
+            _ => {
+                silent += 1;
+                !energy.is_zero()
+            }
         };
-        if (stated - implied).abs() > tolerance {
-            findings.push(Finding::DurationDisagrees {
-                stated,
-                implied: implied.round_dp(6).normalize(),
-            });
-        }
-    }
 
-    if let Some(parking) = cdr.total_parking_time
-        && parking.get() > cdr.total_time.get()
-    {
-        findings.push(Finding::ParkingExceedsTotal {
-            parking: parking.get(),
-            total: cdr.total_time.get(),
+        periods.push(ChargingPeriod {
+            quarter_hour: QuarterHour::containing(span.start.into()),
+            start: span.start.into(),
+            end: span.end.into(),
+            energy,
+            charging,
+            provenance: Provenance::Interpolated,
         });
     }
 
-    // ── The money ───────────────────────────────────────────────────────
-    let parts: Decimal = [
-        cdr.total_energy_cost.as_ref(),
-        cdr.total_time_cost.as_ref(),
-        cdr.total_parking_cost.as_ref(),
-        cdr.total_fixed_cost.as_ref(),
-        cdr.total_reservation_cost.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|price| price.after_taxes().get())
-    .sum();
-    let total = cdr.total_cost.after_taxes().get();
-    // Only where a breakdown was actually sent: a record carrying `total_cost`
-    // alone is uninformative rather than inconsistent.
-    if !parts.is_zero() && parts != total {
-        findings.push(Finding::CostsDoNotAddUp { parts, total });
+    if silent > 0 {
+        crossing.note(
+            "/charging_periods",
+            format!(
+                "{silent} of {} periods state neither a TIME nor a PARKING_TIME volume, so \
+                 whether the vehicle was charging was taken from whether energy moved. That \
+                 reads a taper — a full battery drawing a rounding error — as occupancy, and \
+                 `[AFIR Art. 5(4)]` prices the two differently",
+                cdr.charging_periods.len()
+            ),
+        );
     }
 
-    // ── The identifier that decides which driver pays ───────────────────
-    let contract = cdr.cdr_token.contract_id.as_str();
-    if let Err(emob_core::IdError::BadCheckDigit { .. }) = Emaid::parse(contract) {
-        findings.push(Finding::ContractCheckDigit {
-            id: contract.to_owned(),
-        });
-    }
+    Ok(periods)
+}
 
-    // ── The evidence ────────────────────────────────────────────────────
-    match &cdr.signed_data {
-        None if signed_data == SignedDataPolicy::Required => findings.push(Finding::NoSignedData),
-        Some(data) => {
-            for (index, value) in data.signed_values.iter().enumerate() {
-                if value.signed_data.as_str().trim().is_empty() {
-                    findings.push(Finding::EmptySignedValue { index });
-                }
-            }
-            if data.signed_values.is_empty() && signed_data == SignedDataPolicy::Required {
-                findings.push(Finding::NoSignedData);
-            }
-        }
-        None => {}
+/// Which authorisation path an `auth_method` names, narrowed by the token type.
+///
+/// OCPI has three values for six paths, so the mapping is one-to-many in the
+/// direction that matters. The token type carries the one distinction that can
+/// be recovered: `AD_HOC_USER` is *"a one-time-use Token ID generated by a
+/// server or app"*, which is the ad-hoc session, and `EMAID` on an
+/// `AUTH_REQUEST` is the vehicle presenting a contract.
+///
+/// What cannot be recovered is Plug & Charge from `AutoCharge` — both are
+/// `AUTH_REQUEST` with a contract — so the weaker of the two is taken.
+/// Under-reporting an authorisation is never a fault; over-reporting it bills
+/// a contract that was never presented.
+#[must_use]
+pub fn auth_path_of(method: AuthMethod, token: &TokenType) -> AuthPath {
+    match (method, token) {
+        (AuthMethod::Command, _) => AuthPath::RemoteCommand,
+        // Nothing went out to a provider. A one-time token says why: there was
+        // nobody to ask.
+        (AuthMethod::Whitelist, TokenType::AdHocUser) => AuthPath::AdHoc,
+        (AuthMethod::Whitelist, _) => AuthPath::LocalList,
+        // A request went out, so a provider answered for a contract.
+        // `AUTH_REQUEST` covers roaming, Plug & Charge and AutoCharge alike;
+        // roaming is the one that claims least.
+        (AuthMethod::AuthRequest, _) => AuthPath::Roaming,
     }
+}
 
-    // ── The shape ───────────────────────────────────────────────────────
-    if !cdr.is_credit()
-        && cdr.id.as_str().chars().count() > ocpi_kit::v2_3_0::cdrs::NON_CREDIT_ID_MAX_LEN
-    {
-        findings.push(Finding::IdTooLongForNonCredit {
-            len: cdr.id.as_str().chars().count(),
-        });
+/// What the three values could not say about the six paths.
+fn auth_path_note(method: AuthMethod, token: &TokenType) -> Option<String> {
+    match (method, token) {
+        (AuthMethod::AuthRequest, TokenType::Emaid) => Some(
+            "`AUTH_REQUEST` with an EMAID token is Plug & Charge or AutoCharge — a contract \
+             certificate the vehicle presented, or a MAC address off the wire — and OCPI has one \
+             value for both [OCPI 2.3.0 §mod_cdrs_authmethod_enum]. This record comes back as an \
+             ordinary roaming authorisation, which is the weaker claim; the signed meter data is \
+             where the distinction survives, in the identification strength"
+                .to_owned(),
+        ),
+        (AuthMethod::AuthRequest, _) => Some(
+            "`AUTH_REQUEST` says a provider was asked and not which path asked it. This record \
+             comes back as roaming, the claim that assumes least"
+                .to_owned(),
+        ),
+        (AuthMethod::Whitelist, TokenType::AdHocUser) | (AuthMethod::Command, _) => None,
+        (AuthMethod::Whitelist, _) => Some(
+            "`WHITELIST` says the CPO decided without asking anybody, which is both a local \
+             authorisation list and an ad-hoc session. The token type is not `AD_HOC_USER`, so \
+             this comes back as a local list"
+                .to_owned(),
+        ),
     }
-
-    if let Err(violations) = cdr.validate() {
-        for violation in &violations {
-            findings.push(Finding::SchemaViolation {
-                pointer: violation.pointer.clone(),
-                message: violation.message.clone(),
-            });
-        }
-    }
-
-    Report { findings }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocpi_kit::types::{CiString, DateTime, OcpiString};
-    use ocpi_kit::v2_3_0::Price;
-    use ocpi_kit::v2_3_0::cdrs::{AuthMethod, CdrDimension, CdrLocation, CdrToken, ChargingPeriod};
-    use ocpi_kit::v2_3_0::locations::{ConnectorFormat, ConnectorType, GeoLocation, PowerType};
-    use std::str::FromStr;
-
-    fn dec(text: &str) -> Decimal {
-        Decimal::from_str(text).unwrap()
-    }
-
-    fn at(text: &str) -> DateTime {
-        text.parse().unwrap()
-    }
-
-    fn location() -> CdrLocation {
-        CdrLocation::builder()
-            .id(CiString::<36>::new("loc-1").unwrap())
-            .address(OcpiString::<45>::new("Hauptstraße 12").unwrap())
-            .city(OcpiString::<45>::new("Berlin").unwrap())
-            .country(OcpiString::<3>::new("DEU").unwrap())
-            .coordinates(GeoLocation::new("52.520008", "13.404954").unwrap())
-            .evse_uid(CiString::<36>::new("evse-1").unwrap())
-            .evse_id(CiString::<48>::new("DE*AB7*E840*6487").unwrap())
-            .connector_id(CiString::<36>::new("1").unwrap())
-            .connector_standard(ConnectorType::Iec62196T2Combo)
-            .connector_format(ConnectorFormat::Socket)
-            .connector_power_type(PowerType::Dc)
-            .build()
-    }
-
-    fn token(contract: &str) -> CdrToken {
-        CdrToken::builder()
-            .country_code(CiString::<2>::new("NL").unwrap())
-            .party_id(CiString::<3>::new("TNM").unwrap())
-            .uid(CiString::<36>::new("045F2C").unwrap())
-            .token_type(ocpi_kit::v2_3_0::tokens::TokenType::Rfid)
-            .contract_id(CiString::<36>::new(contract).unwrap())
-            .build()
-    }
-
-    fn period(start: &str, kwh: &str, hours: &str) -> ChargingPeriod {
-        ChargingPeriod::builder()
-            .start_date_time(at(start))
-            .dimensions(vec![
-                CdrDimension::new(CdrDimensionType::Energy, Number::new(dec(kwh))),
-                CdrDimension::new(CdrDimensionType::Time, Number::new(dec(hours))),
-            ])
-            .build()
-    }
-
-    /// A well-formed half-hour, 18.000 kWh, €8.82 gross.
-    fn arriving() -> ocpi_kit::v2_3_0::Cdr {
-        ocpi_kit::v2_3_0::Cdr::builder()
-            .country_code(CiString::<2>::new("DE").unwrap())
-            .party_id(CiString::<3>::new("ABC").unwrap())
-            .id(CiString::<39>::new("cdr-1").unwrap())
-            .start_date_time(at("2026-01-02T10:00:00Z"))
-            .end_date_time(at("2026-01-02T10:30:00Z"))
-            .cdr_token(token("NL-TNM-C00122045-K"))
-            .auth_method(AuthMethod::AuthRequest)
-            .cdr_location(location())
-            .currency(OcpiString::<3>::new("EUR").unwrap())
-            .charging_periods(vec![
-                period("2026-01-02T10:00:00Z", "10.000", "0.25"),
-                period("2026-01-02T10:15:00Z", "8.000", "0.25"),
-            ])
-            .total_cost(Price::new(Number::new(dec("8.82"))))
-            .total_energy(Number::new(dec("18.000")))
-            .total_time(Number::new(dec("0.5")))
-            .last_updated(at("2026-01-02T10:31:00Z"))
-            .build()
-    }
-
-    /// The same periods, with their energy in a dimension OCPI forbids here.
-    fn with_energy_dimension(kind: CdrDimensionType) -> ocpi_kit::v2_3_0::Cdr {
-        let mut cdr = arriving();
-        for (period, kwh) in cdr.charging_periods.iter_mut().zip(["10.000", "8.000"]) {
-            period.dimensions = vec![CdrDimension::new(kind, Number::new(dec(kwh)))];
-        }
-        cdr
-    }
 
     #[test]
-    fn energy_in_the_import_dimension_still_reaches_the_conservation_check() {
-        // `ENERGY_IMPORT` is "Session Only" and may not appear in a CDR, which
-        // the schema check reports — as a *warning*, because a permissive
-        // decoder must not make a page of CDRs unpayable over a spec nit.
-        //
-        // A warning that hides a quantity is a different thing. Summing only
-        // `ENERGY` made these eighteen kilowatt-hours invisible to the one check
-        // whose job is to find them, so a partner could state `total_energy: 0`
-        // beside them and settle clean.
-        let mut lying = with_energy_dimension(CdrDimensionType::EnergyImport);
-        lying.total_energy = Number::new(dec("0"));
-
-        let report = preflight(&lying, SignedDataPolicy::Optional);
-        assert!(
-            !report.is_settleable(),
-            "a record claiming 0 kWh beside 18 kWh of periods was payable: {:?}",
-            report.reasons().collect::<Vec<_>>()
+    fn the_token_type_recovers_the_one_distinction_auth_method_lost() {
+        // `WHITELIST` says the CPO decided without asking anybody, which is
+        // both a local list and an ad-hoc session. A one-time token says which.
+        assert_eq!(
+            auth_path_of(AuthMethod::Whitelist, &TokenType::AdHocUser),
+            AuthPath::AdHoc
         );
-        assert!(matches!(
-            report.blocking().next().unwrap(),
-            Finding::DoesNotConserve { .. }
-        ));
-
-        // …and one whose arithmetic is coherent settles, with the deviation
-        // recorded rather than swallowed. The spelling is wrong; the money is
-        // not, and a note a partner can act on beats a refusal they cannot.
-        let coherent = with_energy_dimension(CdrDimensionType::EnergyImport);
-        let report = preflight(&coherent, SignedDataPolicy::Optional);
-        assert!(report.is_settleable());
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f, Finding::SchemaViolation { .. })),
-            "the deviation has to reach somebody"
+        assert_eq!(
+            auth_path_of(AuthMethod::Whitelist, &TokenType::Rfid),
+            AuthPath::LocalList
         );
-    }
-
-    #[test]
-    fn energy_fed_back_to_the_grid_blocks_rather_than_being_netted_or_dropped() {
-        // The mirror of `RoamError::ExportNotExpressible` on the way out. OCPI's
-        // `total_energy` is "Total energy charged", so an export volume has
-        // nowhere to go: netting it against the draw is what `Direction` exists
-        // to prevent `[A6 §IV.1]`, and dropping it settles a record while
-        // ignoring energy the record itself reports.
-        let mut discharging = arriving();
-        discharging.charging_periods[0]
-            .dimensions
-            .push(CdrDimension::new(
-                CdrDimensionType::EnergyExport,
-                Number::new(dec("4.000")),
-            ));
-
-        let report = preflight(&discharging, SignedDataPolicy::Optional);
-        assert!(!report.is_settleable());
-        assert!(
-            report
-                .blocking()
-                .any(|f| matches!(f, Finding::ExportEnergyInCdr { index: 0, .. })),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
+        assert_eq!(
+            auth_path_of(AuthMethod::Command, &TokenType::AppUser),
+            AuthPath::RemoteCommand
         );
 
-        // The draw itself is untouched: the export is refused, never subtracted.
-        assert!(
-            !report
-                .findings
-                .iter()
-                .any(|f| matches!(f, Finding::DoesNotConserve { .. }))
+        // What cannot be recovered: Plug & Charge and AutoCharge are one value.
+        // The weaker claim is the one taken, and the note says why — a contract
+        // that was never presented is not one this side may bill.
+        assert_eq!(
+            auth_path_of(AuthMethod::AuthRequest, &TokenType::Emaid),
+            AuthPath::Roaming
         );
-    }
+        let note = auth_path_note(AuthMethod::AuthRequest, &TokenType::Emaid).expect("a note");
+        assert!(note.contains("Plug & Charge or AutoCharge"), "{note}");
+        assert!(note.contains("weaker claim"), "{note}");
 
-    #[test]
-    fn a_well_formed_record_is_payable() {
-        let report = preflight(&arriving(), SignedDataPolicy::Optional);
-        assert!(
-            report.is_settleable(),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
-        assert_eq!(report.findings.len(), 0);
-    }
-
-    #[test]
-    fn periods_that_do_not_add_up_block_payment() {
-        let mut wrong = arriving();
-        wrong.total_energy = Number::new(dec("20.000"));
-
-        let report = preflight(&wrong, SignedDataPolicy::Optional);
-        assert!(!report.is_settleable());
-        assert!(matches!(
-            report.blocking().next().unwrap(),
-            Finding::DoesNotConserve { .. }
-        ));
-    }
-
-    #[test]
-    fn periods_out_of_order_are_caught_although_nothing_in_them_is_invalid() {
-        // An OCPI period has no end, so a reader derives every span from the
-        // next period's start. Out of order, every duration in the record is
-        // wrong — and no individual member of the document is malformed.
-        let mut shuffled = arriving();
-        shuffled.charging_periods.swap(0, 1);
-
-        let report = preflight(&shuffled, SignedDataPolicy::Optional);
-        assert!(
-            report
-                .blocking()
-                .any(|f| matches!(f, Finding::PeriodsOutOfOrder { index: 1 })),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn a_duration_that_contradicts_the_timestamps_is_reported() {
-        // Both facts are in the document, and they are the same fact.
-        let mut wrong = arriving();
-        wrong.total_time = Number::new(dec("2.0"));
-
-        let report = preflight(&wrong, SignedDataPolicy::Optional);
-        assert!(
-            report
-                .warnings()
-                .any(|f| matches!(f, Finding::DurationDisagrees { .. })),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn a_partner_rounding_a_duration_too_coarsely_is_worth_a_warning() {
-        // Two decimal places on a duration in hours loses up to 18 seconds,
-        // which at the occupancy fee [AFIR Art. 5(4)] permits is real money.
-        // 22 minutes is 0.36666… h; a partner sending `0.37` is 12 s out.
-        let mut coarse = arriving();
-        coarse.end_date_time = at("2026-01-02T10:22:00Z");
-        coarse.total_time = Number::new(dec("0.37"));
-        coarse.charging_periods = vec![period("2026-01-02T10:00:00Z", "18.000", "0.37")];
-
-        let report = preflight(&coarse, SignedDataPolicy::Optional);
-        assert!(
-            report
-                .warnings()
-                .any(|f| matches!(f, Finding::DurationDisagrees { .. })),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn a_duration_rounded_because_hours_cannot_hold_it_is_not_a_disagreement() {
-        // Twenty minutes is a third of an hour. A partner who sent `0.3333`
-        // did the only thing the field allows, and calling that a
-        // contradiction would flag every session that does not land on a
-        // multiple of nine seconds — which is most of them.
-        let mut twenty = arriving();
-        twenty.end_date_time = at("2026-01-02T10:20:00Z");
-        twenty.total_time = Number::new(dec("0.3333"));
-        twenty.charging_periods = vec![period("2026-01-02T10:00:00Z", "18.000", "0.3333")];
-
-        let report = preflight(&twenty, SignedDataPolicy::Optional);
-        assert!(
-            !report
-                .findings
-                .iter()
-                .any(|f| matches!(f, Finding::DurationDisagrees { .. })),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn a_transcribed_contract_id_does_not_get_paid() {
-        // The inbound half of the check the outbound crossing makes. This
-        // payment is about to be applied to a contract nobody holds.
-        let mut wrong = arriving();
-        wrong.cdr_token = token("NL-TNM-C00122045-X");
-
-        let report = preflight(&wrong, SignedDataPolicy::Optional);
-        assert!(!report.is_settleable());
-        assert!(
-            report
-                .blocking()
-                .any(|f| matches!(f, Finding::ContractCheckDigit { .. }))
-        );
-    }
-
-    #[test]
-    fn a_provider_scheme_in_no_grammar_is_not_a_failed_check_digit() {
-        let mut own = arriving();
-        own.cdr_token = token("acct-9931-2026-fleet");
-
-        let report = preflight(&own, SignedDataPolicy::Optional);
-        assert!(
-            report.is_settleable(),
-            "an eMSP is free to use its own scheme: {:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn a_german_session_without_signed_data_is_not_payable() {
-        let report = preflight(&arriving(), SignedDataPolicy::Required);
-        assert!(!report.is_settleable());
-        assert_eq!(report.blocking().next().unwrap(), &Finding::NoSignedData);
-
-        // …and elsewhere it is simply not this check's business.
-        assert!(preflight(&arriving(), SignedDataPolicy::Optional).is_settleable());
-    }
-
-    #[test]
-    fn a_breakdown_that_was_not_computed_from_the_total_is_worth_knowing() {
-        let mut wrong = arriving();
-        wrong.total_energy_cost = Some(Price::new(Number::new(dec("5.00"))));
-
-        let report = preflight(&wrong, SignedDataPolicy::Optional);
-        assert!(
-            report
-                .warnings()
-                .any(|f| matches!(f, Finding::CostsDoNotAddUp { .. })),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
-        assert!(
-            report.is_settleable(),
-            "a minor unit of rounding is not a reason to refuse a payment"
-        );
-    }
-
-    #[test]
-    fn a_record_carrying_only_a_total_is_uninformative_rather_than_inconsistent() {
-        let report = preflight(&arriving(), SignedDataPolicy::Optional);
-        assert!(
-            !report
-                .findings
-                .iter()
-                .any(|f| matches!(f, Finding::CostsDoNotAddUp { .. }))
-        );
-    }
-
-    #[test]
-    fn every_problem_is_reported_at_once_and_nothing_is_repaired() {
-        // A pre-flight that stopped at the first fault makes fixing a
-        // partner's export an N-round-trip conversation, and one that quietly
-        // repaired what it found would make the record payable and leave the
-        // disagreement in place.
-        let mut broken = arriving();
-        broken.total_energy = Number::new(dec("-1.000"));
-        broken.cdr_token = token("NL-TNM-C00122045-X");
-        broken.charging_periods.clear();
-
-        let report = preflight(&broken, SignedDataPolicy::Required);
-        assert!(!report.is_settleable());
-
-        for expected in [
-            Finding::NoPeriods,
-            Finding::NegativeEnergy {
-                energy: dec("-1.000"),
-            },
-            Finding::ContractCheckDigit {
-                id: "NL-TNM-C00122045-X".to_owned(),
-            },
-            Finding::NoSignedData,
-        ] {
-            assert!(
-                report.findings.contains(&expected),
-                "{expected} was not reported: {:?}",
-                report.reasons().collect::<Vec<_>>()
-            );
-        }
-
-        // …and the record that arrived is untouched.
-        assert_eq!(broken.total_energy.get(), dec("-1.000"));
-        assert!(broken.charging_periods.is_empty());
-    }
-
-    #[test]
-    fn ocpis_own_schema_rules_are_reported_rather_than_swallowed() {
-        // `ocpi-kit` decodes permissively on purpose — a peer that overruns a
-        // `string(45)` must not make a whole page undecodable — so the
-        // violation has to reach somebody, and this is where.
-        let mut empty = arriving();
-        empty.charging_periods.clear();
-
-        let report = preflight(&empty, SignedDataPolicy::Optional);
-        assert!(
-            report
-                .findings
-                .iter()
-                .any(|f| matches!(f, Finding::SchemaViolation { pointer, .. }
-                    if pointer == "/charging_periods")),
-            "{:?}",
-            report.reasons().collect::<Vec<_>>()
-        );
+        // The two that are exact say nothing.
+        assert!(auth_path_note(AuthMethod::Command, &TokenType::AppUser).is_none());
+        assert!(auth_path_note(AuthMethod::Whitelist, &TokenType::AdHocUser).is_none());
     }
 }

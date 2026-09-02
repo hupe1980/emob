@@ -638,41 +638,54 @@ impl<'a> CdrBuilder<'a> {
                 });
             }
 
-            // The check the whole Eichrecht chain was built to make possible.
-            // `[OCMF Tab. 19]` states how far the station's clock can be
-            // trusted, and `[OCMF Tab. 7, EF]` flags a time value as unusable
-            // separately from an energy one. A tariff that charges per minute —
-            // the occupancy fee `[AFIR Art. 5(4)]` permits at 50 kW and above —
-            // is billing a duration, and billing a duration off a clock the
-            // signed record does not vouch for is billing a number nobody can
-            // defend. The energy is unaffected, so the fix is a per-kWh tariff
-            // rather than a blocked session.
-            if let Some(evidence) = &cdr.evidence
-                && !evidence.duration_billable
-                && let Some(dimension) = time_dimension_of(tariff)
-            {
-                return Err(CdrError::DurationNotBillable { dimension });
-            }
-
-            // The same gate from the other end. A clock that cannot be *placed*
-            // `[OCMF Tab. 19]` and a span that cannot be *resolved*
-            // `[REA 6-A §3.1]` both leave a duration nobody can defend — and a
-            // thirty-second session billed per minute is the second one.
-            if let Some(dimension) = time_dimension_of(tariff)
-                && !self.clock.permits(cdr.duration())
-            {
-                return Err(CdrError::DurationBelowClockResolution {
-                    dimension,
-                    measured: cdr.duration(),
-                    shortest: self.clock.shortest_billable_span(),
-                });
-            }
-
             let chargeable = cdr.chargeable()?;
+            let rated = emob_tariff::rate(tariff, &chargeable);
+
+            // The two duration gates below ask about the duration this record
+            // **charges for**, not about the dimensions the tariff mentions.
+            //
+            // The difference is a false refusal that costs real revenue: a
+            // tariff whose occupancy fee begins after four hours prices
+            // `ParkingTime` somewhere, and a thirty-minute session under it
+            // charges no duration at all. Refusing to build that record —
+            // because the *tariff* names a time dimension — throws away the
+            // kilowatt-hours as well, over a fee nobody was charged.
+            //
+            // It is also the rule [`crate::validate`] already applies to a
+            // record somebody else built, and a builder stricter than its own
+            // validator is a builder that refuses records it would accept.
+            for (dimension, seconds) in charged_durations(&rated) {
+                // `[OCMF Tab. 19]` states how far the station's clock can be
+                // trusted, and `[OCMF Tab. 7, EF]` flags a time value as
+                // unusable separately from an energy one. Billing a duration
+                // off a clock the signed record does not vouch for is billing a
+                // number nobody can defend. The energy is unaffected, so the
+                // fix is a per-kWh tariff rather than a blocked session.
+                if let Some(evidence) = &cdr.evidence
+                    && !evidence.duration_billable
+                {
+                    return Err(CdrError::DurationNotBillable { dimension });
+                }
+
+                // The same gate from the other end. A clock that cannot be
+                // *placed* `[OCMF Tab. 19]` and a span that cannot be
+                // *resolved* `[REA 6-A §3.1]` both leave a duration nobody can
+                // defend — and a thirty-second session billed per minute is the
+                // second one. The span judged is the one that was billed, which
+                // for an occupancy fee is not the session's whole length.
+                if !self.clock.permits(seconds) {
+                    return Err(CdrError::DurationBelowClockResolution {
+                        dimension,
+                        measured: seconds,
+                        shortest: self.clock.shortest_billable_span(),
+                    });
+                }
+            }
+
             cdr.cost = Some(Cost {
                 tariff_id: tariff.id.clone(),
                 tariff_fingerprint: tariff.fingerprint(),
-                rated: emob_tariff::rate(tariff, &chargeable),
+                rated,
             });
         }
 
@@ -680,12 +693,29 @@ impl<'a> CdrBuilder<'a> {
     }
 }
 
-/// The first time dimension a tariff prices anywhere, if it prices one.
-fn time_dimension_of(tariff: &Tariff) -> Option<Dimension> {
-    tariff
-        .dimensions()
+/// The durations a rating actually charged for, in the order
+/// `[AFIR Art. 5(4)]` prescribes.
+///
+/// Read off the rated lines rather than off the tariff, because the question
+/// the Eichrecht gates ask is "does this record bill a duration", and a tariff
+/// that prices one under conditions this session never met does not.
+///
+/// The span comes from [`Rated::base_quantity_for`], which is in **whole
+/// seconds** and therefore exact — the same figure the line's amount was
+/// computed from. Summing the hours would divide by 3600 once per line and hand
+/// the comparison a number that is not the one that was billed.
+fn charged_durations(rated: &Rated) -> Vec<(Dimension, time::Duration)> {
+    [Dimension::Time, Dimension::ParkingTime]
         .into_iter()
-        .find(|d| matches!(d, Dimension::Time | Dimension::ParkingTime))
+        .filter_map(|dimension| {
+            let seconds = rated.base_quantity_for(dimension);
+            if seconds.is_zero() {
+                return None;
+            }
+            let seconds = i64::try_from(seconds.trunc()).unwrap_or(i64::MAX);
+            Some((dimension, time::Duration::seconds(seconds)))
+        })
+        .collect()
 }
 
 /// The quarter hours between two instants, as periods that moved no energy.
@@ -787,6 +817,45 @@ mod tests {
         )
         .unwrap();
         s.end(at(30), EndReason::Local).unwrap();
+        s
+    }
+
+    /// The same session, with the car left in the bay for another half hour
+    /// after the charge finished — the thirty minutes `[AFIR Art. 5(4)]`'s
+    /// occupancy fee is for.
+    fn occupied_session() -> Session {
+        let mut s = Session::open(
+            "s-1".parse().unwrap(),
+            "DE*AB7*E840*6487".parse().unwrap(),
+            Authorization::ad_hoc(),
+            at(0),
+        );
+        s.transition_to(emob_session::SessionState::Charging, at(0))
+            .unwrap();
+        s.attach_series(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    MeterReading::new(
+                        at(0),
+                        kwh("100.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionBegin,
+                    ),
+                    MeterReading::new(
+                        at(30),
+                        kwh("118.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionEnd,
+                    ),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        s.transition_to(emob_session::SessionState::Suspended, at(30))
+            .unwrap();
+        s.end(at(60), EndReason::Local).unwrap();
         s
     }
 
@@ -1618,7 +1687,7 @@ mod tests {
             ],
         );
 
-        let err = CdrBuilder::from_session(&ended_session(), Direction::Import)
+        let err = CdrBuilder::from_session(&occupied_session(), Direction::Import)
             .unwrap()
             .key(party(), "cdr-1".parse().unwrap())
             .evidence(unsynchronised.clone())
@@ -1627,6 +1696,19 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CdrError::DurationNotBillable { .. }), "{err}");
         assert!(err.to_string().contains("price this session per kWh"));
+
+        // …and a session that charged **no** occupancy under the very same
+        // tariff is not refused. The gate asks what the record bills, not what
+        // the tariff mentions: refusing here would throw away the
+        // kilowatt-hours over a fee nobody was charged.
+        let cdr = CdrBuilder::from_session(&ended_session(), Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-1".parse().unwrap())
+            .evidence(unsynchronised.clone())
+            .rated_with(&occupancy)
+            .build()
+            .unwrap();
+        assert_eq!(cdr.total_cost().unwrap().to_string(), "8.82 EUR");
 
         // …and the energy is genuinely unaffected: the same session on a
         // per-kWh tariff builds and prices.

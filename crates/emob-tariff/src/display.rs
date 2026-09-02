@@ -9,9 +9,19 @@
 //! from the tariff engine, and one of them was updated.
 //!
 //! Here the description is **derived from the tariff that rates**, through the
-//! same element-selection function — [`crate::rating::element_matches`] — that
-//! [`crate::rating::rate`] uses for a session's first period. There is no
+//! same price-selection function — [`crate::rating::matching_component`] — that
+//! [`crate::rating::rate`] uses for a session's first period, asked once per
+//! dimension exactly as the rating asks it `[OCPI 2.3.0 §Tariff]`. There is no
 //! second source and no parallel rule, so there is nothing to drift from.
+//!
+//! # Why "the element that applies now" is the wrong question
+//!
+//! More than one element can be in force at once — one per dimension. The
+//! tariff shape OCPI recommends puts a default price component for each
+//! dimension in its own unrestricted element, so `{FLAT 0.50}` followed by
+//! `{ENERGY 0.49}` has *both* elements live, and a display that picks one
+//! shows the driver a session fee and no price per kilowatt-hour. That is a
+//! `[PAngV]` breach produced by an off-by-one reading of a specification.
 //!
 //! # The order is the regulation's, not a designer's
 //!
@@ -227,10 +237,25 @@ pub fn describe(tariff: &Tariff, at: time::OffsetDateTime) -> PriceDescription {
         power_kw: None,
     };
 
-    let applicable = tariff
-        .elements
-        .iter()
-        .position(|e| crate::rating::element_matches(e, &opening));
+    // One question per dimension, through the rating engine's own selector:
+    // a tariff whose session fee and whose kilowatt-hour price sit in two
+    // unrestricted elements — the shape `[OCPI 2.3.0 §Tariff]` recommends —
+    // has both in force at once, and a display that stops at the first element
+    // shows the driver one of them.
+    let mut lines: Vec<DisplayLine> = Vec::new();
+    let mut applicable: Vec<usize> = Vec::new();
+    for dimension in tariff.dimensions() {
+        if let Some((index, component)) =
+            crate::rating::matching_component(tariff, dimension, &opening)
+        {
+            lines.push(DisplayLine {
+                dimension,
+                price: price_in_display_unit(dimension, component.price),
+            });
+            applicable.push(index);
+        }
+    }
+    lines.sort_by_key(|l| l.dimension);
 
     let tiers: Vec<Tier> = tariff
         .elements
@@ -239,14 +264,9 @@ pub fn describe(tariff: &Tariff, at: time::OffsetDateTime) -> PriceDescription {
         .map(|(index, element)| Tier {
             condition: element.restrictions.describe(),
             lines: lines_of(element),
-            applies_now: applicable == Some(index),
+            applies_now: applicable.contains(&index),
         })
         .collect();
-
-    let lines = applicable
-        .and_then(|index| tiers.get(index))
-        .map(|tier| tier.lines.clone())
-        .unwrap_or_default();
 
     PriceDescription {
         lines,

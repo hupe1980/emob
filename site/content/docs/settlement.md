@@ -234,6 +234,13 @@ The energy really is unaffected, so the error names the fix rather than blocking
 the session — and the same gate runs again in the pre-flight, on records a
 partner built.
 
+The gate asks what the record **bills**, not what the tariff mentions. A tariff
+whose occupancy fee begins after four hours names `ParkingTime`; a thirty-minute
+session under it charges no duration at all, and refusing that record would
+throw away the kilowatt-hours over a fee nobody was charged. So the rating runs
+first and the gate reads the seconds it actually charged — which for an
+occupancy fee is the occupancy, not the session's whole length.
+
 ### And the third: which way the energy went
 
 `[OCMF Tab. 25]` reserves the OBIS range `B0`–`B3` for import and `C0`–`C3` for
@@ -344,7 +351,20 @@ elsewhere, so the decision belongs to the billing layer that knows which regime
 applies. Blocking here would refuse lawful settlement outside Germany.
 
 Money computed for a different quantity than the record states is **blocking** —
-it is the settlement fault that costs the most to unwind.
+the settlement fault that costs the most to unwind. So are the two that are easy
+to miss:
+
+```rust
+// the Energy line states 18.000 at 0.49 and an amount of 9.80,
+//   but its own numbers come to 8.82
+// the period beginning 10:15 starts before the previous one ended at 10:30:
+//   the overlap is billed twice
+```
+
+Every line has to reproduce its own amount, because the amount is the number the
+payer pays and the quantity check does not reach it. And two periods can have
+ascending starts, sit inside the session, sum to the record's own total, and
+still put fifteen minutes in both.
 
 A blocking finding has to be a fault, not a shape the checker did not expect.
 `CostEnergyMismatch` therefore runs only where an energy price was actually

@@ -278,17 +278,7 @@ impl ReferenceDay {
                 });
 
                 match cdr {
-                    Ok(cdr) => {
-                        // A settled record is one the ledger accepted, not one
-                        // the builder returned: the ledger is where a
-                        // retransmission stops being a second invoice line.
-                        match outcome.ledger.accept(cdr.clone()) {
-                            Acceptance::Stored => outcome.settle(cdr),
-                            other => outcome.refuse(refusal(vec![format!(
-                                "the ledger did not store it: {other:?}"
-                            )])),
-                        }
-                    }
+                    Ok(cdr) => outcome.offer(cdr, &refusal),
                     Err(error) => {
                         let mut reasons = vec![error.to_string()];
                         reasons.extend(evidence.reasons());
@@ -404,11 +394,45 @@ pub struct DayOutcome {
     pub attempted: u32,
     /// Everything the meters moved, billable or not.
     pub metered: Energy,
+    /// How many records the ledger already held when they were offered.
+    ///
+    /// Neither settled nor refused: the first offer counted the energy, and the
+    /// ledger absorbing the second is the idempotency working. Zero for a
+    /// reference day, because each session is offered once.
+    pub re_offered: u32,
     billed: Energy,
     unbilled: Energy,
 }
 
 impl DayOutcome {
+    /// Offer a record to the ledger, and count what the ledger answered.
+    ///
+    /// A settled record is one the ledger **accepted**, not one the builder
+    /// returned: the ledger is where a retransmission stops being a second
+    /// invoice line. The three answers are three different facts, and
+    /// collapsing them into "the ledger did not store it" would put a
+    /// **duplicate's** energy in the refused column — where it would be counted
+    /// a second time, having already been billed by the first offer, and
+    /// `billed + refused == metered` would stop holding for something that is
+    /// not a fault at all.
+    fn offer(&mut self, cdr: Cdr, refusal: &dyn Fn(Vec<String>) -> Refused) {
+        match self.ledger.accept(cdr.clone()) {
+            Acceptance::Stored => self.settle(cdr),
+            // Already billed under this key. Counting it again, either way, is
+            // the double count the ledger exists to prevent.
+            Acceptance::Duplicate => self.re_offered += 1,
+            Acceptance::Conflict { difference } => self.refuse(refusal(vec![format!(
+                "a different record is already settled under this key: {difference}"
+            )])),
+            // `Acceptance` is `#[non_exhaustive]`. An answer this build does not
+            // know is not one it may read as success — the same rule the rating
+            // engine applies to a restriction it cannot evaluate.
+            other => self.refuse(refusal(vec![format!(
+                "the ledger answered {other:?}, which this build cannot interpret"
+            )])),
+        }
+    }
+
     fn settle(&mut self, cdr: Cdr) {
         self.billed += cdr.total_energy;
         self.settled.push(cdr);

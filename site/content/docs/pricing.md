@@ -20,7 +20,7 @@ updated. That is the price-transparency breach the article exists to prevent,
 and it is almost never malice.
 
 Here `describe()` and `rate()` read the same `PriceComponent` values off the
-same `Tariff`, **and select the applicable element through the same predicate**:
+same `Tariff`, **and select the applicable price through the same function**:
 
 ```rust
 let tariff = Tariff::simple(id, Currency::EUR, TariffKind::AdHoc, vec![
@@ -35,10 +35,43 @@ assert_eq!(describe(&tariff, at).one_line(), "0.49 EUR / kWh · 0.50 EUR / sessi
 assert_eq!(rate(&tariff, &session).gross().to_string(), "14.96 EUR");
 ```
 
-Two implementations of "which element applies" would be exactly the drift this
+Two implementations of "which price applies" would be exactly the drift this
 crate exists to prevent, one level down — so `describe` asks the same question
-`rate` asks about a session's first period, and the tier shown is the tier the
+`rate` asks about a session's first period, and the price shown is the price the
 first kilowatt-hour is billed at.
+
+## The price is chosen per dimension, not per element
+
+`[OCPI 2.3.0 §Tariff]` states the selection rule in one sentence:
+
+> …the first Tariff Element with a Price Component **for that dimension** in the
+> list with matching Tariff Restrictions will be used. Only one Price Component
+> per dimension can be active at any point in time, but multiple Price
+> Components for different dimensions can be active at once.
+
+So several elements are in force at once, at most one per dimension — which is
+why the specification advises one unrestricted default element *per dimension*
+after the restricted ones:
+
+```rust
+let elements = vec![
+    element(dec("0.29"), Dimension::Energy, after_22),          // the night rate
+    TariffElement::unrestricted(vec![flat(dec("0.50"))]),        // the defaults,
+    TariffElement::unrestricted(vec![energy(dec("0.49"))]),      // one per dimension
+];
+
+assert_eq!(rated.amount_for(Dimension::Energy), Some(dec("4.90")));
+assert_eq!(rated.amount_for(Dimension::Flat),   Some(dec("0.50")));
+```
+
+Stopping at the first matching element bills the session fee and drops every
+kilowatt-hour — and *nothing failed to match*, so nothing is reported either.
+
+A dimension no element matched is not an error: the specification answers it
+with "there will be no costs for that Tariff Dimension". It is a **quantity**,
+so `RatingNote::Unpriced` carries how much went unpriced. "No element matched at
+10:15" is not something a settlement dispute can be conducted with; "4.5 kWh of
+this session were not priced" is.
 
 ## A session is a sequence of periods
 
@@ -50,7 +83,7 @@ been delivered **so far**. Rate the session against one element chosen from its
 driver was quoted at 0.39. The tariff is legal; the invoice is wrong.
 
 So `rate` walks the periods in order, carrying the cumulative energy and
-duration, and asks which element applies at the start of each one:
+duration, and asks which price applies at the start of each one:
 
 ```rust
 let session = Chargeable::new(vec![
@@ -147,9 +180,11 @@ assert_eq!(describe(&tariff, at_noon).full_disclosure(), vec![
 ]);
 ```
 
-Each `Tier` carries its conditions in words and says whether it `applies_now`.
-`describe()` takes the instant too, so a display can answer *what will this cost
-at 22:00* rather than only *what does it cost now*.
+Each `Tier` carries its conditions in words and says whether it `applies_now` —
+true when any of its components is the one in force for its dimension, since
+more than one element is in force at a time. `describe()` takes the instant too,
+so a display can answer *what will this cost at 22:00* rather than only *what
+does it cost now*.
 
 ## A tariff can be unlawful on its own
 
@@ -215,8 +250,11 @@ at all and an invoice under the tariff could state no taxable amount
 rating engine (D75).
 
 It also reports what is merely incoherent: a minimum above the maximum (no
-session total satisfies both), and an element that sits behind an unrestricted
-one and can therefore never apply — lawful, and almost always a mistake.
+session total satisfies both), and an element **every** one of whose dimensions
+an earlier unrestricted element already prices, which can therefore never apply
+— lawful, and almost always a mistake. Per dimension, because an unrestricted
+element pricing only a session fee shadows nothing but the session fee, and
+objecting otherwise would push an operator off the shape OCPI advises.
 
 Contract tariffs are not judged by this rule. Art. 5(4) governs the ad-hoc
 price; a provider's own contract price falls under Art. 5(5), which is a
@@ -262,8 +300,8 @@ assert!(cdr.was_priced_with(&tariff));   // not "does the id match"
 `Tariff::fingerprint()` is a SHA-256 over a canonical encoding of everything
 that can change a price — the bounds, the window, and every element with its
 restrictions and components **in order**, because the first matching element
-prices the period. Scale is part of it: `0.49` and `0.490` are numerically equal
-and are two different prices to show a driver.
+that prices a dimension is the one that prices it. Scale is part of it: `0.49`
+and `0.490` are numerically equal and are two different prices to show a driver.
 
 And `[AFIR Art. 5(4)]` settles which version governs a session. The price must
 be "known to end users **before they initiate** a recharging session", so a CPO
@@ -309,10 +347,22 @@ assert_eq!(rated.net().amount() + rated.tax().amount(), rated.gross().amount());
 out of them; `No` means they are net and it is added on. `total()` reports the
 basis the tariff states; `gross()` reports what the driver pays.
 
+The breakdown has a per-dimension sibling, and it exists because a wire that
+states a cost per heading — OCPI's `total_energy_cost` and its three siblings —
+needs one. One dimension can be charged at two prices, and two tiers can sit in
+different tax categories, so reading a rate off the first line and applying it
+to the summed amount taxes the second tier at the first tier's rate:
+
+```rust
+let energy = rated.tax_summary_for(Dimension::Energy);
+// two entries, not one rate over a summed amount
+```
+
 A minimum charge that tops the total up is taxed at the rate of the largest line.
 That is a choice rather than a derivation, so it is a **field on the adjustment**
 that a reader can see and an accountant can argue with, rather than an assumption
-buried inside a sum.
+buried inside a sum — and it is left out of the per-dimension view for the same
+reason: a term of the total is not a term of any one heading.
 
 ## Rounding happens once, and division happens last
 
@@ -384,7 +434,7 @@ outright, because a price whose conditions cannot be checked cannot be shown
 before the session either.
 
 Beyond those, time of day, calendar date, cumulative energy, cumulative duration,
-average power and weekday all select which element applies.
+average power and weekday all select which elements apply.
 
 ## What is not here yet 📐
 

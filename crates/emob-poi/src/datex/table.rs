@@ -309,6 +309,35 @@ struct EnergyPrice {
     additional_information: Option<Multilingual>,
     #[serde(rename = "overallPeriod", skip_serializing_if = "Option::is_none")]
     overall_period: Option<OverallPeriod>,
+    #[serde(
+        rename = "energyBasedApplicability",
+        skip_serializing_if = "Option::is_none"
+    )]
+    energy_based_applicability: Option<EnergyBasedApplicability>,
+    #[serde(
+        rename = "timeBasedApplicability",
+        skip_serializing_if = "Option::is_none"
+    )]
+    time_based_applicability: Option<TimeBasedApplicability>,
+}
+
+/// The delivered-energy band a price applies in — the profile's own answer to
+/// a tiered tariff, in whole kilowatt-hours.
+#[derive(Debug, Clone, Serialize)]
+struct EnergyBasedApplicability {
+    #[serde(rename = "fromKWh", skip_serializing_if = "Option::is_none")]
+    from_kwh: Option<u32>,
+    #[serde(rename = "toKWh", skip_serializing_if = "Option::is_none")]
+    to_kwh: Option<u32>,
+}
+
+/// The elapsed-time band, in whole minutes.
+#[derive(Debug, Clone, Serialize)]
+struct TimeBasedApplicability {
+    #[serde(rename = "fromMinute", skip_serializing_if = "Option::is_none")]
+    from_minute: Option<u32>,
+    #[serde(rename = "toMinute", skip_serializing_if = "Option::is_none")]
+    to_minute: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -561,6 +590,18 @@ fn price_of(price: &Price) -> EnergyPrice {
             .as_ref()
             .map(|text| Multilingual::new("en", text)),
         overall_period: price.period.as_ref().map(period_of),
+        // A tiered price published without the band it applies in reads as
+        // unconditional, which is a feed that under-states its own prices.
+        energy_based_applicability: price.energy_applicability.map(|band| {
+            EnergyBasedApplicability {
+                from_kwh: band.from_kwh,
+                to_kwh: band.to_kwh,
+            }
+        }),
+        time_based_applicability: price.time_applicability.map(|band| TimeBasedApplicability {
+            from_minute: band.from_minute,
+            to_minute: band.to_minute,
+        }),
     }
 }
 

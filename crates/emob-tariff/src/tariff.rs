@@ -17,8 +17,15 @@
 //!
 //! The structure follows OCPI's, because that is what a roaming partner will
 //! send and expect: a tariff is a list of *elements*, each a list of *price
-//! components* guarded by *restrictions*. The first element whose restrictions
-//! match a period is the one that prices it.
+//! components* guarded by *restrictions*.
+//!
+//! Which component prices a period is asked **once per dimension**, not once
+//! per period: the first element that carries a component for that dimension
+//! *and* whose restrictions match `[OCPI 2.3.0 §Tariff]`. Several elements can
+//! therefore be in force at the same instant — one per dimension — which is
+//! why the specification advises writing a tariff as one unrestricted default
+//! element per dimension after the restricted ones. See
+//! [`crate::rating::matching_component`].
 
 use emob_core::{Currency, TariffId};
 use rust_decimal::Decimal;
@@ -52,6 +59,22 @@ impl Dimension {
         match self {
             Self::Energy => "kWh",
             Self::Time | Self::ParkingTime => "h",
+            Self::Flat => "session",
+        }
+    }
+
+    /// The dimension's **base** unit — the one every quantity is accumulated
+    /// and reconciled in, which is exact.
+    ///
+    /// Differs from [`Self::unit`] for the two time dimensions: a price is
+    /// quoted per hour and a duration is counted in whole seconds, because
+    /// 3600 has two factors of three and no scale states twenty-five minutes
+    /// as a decimal fraction of an hour.
+    #[must_use]
+    pub const fn base_unit(self) -> &'static str {
+        match self {
+            Self::Energy => "kWh",
+            Self::Time | Self::ParkingTime => "s",
             Self::Flat => "session",
         }
     }
@@ -327,11 +350,22 @@ pub struct Tariff {
     pub kind: TariffKind,
     /// Whether the prices include tax.
     pub tax_included: TaxIncluded,
-    /// The elements, in the order they are tried. Cardinality `+`.
+    /// The elements, in the order they are tried — **per dimension**
+    /// `[OCPI 2.3.0 §Tariff]`, so an element pricing only a session fee does
+    /// not end the search for a price per kWh. Cardinality `+`.
     pub elements: Vec<TariffElement>,
-    /// A session under this tariff costs at least this much.
+    /// A session under this tariff costs at least this much, in the basis
+    /// [`Self::tax_included`] states — gross under [`TaxIncluded::Yes`], net
+    /// under [`TaxIncluded::No`].
+    ///
+    /// One figure rather than OCPI's pair of a before-tax and an after-tax
+    /// bound, because a tariff whose components carry one VAT rate has one
+    /// answer and a tariff whose components carry several has no single
+    /// taxable amount to bound. The rate the adjustment lands in is a field on
+    /// [`crate::Adjustment`] rather than an assumption inside a sum.
     pub min_price: Option<Decimal>,
-    /// A session under this tariff costs at most this much.
+    /// A session under this tariff costs at most this much, in the same basis
+    /// as [`Self::min_price`].
     pub max_price: Option<Decimal>,
     /// The first instant this version of the tariff is in force, **inclusive**.
     ///

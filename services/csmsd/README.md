@@ -103,10 +103,17 @@ is why it is here and not in `emob-ocpp`.
 ## Nothing is dropped silently
 
 Every transaction reaches an `Outcome`: `Settled` with the record it produced,
-or `Refused` with the reasons the chain gave, in the order it gave them. The
-same rule the fleet simulator asserts over a hundred stations — every
-kilowatt-hour either reaches a settled record or is refused with a reason
-somebody can act on — applies to a running daemon.
+`AlreadySettled` when the ledger already held it, or `Refused` with the reasons
+the chain gave, in the order it gave them. The same rule the fleet simulator
+asserts over a hundred stations — every kilowatt-hour either reaches a settled
+record or is refused with a reason somebody can act on — applies to a running
+daemon.
+
+`AlreadySettled` is a **success**. OCPP guarantees delivery by retrying, so a
+record the ledger already holds is the ordinary shape of a flaky link; folding
+it into the refusals sends somebody to investigate a success and counts the
+energy twice. Only a `Conflict` — a *different* record under a settled key —
+needs a human.
 
 A station signing with a key it was not provisioned with gets its own outcome,
 separate from the refusal the chain will produce anyway. It has a **different

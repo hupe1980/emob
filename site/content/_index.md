@@ -107,13 +107,14 @@ sessions unverifiable.
 
 Nine domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
 `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`, `emob-poi`, `emob-roam`
-and `emob-sim` — with **599 tests**, no I/O, no clock, no floats, and an
+and `emob-sim` — with **621 tests**, no I/O, no clock, no floats, and an
 end-to-end test that drives a genuinely signed session from the meter to a
 taxable amount, and back out again as a file the driver's own verifier reads —
 including one record `emob` did not write, from a real German meter, against the
-key it is published with. That session also leaves the building: it settles
-at the same money over self-roaming, OCPI 2.3.0 and OCPI 2.2.1, and each
-crossing reports what it cost. The rest of the platform — Hubject roaming,
+key it is published with. That session also leaves the building and comes back:
+it settles at the same money over self-roaming, OCPI 2.3.0 and OCPI 2.2.1, each
+crossing reports what it cost, and the record a partner receives is one this
+stack reads back into its own model. The rest of the platform — Hubject roaming,
 Plug & Charge, invoicing — is designed and not yet built, and the
 [documentation](@/docs/_index.md) marks which is which on every page rather than
 blurring the two.

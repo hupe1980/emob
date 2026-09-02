@@ -146,6 +146,59 @@ fn session() -> Session {
     session
 }
 
+/// The same session with the car left in the bay for another half hour after
+/// the charge finished — so an occupancy fee `[AFIR Art. 5(4)]` has something
+/// to bill. A session that charges no occupancy is not one an occupancy gate
+/// has anything to say about.
+fn occupied_session() -> Session {
+    let mut session = Session::open(
+        "s-1".parse().unwrap(),
+        "DE*AB7*E840*6487".parse().unwrap(),
+        Authorization {
+            path: emob_session::AuthPath::Roaming,
+            subject: emob_session::Subject::Contract {
+                id: "c-1".parse().unwrap(),
+                emaid: Some("NL-TNM-C00122045-K".parse().unwrap()),
+            },
+            token_ref: Some(emob_session::TokenRef::new("a".repeat(64)).unwrap()),
+            authorization_reference: Some("auth-9".into()),
+        },
+        at(0),
+    );
+    session
+        .transition_to(SessionState::Charging, session.started_at)
+        .unwrap();
+    session
+        .attach_series(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    MeterReading::new(
+                        at(0),
+                        kwh("100.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionBegin,
+                    )
+                    .signed(),
+                    MeterReading::new(
+                        at(30),
+                        kwh("118.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionEnd,
+                    )
+                    .signed(),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    session
+        .transition_to(SessionState::Suspended, at(30))
+        .unwrap();
+    session.end(at(60), EndReason::Local).unwrap();
+    session
+}
+
 fn evidence_of(raw: &[String]) -> Evidence {
     let records = raw
         .iter()
@@ -685,7 +738,7 @@ fn an_unsynchronised_clock_bills_the_energy_and_refuses_the_occupancy_fee() {
     );
     assert!(!evidence.is_billable_for_time());
 
-    let session = session();
+    let session = occupied_session();
     let occupancy = fast_charger_tariff();
     let err = CdrBuilder::from_session(&session, Direction::Import)
         .unwrap()
@@ -954,9 +1007,10 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
     let evidence = evidence_of(&raw_records());
     let occupancy = fast_charger_tariff();
 
-    // The session in `session()` runs half an hour on a synchronised clock, so
-    // both gates open and the occupancy fee is charged.
-    let ok = CdrBuilder::from_session(&session(), Direction::Import)
+    // The session in `occupied_session()` runs an hour on a synchronised clock
+    // with half of it parked, so both gates open and the occupancy fee is
+    // charged.
+    let ok = CdrBuilder::from_session(&occupied_session(), Direction::Import)
         .unwrap()
         .key(PartyId::new("DE", "ABC").unwrap(), "cdr-1".parse().unwrap())
         .evidence(evidence_ref(&evidence))
@@ -968,7 +1022,7 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
     // Close the first gate: the signed records no longer vouch for the clock.
     let mut unplaceable = evidence_ref(&evidence);
     unplaceable.duration_billable = false;
-    let err = CdrBuilder::from_session(&session(), Direction::Import)
+    let err = CdrBuilder::from_session(&occupied_session(), Direction::Import)
         .unwrap()
         .key(PartyId::new("DE", "ABC").unwrap(), "cdr-1".parse().unwrap())
         .evidence(unplaceable)
@@ -978,10 +1032,10 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
     assert!(err.to_string().contains("price this session per kWh"));
 
     // Close the second: the clock cannot resolve a span this long, so nothing
-    // it measured is long enough to bill. The session is genuinely brief —
-    // readings and all — because moving only `ended_at` would leave a meter
-    // series running past the session's own window, which is a different fault
-    // and one the builder now refuses first.
+    // it measured is long enough to bill. The span judged is the one that is
+    // **billed** — half a minute of occupancy after a half-hour charge — rather
+    // than the session's whole length, because it is the occupancy fee that
+    // rests on the clock and the kilowatt-hours do not.
     let coarse = emob_core::ClockResolution::conforming();
     let mut brief = Session::open(
         "s-brief".parse().unwrap(),
@@ -1002,8 +1056,8 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
                         ReadingContext::TransactionBegin,
                     ),
                     MeterReading::new(
-                        at(0) + time::Duration::seconds(30),
-                        kwh("100.400"),
+                        at(30),
+                        kwh("118.000"),
                         Direction::Import,
                         ReadingContext::TransactionEnd,
                     ),
@@ -1013,7 +1067,10 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
         )
         .unwrap();
     brief
-        .end(at(0) + time::Duration::seconds(30), EndReason::Local)
+        .transition_to(SessionState::Suspended, at(30))
+        .unwrap();
+    brief
+        .end(at(30) + time::Duration::seconds(30), EndReason::Local)
         .unwrap();
 
     let err = CdrBuilder::from_session(&brief, Direction::Import)

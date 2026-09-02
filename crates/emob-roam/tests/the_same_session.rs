@@ -19,6 +19,7 @@ use emob_poi::site::{
     Address, ChargingPoint, Connector, ConnectorType, Coordinates, Facility, Site,
 };
 use emob_roam::ocpi::cdr::{Context, SignedPayload, check_conserves, downgrade, to_ocpi};
+use emob_roam::ocpi::inbound::from_ocpi;
 use emob_roam::ocpi::location::cdr_location;
 use emob_roam::{Partner, PartnerRegistry, Reach, RoamError, RoamingToken, TokenType};
 use emob_session::{
@@ -308,6 +309,107 @@ fn one_session_settles_at_the_same_money_on_every_wire() {
     assert_eq!(mine.value.total_cost, wire.total_cost);
     assert_eq!(mine.value.total_energy, wire.total_energy);
     assert_eq!(mine.value.charging_periods, wire.charging_periods);
+}
+
+#[test]
+fn the_record_comes_back_as_the_record_that_went_out() {
+    // The other half of M4. A CDR that crosses to a partner has to be readable
+    // by the party that receives it, and the only way to know that is to read
+    // it back: same key, same session window, same periods, same energy — and
+    // every place OCPI could not carry what the canonical model holds named
+    // rather than quietly restored.
+    let evidence = evidence();
+    let original = cdr(&evidence);
+    let token = token();
+    let context = context(&token, payloads());
+    let partner = Partner::emsp(PartyId::new("NL", "TNM").unwrap()).on_signed_data();
+
+    let wire = to_ocpi(&original, &partner, &context)
+        .expect("a rated import CDR crosses")
+        .into_value_discarding_notes();
+
+    // The receiver verifies the payloads against **its own** registry — never
+    // the key in the document — and only then reads the record in.
+    let payloads = emob_roam::ocpi::cdr::inbound_payloads(&wire);
+    assert_eq!(payloads.len(), 3, "the signed records arrived verbatim");
+    let records: Vec<_> = payloads
+        .iter()
+        .map(|p| ocmf::parse(&p.signed_data).expect("verbatim OCMF"))
+        .collect();
+    let theirs = Evidence::assemble(&records, &registry(), at(0));
+    assert_eq!(
+        theirs.billable_energy().unwrap().to_string(),
+        "18.000 kWh",
+        "the far end re-verifies against its own registry and gets the same energy"
+    );
+
+    let back = from_ocpi(&wire, Some(EvidenceRef::from_evidence(&theirs, "OCMF")))
+        .expect("the document this crate wrote is one it can read");
+    let read = &back.value.cdr;
+
+    assert_eq!(read.key, original.key);
+    assert_eq!(read.session_id, original.session_id);
+    assert_eq!(read.evse_id, original.evse_id);
+    assert_eq!(read.started_at, original.started_at);
+    assert_eq!(read.ended_at, original.ended_at);
+    assert_eq!(read.total_energy, original.total_energy);
+    assert_eq!(read.direction, original.direction);
+    assert!(read.conserves(), "the periods still sum to the total");
+    assert_eq!(
+        read.periods.iter().map(|p| p.energy).collect::<Vec<_>>(),
+        original
+            .periods
+            .iter()
+            .map(|p| p.energy)
+            .collect::<Vec<_>>(),
+        "every period's energy survives the round trip"
+    );
+    assert_eq!(
+        read.periods
+            .iter()
+            .map(|p| (p.start, p.end))
+            .collect::<Vec<_>>(),
+        original
+            .periods
+            .iter()
+            .map(|p| (p.start, p.end))
+            .collect::<Vec<_>>(),
+        "and so does every window, though OCPI carries only the starts"
+    );
+
+    // The partner's own figure, for the comparison an eMSP re-rating makes.
+    assert_eq!(
+        back.value.stated_total,
+        original.total_cost().unwrap(),
+        "what the CPO says it costs comes back beside the record, not inside it"
+    );
+    assert!(
+        read.cost.is_none(),
+        "a `Rated` cannot be rebuilt from totals with no unit prices, and inventing one \
+         would make `validate` check this crate's arithmetic instead of the partner's"
+    );
+
+    // What the wire could not carry is on the record of the crossing rather
+    // than silently restored.
+    let reasons: Vec<String> = back.reasons().collect();
+    assert!(
+        reasons.iter().any(|r| r.contains("interpolated")),
+        "provenance is not a field OCPI has: {reasons:?}"
+    );
+    assert!(
+        read.periods
+            .iter()
+            .all(|p| p.provenance == emob_session::Provenance::Interpolated),
+        "and the weaker answer is the one on the record"
+    );
+
+    // …and the record the far end holds is one its own pre-flight settles.
+    let report = emob_cdr::validate(read);
+    assert!(
+        report.is_settleable(),
+        "{:?}",
+        report.blocking().collect::<Vec<_>>()
+    );
 }
 
 #[test]

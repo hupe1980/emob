@@ -63,6 +63,24 @@ pub enum Finding {
         /// The repeated start.
         start: time::OffsetDateTime,
     },
+    /// A period begins before the previous one ended, so the same minute is in
+    /// two periods.
+    ///
+    /// Distinct from [`Self::PeriodsOutOfOrder`], and invisible to it: two
+    /// periods `10:00–10:30` and `10:15–10:45` have ascending starts, sit inside
+    /// the session, and can still sum to the record's own total. What they
+    /// cannot do is be billed — `[AFIR Art. 5(4)]` prices a minute of occupancy
+    /// per minute, and this record contains fifteen of them twice.
+    ///
+    /// `Chargeable::new` refuses the same shape on the way into the rating
+    /// engine, which catches it for a record this side prices; a record that
+    /// arrives **already rated** never passes through that door.
+    PeriodsOverlap {
+        /// Where the overlap begins.
+        start: time::OffsetDateTime,
+        /// Where the previous period claimed to end.
+        previous_end: time::OffsetDateTime,
+    },
     /// No signed evidence backs the record.
     NoEvidence,
     /// The record carries evidence that says its own energy is not billable.
@@ -138,6 +156,31 @@ pub enum Finding {
         /// Which time dimension the price charges for.
         dimension: Dimension,
     },
+    /// A priced line does not reproduce its own amount from its own numbers.
+    ///
+    /// The identity is `base_quantity × unit_price / base_units_per_unit ==
+    /// amount`, and it holds by construction for a rating this crate performed.
+    /// A `Rated` arriving inside a partner's CDR was computed by somebody else,
+    /// and **nothing else in this report looks at an amount at all**:
+    /// [`Self::CostEnergyMismatch`] compares the priced *quantity* against the
+    /// record's energy, so a line stating 10 kWh at 0.49 and an amount of 9.80
+    /// passes every other check here and doubles the bill.
+    ///
+    /// `Rated::lines_reconcile` was written for exactly this and had no caller
+    /// outside its own tests, which is the shape this workspace keeps
+    /// re-learning: a check nothing runs is a check that is not made.
+    LineDoesNotReconcile {
+        /// Which dimension the line prices.
+        dimension: Dimension,
+        /// The unit price it states.
+        unit_price: Decimal,
+        /// The quantity it states, in the dimension's base unit.
+        base_quantity: Decimal,
+        /// The amount it states.
+        amount: Decimal,
+        /// What its own quantity and price come to.
+        implied: Decimal,
+    },
     /// The record has been rated, and the rating had something to report.
     ///
     /// A note is not a fault — a block rounding is lawful — but it is a term of
@@ -161,6 +204,11 @@ impl Finding {
             | Self::PeriodOutsideSession { .. }
             | Self::PeriodsOutOfOrder { .. }
             | Self::DuplicatePeriod { .. }
+            // The same minute in two periods is the same minute billed twice.
+            | Self::PeriodsOverlap { .. }
+            // A line whose own numbers do not produce its own amount is money
+            // nobody can check, and it is the one number the payer pays.
+            | Self::LineDoesNotReconcile { .. }
             | Self::NoDuration
             | Self::EnergyNotBillable
             | Self::EnergyWhileNotCharging { .. }
@@ -243,6 +291,23 @@ impl core::fmt::Display for Finding {
             Self::DirectionMismatch { claimed, signed } => write!(
                 f,
                 "the record claims {claimed} but the signed register measured {signed}: import and export never net"
+            ),
+            Self::PeriodsOverlap {
+                start,
+                previous_end,
+            } => write!(
+                f,
+                "the period beginning {start} starts before the previous one ended at {previous_end}: the overlap is billed twice"
+            ),
+            Self::LineDoesNotReconcile {
+                dimension,
+                unit_price,
+                base_quantity,
+                amount,
+                implied,
+            } => write!(
+                f,
+                "the {dimension:?} line states {base_quantity} at {unit_price} and an amount of {amount}, but its own numbers come to {implied}"
             ),
             Self::RatingNote { note } => write!(f, "the rating reports: {note}"),
         }
@@ -347,57 +412,7 @@ pub fn validate(cdr: &Cdr) -> Report {
     }
 
     if let Some(cost) = &cdr.cost {
-        // The price and the quantity have to be about the same session — but
-        // only where the price is *about* energy at all. `quantity_for` sums
-        // the lines of a dimension and returns zero for a dimension with none,
-        // so comparing it unconditionally read "this tariff charges nothing per
-        // kWh" as "this price was computed for 0 kWh" and refused every lawful
-        // per-minute tariff below 50 kW as a blocking arithmetic fault.
-        //
-        // A block rounding legitimately bills more than was delivered, and says
-        // so in a note, so it is not a mismatch — anything else is.
-        match cost.rated.amount_for(Dimension::Energy) {
-            Some(_) => {
-                let priced = cost.rated.quantity_for(Dimension::Energy);
-                let rounded_up = cost
-                    .rated
-                    .notes
-                    .iter()
-                    .any(|n| matches!(n, RatingNote::RoundedToBlock { .. }));
-                if priced != cdr.total_energy.kwh()
-                    && !(rounded_up && priced > cdr.total_energy.kwh())
-                {
-                    findings.push(Finding::CostEnergyMismatch {
-                        priced,
-                        total: cdr.total_energy,
-                    });
-                }
-            }
-            None if !cdr.total_energy.is_zero() => {
-                findings.push(Finding::EnergyNotPriced {
-                    total: cdr.total_energy,
-                });
-            }
-            None => {}
-        }
-        // The same gate the builder applies, re-applied to a record somebody
-        // else built. A partner that prices a duration off an unsynchronised
-        // clock has produced a number this side cannot defend either.
-        if let Some(evidence) = &cdr.evidence
-            && !evidence.duration_billable
-        {
-            for dimension in [Dimension::Time, Dimension::ParkingTime] {
-                if cost.rated.amount_for(dimension).is_some() {
-                    findings.push(Finding::DurationNotBillable { dimension });
-                }
-            }
-        }
-
-        for note in &cost.rated.notes {
-            findings.push(Finding::RatingNote {
-                note: note.to_string(),
-            });
-        }
+        check_cost(cdr, cost, &mut findings);
     }
 
     let interpolated = cdr
@@ -414,22 +429,104 @@ pub fn validate(cdr: &Cdr) -> Report {
     Report { findings }
 }
 
+/// The money on the record, checked against the record and against itself.
+///
+/// Split out of [`validate`] because the two halves ask different questions: up
+/// there the record is checked for being a coherent account of a session, and
+/// here the price is checked for being a coherent account of the record.
+fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
+    // The price and the quantity have to be about the same session — but
+    // only where the price is *about* energy at all. `quantity_for` sums
+    // the lines of a dimension and returns zero for a dimension with none,
+    // so comparing it unconditionally read "this tariff charges nothing per
+    // kWh" as "this price was computed for 0 kWh" and refused every lawful
+    // per-minute tariff below 50 kW as a blocking arithmetic fault.
+    //
+    // A block rounding legitimately bills more than was delivered, and says
+    // so in a note, so it is not a mismatch — anything else is.
+    match cost.rated.amount_for(Dimension::Energy) {
+        Some(_) => {
+            let priced = cost.rated.quantity_for(Dimension::Energy);
+            let rounded_up = cost
+                .rated
+                .notes
+                .iter()
+                .any(|n| matches!(n, RatingNote::RoundedToBlock { .. }));
+            if priced != cdr.total_energy.kwh() && !(rounded_up && priced > cdr.total_energy.kwh())
+            {
+                findings.push(Finding::CostEnergyMismatch {
+                    priced,
+                    total: cdr.total_energy,
+                });
+            }
+        }
+        None if !cdr.total_energy.is_zero() => {
+            findings.push(Finding::EnergyNotPriced {
+                total: cdr.total_energy,
+            });
+        }
+        None => {}
+    }
+    // The same gate the builder applies, re-applied to a record somebody
+    // else built. A partner that prices a duration off an unsynchronised
+    // clock has produced a number this side cannot defend either.
+    if let Some(evidence) = &cdr.evidence
+        && !evidence.duration_billable
+    {
+        for dimension in [Dimension::Time, Dimension::ParkingTime] {
+            if cost.rated.amount_for(dimension).is_some() {
+                findings.push(Finding::DurationNotBillable { dimension });
+            }
+        }
+    }
+
+    // Every line has to reproduce its own amount. Nothing else in this
+    // report reads an amount at all, so without this a partner can state
+    // any total it likes beside a quantity and a price that do not produce
+    // it — see `Finding::LineDoesNotReconcile`.
+    for line in &cost.rated.lines {
+        if !line.reconciles() {
+            let per_unit = emob_tariff::Line::base_units_per_unit(line.dimension);
+            findings.push(Finding::LineDoesNotReconcile {
+                dimension: line.dimension,
+                unit_price: line.unit_price,
+                base_quantity: line.base_quantity,
+                amount: line.amount,
+                implied: line.base_quantity * line.unit_price / per_unit,
+            });
+        }
+    }
+
+    for note in &cost.rated.notes {
+        findings.push(Finding::RatingNote {
+            note: note.to_string(),
+        });
+    }
+}
+
 /// The periods, checked against each other and against the session window.
 ///
 /// A period's window is the part of its settlement slot the meter series
 /// actually covered, so it must sit inside the session window exactly — no
 /// clamping, no allowance — and it must not contradict its own `charging` flag.
 fn check_periods(cdr: &Cdr, findings: &mut Vec<Finding>) {
-    let mut previous: Option<time::OffsetDateTime> = None;
+    let mut previous: Option<(time::OffsetDateTime, time::OffsetDateTime)> = None;
     for period in &cdr.periods {
-        if let Some(prev) = previous {
-            if period.start < prev {
+        if let Some((prev_start, prev_end)) = previous {
+            if period.start < prev_start {
                 findings.push(Finding::PeriodsOutOfOrder {
                     start: period.start,
                 });
-            } else if period.start == prev {
+            } else if period.start == prev_start {
                 findings.push(Finding::DuplicatePeriod {
                     start: period.start,
+                });
+            } else if period.start < prev_end {
+                // Ascending starts, inside the session, summing to the total —
+                // and fifteen minutes of it counted twice.
+                findings.push(Finding::PeriodsOverlap {
+                    start: period.start,
+                    previous_end: prev_end,
                 });
             }
         }
@@ -444,7 +541,7 @@ fn check_periods(cdr: &Cdr, findings: &mut Vec<Finding>) {
                 energy: period.energy,
             });
         }
-        previous = Some(period.start);
+        previous = Some((period.start, period.end));
     }
 }
 
@@ -533,6 +630,74 @@ mod tests {
         let report = validate(&good_cdr());
         assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert!(report.is_settleable());
+    }
+
+    #[test]
+    fn overlapping_periods_bill_a_minute_twice_and_are_blocked() {
+        // Ascending starts, inside the session, and the energy still sums to
+        // the record's own total — so every other check here passes. What the
+        // record contains is fifteen minutes in two periods, which an occupancy
+        // fee `[AFIR Art. 5(4)]` charges for twice.
+        let mut cdr = good_cdr();
+        cdr.periods = vec![period(0, 30, "10.000"), period(15, 30, "8.000")];
+
+        let report = validate(&cdr);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f, Finding::PeriodsOverlap { .. })),
+            "{:?}",
+            report.findings
+        );
+        assert!(!report.is_settleable());
+        assert!(
+            report.reasons().any(|r| r.contains("billed twice")),
+            "the operator has to be told what the overlap costs"
+        );
+
+        // Touching, not overlapping, is the ordinary case and says nothing.
+        let mut fine = good_cdr();
+        fine.periods = vec![period(0, 15, "10.000"), period(15, 30, "8.000")];
+        assert!(validate(&fine).findings.is_empty());
+    }
+
+    #[test]
+    fn a_line_that_does_not_explain_its_own_amount_is_blocked() {
+        // The one number the payer pays, and until now nothing in this report
+        // read it: `CostEnergyMismatch` compares the priced *quantity* against
+        // the record's energy, so an amount can be anything at all.
+        let mut cdr = good_cdr();
+        let tariff = energy_tariff("0.49");
+        let mut cost = rated(&cdr, &tariff);
+        cost.rated.lines[0].amount = dec("9.80"); // 18 kWh at 0.49 is 8.82
+        cdr.cost = Some(cost);
+
+        let report = validate(&cdr);
+        assert!(
+            report.findings.iter().any(|f| matches!(
+                f,
+                Finding::LineDoesNotReconcile {
+                    dimension: Dimension::Energy,
+                    ..
+                }
+            )),
+            "{:?}",
+            report.findings
+        );
+        assert!(!report.is_settleable());
+        assert!(report.reasons().any(|r| r.contains("come to 8.82")));
+
+        // …and the untouched rating reconciles, so this cannot fire on a record
+        // this crate priced.
+        let mut honest = good_cdr();
+        honest.cost = Some(rated(&honest, &tariff));
+        assert!(
+            !validate(&honest)
+                .findings
+                .iter()
+                .any(|f| matches!(f, Finding::LineDoesNotReconcile { .. }))
+        );
     }
 
     #[test]

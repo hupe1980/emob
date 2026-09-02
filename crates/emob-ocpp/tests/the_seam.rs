@@ -144,8 +144,13 @@ fn a_real_ocpp_message_reaches_a_settleable_priced_record() {
 #[test]
 fn a_per_minute_tariff_on_this_session_is_refused_by_name() {
     // The clock status is `I`. The energy is perfectly good and the duration is
-    // not, so an occupancy fee has nothing it may be charged against — and the
-    // refusal names the fix rather than blocking the session.
+    // not, so the charging time this tariff prices per minute has nothing it
+    // may be charged against — and the refusal names the fix rather than
+    // blocking the session.
+    //
+    // `Time` rather than `ParkingTime`, because this session charged from end
+    // to end: the gate asks what the record **bills**, and an occupancy fee
+    // nobody was charged is not a duration this record rests on.
     let assembled = oca_transaction().assemble(Direction::Import).unwrap();
     let evidence = Evidence::assemble(&assembled.records, &registry(), started());
 
@@ -155,7 +160,7 @@ fn a_per_minute_tariff_on_this_session_is_refused_by_name() {
         TariffKind::AdHoc,
         vec![
             PriceComponent::new(Dimension::Energy, Decimal::from_str("0.49").unwrap()),
-            PriceComponent::new(Dimension::ParkingTime, Decimal::from_str("6.00").unwrap()),
+            PriceComponent::new(Dimension::Time, Decimal::from_str("6.00").unwrap()),
         ],
     );
     let error = CdrBuilder::from_session(&assembled.session, Direction::Import)

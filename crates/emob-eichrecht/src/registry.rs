@@ -280,18 +280,39 @@ impl KeyRegistry {
             return Err(VerifyError::NoSigningComponent);
         }
 
-        for candidate in &candidates {
-            if let Some(key) = self.key_at(candidate, at) {
-                return Ok(key);
-            }
-        }
+        // Specificity is decided by what the registry knows about the
+        // component, **not** by which entry happens to hold a live key.
+        //
+        // Choosing the first candidate with a *valid* key instead lets a
+        // gateway-and-meter key whose window has closed fall through to a bare
+        // meter key registered for the same physical meter — so which key
+        // verifies a record depends on which side of a window boundary it
+        // falls, which is the load-order hazard `insert` refuses one level up,
+        // arriving through the clock instead. Once the component is
+        // identified, an expired window is an answer the operator needs rather
+        // than a reason to consult a different identity.
+        let Some(component) = candidates
+            .iter()
+            .find(|candidate| self.keys.contains_key(candidate))
+        else {
+            return Err(VerifyError::NoKeyForComponent {
+                serial: candidates
+                    .first()
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+            });
+        };
 
-        Err(VerifyError::NoKeyForComponent {
-            serial: candidates
-                .first()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-        })
+        self.key_at(component, at)
+            .ok_or_else(|| VerifyError::NoKeyValidAt {
+                component: component.to_string(),
+                at,
+                windows: self
+                    .keys
+                    .get(component)
+                    .map(|held| held.iter().map(window_of).collect::<Vec<_>>().join(", "))
+                    .unwrap_or_default(),
+            })
     }
 }
 
@@ -504,6 +525,64 @@ mod tests {
                 .key_at(&component, datetime!(2026-06-15 12:00 UTC))
                 .is_none(),
             "June has no registered key, and inventing one is how a forged record verifies"
+        );
+    }
+
+    #[test]
+    fn an_expired_specific_key_does_not_fall_through_to_a_broader_one() {
+        // The record names both serials, so the gateway-and-meter pair is the
+        // identification `[OCMF §Relation of Serial Numbers]` prescribes. Its
+        // key's window has closed, and the same physical meter is also
+        // registered on its own — with a *different* key.
+        //
+        // Resolving the first candidate that happens to hold a live key would
+        // make which key verifies a record depend on which side of a window
+        // boundary it falls, which is the load-order hazard `insert` refuses,
+        // arriving through the clock instead.
+        let mut registry = KeyRegistry::new();
+        registry
+            .insert(
+                ComponentRef::GatewayAndMeter {
+                    gateway: "GW-1".into(),
+                    meter: "BQ1".into(),
+                },
+                RegisteredKey {
+                    key: key(1),
+                    valid_from: None,
+                    valid_until: Some(datetime!(2026-06-01 0:00 UTC)),
+                    provenance: "the pair".into(),
+                },
+            )
+            .unwrap();
+        registry
+            .insert(
+                ComponentRef::Meter {
+                    serial: "BQ1".into(),
+                },
+                RegisteredKey::unbounded(key(2), "the bare meter"),
+            )
+            .unwrap();
+
+        let record = record_with(Some("GW-1"), Some("BQ1"));
+
+        // Inside the window, the specific key resolves.
+        let found = registry
+            .key_for_record(&record, datetime!(2026-05-01 0:00 UTC))
+            .unwrap();
+        assert_eq!(found.provenance, "the pair");
+
+        // Outside it, the answer is the gap — not the other key.
+        let err = registry
+            .key_for_record(&record, datetime!(2026-07-01 0:00 UTC))
+            .unwrap_err();
+        assert!(
+            matches!(err, VerifyError::NoKeyValidAt { ref component, .. }
+                if component.contains("GW-1")),
+            "{err}"
+        );
+        assert!(
+            err.to_string().contains("windows covers"),
+            "the operator has to see that the key was replaced, not that none exists: {err}"
         );
     }
 

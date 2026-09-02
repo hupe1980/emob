@@ -37,6 +37,7 @@ flowchart LR
     X23 --> ACC["Crossing&lt;T&gt;<br/>the value and the account,<br/>by JSON Pointer"]
     X22 --> ACC
     SELF --> ACC
+    X23 -->|"a partner's record,<br/>read back unpriced"| CDR
 
     classDef built fill:#0a7d3322,stroke:#0a7d33
     classDef planned fill:#88888818,stroke:#888,stroke-dasharray:4 3
@@ -101,11 +102,41 @@ something a partner will act on.
 | A **V2G discharge** | `ENERGY_EXPORT` is Session-only and `total_energy` carries no sign, so the partner reads a discharge as a draw and settles backwards — paying the operator for energy the *driver* supplied |
 | An **unrated** record | `total_cost` is required, and the specification gives the obvious placeholder its own meaning: `0.00` is *free of charge*. Sending zero answers the question permanently, in the partner's favour |
 | A tariff element stripped of an **unevaluable restriction** | Dropping a condition does not narrow the element, it *widens* it — at the partner it then matches wherever the rest holds, and their re-rating disagrees with ours in the driver's disfavour, from a document we published |
+| A **gross price bound** on a tariff mixing VAT rates | `min_price`/`max_price` bound the cost *before taxes* and the field is mandatory. The gross figure written there is a minimum the partner enforces a VAT rate too high, against the driver. Where the components agree on a rate the bound is converted at it; where they do not there is no pre-tax figure, and inventing one is the failure |
 
 The unevaluable-restriction rule is the outward face of a rule
 [the rating engine](@/docs/pricing.md) applies inward: a condition this build
 cannot judge never matches, so it can neither price a session nor be published as
 though it were absent.
+
+## …and the record comes back
+
+`from_ocpi` reads a partner's CDR into the canonical model, and the test that
+matters is the round trip: the record this crate writes is one it can read back
+— same key, same window, same periods, same energy — and a pre-flight that
+settles it.
+
+The two directions are not mirror images:
+
+| Canonical | OCPI | Coming back |
+|---|---|---|
+| a period's `end` | a start and no end | the next period's start, and the last from `end_date_time` |
+| `charging` | the period's dimensions | `TIME` says charging, `PARKING_TIME` says not. A period stating neither is **reported** — the fallback reads a taper as occupancy, and `[AFIR Art. 5(4)]` prices the two differently |
+| `provenance` | nothing at all | interpolated, for every period: a number whose provenance nobody stated is not one this side may call measured |
+| `auth_path` | three values for six paths | narrowed by the token type, and noted where it cannot be |
+| `cost` | totals, no unit prices | **not** rebuilt |
+
+The last one is the argument. A canonical price carries one line per distinct
+price, each reproducing its own amount from its own quantity and unit price.
+Rebuilding that from totals means inventing the numbers that make it add up —
+and then the pre-flight checks the arithmetic of a document *this* crate wrote
+rather than the one that arrived. So the record comes back unpriced, the
+partner's own figure comes back beside it, and an eMSP re-rates with its own
+tariff and compares.
+
+Verification stays where it belongs: the payloads come back for the Eichrecht
+crate to check against **this side's** registry, and the verified result is an
+argument to the conversion rather than something it produces.
 
 ## Routing comes out of the identifier
 

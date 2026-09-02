@@ -85,6 +85,21 @@ pub enum Outcome {
         /// What the chain said, in the order it said it.
         reasons: Vec<String>,
     },
+    /// The ledger already held this record, so nothing changed and nothing is
+    /// billed twice.
+    ///
+    /// A **success**, and reported apart from [`Self::Settled`] rather than
+    /// folded into it: the money was recognised at the first offer, so counting
+    /// this one would double it, and reporting it as a refusal would put a
+    /// settled session in the operator's failure queue. OCPP guarantees
+    /// delivery by retrying, so this is the ordinary shape of a flaky link
+    /// rather than a fault.
+    AlreadySettled {
+        /// Which record.
+        key: String,
+        /// What it billed, when it was first accepted.
+        energy: String,
+    },
     /// A station is signing with a key it was not provisioned with.
     ///
     /// Not a refusal on its own — the chain will refuse the session anyway, by
@@ -256,18 +271,16 @@ impl Csmsd {
                 let stored = lock(&self.cdrs).accept(cdr);
                 {
                     let mut outcomes = lock(&self.outcomes);
-                    outcomes.push(match stored {
-                        Acceptance::Stored => Outcome::Settled {
-                            key,
-                            energy,
+                    outcomes.push(outcome_of(
+                        &stored,
+                        Accepted {
+                            key: &key,
+                            energy: &energy,
                             retries,
+                            identity: &identity.to_string(),
+                            transaction: transaction_id,
                         },
-                        other => Outcome::Refused {
-                            identity: identity.to_string(),
-                            transaction: transaction_id.to_owned(),
-                            reasons: vec![format!("the ledger did not store it: {other:?}")],
-                        },
-                    });
+                    ));
                 }
             }
             Err(error) => {
@@ -391,6 +404,56 @@ impl Csmsd {
 /// died holding the lock and nothing about whether a `Vec<Outcome>` still makes
 /// sense, so bailing out on it would answer a panic elsewhere by dropping the
 /// record of what was billed, which is the worse failure of the two.
+/// Everything an accepted record was identified by, for [`outcome_of`].
+struct Accepted<'a> {
+    key: &'a str,
+    energy: &'a str,
+    retries: usize,
+    identity: &'a str,
+    transaction: &'a str,
+}
+
+/// What the ledger's answer means for the operator queue.
+///
+/// Three answers, three different facts, and collapsing them into "the ledger
+/// did not store it" reports a **retry** — the case OCPP guarantees delivery
+/// with, and the case [`CdrLedger`] is idempotent for — as a refused session.
+/// That is the opposite of what happened: the record is settled, and has been
+/// since the first offer. An operator queue that shows it as a failure sends
+/// somebody to investigate a success, and any reconciliation built on the
+/// queue counts the energy twice.
+///
+/// A pure function so the mapping is tested rather than exercised: a daemon is
+/// the worst place to keep a rule, because CI does not run it.
+fn outcome_of(acceptance: &Acceptance, record: Accepted<'_>) -> Outcome {
+    let refused = |reason: String| Outcome::Refused {
+        identity: record.identity.to_owned(),
+        transaction: record.transaction.to_owned(),
+        reasons: vec![reason],
+    };
+    match acceptance {
+        Acceptance::Stored => Outcome::Settled {
+            key: record.key.to_owned(),
+            energy: record.energy.to_owned(),
+            retries: record.retries,
+        },
+        Acceptance::Duplicate => Outcome::AlreadySettled {
+            key: record.key.to_owned(),
+            energy: record.energy.to_owned(),
+        },
+        Acceptance::Conflict { difference } => refused(format!(
+            "a different record is already settled under {}: {difference}. A partner restating a \
+             settled number needs a human, not an upsert",
+            record.key
+        )),
+        // `Acceptance` is `#[non_exhaustive]`; an answer this build does not
+        // know is not one it may read as success.
+        other => refused(format!(
+            "the ledger answered {other:?}, which this build cannot interpret"
+        )),
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -543,5 +606,61 @@ fn answer_v2_1(ctx: &Ctx, request: &v2_1::CsRequest) -> Result<Box<RawValue>, Ca
         )),
         v2_1::CsRequest::TransactionEvent(_) => ctx.reply(&v2_1::TransactionEventResponse::new()),
         other => Err(CallError::not_supported(other.action().as_str())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record<'a>() -> Accepted<'a> {
+        Accepted {
+            key: "DE*ABC/CP-1-42",
+            energy: "0.636 kWh",
+            retries: 2,
+            identity: "CP-1",
+            transaction: "42",
+        }
+    }
+
+    #[test]
+    fn a_retry_is_a_settled_record_rather_than_a_refused_session() {
+        // OCPP guarantees delivery by retrying, so a record the ledger already
+        // holds is the ordinary shape of a flaky link. Reporting it as a
+        // refusal sends somebody to investigate a success — and doubles the
+        // energy in any reconciliation built on this queue.
+        let outcome = outcome_of(&Acceptance::Duplicate, record());
+        assert!(
+            matches!(
+                outcome,
+                Outcome::AlreadySettled { ref key, ref energy }
+                    if key == "DE*ABC/CP-1-42" && energy == "0.636 kWh"
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_first_offer_settles_and_carries_what_the_link_cost() {
+        let outcome = outcome_of(&Acceptance::Stored, record());
+        assert!(
+            matches!(outcome, Outcome::Settled { retries: 2, .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_restated_number_is_the_one_answer_that_needs_a_human() {
+        let outcome = outcome_of(
+            &Acceptance::Conflict {
+                difference: "total_energy 0.636 kWh vs 1.200 kWh".to_owned(),
+            },
+            record(),
+        );
+        let Outcome::Refused { reasons, .. } = outcome else {
+            panic!("a conflict is the refusal: {outcome:?}");
+        };
+        assert!(reasons[0].contains("needs a human"), "{reasons:?}");
+        assert!(reasons[0].contains("0.636 kWh vs 1.200 kWh"), "{reasons:?}");
     }
 }

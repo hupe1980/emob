@@ -7,10 +7,17 @@
 //!   needs no contract `[AFIR Art. 5(1)]`, and the price on that path carries
 //!   no roaming surcharge `[AFIR Art. 5(4)]`.
 //! - **Eichrecht.** The signed record states how strongly the user was
-//!   identified `[OCMF Tab. 11]`. A session that *claims* Plug & Charge and
-//!   whose signed record says a bare RFID UID was read is telling two different
-//!   stories, and [`AuthPath::strongest_plausible_level`] is what lets the CDR
-//!   layer notice.
+//!   identified `[OCMF Tab. 11]`. A session recorded as recognised by its MAC
+//!   address, whose signed record claims a secure feature established the
+//!   assignment, is telling two different stories, and
+//!   [`AuthPath::strongest_plausible_level`] is what lets the CDR layer notice.
+//!
+//!   The comparison runs in **one direction only**, and that is deliberate: the
+//!   record over-claiming against the path is a fault, the record under-claiming
+//!   is not. A station may omit its identification section, and a chain that did
+//!   not hold up reports no identification at all — so treating a weak record as
+//!   contradicting a strong path would refuse a session for the crime of having
+//!   less evidence than it might have had.
 
 use emob_core::{ContractId, Emaid, IdentificationStrength};
 
@@ -60,31 +67,55 @@ impl AuthPath {
     /// The strongest OCMF identification level this path can honestly support.
     ///
     /// Used to cross-check a session against its own signed records: a session
-    /// claiming [`Self::PlugAndCharge`] whose record reports `RFID_PLAIN` is
-    /// two stories about one event, and the weaker one is the one with a
-    /// signature behind it.
+    /// recorded as [`Self::AutoCharge`] whose record claims `SECURE` is two
+    /// stories about one event, and the one with a signature behind it is not
+    /// the one that can be right — a MAC address off the wire is not a secure
+    /// feature under any reading of `[OCMF Tab. 11]`.
     ///
     /// The mapping is deliberately generous — it is a ceiling, not an
     /// expectation — because a station may under-report and that is not a
     /// fault. Over-reporting is.
+    ///
+    /// # Read off Tables 13–16, not off the decision
+    ///
+    /// `[OCMF Tab. 11]` grades **how the user was identified**; Tables 13–16
+    /// say which identifications each mechanism can carry. The two axes are
+    /// largely orthogonal, so a ceiling set from *who decided* refuses ordinary
+    /// hardware: a local list decides against an RFID card, and `RFID_PSK`
+    /// `[OCMF Tab. 13]` — a secured card — is Table 11's own example of
+    /// `SECURE`. A backend `Authorize` can answer `OCPP_CERTIFIED`
+    /// `[OCMF Tab. 14]`, which is `CERTIFIED`; so can a remote start.
+    ///
+    /// What stays low is what cannot rise: an unauthenticated MAC address, and
+    /// an ad-hoc session that presented no contract for anything to certify.
     #[must_use]
     #[allow(
         clippy::match_same_arms,
-        reason = "the arms coincide today but hold for different reasons, and each \
-                  reason is what a reviewer has to check against OCMF Table 11; \
+        reason = "the arms coincide today and hold for different reasons, and each reason \
+                  is a different row of OCMF Tables 13–16 that a reviewer has to check; \
                   merging them would delete the argument and make the next change silent"
     )]
     pub const fn strongest_plausible_level(self) -> IdentificationStrength {
         match self {
-            // A contract certificate verified by the station.
+            // A contract certificate verified by the station — `ISO15118_PNC`
+            // `[OCMF Tab. 15]`, which is Table 11's other example of `SECURE`.
             Self::PlugAndCharge => IdentificationStrength::Secure,
-            // The backend vouched for it; the station took its word.
-            Self::Roaming | Self::RemoteCommand => IdentificationStrength::Trusted,
-            // A payment instrument, but not one the station verified
-            // cryptographically against a contract.
+            // An RFID card read locally, which `[OCMF Tab. 13]` grades from
+            // `RFID_PLAIN` up to `RFID_PSK` — a secured card, and `SECURE`.
+            Self::LocalList => IdentificationStrength::Secure,
+            // `OCPP_AUTH`, `OCPP_AUTH_TLS`, `OCPP_CACHE`, `OCPP_WHITELIST` or
+            // `OCPP_CERTIFIED` `[OCMF Tab. 14]`. The last certifies the user
+            // mapping with a backend certificate, which is `CERTIFIED` — but
+            // not `SECURE`, which Table 11 reserves for an assignment the
+            // signature component itself established by a secure feature.
+            Self::Roaming | Self::RemoteCommand => IdentificationStrength::Certified,
+            // A payment instrument or a web flow. There is no contract, so
+            // there is nothing for a certificate to certify and nothing a
+            // secure feature could have established.
             Self::AdHoc => IdentificationStrength::Trusted,
-            // A UID read from a card, or a MAC address off the wire.
-            Self::LocalList | Self::AutoCharge => IdentificationStrength::Hearsay,
+            // A MAC address off the wire: not a standard, not authenticated,
+            // trivially spoofable. `PLMN_NONE`-grade evidence at best.
+            Self::AutoCharge => IdentificationStrength::Hearsay,
         }
     }
 }
@@ -260,6 +291,41 @@ mod tests {
         assert!(
             AuthPath::AutoCharge.strongest_plausible_level() < IdentificationStrength::Trusted,
             "a MAC address is hearsay"
+        );
+    }
+
+    #[test]
+    fn the_ceiling_is_read_off_the_identification_tables_not_off_the_decision() {
+        // A station's own list decides against an RFID card, and `RFID_PSK`
+        // `[OCMF Tab. 13]` — a secured card — is `[OCMF Tab. 11]`'s own example
+        // of `SECURE`. A ceiling read off "who decided" would put this at
+        // hearsay and refuse every session from a secure-card installation:
+        // exactly the installation that went to the trouble of not being one.
+        assert_eq!(
+            AuthPath::LocalList.strongest_plausible_level(),
+            IdentificationStrength::Secure
+        );
+
+        // `OCPP_CERTIFIED` `[OCMF Tab. 14]` certifies the user mapping with a
+        // backend certificate — `CERTIFIED`, and not `SECURE`, which Table 11
+        // reserves for the signature component's own secure feature.
+        for path in [AuthPath::Roaming, AuthPath::RemoteCommand] {
+            assert_eq!(
+                path.strongest_plausible_level(),
+                IdentificationStrength::Certified,
+                "{path}"
+            );
+        }
+
+        // What stays low is what cannot rise: no contract was presented, so
+        // there is nothing for a certificate to certify.
+        assert_eq!(
+            AuthPath::AdHoc.strongest_plausible_level(),
+            IdentificationStrength::Trusted
+        );
+        assert_eq!(
+            AuthPath::AutoCharge.strongest_plausible_level(),
+            IdentificationStrength::Hearsay
         );
     }
 

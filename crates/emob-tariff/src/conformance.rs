@@ -111,16 +111,24 @@ pub enum Objection {
         /// The restrictions that could not be judged.
         restrictions: Vec<String>,
     },
-    /// An element sits behind an unrestricted one and can therefore never
-    /// apply.
+    /// Every dimension an element prices is already priced unconditionally by
+    /// an earlier element, so none of its components can ever apply.
     ///
     /// Lawful and almost always a mistake: the prices in it will never be
     /// charged, and somebody believes they will.
+    ///
+    /// Shadowing is judged **per dimension** `[OCPI 2.3.0 §Tariff]`. An
+    /// unrestricted element pricing only a session fee shadows nothing but the
+    /// session fee, and the specification advises writing a tariff as one
+    /// unrestricted default per dimension — so an element behind one of those
+    /// is ordinarily perfectly reachable.
     UnreachableElement {
         /// Which element, by position.
         index: usize,
-        /// The unrestricted element that shadows it.
+        /// The unrestricted element that shadows its first shadowed dimension.
         shadowed_by: usize,
+        /// The dimensions that are already answered unconditionally.
+        dimensions: Vec<Dimension>,
     },
     /// A component would round a quantity up against the customer.
     ///
@@ -195,9 +203,13 @@ impl core::fmt::Display for Objection {
                 f,
                 "element {index} carries restrictions this build cannot evaluate, so its price cannot be shown before the session: {restrictions:?}"
             ),
-            Self::UnreachableElement { index, shadowed_by } => write!(
+            Self::UnreachableElement {
+                index,
+                shadowed_by,
+                dimensions,
+            } => write!(
                 f,
-                "element {index} sits behind the unrestricted element {shadowed_by} and can never apply"
+                "element {index} prices only {dimensions:?}, which the unrestricted element {shadowed_by} already prices unconditionally, so it can never apply"
             ),
             Self::RoundsAgainstTheCustomer {
                 dimension,
@@ -271,7 +283,14 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
         objections.push(Objection::MinimumAboveMaximum { minimum, maximum });
     }
 
-    let mut first_unrestricted: Option<usize> = None;
+    // Which dimensions an earlier unrestricted element already prices, and
+    // which element did it. Shadowing is **per dimension** because selection
+    // is `[OCPI 2.3.0 §Tariff]` — an unrestricted `{FLAT}` element does not
+    // shadow the `{ENERGY}` element behind it, and the specification's own
+    // advice is to write a tariff exactly that way: "always add a 'default'
+    // Price Component per dimension". Objecting to it would push an operator
+    // off the recommended shape and onto the one this crate used to misprice.
+    let mut covered: Vec<(Dimension, usize)> = Vec::new();
     for (index, element) in tariff.elements.iter().enumerate() {
         if element.components.is_empty() {
             objections.push(Objection::EmptyElement { index });
@@ -282,12 +301,35 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
                 restrictions: element.restrictions.unevaluable.clone(),
             });
         }
-        match first_unrestricted {
-            Some(shadowed_by) => {
-                objections.push(Objection::UnreachableElement { index, shadowed_by });
+
+        let mut shadowed: Vec<(Dimension, usize)> = Vec::new();
+        let mut reachable = element.components.is_empty();
+        for component in &element.components {
+            match covered.iter().find(|(d, _)| *d == component.dimension) {
+                Some(&(dimension, by)) => shadowed.push((dimension, by)),
+                None => reachable = true,
             }
-            None if element.restrictions.is_unrestricted() => first_unrestricted = Some(index),
-            None => {}
+        }
+        // Reported only when *every* dimension the element prices is already
+        // answered unconditionally: an element half of whose prices can still
+        // apply is not unreachable, and saying so would be noise.
+        if !reachable && let Some(&(_, shadowed_by)) = shadowed.first() {
+            let mut dimensions: Vec<Dimension> = shadowed.iter().map(|(d, _)| *d).collect();
+            dimensions.sort_unstable();
+            dimensions.dedup();
+            objections.push(Objection::UnreachableElement {
+                index,
+                shadowed_by,
+                dimensions,
+            });
+        }
+
+        if element.restrictions.is_unrestricted() {
+            for component in &element.components {
+                if !covered.iter().any(|(d, _)| *d == component.dimension) {
+                    covered.push((component.dimension, index));
+                }
+            }
         }
     }
 
@@ -672,11 +714,79 @@ mod tests {
                 o,
                 Objection::UnreachableElement {
                     index: 1,
-                    shadowed_by: 0
+                    shadowed_by: 0,
+                    ..
                 }
             )),
             "{:?}",
             c.objections
+        );
+    }
+
+    #[test]
+    fn the_shape_ocpi_recommends_is_not_an_objection() {
+        // "It is advised to always add a 'default' Price Component per
+        // dimension" `[OCPI 2.3.0 §Tariff]` — which produces several
+        // unrestricted elements in a row. Flagging them as unreachable pushes
+        // an operator off the recommended shape, and the shape is recommended
+        // because selection is per dimension.
+        let t = Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            tax_included: TaxIncluded::Yes,
+            elements: vec![
+                TariffElement {
+                    components: vec![PriceComponent::new(Dimension::Energy, dec("0.29"))],
+                    restrictions: crate::tariff::Restrictions {
+                        start_time: Some(time::macros::time!(22:00)),
+                        ..crate::tariff::Restrictions::default()
+                    },
+                },
+                TariffElement::unrestricted(vec![PriceComponent::new(
+                    Dimension::Energy,
+                    dec("0.49"),
+                )]),
+                TariffElement::unrestricted(vec![PriceComponent::new(
+                    Dimension::ParkingTime,
+                    dec("6.00"),
+                )]),
+            ],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+        let c = check_afir(&t, dec("22"));
+        assert!(
+            !c.objections
+                .iter()
+                .any(|o| matches!(o, Objection::UnreachableElement { .. })),
+            "{:?}",
+            c.objections
+        );
+
+        // …and a fourth element pricing only energy *is* unreachable, because
+        // element 1 already prices energy unconditionally.
+        let mut shadowed = t;
+        shadowed
+            .elements
+            .push(TariffElement::unrestricted(vec![PriceComponent::new(
+                Dimension::Energy,
+                dec("0.99"),
+            )]));
+        assert!(
+            check_afir(&shadowed, dec("22"))
+                .objections
+                .iter()
+                .any(|o| matches!(
+                    o,
+                    Objection::UnreachableElement {
+                        index: 3,
+                        shadowed_by: 1,
+                        ..
+                    }
+                ))
         );
     }
 

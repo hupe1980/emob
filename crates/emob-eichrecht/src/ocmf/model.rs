@@ -459,19 +459,6 @@ impl Reading {
             ReadingUnit::MOhm | ReadingUnit::UOhm => None,
         }
     }
-
-    /// Whether this reading may be used as the basis for an energy charge.
-    ///
-    /// Three conditions, all of which have to hold: the meter was working, no
-    /// fault flagged the energy, and there is a value in an energy unit.
-    #[must_use]
-    pub fn is_billable_energy(&self) -> bool {
-        self.state.is_billable()
-            && !self.error_flags.energy_unusable
-            && self.unknown_error_flags.is_empty()
-            && self.value.is_some()
-            && self.unit.is_some_and(ReadingUnit::is_energy)
-    }
 }
 
 /// How a user was identified `[OCMF Tab. 11]`.
