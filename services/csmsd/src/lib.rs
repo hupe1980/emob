@@ -243,11 +243,14 @@ impl Csmsd {
         // Against the **registry**, never against the key the station sent
         // beside the record: a key arriving on the same socket proves only that
         // whoever holds the socket owns a private key.
-        let evidence = Evidence::assemble(
-            &assembled.records,
-            &self.registry,
-            assembled.session.started_at,
-        );
+        // The owned records outlive this borrowed view: a `Record` borrows the
+        // bytes its signature covers.
+        let borrowed: Vec<ocmf::Record<'_>> = assembled
+            .records
+            .iter()
+            .filter_map(|r| r.record().ok())
+            .collect();
+        let evidence = Evidence::assemble(&borrowed, &self.registry, assembled.session.started_at);
 
         let cdr =
             CdrBuilder::from_session(&assembled.session, Direction::Import).and_then(|builder| {
@@ -305,29 +308,38 @@ impl Csmsd {
         transaction: &Transaction,
         assembled: &emob_ocpp::Assembled,
     ) {
-        let Some(record) = assembled.records.first() else {
+        let Some(Ok(record)) = assembled.records.first().map(ocmf::RecordBuf::record) else {
             return;
         };
         let registered = self
             .registry
-            .key_for_record(record, assembled.session.started_at)
+            .key_for_record(&record, assembled.session.started_at)
             .ok()
-            .map(|key| key.key.bytes.clone());
+            .map(|key| key.key.clone());
 
         for event in &transaction.events {
             for reading in &event.signed {
                 let Some(Ok(claimed)) = reading.value.public_key() else {
                     continue;
                 };
-                if registered
-                    .as_ref()
-                    .is_some_and(|bytes| *bytes == claimed.bytes)
-                {
+                // Compared as **keys**, not as bytes. A station may send the
+                // same point as a bare SEC1 encoding, wrapped in a
+                // `SubjectPublicKeyInfo`, or inside the OCA's
+                // `oca:base16:asn1:` envelope — three spellings of one key, and
+                // a byte comparison calls two of them a mismatch and sends an
+                // operator after a meter nobody swapped.
+                let Ok(claimed) = ocmf::PublicKey::from_bytes(
+                    &claimed.bytes,
+                    registered.as_ref().map(ocmf::PublicKey::curve),
+                ) else {
+                    continue;
+                };
+                if registered.as_ref() == Some(&claimed) {
                     continue;
                 }
                 lock(&self.outcomes).push(Outcome::KeyMismatch {
                     identity: identity.to_string(),
-                    claimed: hex_of(&claimed.bytes),
+                    claimed: hex_of(claimed.sec1_bytes()),
                 });
                 return;
             }

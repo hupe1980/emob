@@ -15,6 +15,7 @@ rust-version.workspace = true
 emob-cdr       = { workspace = true }
 emob-core      = { workspace = true }
 emob-eichrecht = { workspace = true }
+ocmf           = { workspace = true }
 emob-ocpp      = { workspace = true }
 emob-session   = { workspace = true }
 emob-tariff    = { workspace = true }

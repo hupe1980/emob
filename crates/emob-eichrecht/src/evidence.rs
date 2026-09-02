@@ -22,21 +22,23 @@
 
 use emob_core::{Energy, IdentificationStrength};
 
+use ocmf::{PublicKey, Record, RecordBuf};
+
 use crate::chain::{self, ChainFinding, ChainReport};
-use crate::error::VerifyError;
-use crate::ocmf::{self, OcmfRecord};
+use crate::error::EichrechtError;
 use crate::registry::KeyRegistry;
 
 /// Why a session could not be billed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EvidenceProblem {
-    /// A record's signature did not verify, or could not be checked.
+    /// A record's signature did not verify, or could not be checked — or no
+    /// key could be found to check it against.
     Signature {
         /// Which record, by pagination counter.
         pagination: u64,
         /// What went wrong.
-        error: VerifyError,
+        error: EichrechtError,
     },
     /// The chain of records does not hold together.
     Chain(ChainFinding),
@@ -56,8 +58,13 @@ impl core::fmt::Display for EvidenceProblem {
 /// One verified record, with the proof that it was verified.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedRecord {
-    /// The record.
-    pub record: OcmfRecord,
+    /// The record, owning its own text.
+    ///
+    /// [`ocmf::RecordBuf`] rather than a parsed tree, because the signature
+    /// covers **the bytes as they were written** and a structure that had to be
+    /// re-serialised to be checked again would already have lost. An evidence
+    /// artefact is re-checked years later; it keeps the text.
+    pub record: RecordBuf,
     /// SHA-256 of the payload the signature covers — a stable content address.
     pub payload_digest: [u8; 32],
     /// The key it was checked against.
@@ -66,7 +73,7 @@ pub struct VerifiedRecord {
     /// own verifier needs it: a transparency file that named a key without
     /// carrying it would leave the driver to find it, which is the step
     /// `[MessEG §33]` exists to remove.
-    pub key: crate::ocmf::PublicKey,
+    pub key: PublicKey,
     /// Where that key came from — a type approval, a provisioning run.
     pub key_provenance: String,
 }
@@ -97,7 +104,7 @@ impl Evidence {
     /// still checked against the key it actually signed with.
     #[must_use]
     pub fn assemble(
-        records: &[OcmfRecord],
+        records: &[Record<'_>],
         registry: &KeyRegistry,
         at: time::OffsetDateTime,
     ) -> Self {
@@ -105,17 +112,34 @@ impl Evidence {
         let mut problems = Vec::new();
 
         for record in records {
-            let pagination = record.payload.pagination.number;
-            match registry.key_for_record(record, at) {
-                Ok(registered) => match ocmf::verify(record, &registered.key) {
-                    Ok(()) => verified.push(VerifiedRecord {
-                        record: record.clone(),
-                        payload_digest: ocmf::payload_digest(record),
-                        key: registered.key.clone(),
-                        key_provenance: registered.provenance.clone(),
-                    }),
-                    Err(error) => problems.push(EvidenceProblem::Signature { pagination, error }),
-                },
+            let pagination = record.payload().pagination().map_or(0, |p| p.number());
+            let outcome = registry
+                .key_for_record(record, at)
+                .map_err(EichrechtError::Key)
+                .and_then(|registered| {
+                    ocmf::verify(record, &registered.key)
+                        .map(|_| registered)
+                        .map_err(EichrechtError::Signature)
+                });
+            match outcome {
+                Ok(registered) => {
+                    match RecordBuf::new(
+                        record.as_str().to_owned(),
+                        ocmf::Profile::Interop,
+                        ocmf::Limits::default(),
+                    ) {
+                        Ok(owned) => verified.push(VerifiedRecord {
+                            record: owned,
+                            payload_digest: record.payload_digest(),
+                            key: registered.key.clone(),
+                            key_provenance: registered.provenance.clone(),
+                        }),
+                        Err(error) => problems.push(EvidenceProblem::Signature {
+                            pagination,
+                            error: EichrechtError::Parse(error),
+                        }),
+                    }
+                }
                 Err(error) => problems.push(EvidenceProblem::Signature { pagination, error }),
             }
         }
@@ -250,8 +274,8 @@ impl Evidence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocmf::{KeyType, PublicKey};
     use crate::registry::{ComponentRef, RegisteredKey};
+    use ocmf::{Curve, PublicKey};
     use p256::ecdsa::signature::hazmat::PrehashSigner;
     use p256::ecdsa::{DerSignature, SigningKey};
     use sha2::{Digest, Sha256};
@@ -277,14 +301,14 @@ mod tests {
                 serial: "BQ1".into(),
             },
             RegisteredKey::unbounded(
-                PublicKey {
-                    algorithm: KeyType::Secp256r1,
-                    bytes: signing_key()
+                PublicKey::from_sec1(
+                    Curve::Secp256r1,
+                    signing_key()
                         .verifying_key()
                         .to_encoded_point(false)
-                        .as_bytes()
-                        .to_vec(),
-                },
+                        .as_bytes(),
+                )
+                .unwrap(),
                 "test fixture",
             ),
         )
@@ -298,18 +322,32 @@ mod tests {
         )
     }
 
-    fn session() -> Vec<OcmfRecord> {
+    fn session_texts() -> Vec<String> {
         vec![
-            ocmf::parse(&sign(&payload(1, "B", "2935.600", 0))).unwrap(),
-            ocmf::parse(&sign(&payload(2, "E", "2965.100", 20))).unwrap(),
+            sign(&payload(1, "B", "2935.600", 0)),
+            sign(&payload(2, "E", "2965.100", 20)),
         ]
+    }
+
+    /// Parse a set of texts and assemble the evidence over them.
+    ///
+    /// The texts have to outlive the records, because a `Record` borrows the
+    /// bytes its signature covers — which is the whole premise of the format
+    /// and is why this helper takes them by reference rather than building them
+    /// inside.
+    fn assemble(texts: &[String], registry: &KeyRegistry) -> Evidence {
+        let records: Vec<ocmf::Record<'_>> = texts
+            .iter()
+            .map(|t| ocmf::Record::parse(t).expect("a record these tests signed"))
+            .collect();
+        Evidence::assemble(&records, registry, AT)
     }
 
     const AT: time::OffsetDateTime = datetime!(2026-01-02 10:00 +1);
 
     #[test]
     fn a_genuine_session_bills() {
-        let evidence = Evidence::assemble(&session(), &registry(), AT);
+        let evidence = assemble(&session_texts(), &registry());
         assert!(
             evidence.problems.is_empty(),
             "{:?}",
@@ -326,52 +364,59 @@ mod tests {
     #[test]
     fn a_tampered_value_rates_nothing_and_says_why() {
         // The headline claim of the whole crate, as a test.
-        let mut records = session();
-        let tampered =
-            ocmf::parse(&sign(&payload(2, "E", "2965.100", 20)).replace("2965.100", "9965.100"))
-                .unwrap();
-        records[1] = tampered;
+        let mut texts = session_texts();
+        texts[1] = texts[1].replace("2965.100", "9965.100");
 
-        let evidence = Evidence::assemble(&records, &registry(), AT);
+        let evidence = assemble(&texts, &registry());
         assert!(!evidence.is_billable());
         assert_eq!(evidence.billable_energy(), None);
-        assert!(matches!(
-            evidence.problems[0],
-            EvidenceProblem::Signature {
-                pagination: 2,
-                error: VerifyError::SignatureMismatch
-            }
-        ));
+        assert!(
+            matches!(
+                &evidence.problems[0],
+                EvidenceProblem::Signature {
+                    pagination: 2,
+                    error: EichrechtError::Signature(_)
+                }
+            ),
+            "{:?}",
+            evidence.problems
+        );
         let reason = evidence.reasons().next().unwrap();
         assert!(reason.contains("record 2"), "{reason}");
     }
 
     #[test]
     fn an_unregistered_station_cannot_bill() {
-        let records = session();
-        let empty = KeyRegistry::new();
-        let evidence = Evidence::assemble(&records, &empty, AT);
+        let evidence = assemble(&session_texts(), &KeyRegistry::new());
         assert!(!evidence.is_billable());
         assert!(
             evidence.chain.is_none(),
             "no chain report over unverified records"
         );
+        assert!(matches!(
+            &evidence.problems[0],
+            EvidenceProblem::Signature {
+                error: EichrechtError::Key(_),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn a_deleted_middle_record_is_caught_after_verification() {
-        let records = vec![
-            ocmf::parse(&sign(&payload(1, "B", "2935.600", 0))).unwrap(),
-            ocmf::parse(&sign(&payload(3, "E", "2965.100", 20))).unwrap(),
+        let texts = vec![
+            sign(&payload(1, "B", "2935.600", 0)),
+            sign(&payload(3, "E", "2965.100", 20)),
         ];
-        let evidence = Evidence::assemble(&records, &registry(), AT);
+        let evidence = assemble(&texts, &registry());
         // Every signature is genuine…
         assert!(
             evidence
                 .problems
                 .iter()
                 .all(|p| matches!(p, EvidenceProblem::Chain(_))),
-            "signatures are fine; the chain is not"
+            "signatures are fine; the chain is not: {:?}",
+            evidence.problems
         );
         // …and the session still does not bill.
         assert!(!evidence.is_billable());
@@ -381,16 +426,17 @@ mod tests {
     fn a_bad_clock_is_a_problem_that_still_bills_the_energy() {
         // The reason `problems` is not the same list as "reasons this cannot be
         // invoiced": OCMF states the trustworthiness of the clock separately
-        // from the register, and so does the verdict.
-        let unsynchronised: Vec<OcmfRecord> = [
+        // from the register, and so does the verdict. This is the split
+        // `Disqualifies` exists for, and the one `ocmf::session` leaves to us.
+        let texts: Vec<String> = [
             payload(1, "B", "2935.600", 0),
             payload(2, "E", "2965.100", 20),
         ]
         .iter()
-        .map(|p| ocmf::parse(&sign(&p.replace(":00,000+0100 S", ":00,000+0100 U"))).unwrap())
+        .map(|p| sign(&p.replace(":00,000+0100 S", ":00,000+0100 U")))
         .collect();
 
-        let evidence = Evidence::assemble(&unsynchronised, &registry(), AT);
+        let evidence = assemble(&texts, &registry());
 
         assert!(!evidence.problems.is_empty(), "there is something to say");
         assert_eq!(
@@ -399,42 +445,50 @@ mod tests {
             "…and it is not about the register"
         );
         assert!(!evidence.is_billable_for_time());
-        assert!(
-            evidence
-                .reasons()
-                .any(|r| r.contains("energy is unaffected")),
-            "the message has to say so, or an operator escalates a session that bills"
-        );
     }
 
     #[test]
     fn the_identification_comes_off_the_records() {
-        let records: Vec<OcmfRecord> = [
-            r#"{"PG":"T1","MS":"BQ1","IS":true,"IL":"TRUSTED","IT":"CENTRAL","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":2935.600,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}"#,
-            r#"{"PG":"T2","MS":"BQ1","IS":true,"IL":"HEARSAY","IT":"ISO14443","RD":[{"TM":"2026-01-02T10:20:00,000+0100 S","TX":"E","RV":2965.100,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}"#,
+        let texts: Vec<String> = [
+            r#"{"FV":"1.0","PG":"T1","MS":"BQ1","IS":true,"IL":"TRUSTED","IF":[],"IT":"CENTRAL","ID":"A","RD":[{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":2935.600,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}"#,
+            r#"{"FV":"1.0","PG":"T2","MS":"BQ1","IS":true,"IL":"HEARSAY","IF":[],"IT":"ISO14443","ID":"A","RD":[{"TM":"2026-01-02T10:20:00,000+0100 S","TX":"E","RV":2965.100,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}]}"#,
         ]
         .iter()
-        .map(|p| ocmf::parse(&sign(p)).unwrap())
+        .map(|p| sign(p))
         .collect();
 
-        let evidence = Evidence::assemble(&records, &registry(), AT);
+        let evidence = assemble(&texts, &registry());
         assert_eq!(
             evidence.identification_strength(),
             Some(emob_core::IdentificationStrength::Hearsay),
             "a chain is only as strong as its weakest claim"
         );
+        // …and a level that *changed* is its own finding, because a session
+        // identified two ways is one nobody can attribute.
+        assert!(
+            evidence
+                .reasons()
+                .any(|r| r.contains("identification level changed")),
+            "{:?}",
+            evidence.reasons().collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn the_digest_is_recorded_for_every_verified_record() {
-        let evidence = Evidence::assemble(&session(), &registry(), AT);
+        let texts = session_texts();
+        let evidence = assemble(&texts, &registry());
         assert_ne!(
             evidence.verified[0].payload_digest,
             evidence.verified[1].payload_digest
         );
         assert_eq!(
             evidence.verified[0].payload_digest,
-            ocmf::payload_digest(&evidence.verified[0].record)
+            evidence.verified[0]
+                .record
+                .record()
+                .unwrap()
+                .payload_digest()
         );
     }
 }

@@ -213,6 +213,16 @@ pub struct Rate {
     pub id: String,
     /// Ad hoc or contract.
     pub policy: RatePolicy,
+    /// The zone every [`Period::daily`] window on this rate is read in — the
+    /// IANA name of [`emob_tariff::Tariff::time_zone`].
+    ///
+    /// Carried because the document cannot carry it: the profile's own field is
+    /// an ISO 8601 offset on the site, which cannot express summer time. Keeping
+    /// the real name here is what lets [`crate::feed::Feed::check`] refuse a
+    /// rate offered at a site on a different clock — a `22:00` night rate
+    /// published under a site an hour away is a price the driver at that site is
+    /// never charged.
+    pub time_zone: String,
     /// The currency the prices are quoted in.
     pub currency: Currency,
     /// A name for the rate, when the tariff has one worth showing.
@@ -328,6 +338,33 @@ pub enum RateNote {
         /// Whether that figure includes tax, which the document cannot state.
         tax_included: bool,
     },
+    /// A price applies in a daily window, and the profile can only say which
+    /// zone that window is read in as a **fixed offset**.
+    ///
+    /// The window itself publishes fine: `overallPeriod` carries a
+    /// `TimePeriodOfDay`, and `22:00` is `22:00`. What it does not carry is the
+    /// zone — that lives one object away, on `FacilityLocation.timeZone`, and
+    /// the profile types it as a string that "identifies a time zone by
+    /// specifying the difference to UTC in hours and minutes, as defined in
+    /// ISO 8601" `[DATEX-II-Profil]`. Its own reference instance publishes
+    /// `"+01:00"` for a German site.
+    ///
+    /// An offset is not a zone. `+01:00` is wrong for that site from the last
+    /// Sunday in March to the last Sunday in October, so a consumer reading a
+    /// `22:00` night rate against the published offset prices an hour of every
+    /// summer evening at the wrong rate — the same failure the rating engine
+    /// carries a [`emob_core::TimeZone`] to avoid, met from the publishing
+    /// side. The table publishes the offset in force when it is issued, which
+    /// is the only reading that is true of the document, and this says that the
+    /// document has no way to state the rest.
+    DailyWindowHasOnlyAnOffset {
+        /// The zone the tariff's wall clock is actually read in.
+        zone: String,
+        /// The window, as published.
+        from: time::Time,
+        /// …and its end.
+        to: time::Time,
+    },
 }
 
 impl core::fmt::Display for RateNote {
@@ -376,6 +413,10 @@ impl core::fmt::Display for RateNote {
                 } else {
                     "excluding tax"
                 }
+            ),
+            Self::DailyWindowHasOnlyAnOffset { zone, from, to } => write!(
+                f,
+                "this price applies from {from} to {to} on the wall clock of {zone}, and [DATEX-II-Profil] carries that zone only as an ISO 8601 offset on `FacilityLocation.timeZone` — which cannot express summer time, so the table states the offset in force when it is published and a consumer reading the window six months later reads it an hour out"
             ),
         }
     }
@@ -451,6 +492,7 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
             TariffKind::AdHoc => RatePolicy::AdHoc,
             TariffKind::Contract => RatePolicy::Contract,
         },
+        time_zone: tariff.time_zone.to_string(),
         currency: tariff.currency,
         name: None,
         prices,
@@ -652,6 +694,14 @@ fn period_of(
         (None, None) => None,
     };
 
+    if let Some((from, to)) = daily {
+        notes.push(RateNote::DailyWindowHasOnlyAnOffset {
+            zone: tariff.time_zone.to_string(),
+            from,
+            to,
+        });
+    }
+
     let period = Period {
         from: tariff.valid_from,
         until: tariff.valid_until,
@@ -674,6 +724,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![TariffElement::unrestricted(components)],
             min_price: None,
@@ -815,11 +866,21 @@ mod tests {
         tariff.elements = vec![element];
 
         let (rate, notes) = publish(&tariff, "r");
-        assert!(notes.is_empty());
         assert_eq!(
             rate.prices[0].period.as_ref().unwrap().daily,
             Some((time::macros::time!(21:00), time::macros::time!(6:00)))
         );
+        // The window survives; the zone it is read in does not, because the
+        // profile carries a fixed offset and a German site is not at one.
+        assert_eq!(
+            notes,
+            vec![RateNote::DailyWindowHasOnlyAnOffset {
+                zone: "Europe/Berlin".to_owned(),
+                from: time::macros::time!(21:00),
+                to: time::macros::time!(6:00),
+            }]
+        );
+        assert!(notes[0].to_string().contains("Europe/Berlin"));
     }
 
     #[test]

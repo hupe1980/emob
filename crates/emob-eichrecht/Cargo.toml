@@ -13,23 +13,22 @@ rust-version.workspace = true
 
 [dependencies]
 emob-core    = { workspace = true }
-base64       = { workspace = true }
+# The format; what is left here is which quantity a failure takes away (D184).
+ocmf         = { workspace = true }
 hex          = { workspace = true }
-k256         = { workspace = true }
-p192         = { workspace = true }
-p256         = { workspace = true }
-p384         = { workspace = true }
 rust_decimal = { workspace = true }
 serde        = { workspace = true, optional = true }
-serde_json   = { workspace = true }
-sha2         = { workspace = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }
 
 [features]
 default = ["serde"]
 ## Serialize/deserialize the parsed payload types.
-serde = ["dep:serde", "emob-core/serde", "rust_decimal/serde", "time/serde-well-known"]
+serde = ["dep:serde", "emob-core/serde", "ocmf/serde", "rust_decimal/serde", "time/serde-well-known"]
 
 [dev-dependencies]
+# The tests sign real records rather than asserting over constants, so the
+# fixtures a chain is judged on are ones a private key actually produced.
+p256       = { workspace = true }
 serde_json = { workspace = true }
+sha2       = { workspace = true }

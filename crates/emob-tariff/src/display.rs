@@ -203,7 +203,7 @@ impl PriceDescription {
 ///
 /// ```
 /// use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, describe};
-/// use emob_core::Currency;
+/// use emob_core::{Currency, TimeZone};
 /// use rust_decimal::Decimal;
 /// use std::str::FromStr;
 /// use time::macros::datetime;
@@ -213,6 +213,7 @@ impl PriceDescription {
 ///     "ad-hoc".parse()?,
 ///     Currency::EUR,
 ///     TariffKind::AdHoc,
+///     TimeZone::new("Europe/Berlin")?,
 ///     vec![
 ///         PriceComponent::new(Dimension::Flat, dec("0.50")),
 ///         PriceComponent::new(Dimension::Energy, dec("0.49")),
@@ -230,12 +231,7 @@ pub fn describe(tariff: &Tariff, at: time::OffsetDateTime) -> PriceDescription {
     // The state a session is in at its first period: nothing delivered, no time
     // elapsed, no power yet. Exactly what `rate` asks the same predicate with,
     // so the tier shown is the tier the first kilowatt-hour is billed at.
-    let opening = SessionState {
-        energy_kwh: Decimal::ZERO,
-        elapsed_seconds: 0,
-        at,
-        power_kw: None,
-    };
+    let opening = SessionState::new(&tariff.time_zone, at);
 
     // One question per dimension, through the rating engine's own selector:
     // a tariff whose session fee and whose kilowatt-hour price sit in two
@@ -360,6 +356,7 @@ mod tests {
     use crate::rating::{Chargeable, Period, rate};
     use crate::tariff::{PriceComponent, Restrictions, TariffElement, TariffKind, TaxIncluded};
     use emob_core::Energy;
+    use emob_core::TimeZone;
     use rust_decimal::prelude::FromStr;
     use time::macros::datetime;
 
@@ -376,6 +373,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             components,
         )
     }
@@ -448,6 +446,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 night,
@@ -488,6 +487,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement {
@@ -531,6 +531,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement {
@@ -625,6 +626,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement {

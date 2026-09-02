@@ -19,9 +19,9 @@
 //! point at.
 
 use emob_core::{Direction, Energy, EvseId};
-use emob_eichrecht::ocmf::{KeyType, PublicKey};
 use emob_eichrecht::registry::{ComponentRef, RegisteredKey};
 use emob_session::{MeterReading, MeterSeries, ReadingContext};
+use ocmf::{Curve, PublicKey};
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::{DerSignature, SigningKey};
 use rust_decimal::Decimal;
@@ -89,17 +89,23 @@ impl VirtualStation {
 
     /// The public key a registry has to hold for this station's records to
     /// verify.
+    ///
+    /// # Panics
+    ///
+    /// Never. A verifying key encodes to a well-formed uncompressed SEC1 point
+    /// by construction, so the conversion cannot fail — it is `expect` rather
+    /// than a `Result` because a simulator that could hand back a station with
+    /// no key would push the impossibility into every caller.
     #[must_use]
     pub fn public_key(&self) -> PublicKey {
-        PublicKey {
-            algorithm: KeyType::Secp256r1,
-            bytes: self
-                .signing_key
+        PublicKey::from_sec1(
+            Curve::Secp256r1,
+            self.signing_key
                 .verifying_key()
                 .to_encoded_point(false)
-                .as_bytes()
-                .to_vec(),
-        }
+                .as_bytes(),
+        )
+        .expect("a verifying key encodes to a well-formed SEC1 point")
     }
 
     /// How this station is identified to the key registry.
@@ -489,7 +495,7 @@ pub struct ChargedSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emob_eichrecht::{Evidence, KeyRegistry, ocmf};
+    use emob_eichrecht::{Evidence, KeyRegistry};
     use time::macros::datetime;
 
     fn day() -> time::OffsetDateTime {
@@ -516,7 +522,7 @@ mod tests {
         let records: Vec<_> = charged
             .records
             .iter()
-            .map(|raw| ocmf::parse(raw).expect("the station emits valid OCMF"))
+            .map(|raw| ocmf::Record::parse(raw).expect("the station emits valid OCMF"))
             .collect();
         let evidence = Evidence::assemble(&records, &registry(&station), plan.started_at);
 
@@ -641,7 +647,7 @@ mod tests {
         let records: Vec<_> = charged
             .records
             .iter()
-            .map(|raw| ocmf::parse(raw).unwrap())
+            .map(|raw| ocmf::Record::parse(raw).unwrap())
             .collect();
         let evidence = Evidence::assemble(&records, &registry(&station), plan.started_at);
         assert!(!evidence.is_billable());

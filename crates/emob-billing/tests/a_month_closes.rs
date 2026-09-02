@@ -16,13 +16,14 @@ use emob_billing::{
 };
 use emob_cdr::{CdrBuilder, CdrLedger, EvidenceRef};
 use emob_core::{Currency, Direction, Energy, PartyId};
-use emob_eichrecht::ocmf::KeyType;
 use emob_eichrecht::registry::{ComponentRef, RegisteredKey};
-use emob_eichrecht::{Evidence, KeyRegistry, PublicKey, ocmf};
+use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, TaxIncluded};
+use ocmf::Curve;
+use ocmf::PublicKey;
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::{DerSignature, SigningKey};
 use rust_decimal::Decimal;
@@ -81,14 +82,14 @@ fn registry() -> KeyRegistry {
                 meter: METER_SERIAL.into(),
             },
             RegisteredKey::unbounded(
-                PublicKey {
-                    algorithm: KeyType::Secp256r1,
-                    bytes: signing_key()
+                PublicKey::from_sec1(
+                    Curve::Secp256r1,
+                    signing_key()
                         .verifying_key()
                         .to_encoded_point(false)
-                        .as_bytes()
-                        .to_vec(),
-                },
+                        .as_bytes(),
+                )
+                .expect("a well-formed SEC1 point"),
                 "type approval 2026-01",
             ),
         )
@@ -106,7 +107,10 @@ fn session(n: i64, id: &str, from: &str, to: &str) -> (Session, Evidence) {
         signed_record(counter, counter + 1, "B", from, start),
         signed_record(counter, counter + 2, "E", to, end),
     ];
-    let records: Vec<_> = raw.iter().map(|r| ocmf::parse(r).unwrap()).collect();
+    let records: Vec<_> = raw
+        .iter()
+        .map(|r| ocmf::Record::parse(r).unwrap())
+        .collect();
     let evidence = Evidence::assemble(&records, &registry(), end);
 
     let mut session = Session::open(
@@ -152,6 +156,7 @@ fn tariff() -> Tariff {
         "ad-hoc-2026".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
     )
 }
@@ -188,6 +193,9 @@ fn cpo() -> Counterparty {
     )
     .at("Hauptstraße 1", "12345")
     .reachable_at("de-cpo@example.org", "EM")
+    // BT-30. The only way `BR-CO-26` can identify a seller on the one document
+    // that may carry no VAT identifier — see the outside-scope test.
+    .registered_as("HRB 12345", None)
     // BR-DE-2 and BR-DE-5..7: a German public buyer wants somebody to ask.
     .contactable("Rechnungswesen", "+49 555 123456", "rechnung@example.org")
 }
@@ -661,6 +669,7 @@ fn a_two_rate_invoice_states_both_taxable_amounts_and_the_standard_accepts_it() 
         "mixed".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![
             PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
             PriceComponent::new(Dimension::Flat, dec("1.07")).with_vat(dec("7")),
@@ -700,12 +709,12 @@ fn a_two_rate_invoice_states_both_taxable_amounts_and_the_standard_accepts_it() 
     // 7 % → 1.00 net. Two rates, two taxable amounts.
     assert_eq!(
         invoice.lines.iter().map(|l| l.vat_rate).collect::<Vec<_>>(),
-        vec![dec("19"), dec("7")]
+        vec![Some(dec("19")), Some(dec("7"))]
     );
     assert_eq!(invoice.tax.len(), 2, "{:?}", invoice.tax);
-    assert_eq!(invoice.tax[0].rate, dec("7"));
+    assert_eq!(invoice.tax[0].rate, Some(dec("7")));
     assert_eq!(invoice.tax[0].tax, dec("0.07"));
-    assert_eq!(invoice.tax[1].rate, dec("19"));
+    assert_eq!(invoice.tax[1].rate, Some(dec("19")));
     assert_eq!(invoice.tax[1].tax, dec("2.31"));
     assert_eq!(invoice.gross_total().to_string(), "15.53 EUR");
     assert!(invoice.reconciles());
@@ -732,5 +741,80 @@ fn a_two_rate_invoice_states_both_taxable_amounts_and_the_standard_accepts_it() 
             .filter(|role| matches!(role, postings::Role::VatPayable { .. }))
             .count(),
         2
+    );
+}
+
+#[test]
+fn a_settlement_outside_the_union_is_outside_the_scope_and_states_neither_a_rate_nor_an_identifier()
+{
+    // `[UStG §3g]` moves the place of supply to where the reseller is
+    // established, and a Swiss e-mobility provider takes it out of the Union
+    // altogether — so no member state's VAT arises and the category is `O`,
+    // outside scope, rather than the `G` that describes goods leaving the
+    // customs territory zero-rated.
+    //
+    // The document that follows is the point. `O` is the only category in
+    // UNCL 5305 that states **no rate** (`BR-O-05`) and allows **no VAT
+    // identifier** on either party (`BR-O-02`) — and once the seller's is gone,
+    // `BR-CO-26` still wants the buyer to be able to identify its supplier, so
+    // the legal registration BT-30 stops being optional. All three are visible
+    // only by running the standard's own rules over the finished document
+    // (D183).
+    let ledger = month();
+    let swiss = Counterparty::new(
+        "Helvetia Mobility AG",
+        "Zug",
+        TaxStatus::reseller("CH", "CHE-123.456.789"),
+    )
+    .at("Bahnhofstrasse 1", "6300");
+
+    let invoice = InvoiceBuilder::new(
+        "R-2026-0003",
+        date!(2026 - 07 - 01),
+        (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),
+        cpo(),
+        swiss,
+    )
+    .supplied_from("DE", dec("19"))
+    .ledger(&ledger)
+    .payment_terms("30 days net")
+    .build()
+    .unwrap()
+    .value;
+
+    assert_eq!(invoice.treatment.category, VatCategory::OutOfScope);
+    assert_eq!(invoice.treatment.category.code(), "O");
+    assert_eq!(invoice.treatment.place_of_supply, "CH");
+    assert_eq!(invoice.tax_total().to_string(), "0 EUR");
+    assert_eq!(invoice.gross_total().to_string(), "26.08 EUR");
+
+    // No rate anywhere — on the lines or on the breakdown. A rate of zero is a
+    // rate, and `BR-O-05` refuses the field rather than the value.
+    assert!(invoice.lines.iter().all(|line| line.vat_rate.is_none()));
+    assert!(invoice.tax.iter().all(|subtotal| subtotal.rate.is_none()));
+
+    let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE).unwrap();
+    assert!(
+        crossed.value.is_valid(),
+        "{:?}",
+        crossed.value.reasons().collect::<Vec<_>>()
+    );
+
+    // Neither party's VAT identifier reaches the document, and the seller is
+    // identified by its registration instead.
+    let document = &crossed.value.invoice;
+    assert_eq!(document.seller.vat_identifier, None);
+    assert_eq!(document.buyer.vat_identifier, None);
+    assert!(document.seller.legal_registration.is_some());
+    assert!(document.vat_breakdown[0].rate.is_none());
+
+    // And the books carry no VAT posting, because there is no liability.
+    let books = postings::postings_for(&invoice);
+    assert!(books.balances());
+    assert!(
+        !books
+            .roles()
+            .iter()
+            .any(|role| matches!(role, postings::Role::VatPayable { .. }))
     );
 }

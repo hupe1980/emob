@@ -198,6 +198,7 @@ mod tests {
             "by-the-minute".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Time, dec("6.00"))],
         )
     }
@@ -263,6 +264,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
         );
         let proposal = review(&Estate {
@@ -306,6 +308,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_step_size(1000)],
         );
         blocks.tax_included = emob_tariff::TaxIncluded::Yes;

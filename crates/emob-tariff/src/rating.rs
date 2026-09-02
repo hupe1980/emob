@@ -31,6 +31,30 @@
 //! fifteen are charged at 0.39 and five at 0.59, and the answer no longer
 //! depends on whether the session arrived as one period or ninety-six.
 //!
+//! ## …except for the one restriction that carries no information to cut on
+//!
+//! That holds for every quantity that **accumulates** — energy delivered so
+//! far, seconds elapsed so far, the wall clock — and it holds for a reason
+//! worth stating: a period *contains* the fact about where the threshold was
+//! crossed. One period of 15 kWh says by construction that the tenth
+//! kilowatt-hour fell inside it, so the cut can be placed and the answer stops
+//! depending on the slicing.
+//!
+//! Average power is `energy / duration` over whatever window is asked about,
+//! and a period carries **no** information about the power inside it. A session
+//! delivering 60 kWh in an hour averages 60 kW; the same hour measured as two
+//! half-hours of 55 and 5 kWh averages 110 kW and 10 kW. Under "below 50 kW at
+//! 0.30, otherwise 0.60" those price differently, and no cut recovers the
+//! second reading from the first — the 60 kW figure does not contain it.
+//!
+//! The finer answer is therefore not a different answer to the same question.
+//! It is a **better measurement**, and the arithmetic is right either way; what
+//! it cannot do is make a low-resolution input behave like a high-resolution
+//! one. Rate the periods the meter produced — which is what
+//! `emob_session::Session::split` hands over — and the answer is stable.
+//! [`RatingNote::PowerJudgedPerPeriod`] says so on any tariff where it matters,
+//! because a partner's document may carry coarser periods than the meter did.
+//!
 //! # What is charged, and what it is charged against
 //!
 //! | Dimension | Quantity | Unit |
@@ -69,22 +93,28 @@
 //! that is not one of those two things, so "why is this €14.46" is answerable
 //! by reading the structure rather than by re-deriving it.
 //!
-//! # The wall clock is read in the offset the period carries
+//! # The wall clock is read in the tariff's own zone
 //!
-//! "0.30 from 22:00" is a statement about local civil time, and a
-//! `time::OffsetDateTime` carries a **UTC offset, not a time zone** — so the
-//! only frame this crate can judge it in is the one each period states. That is
-//! exact for every session `emob-session` assembles, because the quarter-hour
-//! split gives every period one offset, and it is exact across a clock change
-//! too as long as the periods either side carry the offsets their readings did.
+//! "0.30 from 22:00" is a statement about **local civil time at the charge
+//! point** `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and OCPI
+//! carries the zone it is read in on the Location, where it is mandatory
+//! `[OCPI 2.3.0 §mod_locations_location_object]`. So a [`Tariff`] carries one
+//! too — [`Tariff::time_zone`] — and every date, weekday and time-of-day
+//! restriction is judged against the wall clock that zone puts the period's
+//! start on.
 //!
-//! A session assembled from somebody else's timestamps can carry two, and then
-//! the cuts are all placed in the first period's frame. [`rate`] says so —
-//! [`RatingNote::MixedUtcOffsets`] — rather than letting an hour of night rate
-//! land on the wrong side of a boundary in silence. Nothing here consults a
-//! time-zone database: that would make a replayed rating depend on which
-//! version of `tzdata` was installed, which is the one thing a dispute two
-//! years old cannot afford.
+//! **Not against the offset the timestamps happen to carry.** An offset is what
+//! a clock was written with; a zone is the rule that decides the offset. Judged
+//! against the offset, one physical session priced under a German night tariff
+//! costs €6.00 when its readings are stamped `+01:00` and €9.00 when the same
+//! instants are stamped `Z` — which is the ordinary case, because every session
+//! an eMSP re-rates from a roaming partner arrives in UTC.
+//!
+//! The zone also decides where the *cuts* go, and it knows about the two days a
+//! year a civil time is not an instant: a spring gap swallows an hour, so the
+//! wall clock passes 02:30 once, at the transition; an autumn fold repeats one,
+//! so it passes 02:30 **twice** and both are cut. See
+//! [`emob_core::TimeZone::instants_at`].
 //!
 //! # Rounding happens once, at the end
 //!
@@ -94,8 +124,8 @@
 //! the two is correct is a tax question rather than an arithmetic one — so the
 //! exact figures survive and the caller can do either.
 
-use emob_core::Energy;
 use emob_core::quantity::{Currency, Money};
+use emob_core::{Energy, Local, TimeZone};
 use rust_decimal::Decimal;
 
 use crate::tariff::{Dimension, PriceComponent, Restrictions, Tariff, TariffElement, TaxIncluded};
@@ -295,6 +325,10 @@ pub enum ChargeableError {
 }
 
 /// What the session had done when a period began — what the restrictions read.
+///
+/// Built with [`SessionState::new`] so that [`Self::local`] and [`Self::at`]
+/// cannot disagree: the wall clock a restriction is judged against is derived
+/// from the instant, in the tariff's own zone, once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionState {
     /// Energy delivered before this period.
@@ -303,8 +337,48 @@ pub struct SessionState {
     pub elapsed_seconds: u64,
     /// When the period begins.
     pub at: time::OffsetDateTime,
+    /// The wall clock [`Tariff::time_zone`] puts [`Self::at`] on.
+    ///
+    /// What every date, weekday and time-of-day restriction is judged against.
+    /// Derived rather than supplied — see [`SessionState::new`].
+    pub local: Local,
     /// The average power across this period, if it has a duration.
     pub power_kw: Option<Decimal>,
+}
+
+impl SessionState {
+    /// The state at the start of a session, in a tariff's zone.
+    ///
+    /// Zero energy, zero elapsed time, no power yet — what
+    /// [`crate::display::describe`] asks about and what the first period of a
+    /// rating begins from.
+    #[must_use]
+    pub fn new(zone: &TimeZone, at: time::OffsetDateTime) -> Self {
+        Self {
+            energy_kwh: Decimal::ZERO,
+            elapsed_seconds: 0,
+            at,
+            local: zone.local(at),
+            power_kw: None,
+        }
+    }
+
+    /// The same state, after a session has delivered `energy_kwh` over
+    /// `elapsed_seconds`.
+    #[must_use]
+    pub const fn after(mut self, energy_kwh: Decimal, elapsed_seconds: u64) -> Self {
+        self.energy_kwh = energy_kwh;
+        self.elapsed_seconds = elapsed_seconds;
+        self
+    }
+
+    /// The same state, at an average power — `None` for a period with no
+    /// duration, against which a power restriction cannot be judged.
+    #[must_use]
+    pub const fn at_power(mut self, power_kw: Option<Decimal>) -> Self {
+        self.power_kw = power_kw;
+        self
+    }
 }
 
 /// One priced line of a session: one dimension at one price.
@@ -447,6 +521,31 @@ pub enum RatingNote {
         /// whole seconds, one session — which is exact.
         base_quantity: Decimal,
     },
+    /// An element restricts on **average power**, so this total is a function of
+    /// the session *at the resolution its periods carry* rather than of the
+    /// session alone.
+    ///
+    /// Not an error in the arithmetic. Every other restriction reads a quantity
+    /// that accumulates, and a period *contains* the fact about where the
+    /// threshold was crossed — so [`rate`] can cut there. Average power is
+    /// `energy / duration` over whatever window is asked about, and a period
+    /// carries no information about the power inside it: 60 kWh in an hour
+    /// averages 60 kW, and the same hour as two halves of 55 and 5 kWh averages
+    /// 110 and 10. Both are right; the finer one is the better measurement, and
+    /// no cut recovers it from the coarser. See the module documentation.
+    ///
+    /// Reported rather than refused, because `[OCPI 2.3.0 §Tariff]` defines the
+    /// restriction and a partner's tariff may carry one. Raised once per
+    /// element, from the tariff rather than the session: it is true of the
+    /// document before a session arrives.
+    PowerJudgedPerPeriod {
+        /// Which element, by position.
+        index: usize,
+        /// The lower bound, when it carries one.
+        min_kw: Option<Decimal>,
+        /// The upper bound, when it carries one.
+        max_kw: Option<Decimal>,
+    },
     /// An element was skipped because it carries a restriction this build
     /// cannot evaluate.
     ///
@@ -488,27 +587,6 @@ pub enum RatingNote {
         /// The rate that arrived.
         rate: Decimal,
     },
-    /// The session's periods carry more than one UTC offset, and a wall-clock
-    /// restriction was judged in one of them.
-    ///
-    /// A `time::OffsetDateTime` carries an offset, not a time zone, so "0.30
-    /// from 22:00" can only be read against the offset the period itself
-    /// states. Where every period agrees — which is what the quarter-hour split
-    /// produces — that is exactly right. Where they do not, the session crossed
-    /// a clock change or was assembled from timestamps in two frames, and every
-    /// cut was placed in the first period's, so a boundary on the far side of
-    /// the change is an hour out.
-    ///
-    /// Not an error: the energy, the durations and the totals are unaffected,
-    /// and no session this workspace assembles carries mixed offsets. It is
-    /// reported because a session built from a partner's document can, and an
-    /// hour of night rate is worth more than the silence.
-    MixedUtcOffsets {
-        /// The offset the wall clock was judged in, in seconds east of UTC.
-        judged_in_seconds: i32,
-        /// An offset some other period carried.
-        also_seen_seconds: i32,
-    },
 }
 
 impl core::fmt::Display for RatingNote {
@@ -523,6 +601,20 @@ impl core::fmt::Display for RatingNote {
                 f,
                 "no tariff element prices {dimension:?} under the conditions of {periods} period(s) beginning {at}: {base_quantity} {} was not charged",
                 dimension.base_unit()
+            ),
+            Self::PowerJudgedPerPeriod {
+                index,
+                min_kw,
+                max_kw,
+            } => write!(
+                f,
+                "element {index} restricts on average power ({}), which is a property of a period rather than of the session: unlike energy and duration a period carries no information about the power inside it, so there is nothing to cut at and this total is a function of the session at the resolution its periods carry — rate the periods the meter produced, not an average of them",
+                match (min_kw, max_kw) {
+                    (Some(min), Some(max)) => format!("{min}–{max} kW"),
+                    (Some(min), None) => format!("from {min} kW"),
+                    (None, Some(max)) => format!("below {max} kW"),
+                    (None, None) => "no bound".to_owned(),
+                }
             ),
             Self::UnevaluableRestriction {
                 index,
@@ -543,13 +635,6 @@ impl core::fmt::Display for RatingNote {
             Self::VatRateNotUsable { dimension, rate } => write!(
                 f,
                 "{dimension:?} carries a VAT rate of {rate} %, from which no net and tax can be computed: the amount is reported whole"
-            ),
-            Self::MixedUtcOffsets {
-                judged_in_seconds,
-                also_seen_seconds,
-            } => write!(
-                f,
-                "this session's periods carry more than one UTC offset ({judged_in_seconds} s and {also_seen_seconds} s); every time-of-day restriction was judged in the first period's, so a boundary on the far side of the change is placed an hour out"
             ),
             Self::Adjusted(adjustment) => match adjustment.kind {
                 AdjustmentKind::Minimum => write!(
@@ -837,7 +922,7 @@ impl Rated {
 ///
 /// ```
 /// use emob_tariff::{Chargeable, Dimension, PriceComponent, Tariff, TariffKind, rate};
-/// use emob_core::{Currency, Energy};
+/// use emob_core::{Currency, Energy, TimeZone};
 /// use rust_decimal::Decimal;
 /// use std::str::FromStr;
 /// use time::macros::datetime;
@@ -847,6 +932,7 @@ impl Rated {
 ///     "ad-hoc".parse()?,
 ///     Currency::EUR,
 ///     TariffKind::AdHoc,
+///     TimeZone::new("Europe/Berlin")?,
 ///     vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
 /// );
 ///
@@ -863,7 +949,7 @@ impl Rated {
 /// ```
 #[must_use]
 pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
-    let mut notes = preflight(tariff, session);
+    let mut notes = preflight(tariff);
 
     // One accumulator per (dimension, price, vat): a tiered session charges the
     // same dimension at two prices and the invoice has to show both.
@@ -881,12 +967,9 @@ pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
 
     let periods = subdivide_at_thresholds(tariff, session.periods());
     for period in &periods {
-        let state = SessionState {
-            energy_kwh: cumulative_energy,
-            elapsed_seconds,
-            at: period.start,
-            power_kw: period.average_power_kw(),
-        };
+        let state = SessionState::new(&tariff.time_zone, period.start)
+            .after(cumulative_energy, elapsed_seconds)
+            .at_power(period.average_power_kw());
         let seconds = Decimal::from(period.seconds());
 
         for &dimension in &dimensions {
@@ -980,9 +1063,9 @@ pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
     }
 }
 
-/// What is worth saying about a tariff and a session **before** either is
-/// touched — facts about the two documents rather than about the arithmetic.
-fn preflight(tariff: &Tariff, session: &Chargeable) -> Vec<RatingNote> {
+/// What is worth saying about a tariff **before** a session is touched — facts
+/// about the document rather than about the arithmetic.
+fn preflight(tariff: &Tariff) -> Vec<RatingNote> {
     let mut notes = Vec::new();
 
     for (index, element) in tariff.elements.iter().enumerate() {
@@ -990,6 +1073,17 @@ fn preflight(tariff: &Tariff, session: &Chargeable) -> Vec<RatingNote> {
             notes.push(RatingNote::UnevaluableRestriction {
                 index,
                 restrictions: element.restrictions.unevaluable.clone(),
+            });
+        }
+        // The one restriction whose answer is not a function of the session.
+        // See `RatingNote::PowerJudgedPerPeriod`.
+        if element.restrictions.min_power_kw.is_some()
+            || element.restrictions.max_power_kw.is_some()
+        {
+            notes.push(RatingNote::PowerJudgedPerPeriod {
+                index,
+                min_kw: element.restrictions.min_power_kw,
+                max_kw: element.restrictions.max_power_kw,
             });
         }
         // A rate of exactly -100 % makes the gross-to-net factor zero, and no
@@ -1011,32 +1105,6 @@ fn preflight(tariff: &Tariff, session: &Chargeable) -> Vec<RatingNote> {
                     });
                 }
             }
-        }
-    }
-
-    // A time-of-day restriction is read against the offset the period carries,
-    // because that is all an `OffsetDateTime` knows. Every period of a session
-    // this workspace assembles carries one; a session assembled from somebody
-    // else's timestamps need not, and then the cuts are all in the first one's
-    // frame. Said once, here, rather than left for a driver to find on a
-    // clock-change night.
-    if tariff
-        .elements
-        .iter()
-        .any(|element| element.restrictions.reads_the_wall_clock())
-        && let Some(first) = session.periods().first()
-    {
-        let judged_in = first.start.offset();
-        if let Some(other) = session
-            .periods()
-            .iter()
-            .flat_map(|period| [period.start.offset(), period.end.offset()])
-            .find(|offset| *offset != judged_in)
-        {
-            notes.push(RatingNote::MixedUtcOffsets {
-                judged_in_seconds: judged_in.whole_seconds(),
-                also_seen_seconds: other.whole_seconds(),
-            });
         }
     }
 
@@ -1174,7 +1242,12 @@ fn subdivide_at_thresholds(tariff: &Tariff, periods: &[Period]) -> Vec<Period> {
                 };
                 by_offset(offset, &mut cuts);
             }
-            for offset in clock_cut_offsets(&clock_thresholds, &date_thresholds, period) {
+            for offset in clock_cut_offsets(
+                &tariff.time_zone,
+                &clock_thresholds,
+                &date_thresholds,
+                period,
+            ) {
                 by_offset(offset, &mut cuts);
             }
             if energy > Decimal::ZERO {
@@ -1260,12 +1333,27 @@ fn subdivide_at_thresholds(tariff: &Tariff, periods: &[Period]) -> Vec<Period> {
 /// The offsets, in whole seconds from the period's start, at which a wall-clock
 /// restriction changes which element applies.
 ///
-/// Computed in the period's own UTC offset, because [`matches_restrictions`]
-/// judges the times and dates against `state.at` — a cut in any other frame
+/// Computed in the **tariff's own zone**, because that is the frame
+/// [`matches_restrictions`] judges the times and dates in — a cut in any other
 /// would split a period into two pieces that price identically and leave the
-/// real boundary uncut. Every day the period spans is walked: an overnight
-/// session crosses `22:00` and `06:00` on different dates.
-fn clock_cut_offsets(times: &[time::Time], dates: &[time::Date], period: &Period) -> Vec<u64> {
+/// real boundary uncut. Every local day the period spans is walked: an
+/// overnight session crosses `22:00` and `06:00` on different dates.
+///
+/// # A clock change is not an edge case here, it is a Sunday
+///
+/// A civil time is not an instant. On the autumn fold the wall clock passes
+/// `02:30` twice, an hour apart, and a night tariff switching there switches
+/// twice — so [`TimeZone::instants_at`] returns both and both are cut. On the
+/// spring gap it passes once, at the transition itself. Getting this wrong
+/// leaves an hour of one Sunday a year priced at the wrong rate, which is the
+/// kind of error that is never found because nobody re-reads a bill from the
+/// last weekend in October.
+fn clock_cut_offsets(
+    zone: &TimeZone,
+    times: &[time::Time],
+    dates: &[time::Date],
+    period: &Period,
+) -> Vec<u64> {
     // A corruption guard rather than a rule — a period spanning more than a year
     // is a clock fault, and the same bound the session split refuses one at.
     const MAX_DAYS: u16 = 366;
@@ -1275,7 +1363,6 @@ fn clock_cut_offsets(times: &[time::Time], dates: &[time::Date], period: &Period
     }
 
     let mut out = Vec::new();
-    let offset = period.start.offset();
     let mut push_if_inside = |candidate: time::OffsetDateTime| {
         if candidate > period.start
             && candidate < period.end
@@ -1285,23 +1372,23 @@ fn clock_cut_offsets(times: &[time::Time], dates: &[time::Date], period: &Period
         }
     };
 
-    // A date restriction turns on at midnight of the date it names, in the same
-    // local frame. The `push_if_inside` filter does the rest, so a date outside
-    // the period costs one comparison and contributes nothing.
+    // A date restriction turns on at local midnight of the date it names. The
+    // `push_if_inside` filter does the rest, so a date outside the period costs
+    // one lookup and contributes nothing.
     for &date in dates {
-        push_if_inside(time::OffsetDateTime::new_in_offset(
-            date,
-            time::Time::MIDNIGHT,
-            offset,
-        ));
+        for candidate in zone.instants_at(date, time::Time::MIDNIGHT) {
+            push_if_inside(candidate);
+        }
     }
 
-    // Every day the period touches, in its own local calendar.
-    let last = period.end.to_offset(offset).date();
-    let mut date = period.start.date();
+    // Every day the period touches, in the tariff zone's own calendar.
+    let last = zone.local(period.end).date;
+    let mut date = zone.local(period.start).date;
     for _ in 0..MAX_DAYS {
         for &clock in times {
-            push_if_inside(time::OffsetDateTime::new_in_offset(date, clock, offset));
+            for candidate in zone.instants_at(date, clock) {
+                push_if_inside(candidate);
+            }
         }
         if date >= last {
             break;
@@ -1566,16 +1653,20 @@ fn matches_restrictions(r: &Restrictions, state: &SessionState) -> bool {
         }
     }
 
-    let date = state.at.date();
+    // Every one of these is a statement about the wall clock at the charge
+    // point, so every one of them reads the local civil value the tariff's own
+    // zone puts this instant at — never the offset the timestamp was written
+    // with. See the module documentation.
+    let date = state.local.date;
     if r.start_date.is_some_and(|from| date < from) || r.end_date.is_some_and(|to| date >= to) {
         return false;
     }
 
-    if !r.days_of_week.is_empty() && !r.days_of_week.contains(&state.at.weekday()) {
+    if !r.days_of_week.is_empty() && !r.days_of_week.contains(&state.local.weekday) {
         return false;
     }
 
-    let clock = state.at.time();
+    let clock = state.local.time;
     match (r.start_time, r.end_time) {
         (Some(from), Some(to)) if from <= to => {
             // An ordinary window inside one day.
@@ -1622,6 +1713,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             components,
         )
     }
@@ -1631,6 +1723,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements,
             min_price: None,
@@ -2872,17 +2965,13 @@ mod tests {
         assert_eq!(s.total_energy(), kwh("15"));
     }
 
-    #[test]
-    fn a_session_in_two_offsets_says_which_one_the_clock_was_read_in() {
-        // An `OffsetDateTime` knows an offset, not a time zone, so a night rate
-        // can only be judged in the offset the period carries. Every period the
-        // split produces carries one; a session assembled from a partner's
-        // timestamps need not, and then a boundary on the far side of a clock
-        // change sits an hour out.
-        let night = Tariff {
+    /// A night tariff, in the zone its wall clock is written in.
+    fn night_tariff(zone: &str) -> Tariff {
+        Tariff {
             id: "n".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: TimeZone::new(zone).unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement {
@@ -2902,56 +2991,151 @@ mod tests {
             max_price: None,
             valid_from: None,
             valid_until: None,
-        };
+        }
+    }
 
-        // Europe/Berlin springs forward at 02:00 local on 2026-03-29: the
-        // readings either side of it are stamped +01:00 and +02:00.
-        let mixed = Chargeable::new(vec![
-            Period::charging(
-                datetime!(2026-03-29 01:30 +1),
-                datetime!(2026-03-29 02:00 +1),
-                kwh("5"),
+    #[test]
+    fn one_instant_is_one_price_however_its_clock_was_spelled() {
+        // The whole reason a tariff carries a zone. These are the *same two
+        // hours* — 22:00 to midnight in Berlin — written three ways. Judged
+        // against the offset each timestamp happens to carry, the UTC spelling
+        // prices the first hour at the day rate and the session costs fifty per
+        // cent more; judged in the tariff's zone, all three agree.
+        let night = night_tariff("Europe/Berlin");
+        let spellings = [
+            (
+                datetime!(2026-01-02 21:00 +0),
+                datetime!(2026-01-02 23:00 +0),
             ),
-            Period::charging(
-                datetime!(2026-03-29 03:00 +2),
-                datetime!(2026-03-29 03:30 +2),
-                kwh("5"),
+            (
+                datetime!(2026-01-02 22:00 +1),
+                datetime!(2026-01-03 00:00 +1),
             ),
-        ])
-        .unwrap();
-        let rated = rate(&night, &mixed);
-        assert!(
-            rated
-                .notes
-                .iter()
-                .any(|n| matches!(n, RatingNote::MixedUtcOffsets { .. })),
-            "{:?}",
-            rated.notes
-        );
+            (
+                datetime!(2026-01-03 06:00 +9),
+                datetime!(2026-01-03 08:00 +9),
+            ),
+        ];
+        for (from, to) in spellings {
+            let session = Chargeable::energy_only(kwh("20"), from, to).unwrap();
+            let rated = rate(&night, &session);
+            assert_eq!(
+                rated.total().to_string(),
+                "6.00 EUR",
+                "20 kWh entirely inside the Berlin night window, stamped {from}"
+            );
+            assert_eq!(
+                rated.lines.len(),
+                1,
+                "one price, not two: {:?}",
+                rated.lines
+            );
+        }
+    }
 
-        // …and a session in one offset says nothing, because there is nothing
-        // to say.
-        let single = Chargeable::energy_only(
-            kwh("10"),
-            datetime!(2026-01-02 23:00 +1),
-            datetime!(2026-01-03 01:00 +1),
+    #[test]
+    fn the_zone_and_not_the_timestamp_decides_where_the_night_begins() {
+        // One session, one set of instants, two zones. Lisbon is an hour behind
+        // Berlin, so 21:00–23:00 UTC is 22:00–00:00 in Berlin — all night — and
+        // 21:00–23:00 in Lisbon, of which only the last hour is.
+        let session = Chargeable::energy_only(
+            kwh("20"),
+            datetime!(2026-01-02 21:00 +0),
+            datetime!(2026-01-02 23:00 +0),
         )
         .unwrap();
-        assert!(
-            !rate(&night, &single)
-                .notes
-                .iter()
-                .any(|n| matches!(n, RatingNote::MixedUtcOffsets { .. }))
+        assert_eq!(
+            rate(&night_tariff("Europe/Berlin"), &session)
+                .total()
+                .to_string(),
+            "6.00 EUR"
         );
+        assert_eq!(
+            rate(&night_tariff("Europe/Lisbon"), &session)
+                .total()
+                .to_string(),
+            // Ten kWh at the day rate, ten at the night rate.
+            "8.00 EUR"
+        );
+    }
 
-        // …and neither does a tariff that reads no clock at all.
-        let flat = Tariff::simple(
-            "f".parse().unwrap(),
-            Currency::EUR,
-            TariffKind::AdHoc,
-            vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+    #[test]
+    fn the_answer_does_not_depend_on_how_the_session_was_sliced_across_a_zone() {
+        // The same property the threshold cuts exist for, now that the cuts are
+        // placed in the zone: one session, seven granularities, one total.
+        let night = night_tariff("Europe/Berlin");
+        let from = datetime!(2026-01-02 21:00 +0);
+        let mut totals = Vec::new();
+        for slices in [1_i64, 2, 3, 4, 6, 8, 12] {
+            let minutes = 120 / slices;
+            let periods: Vec<Period> = (0..slices)
+                .map(|i| {
+                    Period::charging(
+                        from + time::Duration::minutes(i * minutes),
+                        from + time::Duration::minutes((i + 1) * minutes),
+                        kwh(&(Decimal::from(20) / Decimal::from(slices)).to_string()),
+                    )
+                })
+                .collect();
+            totals.push(rate(&night, &Chargeable::new(periods).unwrap()).total());
+        }
+        assert!(
+            totals.windows(2).all(|w| w[0] == w[1]),
+            "one session priced seven ways: {totals:?}"
         );
-        assert!(rate(&flat, &mixed).notes.is_empty());
+    }
+
+    #[test]
+    fn a_clock_change_moves_the_boundary_rather_than_the_price() {
+        // Europe/Berlin springs forward at 02:00 local on 2026-03-29, so the
+        // 06:00 end of the night window falls an hour earlier in UTC than it
+        // does on any other day: 04:00 rather than 05:00. Six hours of a
+        // constant 10 kWh/h therefore split four/two across the change, and
+        // five/one the day before — the same tariff, the same session length,
+        // a different answer, and the zone is the only thing that knows.
+        let night = night_tariff("Europe/Berlin");
+        let six_hours_from = |from: time::OffsetDateTime| {
+            rate(
+                &night,
+                &Chargeable::energy_only(kwh("60"), from, from + time::Duration::hours(6)).unwrap(),
+            )
+        };
+
+        // 40 kWh at 0.30 and 20 at 0.50.
+        let across = six_hours_from(datetime!(2026-03-29 00:00 +0));
+        assert_eq!(across.total().to_string(), "22.00 EUR");
+        assert_eq!(across.lines.len(), 2, "{:?}", across.lines);
+
+        // The ordinary day before: 50 kWh at 0.30 and 10 at 0.50.
+        let ordinary = six_hours_from(datetime!(2026-03-28 00:00 +0));
+        assert_eq!(ordinary.total().to_string(), "20.00 EUR");
+    }
+
+    #[test]
+    fn the_hour_that_happens_twice_is_cut_twice() {
+        // Europe/Berlin falls back at 03:00 local on 2026-10-25, so the wall
+        // clock passes 02:30 twice. A tariff whose night window *ends* at 02:30
+        // therefore ends twice: the day rate applies from the first crossing,
+        // and the second crossing is inside the repeated hour.
+        let mut tariff = night_tariff("Europe/Berlin");
+        tariff.elements[0].restrictions.end_time = Some(time::macros::time!(02:30));
+        // 00:00 UTC (02:00 local, summer time) to 02:00 UTC (03:00 local).
+        // Night until 00:30 UTC, day from there.
+        let session = Chargeable::energy_only(
+            kwh("20"),
+            datetime!(2026-10-25 00:00 +0),
+            datetime!(2026-10-25 02:00 +0),
+        )
+        .unwrap();
+        let rated = rate(&tariff, &session);
+        let cuts: Vec<Decimal> = rated.lines.iter().map(|l| l.unit_price).collect();
+        assert!(
+            cuts.contains(&dec("0.30")) && cuts.contains(&dec("0.50")),
+            "the repeated hour has to be cut at both crossings: {:?}",
+            rated.lines
+        );
+        // 5 kWh night, 15 kWh day.
+        assert_eq!(rated.total().to_string(), "9.00 EUR");
     }
 
     #[test]
@@ -2965,6 +3149,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::ParkingTime, dec("6.00"))],
         );
         let session = Chargeable::new(vec![Period::parked(at(0), at(25))]).unwrap();
@@ -2990,6 +3175,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::Contract,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement {
@@ -3028,6 +3214,74 @@ mod tests {
             rated.base_quantity_for(Dimension::Energy),
             dec("15"),
             "the tiers divide the energy, they do not change it"
+        );
+    }
+
+    #[test]
+    fn a_power_restriction_makes_the_total_depend_on_the_slicing_and_says_so() {
+        // The one restriction a period carries no information to cut on.
+        // Average power is `energy / duration` over whichever window is asked
+        // about, so one physical hour measured two ways gives two readings —
+        // and the coarse one does not contain the fine one. Neither figure is
+        // an arithmetic error; the finer is the better measurement, and the
+        // note is what says the total is a function of the resolution.
+        let mut t = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.60"))]);
+        t.elements.insert(
+            0,
+            TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.30"))],
+                restrictions: Restrictions {
+                    max_power_kw: Some(dec("50")),
+                    ..Restrictions::default()
+                },
+            },
+        );
+
+        // 60 kWh in an hour: 60 kW average, so the whole hour is above the bound.
+        let one = Chargeable::new(vec![Period::charging(at(0), at(60), kwh("60"))]).unwrap();
+        // The same hour and the same energy, as two halves averaging 110 and 10.
+        let two = Chargeable::new(vec![
+            Period::charging(at(0), at(30), kwh("55")),
+            Period::charging(at(30), at(60), kwh("5")),
+        ])
+        .unwrap();
+
+        let coarse = rate(&t, &one);
+        let fine = rate(&t, &two);
+        assert_eq!(coarse.total().to_string(), "36.00 EUR");
+        assert_eq!(fine.total().to_string(), "34.50 EUR");
+
+        // Which is the point: both are priced, and both say the figure is not a
+        // function of the session alone.
+        for rated in [&coarse, &fine] {
+            assert!(
+                rated.notes.iter().any(|n| matches!(
+                    n,
+                    RatingNote::PowerJudgedPerPeriod {
+                        index: 0,
+                        max_kw: Some(_),
+                        ..
+                    }
+                )),
+                "{:?}",
+                rated.notes
+            );
+        }
+        assert!(
+            coarse
+                .reasons()
+                .any(|r| r.contains("rate the periods the meter produced"))
+        );
+
+        // A tariff with no power restriction says nothing, because there is
+        // nothing to say.
+        assert!(
+            rate(
+                &ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]),
+                &one
+            )
+            .notes
+            .is_empty()
         );
     }
 }

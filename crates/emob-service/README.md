@@ -130,6 +130,27 @@ receiver de-duplicate on the signature. The freshness tolerance is the caller's:
 five minutes is right for an interactive callback and wrong for an overnight
 batch, and a library that picked one would be picking it for both.
 
+### …and the secret's encoding is stated, never inferred
+
+Standard Webhooks writes a secret as `whsec_<base64>`, and some deployments
+configure a passphrase instead. A constructor that stripped the prefix, tried
+base64 and fell back to the raw bytes looks accommodating and is **ambiguous for
+exactly the secrets that look like base64**: `"mysecret"` is eight ASCII bytes
+*and* a valid base64 string, so it silently becomes six arbitrary ones, while
+`"hunter2"` is not and stays as it is.
+
+Nothing about a configured value tells an operator which they will get, and a
+sender using the literal bytes and a receiver decoding them disagree on every
+delivery — with `SignatureMismatch` as the only diagnostic, which points at the
+payload rather than at the key.
+
+```rust
+Secret::standard("whsec_bXlzZWNyZXQ=")?;   // the specification's spelling
+Secret::raw("bXlzZWNyZXQ=");                // the bytes as written
+// …and the same string is a different key under each, which is why
+// neither is a default.
+```
+
 ## Why this is not `mako-service`
 
 Extracting it was considered and rejected, for the reason `hems-service` gives

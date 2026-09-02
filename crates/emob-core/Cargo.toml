@@ -12,6 +12,7 @@ repository.workspace   = true
 rust-version.workspace = true
 
 [dependencies]
+jiff         = { workspace = true }
 rust_decimal = { workspace = true }
 serde        = { workspace = true, optional = true }
 thiserror    = { workspace = true }

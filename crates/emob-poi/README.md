@@ -43,7 +43,7 @@ let (rate, notes) = emob_poi::rate::publish(&tariff, "rate-1");
 ## What the profile cannot say, and is told to say anyway
 
 `[DATEX-II-Profil Tab. A.116]` offers six price types: `basePrice`, `flatRate`,
-`free`, `other`, `pricePerKWh`, `pricePerMinute`. Three things follow, and all
+`free`, `other`, `pricePerKWh`, `pricePerMinute`. Four things follow, and all
 of them are reported rather than papered over.
 
 **There is no per-hour price type.** A tariff is written and displayed per hour;
@@ -68,6 +68,22 @@ unit price is the one a consumer cannot qualify — and reading a net minimum as
 gross is out by the whole VAT rate, on the number a driver comparing two
 operators looks at first. The fee is published in the basis the tariff states,
 and a note says which that is.
+
+
+**And the zone a daily window is read in is typed as a fixed offset.**
+`FacilityLocation.timeZone` exists, the Mobilithek's own reference instance
+populates it, and the profile types it as a string that "identifies a time zone
+by specifying the difference to UTC in hours and minutes, as defined in
+ISO 8601" — so the reference instance writes `"+01:00"` for a site in Aachen.
+An offset cannot express a zone that observes summer time: that value is wrong
+for that site from the last Sunday in March to the last Sunday in October, and
+it is the field a consumer would read a published `22:00` night rate against.
+
+There is no honest fixed value, so the table publishes the offset **in force at
+the instant of publication** — the one reading that is true of the document when
+it is issued — and `RateNote::DailyWindowHasOnlyAnOffset` names the real zone
+beside it. This is the first of the four gaps that the profile gets *wrong*
+rather than merely omits.
 
 ## The register is upstream of the feed
 

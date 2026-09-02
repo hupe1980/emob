@@ -27,7 +27,7 @@
 //! element per dimension after the restricted ones. See
 //! [`crate::rating::matching_component`].
 
-use emob_core::{Currency, TariffId};
+use emob_core::{Currency, TariffId, TimeZone};
 use rust_decimal::Decimal;
 
 /// What a price component charges for.
@@ -190,7 +190,8 @@ impl PriceComponent {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Restrictions {
-    /// Applies only from this time of day, in the offset the session carries.
+    /// Applies only from this time of day, on the wall clock of
+    /// [`Tariff::time_zone`].
     #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::clock::option"))]
     pub start_time: Option<time::Time>,
     /// Applies only until this time of day.
@@ -413,6 +414,24 @@ pub struct Tariff {
     pub currency: Currency,
     /// Who it is for.
     pub kind: TariffKind,
+    /// The zone this tariff's **wall-clock** restrictions are read in.
+    ///
+    /// [`Restrictions::start_time`], [`Restrictions::end_time`],
+    /// [`Restrictions::start_date`], [`Restrictions::end_date`] and
+    /// [`Restrictions::days_of_week`] are statements about local civil time at
+    /// the charge point `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`,
+    /// and OCPI carries the zone they are read in on the Location, where it is
+    /// mandatory `[OCPI 2.3.0 §mod_locations_location_object]`. A tariff that
+    /// travels without it is a set of prices whose conditions cannot be
+    /// evaluated, so it travels with it here.
+    ///
+    /// **Not** the offset the session's timestamps happen to carry. An offset
+    /// is what a clock was written with; a zone is the rule that decides the
+    /// offset, including on the two days a year it changes. Reading "0.30 from
+    /// 22:00" against a UTC timestamp prices a German night rate from 23:00 —
+    /// the same physical session at a different price, decided by nothing but
+    /// how its clock was spelled. See [`emob_core::TimeZone`].
+    pub time_zone: TimeZone,
     /// Whether the prices include tax.
     pub tax_included: TaxIncluded,
     /// The elements, in the order they are tried — **per dimension**
@@ -450,17 +469,25 @@ pub struct Tariff {
 
 impl Tariff {
     /// A tariff with one unrestricted element.
+    ///
+    /// The zone is an argument rather than a default, because a tariff whose
+    /// wall-clock restrictions are read in a zone nobody chose is the failure
+    /// [`Tariff::time_zone`] exists to remove. [`TimeZone::utc`] is the honest
+    /// answer for a tariff that really is written in UTC, and for one with no
+    /// wall-clock restrictions at all it changes nothing.
     #[must_use]
     pub fn simple(
         id: TariffId,
         currency: Currency,
         kind: TariffKind,
+        time_zone: TimeZone,
         components: Vec<PriceComponent>,
     ) -> Self {
         Self {
             id,
             currency,
             kind,
+            time_zone,
             tax_included: TaxIncluded::Yes,
             elements: vec![TariffElement::unrestricted(components)],
             min_price: None,
@@ -648,6 +675,7 @@ mod tests {
             "t1".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
         );
         assert!(energy.prices_energy());
@@ -656,6 +684,7 @@ mod tests {
             "t2".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Time, dec("0.10"))],
         );
         assert!(!by_the_minute.prices_energy());
@@ -667,6 +696,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement::unrestricted(vec![
@@ -696,6 +726,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
         );
         assert_eq!(unstated.vat_basis(), VatBasis::Unstated);
@@ -709,6 +740,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
                 PriceComponent::new(Dimension::Flat, dec("0.50")).with_vat(dec("19")),
@@ -721,6 +753,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
                 PriceComponent::new(Dimension::Flat, dec("0.50")).with_vat(dec("7")),
@@ -740,6 +773,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
                 PriceComponent::new(Dimension::Flat, dec("0.50")),

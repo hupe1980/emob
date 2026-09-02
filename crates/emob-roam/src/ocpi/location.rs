@@ -212,6 +212,7 @@ mod tests {
                 city: "Berlin".to_owned(),
                 country_code: "DE".to_owned(),
             },
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             stations: Vec::new(),
         }
     }

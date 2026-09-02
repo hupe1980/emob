@@ -34,9 +34,13 @@
 //! off the system clock, and a collection file that differs between two runs of
 //! one job is a file no bank reconciles.
 //!
-//! **It names no accounts.** [`postings`] produces movements addressed by
-//! [`postings::Role`] and a caller maps them onto its own chart. SKR03 and SKR04
-//! disagree about the numbers and neither of them is a domain crate's business.
+//! **It names no accounts, and it links no ledger.** [`postings`] produces
+//! movements addressed by [`postings::Role`], balanced, and a service maps them
+//! onto its own chart. SKR03 and SKR04 disagree about the numbers, and posting
+//! into a journal needs a journal: accounts, a calendar, a policy, a database.
+//! None of those can live in a crate that reads no clock — and a bookkeeping
+//! engine would bring one in through the door, since a v7 identifier is
+//! generated from `SystemTime::now()`. See [`postings`].
 //!
 //! # A month, end to end
 //!
@@ -107,4 +111,4 @@ pub use invoice::{
 };
 pub use payment::{Collection, Creditor, Mandate, PaymentError};
 pub use postings::{Posting, Postings, Role, Side};
-pub use tax::{TaxStatus, TaxTreatment, VatCategory};
+pub use tax::{TaxStatus, TaxTreatment, VatCategory, VatRates};

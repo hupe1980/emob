@@ -62,72 +62,41 @@ use rust_decimal::Decimal;
 
 use crate::error::BillingError;
 
-/// A VAT category from UNCL 5305, as EN 16931 uses it.
+/// A VAT category from UNCL 5305 — **`en16931`'s own type**, re-exported.
 ///
-/// Five of the ten, which are the five a European charging platform can reach.
-/// The rest — the Canary Islands' IGIC, Ceuta and Melilla's IPSI, Italy's split
-/// payment, and the zero rate that only a handful of member states operate — are
-/// deliberately absent: an enum arm nothing can select is a code path nothing
-/// tests, and a platform that grows into one of them adds it with the rule that
-/// selects it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[non_exhaustive]
-pub enum VatCategory {
-    /// `S` — standard rated. The tax is charged and shown.
-    Standard,
-    /// `AE` — reverse charge: the recipient accounts for the tax.
-    ///
-    /// The rate on the breakdown is zero and both parties' VAT identifiers are
-    /// mandatory, which is `BR-AE-*` in EN 16931 and `[UStG §14a]` in German
-    /// law saying the same thing twice.
-    ReverseCharge,
-    /// `K` — VAT-exempt intra-Community supply of goods.
-    IntraCommunity,
-    /// `G` — free export item, VAT not charged.
-    Export,
-    /// `E` — exempt with a reason.
-    Exempt,
-}
+/// # Why the codes are not this crate's
+///
+/// `en16931::codes::VatCategory` carries all ten codes with four predicates
+/// generated from the CEN validation artefacts, and two of them decide whether a
+/// document is valid at all:
+///
+/// | | `carries_tax` | `requires_exemption_reason` | `forbids_exemption_reason` | `states_rate` |
+/// |---|---|---|---|---|
+/// | `S` Standard | ✓ | | ✓ | ✓ |
+/// | `AE` Reverse charge | | ✓ | | ✓ |
+/// | `O` Outside scope | | ✓ | | **✗** |
+///
+/// `forbids_exemption_reason` is a different question from "does not require
+/// one" — `S` *forbids* a reason. And `states_rate` is false for exactly one
+/// category, `O`, which is what `[UStG §3g]` produces for a reseller outside the
+/// Union: `BR-O-05` refuses a line carrying BT-152 at all, and a rate of zero is
+/// carrying it.
+///
+/// So the codes and their rules come from the artefacts, and this crate states
+/// only what `en16931` cannot: which category two *parties* produce, in
+/// [`TaxTreatment::decide`]. The tax law is domain knowledge; the code list is a
+/// table (D183).
+pub use en16931::codes::VatCategory;
 
-impl VatCategory {
-    /// The UNCL 5305 code as it is written on an invoice.
-    #[must_use]
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::Standard => "S",
-            Self::ReverseCharge => "AE",
-            Self::IntraCommunity => "K",
-            Self::Export => "G",
-            Self::Exempt => "E",
-        }
-    }
-
-    /// Whether this category levies tax on this invoice.
-    ///
-    /// False for all four of the others, and that is the point: under a reverse
-    /// charge the tax exists and is *somebody else's* to declare, so the
-    /// invoice's own tax amount is zero and its total is its net.
-    #[must_use]
-    pub const fn levies_tax(self) -> bool {
-        matches!(self, Self::Standard)
-    }
-
-    /// Whether EN 16931's category rules require an exemption reason (BT-120 or
-    /// BT-121) for it.
-    #[must_use]
-    pub const fn needs_exemption_reason(self) -> bool {
-        matches!(
-            self,
-            Self::ReverseCharge | Self::IntraCommunity | Self::Export | Self::Exempt
-        )
-    }
-}
-
-impl core::fmt::Display for VatCategory {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.code())
-    }
+/// Whether this category levies tax on this invoice — `en16931`'s
+/// `carries_tax`, under the name the rest of this crate reads it by.
+///
+/// False for every category but `S`, `L`, `M` and `B`, and that is the point:
+/// under a reverse charge the tax exists and is *somebody else's* to declare, so
+/// the invoice's own tax amount is zero and its total is its net.
+#[must_use]
+pub const fn levies_tax(category: VatCategory) -> bool {
+    category.carries_tax()
 }
 
 /// What a counterparty is, for the purpose of deciding the tax.
@@ -202,6 +171,73 @@ impl TaxStatus {
     }
 }
 
+/// The standard VAT rates in force, by country, at the moment an invoice is
+/// issued.
+///
+/// # Why a table and not one number
+///
+/// [`TaxTreatment::decide`] works out **where** a supply is taxed before it
+/// works out at what rate, and the two are not always the same country. A German
+/// operator selling sessions from charge points in France to a German e-mobility
+/// provider is taxed in Germany, because `[UStG §3g]` moves the place of supply
+/// to where the *reseller* is established — so the invoice needs the German rate
+/// even though every kilowatt-hour on it was drawn in France.
+///
+/// A single `standard_rate` argument cannot express that: it is the rate of one
+/// country, and the branch that moves the place of supply moves it to a
+/// different one. Handing that one figure through produces an invoice whose
+/// stated place of supply and stated rate disagree — 20 % French VAT under a
+/// German place of supply — which is a document that reconciles against nothing
+/// and is wrong by the difference between two rates.
+///
+/// So the caller states the rates it knows, each with its country, and
+/// [`TaxTreatment::decide`] looks up the one that belongs to the place of supply
+/// it derived. Rates are arguments rather than a lookup for the reason every
+/// instant in this workspace is: rates move, and an invoice replayed two years
+/// later has to reproduce the rate that was in force rather than today's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct VatRates(Vec<(String, Decimal)>);
+
+impl VatRates {
+    /// No rates at all — enough for an invoice that levies no tax.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The standard rate in force in one country.
+    ///
+    /// Stating a country twice replaces the earlier figure, so a caller
+    /// assembling a table from several sources cannot end up with two answers
+    /// for one place of supply.
+    #[must_use]
+    pub fn at(mut self, country: impl AsRef<str>, rate: Decimal) -> Self {
+        let country = country.as_ref().to_ascii_uppercase();
+        match self.0.iter_mut().find(|(c, _)| *c == country) {
+            Some(entry) => entry.1 = rate,
+            None => self.0.push((country, rate)),
+        }
+        self
+    }
+
+    /// The rate for a country, when the caller stated one.
+    #[must_use]
+    pub fn rate_for(&self, country: &str) -> Option<Decimal> {
+        let country = country.to_ascii_uppercase();
+        self.0
+            .iter()
+            .find(|(c, _)| *c == country)
+            .map(|(_, rate)| *rate)
+    }
+
+    /// The countries a rate was stated for, for a diagnostic that has to say
+    /// what the caller did supply.
+    fn countries(&self) -> Vec<&str> {
+        self.0.iter().map(|(c, _)| c.as_str()).collect()
+    }
+}
+
 /// The tax treatment of one invoice, and why.
 ///
 /// Carried on the invoice rather than recomputed by each consumer, so the
@@ -225,14 +261,14 @@ pub struct TaxTreatment {
 }
 
 impl TaxTreatment {
-    /// Decide the treatment from the two parties and the rate that would apply
-    /// at the place of supply.
+    /// Decide the treatment from the two parties, where the electricity was
+    /// drawn, and the standard rates in force.
     ///
-    /// `standard_rate` is the rate of the country the **charge point** stands
-    /// in, because that is where an ordinary supply of electricity is taxed. It
-    /// is an argument rather than a table: rates move, a replayed invoice has to
-    /// reproduce the rate that was in force, and a lookup would silently
-    /// re-rate a two-year-old document.
+    /// `point_country` is where the charge point stands, which is where an
+    /// ordinary supply of electricity is taxed. `rates` is consulted only for
+    /// the country this function concludes the supply is taxed in — which is
+    /// `point_country` for every supply but the one `[UStG §3g]` moves. See
+    /// [`VatRates`].
     ///
     /// # Errors
     ///
@@ -240,11 +276,17 @@ impl TaxTreatment {
     /// a reverse charge with no VAT identifier on one side of it, above all,
     /// because EN 16931's `BR-AE-*` refuses that invoice and so does the
     /// Finanzamt.
+    ///
+    /// [`BillingError::NoVatRate`] where the supply is standard-rated and
+    /// `rates` states no rate for the place of supply. Refused rather than
+    /// defaulted: a rate nobody supplied is not zero, and an invoice that
+    /// silently under-declares its own VAT is the failure this module exists to
+    /// prevent.
     pub fn decide(
         seller: &TaxStatus,
         buyer: &TaxStatus,
         point_country: &str,
-        standard_rate: Decimal,
+        rates: &VatRates,
     ) -> Result<Self, BillingError> {
         let point = point_country.to_ascii_uppercase();
         let buyer_country = buyer.country.to_ascii_uppercase();
@@ -257,22 +299,28 @@ impl TaxTreatment {
             if buyer_country == seller_country {
                 // A domestic reseller. The place of supply moved to a country
                 // the seller is already registered in, so nothing is shifted —
-                // it is an ordinary domestic supply.
+                // it is an ordinary domestic supply, taxed at **that** country's
+                // rate and not at the rate where the point stands. The two are
+                // the same for an operator that only operates at home, and
+                // different for one that does not.
                 return Ok(Self {
+                    rate: standard_rate(rates, &buyer_country, &point)?,
                     category: VatCategory::Standard,
-                    rate: standard_rate,
                     place_of_supply: buyer_country,
                     reason: None,
                 });
             }
             if !buyer.in_the_union() {
+                // The place of supply is outside the Union, so no member
+                // state's VAT arises at all: outside scope, not a zero-rated
+                // export of goods. See `VatCategory::OutOfScope`.
                 return Ok(Self {
-                    category: VatCategory::Export,
+                    category: VatCategory::OutOfScope,
                     rate: Decimal::ZERO,
                     place_of_supply: buyer_country.clone(),
                     reason: Some(format!(
                         "Place of supply {buyer_country} under [UStG §3g] (electricity supplied \
-                         to a reseller); outside the Union, VAT not charged"
+                         to a reseller established outside the Union): outside the scope of EU VAT"
                     )),
                 });
             }
@@ -313,8 +361,8 @@ impl TaxTreatment {
         // move it, and neither does a fleet's VAT registration: only a reseller
         // moves the place of supply, and this party is not one.
         Ok(Self {
+            rate: standard_rate(rates, &point, &point)?,
             category: VatCategory::Standard,
-            rate: standard_rate,
             place_of_supply: point,
             reason: None,
         })
@@ -344,6 +392,22 @@ impl TaxTreatment {
     }
 }
 
+/// The standard rate at a place of supply, or a refusal that says what was
+/// asked for and what was supplied.
+fn standard_rate(
+    rates: &VatRates,
+    place_of_supply: &str,
+    point_country: &str,
+) -> Result<Decimal, BillingError> {
+    rates
+        .rate_for(place_of_supply)
+        .ok_or_else(|| BillingError::NoVatRate {
+            place_of_supply: place_of_supply.to_owned(),
+            point_country: point_country.to_owned(),
+            stated_for: rates.countries().join(", "),
+        })
+}
+
 fn described(identifier: Option<&str>) -> String {
     identifier.map_or_else(|| "has none".to_owned(), |id| format!("has {id}"))
 }
@@ -366,7 +430,13 @@ mod tests {
         // The ordinary ad-hoc leg. The driver's own country never enters into
         // it: electricity is consumed where it is drawn.
         let dutch_driver = TaxStatus::consumer("NL");
-        let t = TaxTreatment::decide(&cpo(), &dutch_driver, "DE", dec("19")).unwrap();
+        let t = TaxTreatment::decide(
+            &cpo(),
+            &dutch_driver,
+            "DE",
+            &VatRates::new().at("DE", dec("19")),
+        )
+        .unwrap();
         assert_eq!(t.category, VatCategory::Standard);
         assert_eq!(t.rate, dec("19"));
         assert_eq!(t.place_of_supply, "DE");
@@ -379,7 +449,8 @@ mod tests {
         // A fleet with a French VAT identifier charging in Germany consumes what
         // it buys, so the supply stays German.
         let fleet = TaxStatus::business("FR", "FR12345678901");
-        let t = TaxTreatment::decide(&cpo(), &fleet, "DE", dec("19")).unwrap();
+        let t = TaxTreatment::decide(&cpo(), &fleet, "DE", &VatRates::new().at("DE", dec("19")))
+            .unwrap();
         assert_eq!(t.category, VatCategory::Standard);
         assert_eq!(t.place_of_supply, "DE");
     }
@@ -389,7 +460,8 @@ mod tests {
         // The roaming leg, and the one every platform gets wrong by putting the
         // charge point's rate on it.
         let emsp = TaxStatus::reseller("FR", "FR12345678901");
-        let t = TaxTreatment::decide(&cpo(), &emsp, "DE", dec("19")).unwrap();
+        let t = TaxTreatment::decide(&cpo(), &emsp, "DE", &VatRates::new().at("DE", dec("19")))
+            .unwrap();
         assert_eq!(t.category, VatCategory::ReverseCharge);
         assert_eq!(
             t.rate,
@@ -409,7 +481,13 @@ mod tests {
         // which here is the country the seller is already in. Nothing shifts,
         // and treating it as a reverse charge would drop tax that is due.
         let german_emsp = TaxStatus::reseller("DE", "DE987654321");
-        let t = TaxTreatment::decide(&cpo(), &german_emsp, "DE", dec("19")).unwrap();
+        let t = TaxTreatment::decide(
+            &cpo(),
+            &german_emsp,
+            "DE",
+            &VatRates::new().at("DE", dec("19")),
+        )
+        .unwrap();
         assert_eq!(t.category, VatCategory::Standard);
         assert_eq!(t.rate, dec("19"));
         assert_eq!(t.place_of_supply, "DE");
@@ -425,7 +503,13 @@ mod tests {
             vat_identifier: None,
             reseller: true,
         };
-        let err = TaxTreatment::decide(&cpo(), &anonymous, "DE", dec("19")).unwrap_err();
+        let err = TaxTreatment::decide(
+            &cpo(),
+            &anonymous,
+            "DE",
+            &VatRates::new().at("DE", dec("19")),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("has none"), "{err}");
         assert!(err.to_string().contains("[UStG §3g]"), "{err}");
     }
@@ -433,10 +517,15 @@ mod tests {
     #[test]
     fn a_reseller_outside_the_union_takes_the_supply_with_it() {
         let swiss = TaxStatus::reseller("CH", "CHE-123.456.789");
-        let t = TaxTreatment::decide(&cpo(), &swiss, "DE", dec("19")).unwrap();
-        assert_eq!(t.category, VatCategory::Export);
+        let t = TaxTreatment::decide(&cpo(), &swiss, "DE", &VatRates::new().at("DE", dec("19")))
+            .unwrap();
+        // Outside scope, not a zero-rated export: the place of supply left the
+        // Union, so no member state's VAT arises at all.
+        assert_eq!(t.category, VatCategory::OutOfScope);
+        assert_eq!(t.category.code(), "O");
         assert_eq!(t.rate, Decimal::ZERO);
-        assert!(t.reason.unwrap().contains("outside the Union"));
+        assert_eq!(t.place_of_supply, "CH");
+        assert!(t.reason.unwrap().contains("outside the scope"));
     }
 
     #[test]
@@ -449,18 +538,86 @@ mod tests {
     }
 
     #[test]
-    fn only_the_standard_rate_levies_tax_and_the_rest_owe_a_reason() {
-        assert!(VatCategory::Standard.levies_tax());
-        assert!(!VatCategory::Standard.needs_exemption_reason());
+    fn the_category_predicates_are_en16931s_and_not_a_reading_of_them() {
+        // The four this crate reaches for, and the two it used to have. `S`
+        // *forbids* an exemption reason where `AE` and `O` require one, which is
+        // a distinction the hand-rolled enum could not express — and `O` states
+        // no rate at all, which is the one that made a Swiss settlement invalid.
+        assert!(VatCategory::Standard.carries_tax());
+        assert!(VatCategory::Standard.forbids_exemption_reason());
+        assert!(VatCategory::Standard.states_rate());
+
         for category in [
             VatCategory::ReverseCharge,
-            VatCategory::IntraCommunity,
-            VatCategory::Export,
+            VatCategory::OutOfScope,
             VatCategory::Exempt,
         ] {
-            assert!(!category.levies_tax(), "{category}");
-            assert!(category.needs_exemption_reason(), "{category}");
+            assert!(!category.carries_tax(), "{}", category.code());
+            assert!(category.requires_exemption_reason(), "{}", category.code());
         }
+
+        // The only category in the whole of UNCL 5305 that states no rate.
+        assert!(!VatCategory::OutOfScope.states_rate());
+        for category in VatCategory::ALL {
+            assert_eq!(
+                category.states_rate(),
+                category != VatCategory::OutOfScope,
+                "{}",
+                category.code()
+            );
+        }
+
         assert_eq!(VatCategory::ReverseCharge.code(), "AE");
+        assert_eq!(VatCategory::OutOfScope.code(), "O");
+    }
+
+    #[test]
+    fn the_rate_belongs_to_the_place_of_supply_and_not_to_the_charge_point() {
+        // A German operator running points in France, selling to a German
+        // e-mobility provider. `[UStG §3g]` taxes that supply in Germany
+        // because that is where the reseller is established, so the invoice
+        // carries 19 % — even though every kilowatt-hour on it was drawn under
+        // a 20 % regime.
+        let german_emsp = TaxStatus::reseller("DE", "DE811111111");
+        let rates = VatRates::new().at("FR", dec("20")).at("DE", dec("19"));
+        let t = TaxTreatment::decide(&cpo(), &german_emsp, "FR", &rates).unwrap();
+        assert_eq!(t.place_of_supply, "DE");
+        assert_eq!(
+            t.rate,
+            dec("19"),
+            "the rate has to match the place of supply"
+        );
+
+        // …and the ad-hoc leg at the same points is taxed where they stand.
+        let driver = TaxStatus::consumer("DE");
+        let t = TaxTreatment::decide(&cpo(), &driver, "FR", &rates).unwrap();
+        assert_eq!(t.place_of_supply, "FR");
+        assert_eq!(t.rate, dec("20"));
+    }
+
+    #[test]
+    fn a_standard_rated_supply_with_no_rate_for_its_place_of_supply_is_refused() {
+        // The failure the table exists to make visible: the caller stated the
+        // rate where the points stand and the supply is taxed somewhere else.
+        let german_emsp = TaxStatus::reseller("DE", "DE811111111");
+        let err = TaxTreatment::decide(
+            &cpo(),
+            &german_emsp,
+            "FR",
+            &VatRates::new().at("FR", dec("20")),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("taxed in DE"), "{message}");
+        assert!(message.contains("stand in FR"), "{message}");
+        assert!(message.contains("FR"), "{message}");
+    }
+
+    #[test]
+    fn stating_a_country_twice_leaves_one_answer() {
+        let rates = VatRates::new().at("DE", dec("16")).at("de", dec("19"));
+        assert_eq!(rates.rate_for("DE"), Some(dec("19")));
+        assert_eq!(rates.rate_for("de"), Some(dec("19")));
+        assert_eq!(rates.rate_for("FR"), None);
     }
 }

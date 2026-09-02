@@ -15,13 +15,13 @@
 
 use emob_cdr::{CdrBuilder, EvidenceRef, validate};
 use emob_core::{Currency, Direction, PartyId};
-use emob_eichrecht::ocmf::{KeyType, PublicKey};
 use emob_eichrecht::registry::{ComponentRef, KeyRegistry, RegisteredKey};
 use emob_eichrecht::{Evidence, transparency};
 use emob_ocpp::fixtures::{OCA_1_6_SAMPLED_VALUE, OCA_KEY_HEX};
 use emob_ocpp::{SignedMeterValue, SignedReading, Transaction, TransactionEvent};
 use emob_session::{Authorization, EndReason};
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+use ocmf::{Curve, PublicKey};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use time::macros::datetime;
@@ -48,7 +48,7 @@ fn registry() -> KeyRegistry {
                 serial: "1DZG0028225179".into(),
             },
             RegisteredKey::unbounded(
-                PublicKey::from_hex(KeyType::Secp256k1, OCA_KEY_HEX).unwrap(),
+                PublicKey::from_text(OCA_KEY_HEX, Some(Curve::Secp256k1)).unwrap(),
                 "type approval — DZG GSH01.1K2L",
             ),
         )
@@ -81,11 +81,16 @@ fn a_real_ocpp_message_reaches_a_settleable_priced_record() {
 
     // 1. The signed records came out of the transport intact, and verify
     //    against the registry — not against the key the station sent.
-    let evidence = Evidence::assemble(&assembled.records, &registry(), started());
+    let borrowed: Vec<ocmf::Record<'_>> = assembled
+        .records
+        .iter()
+        .filter_map(|r| r.record().ok())
+        .collect();
+    let evidence = Evidence::assemble(&borrowed, &registry(), started());
     assert!(
         evidence.problems.iter().all(|p| {
             matches!(p, emob_eichrecht::EvidenceProblem::Chain(f)
-                if matches!(f, emob_eichrecht::ChainFinding::ClockNotBillable { .. }))
+                if matches!(f, emob_eichrecht::ChainFinding::Sequence(ocmf::session::Finding::ClockNotSynchronised { .. })))
         }),
         "{:?}",
         evidence.reasons().collect::<Vec<_>>()
@@ -112,6 +117,7 @@ fn a_real_ocpp_message_reaches_a_settleable_priced_record() {
         "ad-hoc".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![
             PriceComponent::new(Dimension::Energy, Decimal::from_str("0.49").unwrap())
                 .with_vat(Decimal::from(19)),
@@ -132,12 +138,13 @@ fn a_real_ocpp_message_reaches_a_settleable_priced_record() {
 
     // 5. And the driver gets a file their own verifier reads, holding the
     //    record the station signed — byte for byte, through the whole seam.
-    let xml = transparency::to_xml(&evidence);
+    let xml = transparency::to_xml(&evidence).unwrap();
     let back = transparency::from_xml(&xml).unwrap();
-    assert_eq!(back.len(), 1);
+    assert_eq!(back.entries.len(), 1);
     assert_eq!(
-        back[0].record.signed_bytes(),
-        assembled.records[0].signed_bytes()
+        back.entries[0].signed_data.as_bytes(),
+        assembled.records[0].as_str().as_bytes(),
+        "the record the station signed, byte for byte, through the whole seam"
     );
 }
 
@@ -152,12 +159,18 @@ fn a_per_minute_tariff_on_this_session_is_refused_by_name() {
     // to end: the gate asks what the record **bills**, and an occupancy fee
     // nobody was charged is not a duration this record rests on.
     let assembled = oca_transaction().assemble(Direction::Import).unwrap();
-    let evidence = Evidence::assemble(&assembled.records, &registry(), started());
+    let borrowed: Vec<ocmf::Record<'_>> = assembled
+        .records
+        .iter()
+        .filter_map(|r| r.record().ok())
+        .collect();
+    let evidence = Evidence::assemble(&borrowed, &registry(), started());
 
     let occupancy = Tariff::simple(
         "ad-hoc".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![
             PriceComponent::new(Dimension::Energy, Decimal::from_str("0.49").unwrap()),
             PriceComponent::new(Dimension::Time, Decimal::from_str("6.00").unwrap()),
@@ -207,7 +220,12 @@ fn a_tampered_record_from_the_same_transport_reaches_no_price() {
     match transaction.assemble(Direction::Import) {
         Err(_) => {}
         Ok(assembled) => {
-            let evidence = Evidence::assemble(&assembled.records, &registry(), started());
+            let borrowed: Vec<ocmf::Record<'_>> = assembled
+                .records
+                .iter()
+                .filter_map(|r| r.record().ok())
+                .collect();
+            let evidence = Evidence::assemble(&borrowed, &registry(), started());
             assert_eq!(evidence.billable_energy(), None);
         }
     }

@@ -15,7 +15,7 @@
 //!
 //! ```
 //! use emob_tariff::{Chargeable, Dimension, PriceComponent, Tariff, TariffKind, describe, rate};
-//! use emob_core::{Currency, Energy};
+//! use emob_core::{Currency, Energy, TimeZone};
 //! # use rust_decimal::Decimal;
 //! # use std::str::FromStr;
 //! # use time::macros::datetime;
@@ -25,6 +25,7 @@
 //!     "ad-hoc".parse()?,
 //!     Currency::EUR,
 //!     TariffKind::AdHoc,
+//!     TimeZone::new("Europe/Berlin")?,
 //!     vec![
 //!         PriceComponent::new(Dimension::Flat, dec("0.50")),
 //!         PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),

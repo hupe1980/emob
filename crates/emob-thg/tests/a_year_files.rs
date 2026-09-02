@@ -11,9 +11,8 @@ use emob_core::station::{
     Accessibility, ChargePointProfile, QuotaPosture, RegisterPublication, Registration,
 };
 use emob_core::{Currency, Direction, Energy, PartyId};
-use emob_eichrecht::ocmf::KeyType;
 use emob_eichrecht::registry::{ComponentRef, RegisteredKey};
-use emob_eichrecht::{Evidence, KeyRegistry, PublicKey, ocmf};
+use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
@@ -22,6 +21,8 @@ use emob_thg::{
     Attribution, ClaimBuilder, DirectSupply, DriveEfficiency, EmissionsBasis, RenewableSource,
     ThgError,
 };
+use ocmf::Curve;
+use ocmf::PublicKey;
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::{DerSignature, SigningKey};
 use rust_decimal::Decimal;
@@ -80,14 +81,14 @@ fn registry() -> KeyRegistry {
                 meter: METER_SERIAL.into(),
             },
             RegisteredKey::unbounded(
-                PublicKey {
-                    algorithm: KeyType::Secp256r1,
-                    bytes: signing_key()
+                PublicKey::from_sec1(
+                    Curve::Secp256r1,
+                    signing_key()
                         .verifying_key()
                         .to_encoded_point(false)
-                        .as_bytes()
-                        .to_vec(),
-                },
+                        .as_bytes(),
+                )
+                .expect("a well-formed SEC1 point"),
                 "type approval 2026-01",
             ),
         )
@@ -104,7 +105,10 @@ fn session(n: i64, id: &str, from: &str, to: &str) -> (Session, Evidence) {
         signed_record(counter, counter + 1, "B", from, start),
         signed_record(counter, counter + 2, "E", to, end),
     ];
-    let records: Vec<_> = raw.iter().map(|r| ocmf::parse(r).unwrap()).collect();
+    let records: Vec<_> = raw
+        .iter()
+        .map(|r| ocmf::Record::parse(r).unwrap())
+        .collect();
     let evidence = Evidence::assemble(&records, &registry(), end);
 
     let mut session = Session::open(
@@ -149,6 +153,7 @@ fn tariff() -> Tariff {
         "ad-hoc-2026".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
     )
 }
@@ -409,4 +414,140 @@ fn two_runs_of_one_year_are_one_file() {
         claim.build().unwrap().value
     };
     assert_eq!(build(), build());
+}
+
+/// A session that begins on 31 December and ends on 1 January.
+fn new_year_session() -> (Session, Evidence) {
+    let start = datetime!(2026-12-31 23:45 +1);
+    let end = datetime!(2027-01-01 00:15 +1);
+    let raw = [
+        signed_record(900, 901, "B", "200.000", start),
+        signed_record(900, 902, "E", "230.000", end),
+    ];
+    let records: Vec<_> = raw
+        .iter()
+        .map(|r| ocmf::Record::parse(r).unwrap())
+        .collect();
+    let evidence = Evidence::assemble(&records, &registry(), end);
+    let mut session = Session::open(
+        "s-ny".parse().unwrap(),
+        EVSE.parse().unwrap(),
+        Authorization::ad_hoc(),
+        start,
+    );
+    session
+        .transition_to(SessionState::Charging, start)
+        .unwrap();
+    session
+        .attach_series(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    MeterReading::new(
+                        start,
+                        kwh("200.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionBegin,
+                    )
+                    .signed(),
+                    MeterReading::new(
+                        end,
+                        kwh("230.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionEnd,
+                    )
+                    .signed(),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    session.end(end, EndReason::Local).unwrap();
+    (session, evidence)
+}
+
+#[test]
+fn a_session_across_the_turn_of_the_year_is_filed_in_both() {
+    // `[38k §5(1)]` counts the electricity withdrawn **in the obligation
+    // year**, and a charge from 23:45 on 31 December to 00:15 on 1 January
+    // withdrew half its energy in each. Attributing the record to the year it
+    // *started* in files the January half under December and files nothing at
+    // all in January — the operator loses the quota on it, silently, which is
+    // the failure mode this whole crate exists for (D187).
+    //
+    // The answer was already in the record: a CDR carries the quarter-hour
+    // periods the split produced, and that split conserves exactly.
+    let mut ledger = CdrLedger::new();
+    let (session, evidence) = new_year_session();
+    let cdr = CdrBuilder::from_session(&session, Direction::Import)
+        .unwrap()
+        .key(
+            PartyId::new("DE", "ABC").unwrap(),
+            "cdr-ny".parse().unwrap(),
+        )
+        .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
+        .rated_with(&tariff())
+        .build()
+        .unwrap();
+    assert_eq!(cdr.total_energy, kwh("30.000"));
+    assert_eq!(
+        cdr.periods.len(),
+        2,
+        "one quarter hour either side of midnight"
+    );
+    assert!(ledger.accept(cdr).is_stored());
+
+    let filed = |year: i32| {
+        let mut builder = ClaimBuilder::new(
+            year,
+            Attribution::own("AB7"),
+            basis(),
+            DriveEfficiency::BatteryElectric,
+        )
+        .unwrap();
+        builder
+            .point(&eligible_point(), "Musterstadt", &ledger)
+            .expect("an eligible point");
+        builder.build().expect("a line")
+    };
+
+    let old_year = filed(2026);
+    let new_year = filed(2027);
+
+    // Half each, and the two halves are the record's own total to the digit.
+    assert_eq!(old_year.value.megawatt_hours(), dec("0.015"));
+    assert_eq!(new_year.value.megawatt_hours(), dec("0.015"));
+    assert_eq!(
+        old_year.value.megawatt_hours() + new_year.value.megawatt_hours(),
+        dec("0.030"),
+        "nothing is lost and nothing is counted twice"
+    );
+
+    // …and neither notification states a window in a year it does not report.
+    // A settlement period is half-open, so the quarter hour running 23:45 to
+    // 00:00 withdrew nothing on the 1st.
+    assert_eq!(
+        old_year.value.records[0].window,
+        Some(emob_thg::Window {
+            from: date!(2026 - 12 - 31),
+            to: date!(2026 - 12 - 31)
+        })
+    );
+    assert_eq!(
+        new_year.value.records[0].window,
+        Some(emob_thg::Window {
+            from: date!(2027 - 01 - 01),
+            to: date!(2027 - 01 - 01)
+        })
+    );
+
+    // And the reconciliation an operator will need: a THG file and a billing
+    // file state different figures for this one session, on purpose.
+    assert!(
+        old_year
+            .reasons()
+            .any(|r| r.contains("spans the turn of the obligation year")),
+        "{:?}",
+        old_year.reasons().collect::<Vec<_>>()
+    );
 }

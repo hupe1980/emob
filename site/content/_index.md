@@ -39,8 +39,8 @@ pages below are mostly about the arrows.
 
 <div class="cards">
 <div class="card"><h3>A value that does not verify does not bill</h3><p>German law lets you invoice a measured value only if the customer can check it, long after the session. Here that is a property of the type system: the only route to a billable quantity returns nothing at all when anything is wrong — a bad signature, an unregistered key, a substitute reading, a deleted record.</p></div>
-<div class="card"><h3>Parsed without being destroyed</h3><p>An OCMF signature covers the payload bytes <em>as written</em>. A parser that deserialises and re-serialises to verify has already lost: key order, whitespace and number formatting each change the hash. This one keeps the raw span, so “the signature holds” means what it says.</p></div>
-<div class="card"><h3>Signatures cannot see a deletion</h3><p>Drop the middle records of a charging session and every remaining signature still verifies. The specification assigns that check to a separate component — contiguous pagination, a begin marker, an end marker — and so does this workspace, as its own question with its own answer.</p></div>
+<div class="card"><h3>Parsed without being destroyed</h3><p>An OCMF signature covers the payload bytes <em>as written</em>. A parser that deserialises and re-serialises to verify has already lost: key order, whitespace and number formatting each change the hash. The format is the <a href="https://crates.io/crates/ocmf"><code>ocmf</code></a> crate’s, written against all 256 records of the S.A.F.E. reference corpus with OpenSSL as an independent oracle — so “the signature holds” means what it says.</p></div>
+<div class="card"><h3>Signatures cannot see a deletion</h3><p>Drop the middle records of a charging session and every remaining signature still verifies. The specification assigns that check to a separate component — contiguous pagination, a begin marker, an end marker — and it is asked as its own question with its own answer, apart from “did this key sign these bytes”.</p></div>
 <div class="card"><h3>A chain proves four things</h3><p>Energy, duration, identity and direction are separate claims with separate fields. A session on an unsynchronised clock has a register an invoice may use and a duration it may not — so a per-kWh tariff bills it and a per-minute occupancy fee is refused by name. A record reporting that the certificate did not check out blocks both: the energy was measured, and there is nobody provably behind it.</p></div>
 <div class="card"><h3>Import and export never net, and the register says so</h3><p>OCMF reserves an OBIS range that states which way a register measured — <code>B*</code> drawn, <code>C*</code> fed back. Carrying that as an opaque string and taking the direction from somewhere else is how a V2G discharge gets billed as consumption with nothing downstream noticing. Here the code is read, and a record that claims the other direction is refused.</p></div>
 <div class="card"><h3>The customer can repeat the check</h3><p>German law does not require a measured value to be <em>correct</em>. It requires the affected party to be able to <strong>check</strong> it — so a platform that verifies internally and reports “verified” has satisfied nobody. The deliverable is a file the independent S.A.F.E. verifier reads: each record verbatim beside the key it was checked against, and emitted whether or not the session bills, because a dispute is exactly when it matters.</p></div>
@@ -108,7 +108,7 @@ number worth invoicing means answering four questions that are usually
 conflated, and answering them in order:
 
 ```rust
-let records = raw.iter().map(|r| ocmf::parse(r)).collect::<Result<Vec<_>, _>>()?;
+let records = raw.iter().map(|r| ocmf::Record::parse(r)).collect::<Result<Vec<_>, _>>()?;
 let evidence = Evidence::assemble(&records, &registry, session_start);
 
 match evidence.billable_energy() {
@@ -116,8 +116,8 @@ match evidence.billable_energy() {
     None => for reason in evidence.reasons() {
         eprintln!("blocked: {reason}");
         // record 2: the signature does not match the payload
-        // pagination jumped from 1 to 3: a record is missing or duplicated
-        // the meter was in state Substitute at record 2, which may not be billed
+        // pagination went 1 → 3 at record 1: a record was removed or reordered
+        // record 2 reports meter state S (SUBSTITUTE)
     },
 }
 ```
@@ -140,7 +140,7 @@ sessions unverifiable.
 Twelve domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
 `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`, `emob-poi`, `emob-roam`,
 `emob-billing`, `emob-thg`, `emob-service` and `emob-sim` — with two daemons on
-top of them and **782 tests**. The domain crates do no I/O, read no clock and
+top of them and **697 tests**. The domain crates do no I/O, read no clock and
 hold no binary floats.
 
 What that buys, concretely:

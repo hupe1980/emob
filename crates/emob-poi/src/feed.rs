@@ -52,13 +52,42 @@ pub struct Feed<'a> {
 }
 
 impl Feed<'_> {
-    /// Every station's power claim, checked against the points it holds.
+    /// Every station's power claim checked against the points it holds, and
+    /// every published price checked against the clock the site runs on.
+    ///
+    /// # The second half is the one that is otherwise silent
+    ///
+    /// A tariff's `22:00` is local civil time at the charge point, and the site
+    /// says which clock that is. Publishing a rate written in `Europe/Berlin` at
+    /// a site in `Europe/Lisbon` produces a feed whose night price starts an
+    /// hour after the driver standing there thinks it does — a well-formed
+    /// document, a lawful tariff, a real site, and nothing failing until
+    /// somebody compares a bill against a map. It is exactly the display-versus-
+    /// bill drift `emob_tariff::display` exists to prevent, one object out.
     ///
     /// # Errors
     ///
-    /// Whatever [`crate::site::Station::check`] objects to.
+    /// Whatever [`crate::site::Station::check`] objects to, and
+    /// [`PoiError::RateZoneIsNotTheSites`] for a price published on the wrong
+    /// clock.
     pub fn check(&self) -> Result<()> {
-        self.sites.iter().try_for_each(Site::check)
+        self.sites.iter().try_for_each(Site::check)?;
+        for site in &self.sites {
+            for point in site.points() {
+                let Some(rate) = (self.rate_for)(point) else {
+                    continue;
+                };
+                if rate.time_zone != site.time_zone.name() {
+                    return Err(PoiError::RateZoneIsNotTheSites {
+                        rate: rate.id,
+                        rate_zone: rate.time_zone,
+                        site: site.facility.id.clone(),
+                        site_zone: site.time_zone.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The static publication `[AFIR Art. 20(2)(a)–(b)]`.
@@ -183,6 +212,7 @@ mod tests {
                 longitude: Decimal::from_str_exact("6.104507").unwrap(),
             },
             Address::default(),
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![Station::new(
                 Facility::new("station"),
                 PartyId::new("DE", "ABC").unwrap(),
@@ -240,5 +270,44 @@ mod tests {
             refused,
             Err(PoiError::StatusContradictsRegister { .. })
         ));
+    }
+
+    #[test]
+    fn a_price_published_on_a_clock_the_site_does_not_run_on_is_refused() {
+        use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+
+        let lisbon = Tariff::simple(
+            "t".parse().unwrap(),
+            emob_core::Currency::EUR,
+            TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Lisbon").unwrap(),
+            vec![PriceComponent::new(
+                Dimension::Energy,
+                Decimal::from_str_exact("0.49").unwrap(),
+            )],
+        );
+        let (rate, _) = crate::rate::publish(&lisbon, "r-1");
+        let sites = inventory(); // Europe/Berlin
+
+        let feed = Feed {
+            publisher: Publisher {
+                country: "de".to_owned(),
+                national_identifier: "DE-NAP".to_owned(),
+                language: "de".to_owned(),
+            },
+            information_status: InformationStatus::Real,
+            table: Facility::new("table"),
+            table_name: None,
+            sites,
+            rate_for: &|_| Some(rate.clone()),
+        };
+
+        let refused = feed.check().unwrap_err();
+        assert!(
+            matches!(refused, PoiError::RateZoneIsNotTheSites { .. }),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains("Europe/Lisbon"));
+        assert!(refused.to_string().contains("Europe/Berlin"));
     }
 }

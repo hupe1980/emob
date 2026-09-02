@@ -20,7 +20,7 @@ value survives in, and the driver contract all of it turns into an invoice.
 > [`emob-billing`](crates/emob-billing), [`emob-thg`](crates/emob-thg),
 > [`emob-service`](crates/emob-service)
 > and [`emob-sim`](crates/emob-sim) — with two daemons on top of them and
-> **782 tests**, an end-to-end test that drives the Open Charge Alliance's own
+> **697 tests**, an end-to-end test that drives the Open Charge Alliance's own
 > OCPP example message from the wire to a taxable amount and back out again as a
 > file the driver's verifier reads, records from **five** real meters this
 > workspace did not write, one session that settles at the same money over three
@@ -72,7 +72,7 @@ Every arrow is a place a kilowatt-hour can quietly become the wrong number.
 [`iso15118`]: https://github.com/hupe1980/iso15118
 [`eebus`]: https://github.com/hupe1980/eebus
 
-## The twenty-seven properties that decide quality
+## The twenty-eight properties that decide quality
 
 ### A value that does not verify does not bill
 
@@ -161,7 +161,7 @@ the affected party to be able to **check** it — so a platform that verifies
 internally and reports "verified" has satisfied nobody.
 
 ```rust
-let xml = transparency::to_xml(&evidence);   // hand this to the driver
+let xml = transparency::to_xml(&evidence)?;   // hand this to the driver
 ```
 
 That is the container the S.A.F.E. Transparenzsoftware reads: each record
@@ -189,11 +189,12 @@ And the file reads back, because the export is only half of the duty. The other
 half arrives when a driver disputes a bill and sends the file back:
 
 ```rust
-for value in transparency::from_xml(&their_file)? {
+for value in transparency::from_xml(&their_file)?.entries {
     // Checked against *our* registry — never against the key the file carries,
     // which is the artefact under examination.
-    let evidence = Evidence::assemble(&[value.record], &registry, session_start);
-    let same_key = value.claimed_key.as_ref() == registry_key;
+    let record = ocmf::Record::parse(&value.signed_data)?;
+    let evidence = Evidence::assemble(&[record], &registry, session_start);
+    let same_key = value.public_key.as_deref() == registry_key;
 }
 ```
 
@@ -246,7 +247,7 @@ A **note, never a refusal**: `S` is optional, so its absence says nothing and
 most of the fleet never emits one. Its presence against a contrary protocol claim
 is two stories about one event, and only one of them is signed.
 
-### Import and export never net, and now the register says so
+### Import and export never net, and the register says so
 
 `[OCMF Tab. 25]` reserves the OBIS range `B0`–`B3` for import and `C0`–`C3` for
 export, so the signed register itself states the direction. Taking it from the
@@ -722,7 +723,10 @@ transaction's signed difference is `0.636 kWh`:
 
 ```rust
 let assembled = transaction.assemble(Direction::Import)?;
-let evidence  = Evidence::assemble(&assembled.records, &registry, started);
+// The owned records outlive this borrowed view: a `Record` borrows the bytes
+// its signature covers.
+let borrowed: Vec<_> = assembled.records.iter().filter_map(|r| r.record().ok()).collect();
+let evidence = Evidence::assemble(&borrowed, &registry, started);
 
 assert_eq!(evidence.billable_energy().unwrap().to_string(), "0.636 kWh");
 ```
@@ -1114,10 +1118,24 @@ place of supply is France, German VAT does not arise, and the invoice states the
 reverse charge with the partner's own identifier on it `[UStG §13b]`:
 
 ```rust
-let treatment = TaxTreatment::decide(&cpo.tax, &emsp.tax, "DE", dec("19"))?;
+let rates = VatRates::new().at("DE", dec("19"));
+let treatment = TaxTreatment::decide(&cpo.tax, &emsp.tax, "DE", &rates)?;
 assert_eq!(treatment.category, VatCategory::ReverseCharge);
 assert_eq!(treatment.place_of_supply, "FR");
 ```
+
+**And the rate follows the place of supply, not the charge point.** A *domestic*
+reseller moves the place of supply to a country that need not be the one the
+posts stand in: a German operator running chargers in France and settling with a
+German eMSP is taxed in Germany, at 19 %, on kilowatt-hours drawn under a 20 %
+regime. So the rates are a small table the caller states, and a standard-rated
+supply whose place of supply has no rate in it is refused — the two silent
+alternatives are an invoice that over-declares its VAT and one that
+under-declares it.
+
+A reseller established **outside** the Union takes the place of supply out with
+it, so no member state's VAT arises at all: the category is `O`, outside scope,
+and not the `G` that describes goods leaving the customs territory zero-rated.
 
 Putting 19 % on that invoice charges tax that may not be charged and that the
 partner cannot reclaim. The ad-hoc leg does not share the rule — a driver paying
@@ -1136,6 +1154,49 @@ and omits it from the invoice has a VAT return that reconciles against nothing i
 sent. The postings are addressed by *role* rather than by account number, because
 SKR03 and SKR04 disagree about the numbers and a chart of accounts is not a
 domain crate's business.
+
+### A price per hour of the day needs a zone, and an offset is not one
+
+`0.30 from 22:00` is local civil time at the charge point
+`[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and OCPI carries the zone
+it is read in on the Location, where it is mandatory
+`[OCPI 2.3.0 §mod_locations_location_object]`. A `time::OffsetDateTime` carries
+an offset — what a clock happened to be *written* with — and a zone is the rule
+that decides the offset, including on the two days a year it changes.
+
+Judge the restriction against the offset and one physical session costs a
+different amount depending on how its timestamps were spelled:
+
+```rust
+// 20 kWh, 22:00–24:00 in Berlin, night rate 0.30 against a day rate of 0.60.
+// The same instants, three spellings, one price — because the tariff knows
+// which wall clock its `22:00` is on.
+for (from, to) in [
+    (datetime!(2026-01-02 21:00 +0), datetime!(2026-01-02 23:00 +0)),
+    (datetime!(2026-01-02 22:00 +1), datetime!(2026-01-03 00:00 +1)),
+    (datetime!(2026-01-03 06:00 +9), datetime!(2026-01-03 08:00 +9)),
+] {
+    let session = Chargeable::energy_only(kwh("20"), from, to)?;
+    assert_eq!(rate(&berlin_night, &session).total().to_string(), "6.00 EUR");
+}
+```
+
+Read against the offset instead, the first of those is **€9.00**: the first hour
+falls to the day rate, nothing fails to match, and no note is raised. It is not
+the exotic case — every session an eMSP re-rates from a roaming partner arrives
+in UTC, because OCPI requires it.
+
+The zone also places the cuts, and it knows that a civil time is not always an
+instant. A spring gap swallows an hour, so the wall clock passes `02:30` once, at
+the transition; an autumn fold repeats one, so it passes `02:30` **twice** and a
+window ending there ends twice. Both are cut.
+
+Nothing reads `/usr/share/zoneinfo` or `TZ`: the database is compiled in,
+`Cargo.lock` pins its version, and a tzdb release moves future offsets rather
+than the frozen ones a settled session has — so the replay a two-year-old dispute
+needs is unaffected. The same zone is a mandatory field of a site, is published
+to the national access point where `[DATEX-II-Profil]` asks for it, and a rate
+offered at a site on a different clock is refused rather than published.
 
 ### A valid token is not permission to read somebody else's session
 
@@ -1192,7 +1253,7 @@ product on the 22 kW posts and a breach on the two 150 kW cabinets beside them �
 because `[AFIR Art. 5(4)]` binds a tariff at the power the point offers it at,
 and no tariff document says which points those are.
 
-"Advisory only" used to be a sentence in a design note. Two things make it
+"Advisory only" is a sentence anybody can write in a design note. Two things make it
 structural: the output type is a **leaf** — nothing in the workspace consumes an
 `Advice`, so there is no path from an agent's answer into a document — and a
 specialist's principal comes from `attenuate`, so no agent principal can hold a
@@ -1247,7 +1308,7 @@ argument, carried with the notice it came from.
 | Crate | What it holds | State |
 |---|---|---|
 | [`emob-core`](crates/emob-core) | Identifiers in both grammars, text-preserving; exact energy and money; the settlement grid; the charge-point, provider **and undertaking** profiles; the obligation calendar over all three; and `Crossing`, the account a value owes when it is carried onto somebody else's wire | ✅ |
-| [`emob-eichrecht`](crates/emob-eichrecht) | OCMF parse/verify on four curves, the key registry, the four-quantity session chain, the evidence record, the transparency file | ✅ |
+| [`emob-eichrecht`](crates/emob-eichrecht) | **The law, not the format** (that is [`ocmf`](https://crates.io/crates/ocmf)): which quantity each failure takes away, the station key registry, the evidence record, and the transparency file filtered to what verified | ✅ |
 | [`emob-session`](crates/emob-session) | Authorisation paths, cumulative meter series, the timestamped state machine, and the quarter-hour split | ✅ |
 | [`emob-cdr`](crates/emob-cdr) | The record, its price, idempotent acceptance, pre-flight validation | ✅ |
 | [`emob-tariff`](crates/emob-tariff) | Period-based rating with tiers and VAT, the display derived from it, the AFIR shape check, validity windows and a content fingerprint — one object, read by the invoice, the driver's screen, the roaming partner and the national access point | ✅ |
@@ -1286,7 +1347,7 @@ because CI does not run it.
 just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs
 just test       # cargo test --workspace --all-features
-just guards     # no-floats, check-citations, check-manifests
+just guards     # no-floats, check-citations, check-manifests, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
 ```

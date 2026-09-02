@@ -64,7 +64,7 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | Crate | Holds |
 |---|---|
 | `emob-core` | Identifiers in both grammars, text-preserving; exact energy and money; the settlement grid; the charge-point, provider **and undertaking** profiles; the obligation calendar over all three; and `Crossing`, the account a value owes when it is carried onto somebody else's wire |
-| `emob-eichrecht` | OCMF parse and verify, the key registry, a chain that answers energy/duration/identity/direction separately, the evidence record, and the transparency file the driver checks the bill with |
+| `emob-eichrecht` | The **law** over the format: the station key registry, a chain that answers energy/duration/identity/direction separately, the evidence record, and the transparency file the driver checks the bill with. The format itself — parsing, verification, the tables, the OBIS code, the container — is the [`ocmf`](https://crates.io/crates/ocmf) crate's, written from the whole S.A.F.E. reference corpus with OpenSSL as an oracle |
 | `emob-session` | Authorisation paths, cumulative meter series, a timestamped state machine, and the quarter-hour split that conserves exactly |
 | `emob-cdr` | The record, **its price**, idempotent acceptance, and pre-flight validation |
 | `emob-tariff` | Period-based rating with tiers and a VAT breakdown, the display derived from the rating tariff, the AFIR shape check, validity windows and a content fingerprint |
@@ -78,7 +78,7 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `agentd` | The advisory plane on `agentplane`: specialists that correlate across many exact answers, and cannot move money by construction |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-782 tests. The domain crates do no I/O, read no clock and hold no binary floats;
+697 tests. The domain crates do no I/O, read no clock and hold no binary floats;
 `emob-service` is the one shared place that stops being true, and everything
 above it is a daemon. `just ci` green.
 
@@ -510,4 +510,5 @@ reaches for one.
 | `no-floats` | a workspace exact everywhere it was reviewed and approximate in the helper nobody read |
 | `check-citations` | a rule citing a document nobody can produce — in the prose as well as the code: the READMEs, this site, and every comment that names a paragraph |
 | `check-manifests` | a `cargo publish` that fails after the version is spent |
-| `purity` | a domain crate that cannot be replayed |
+| `purity` | a domain crate that reaches for a clock, a socket or the filesystem in **its own** source |
+| `check-graph` | the other half: a clock, a socket or a database reaching a domain crate through a **dependency**, which `purity` greps past — a `uuid`/`v7` identifier is `SystemTime::now` behind a manifest line |

@@ -525,7 +525,7 @@ way every other inexact crossing in this workspace is:
 
 ```rust
 let crossing = InvoiceBuilder::new("R-2026-0001", issued, period, cpo, driver)
-    .supplied_from("DE", dec("19"))
+    .supplied_from("DE", dec("19"))   // the points' country, and its rate
     .ledger(&ledger)         // `live`, never `iter`: a correction is a new record
     .due_on(due)
     .build()?;
@@ -581,13 +581,42 @@ an e-mobility provider buying sessions through roaming is exactly a reseller: it
 does not consume the electricity, it resells it.
 
 ```rust
-let treatment = TaxTreatment::decide(&cpo.tax, &emsp.tax, "DE", dec("19"))?;
+let rates = VatRates::new().at("DE", dec("19"));
+let treatment = TaxTreatment::decide(&cpo.tax, &emsp.tax, "DE", &rates)?;
 assert_eq!(treatment.category, VatCategory::ReverseCharge);
 assert_eq!(treatment.place_of_supply, "FR");
 ```
 
 Putting 19 % on that invoice charges tax that may not be charged and that the
-partner cannot reclaim. The ad-hoc leg does not share the rule — a driver paying
+partner cannot reclaim.
+
+**And the rate follows the place of supply, not the charge point.** A
+*domestic* reseller moves the place of supply to a country that need not be the
+one the posts stand in: a German operator running chargers in France and
+settling with a German eMSP is taxed in Germany, at 19 %, on kilowatt-hours
+drawn under a 20 % regime. So the rates are a table the caller states —
+`VatRates` — and `decide` looks up the one belonging to the place of supply it
+derived. A standard-rated supply whose place of supply has no rate stated is
+refused, because the two silent alternatives are an invoice that over-declares
+its VAT and one that under-declares it.
+
+A reseller established **outside** the Union takes the place of supply out with
+it, so no member state's VAT arises at all: the category is `O`, outside scope,
+and not the `G` that describes goods leaving the customs territory zero-rated.
+
+`O` is the only category in UNCL 5305 that **states no rate**, and that reaches
+the document. `BR-O-05` refuses a line carrying BT-152 at all — a rate of zero is
+carrying it — `BR-O-02` allows no VAT identifier on either party, and once the
+seller's is gone `BR-CO-26` still wants the buyer to be able to identify its
+supplier. So an outside-scope settlement is the one invoice where the legal
+registration (BT-30) is not optional, and a German operator states its `HRB`
+entry and omits its own VAT identifier.
+
+The category enum is `en16931`'s own rather than this crate's: it carries all ten
+codes with four predicates generated from the CEN artefacts, and the two a
+hand-rolled copy was missing are exactly the two that decide the paragraph above.
+
+The ad-hoc leg does not share the rule — a driver paying
 at the point is not a reseller — so **two sessions at one post a minute apart can
 carry different VAT**, which is why the treatment is decided per invoice from the
 parties rather than per station from a configuration field.
@@ -613,6 +642,14 @@ revenue, VAT payable at a rate — and a caller maps them onto its own chart. SK
 and SKR04 disagree about the numbers and neither is a domain crate's business. A
 role the chart cannot place is refused rather than dropped: a dropped posting is
 an entry that does not balance and a trial balance that is quietly wrong.
+
+The **journal** belongs to a service, and so does the bookkeeping engine.
+Posting into one needs accounts, a calendar, a policy and a database, none of
+which a pure crate can hold — and a ledger crate brings the clock in through the
+door: `doubleentry` takes `uuid` with `v7`, and a v7 identifier comes from
+`SystemTime::now()`. A crate whose promise is that two runs of one billing job
+produce one file cannot carry that in its graph, so it does not: what crosses
+the seam is `Postings`, and `billd` maps it.
 
 Nothing here reads a clock. `sepa` defaults a collection date and a message
 timestamp off the system clock, and a collection file that differs between two

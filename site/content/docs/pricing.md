@@ -26,7 +26,10 @@ Here `describe()` and `rate()` read the same `PriceComponent` values off the
 same `Tariff`, **and select the applicable price through the same function**:
 
 ```rust
-let tariff = Tariff::simple(id, Currency::EUR, TariffKind::AdHoc, vec![
+// The zone the tariff's wall-clock restrictions are read in — see below.
+let berlin = TimeZone::new("Europe/Berlin")?;
+
+let tariff = Tariff::simple(id, Currency::EUR, TariffKind::AdHoc, berlin, vec![
     PriceComponent::new(Dimension::Flat, dec("0.50")),
     PriceComponent::new(Dimension::Energy, dec("0.49")),
 ]);
@@ -500,18 +503,70 @@ assert!(rated.lines_reconcile());   // base_quantity × unit_price / 3600 == amo
 A billing layer that needs a quantity and a price whose product is the line total
 quotes the seconds; the hours figure is what a driver reads.
 
+## …and the one restriction a period carries nothing to cut on
+
+Cutting works because a period *contains* the fact about where the threshold was
+crossed: one period of 15 kWh says by construction that the tenth kilowatt-hour
+fell inside it. Energy, duration and the wall clock all accumulate.
+
+Average power does not. It is `energy / duration` over whatever window is asked
+about, and a period carries **no** information about the power inside it:
+
+```rust
+// 60 kWh in one hour, under "below 50 kW at 0.30, otherwise 0.60".
+rate(&t, &one_period).total()    // 36.00 EUR — one window, averaging 60 kW
+rate(&t, &two_halves).total()    // 34.50 EUR — 55 kWh then 5, averaging 110 and 10
+```
+
+Neither is an arithmetic error, and no cut recovers the second from the first —
+the 60 kW figure does not contain it. The finer answer is a **better
+measurement**, and what the engine cannot do is make a low-resolution input
+behave like a high-resolution one.
+
+So a total under such a tariff is a function of the session *at the resolution
+its periods carry*. Rate the periods the meter produced — which is what
+`Session::split` hands over — and the answer is stable;
+`RatingNote::PowerJudgedPerPeriod` is why a partner's coarser document gives a
+different total. Reported rather than refused, because `[OCPI 2.3.0 §Tariff]`
+defines the restriction and a lawful partner document is not this crate's to
+reject.
+
 ## The clock a time-of-day restriction is read against
 
-"0.30 from 22:00" is local civil time, and an `OffsetDateTime` carries a **UTC
-offset, not a time zone** — so the only frame the rating can judge it in is the
-one each period states. That is exact for every session this workspace assembles,
-across a clock change included, as long as the periods either side carry the
-offsets their readings did.
+"0.30 from 22:00" is **local civil time at the charge point**
+`[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and OCPI carries the zone
+on the Location — `time_zone`, an IANA name, cardinality 1
+`[OCPI 2.3.0 §mod_locations_location_object]`. So a tariff carries one too.
 
-A session assembled from a partner's timestamps can carry two, and then every cut
-lands in the first period's frame. `rate` reports that as `MixedUtcOffsets`.
-Nothing consults a time-zone database: a replayed rating that depended on the
-installed `tzdata` is the one thing a two-year-old dispute cannot afford.
+**An offset is not a zone.** An offset is what a clock was written with; a zone
+is the rule that decides the offset, including on the two days a year it
+changes. Judged against the offset, one physical session costs a different
+amount depending on how its timestamps were spelled:
+
+```rust
+// 20 kWh, 22:00–24:00 in Berlin, 0.30 at night against 0.60 by day.
+rate(&tariff, &stamped_in_utc).total()     // 9.00 EUR — the first hour at the day rate
+rate(&tariff, &stamped_in_berlin).total()  // 6.00 EUR — the price the driver was quoted
+```
+
+Same two hours. The first is what an eMSP gets for every session it re-rates from
+a roaming partner, because OCPI carries its timestamps in UTC. With the zone on
+the tariff, all three spellings of those instants — `+00:00`, `+01:00`, `+09:00`
+— come to €6.00.
+
+**A civil time is not always an instant.** A spring gap swallows an hour, so the
+wall clock passes `02:30` once, at the transition; an autumn fold repeats one, so
+it passes `02:30` **twice** and a night window ending there ends twice. Both
+crossings are cut — cutting only the first leaves the repeated hour priced by
+whatever applied before it, on a bill from the last weekend in October that
+nobody re-reads.
+
+**And it does not break a replay.** The database is compiled in, not read:
+nothing opens `/usr/share/zoneinfo` or looks at `TZ`, so `just purity` holds and
+two machines with different system `tzdata` agree. `Cargo.lock` pins the version,
+and a tzdb release moves future offsets while the civil offsets of instants that
+have already happened are frozen — which are the only instants a settled session
+has.
 
 ## The two restrictions everybody gets wrong
 
@@ -548,7 +603,7 @@ average power and weekday all select which elements apply.
 and pushing `SetDefaultTariff` to the estate's 2.1 stations — belongs with
 `tarifd`. All three payloads exist; the service that decides *when* does not.
 
-The EN 16931 invoice itself — the breakdown above is the input it needs, and
-`emob-billing` is where it becomes an XRechnung or ZUGFeRD document, a SEPA
-mandate and a double-entry posting. Reservation and booking are OCPI concepts
-this crate carries verbatim rather than evaluating.
+The invoice itself is `emob-billing`'s: the breakdown above is the input it
+needs, and it becomes an EN 16931 document, a SEPA collection and a balanced set
+of role-addressed postings there. Reservation and booking are OCPI concepts this
+crate carries verbatim rather than evaluating.

@@ -11,13 +11,14 @@
 
 use emob_cdr::{Acceptance, CdrBuilder, CdrLedger, EvidenceRef, validate};
 use emob_core::{Currency, Direction, Energy, IdentificationStrength, PartyId};
-use emob_eichrecht::ocmf::KeyType;
 use emob_eichrecht::registry::{ComponentRef, RegisteredKey};
-use emob_eichrecht::{Evidence, KeyRegistry, PublicKey, ocmf, transparency};
+use emob_eichrecht::{Evidence, KeyRegistry, transparency};
 use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, check_afir, describe};
+use ocmf::Curve;
+use ocmf::PublicKey;
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::{DerSignature, SigningKey};
 use rust_decimal::Decimal;
@@ -67,14 +68,14 @@ fn registry() -> KeyRegistry {
                 meter: METER_SERIAL.into(),
             },
             RegisteredKey::unbounded(
-                PublicKey {
-                    algorithm: KeyType::Secp256r1,
-                    bytes: signing_key()
+                PublicKey::from_sec1(
+                    Curve::Secp256r1,
+                    signing_key()
                         .verifying_key()
                         .to_encoded_point(false)
-                        .as_bytes()
-                        .to_vec(),
-                },
+                        .as_bytes(),
+                )
+                .expect("a well-formed SEC1 point"),
                 "type approval 2026-01",
             ),
         )
@@ -202,7 +203,7 @@ fn occupied_session() -> Session {
 fn evidence_of(raw: &[String]) -> Evidence {
     let records = raw
         .iter()
-        .map(|r| ocmf::parse(r))
+        .map(|r| ocmf::Record::parse(r))
         .collect::<Result<Vec<_>, _>>()
         .expect("the fixtures are well-formed OCMF");
     Evidence::assemble(&records, &registry(), at(0))
@@ -305,7 +306,7 @@ fn a_deleted_middle_record_stops_the_chain_though_every_signature_holds() {
     assert!(
         evidence
             .reasons()
-            .any(|r| r.contains("pagination jumped from 1 to 3"))
+            .any(|r| r.contains("pagination went 1 → 3"))
     );
 }
 
@@ -342,14 +343,20 @@ fn a_substitute_reading_stops_the_chain() {
         evidence.reasons().collect::<Vec<_>>()
     );
     assert!(!evidence.is_billable());
-    assert!(evidence.reasons().any(|r| r.contains("Substitute")));
+    // The specification's own identifier for `ST=S`, not a Rust variant name.
+    assert!(
+        evidence.reasons().any(|r| r.contains("SUBSTITUTE")),
+        "{:?}",
+        evidence.reasons().collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn an_unregistered_station_cannot_bill() {
-    let records = raw_records()
+    let texts = raw_records();
+    let records = texts
         .iter()
-        .map(|r| ocmf::parse(r))
+        .map(|r| ocmf::Record::parse(r))
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let evidence = Evidence::assemble(&records, &KeyRegistry::new(), at(0));
@@ -491,6 +498,7 @@ fn fast_charger_tariff() -> Tariff {
         "ad-hoc-dc".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![
             PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
             PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_vat(dec("19")),
@@ -562,6 +570,7 @@ fn a_tiered_tariff_prices_the_quarter_hours_the_split_produced() {
         id: "tiered".parse().unwrap(),
         currency: Currency::EUR,
         kind: TariffKind::AdHoc,
+        time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         tax_included: emob_tariff::TaxIncluded::Yes,
         elements: vec![
             emob_tariff::TariffElement {
@@ -614,6 +623,7 @@ fn a_fast_charger_may_not_offer_a_per_minute_only_tariff() {
         "ad-hoc-dc".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![PriceComponent::new(Dimension::Time, dec("0.30"))],
     );
     let verdict = check_afir(&unlawful, dec("150"));
@@ -691,12 +701,18 @@ fn the_driver_can_repeat_the_whole_check_in_software_nobody_here_wrote() {
     // that the affected party can check it. The deliverable is a file the
     // S.A.F.E. Transparenzsoftware reads.
     let evidence = evidence_of(&raw_records());
-    let xml = transparency::to_xml(&evidence);
+    let xml = transparency::to_xml(&evidence).expect("a container");
 
     // One dataset per signed record, each verbatim, each beside the key it was
     // checked against — which is the key the registry supplied out of band,
     // not one chosen to make the file verify.
-    assert_eq!(xml.matches("<value ").count(), 3);
+    assert_eq!(
+        transparency::from_xml(&xml)
+            .expect("readable")
+            .entries
+            .len(),
+        3
+    );
     for raw in raw_records() {
         assert!(xml.contains(&raw), "the record must survive verbatim");
     }
@@ -706,7 +722,10 @@ fn the_driver_can_repeat_the_whole_check_in_software_nobody_here_wrote() {
 
     // And the file is the same artefact two years later: nothing in the export
     // path reads a clock or a network.
-    assert_eq!(transparency::to_xml(&evidence_of(&raw_records())), xml);
+    assert_eq!(
+        transparency::to_xml(&evidence_of(&raw_records())).expect("a container"),
+        xml
+    );
 }
 
 #[test]
@@ -757,6 +776,7 @@ fn an_unsynchronised_clock_bills_the_energy_and_refuses_the_occupancy_fee() {
         "ad-hoc-dc".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
     );
     let cdr = CdrBuilder::from_session(&session, Direction::Import)
@@ -872,12 +892,12 @@ fn ebz_evidence() -> Evidence {
                 serial: "1EBZ0300034628".into(),
             },
             RegisteredKey::unbounded(
-                PublicKey::from_hex(KeyType::Secp192r1, EBZ_LD3_KEY).unwrap(),
+                PublicKey::from_text(EBZ_LD3_KEY, Some(Curve::Secp192r1)).unwrap(),
                 "S.A.F.E. reference data set",
             ),
         )
         .unwrap();
-    let record = ocmf::parse(EBZ_LD3_RECORD).unwrap();
+    let record = ocmf::Record::parse(EBZ_LD3_RECORD).unwrap();
     Evidence::assemble(&[record], &registry, datetime!(2022-10-27 19:38 +2))
 }
 
@@ -886,11 +906,14 @@ fn a_record_from_a_real_german_meter_verifies_and_bills() {
     let evidence = ebz_evidence();
 
     // The clock is informative, so there is something to say — and it is about
-    // the duration, not the register.
+    // the duration, not the register. Judged on the **weakest** clock in the
+    // sequence rather than the best one, because one synchronised reading says
+    // nothing about the twenty around it and the error of taking the best one
+    // always runs towards billing.
     assert!(
         evidence
             .reasons()
-            .all(|r| r.contains("energy is unaffected")),
+            .all(|r| r.contains("cannot support a duration")),
         "{:?}",
         evidence.reasons().collect::<Vec<_>>()
     );
@@ -912,19 +935,24 @@ fn a_record_from_a_real_german_meter_verifies_and_bills() {
 
 #[test]
 fn the_driver_of_a_real_meter_gets_a_file_their_own_verifier_reads() {
-    let xml = transparency::to_xml(&ebz_evidence());
+    let xml = transparency::to_xml(&ebz_evidence()).expect("a container");
 
     // The record verbatim, beside the key the registry supplied — not one
     // chosen to make the file verify.
     assert!(xml.contains(EBZ_LD3_RECORD));
     assert!(xml.contains(&EBZ_LD3_KEY.to_uppercase()));
-    assert!(xml.contains(r#"transactionId="120""#));
-
-    // …and *no* context label, because this meter puts the whole transaction in
-    // one signed data set: `TX=B` and `TX=E` are two readings of one record, so
-    // it is neither a begin nor an end. The reference sample files omit the
-    // attribute for exactly this shape, and the reference verifier pairs the
-    // readings itself.
+    // …and **no** `transactionId` and no context label, because this meter puts
+    // the whole transaction in one signed data set: `TX=B` and `TX=E` are two
+    // readings of *one* record, so it is neither a begin nor an end and it has
+    // no partner to be grouped with. Giving it an id makes the verifier look
+    // for the other half and refuse the file when it does not find one — which
+    // is D74's lesson, met a second time on the record that needs no grouping
+    // at all (D185). 223 of S.A.F.E.'s own 257 reference values have this
+    // shape, and none of them carries an id.
+    assert!(
+        !xml.contains("transactionId="),
+        "a record that is a whole transaction has no partner to be grouped with"
+    );
     assert!(
         !xml.contains("context="),
         "a whole transaction is not half of one: {xml}"

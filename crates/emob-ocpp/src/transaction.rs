@@ -48,11 +48,11 @@
 //! that reused a counter for different content is exactly the fault the chain
 //! is there to find.
 
-use emob_core::{Direction, EvseId, SessionId};
-use emob_eichrecht::ocmf::{self, OcmfRecord};
+use emob_core::{Direction, Energy, EvseId, SessionId};
 use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
+use ocmf::{Record, RecordBuf};
 
 use ocpp_kit::metering::SignedMeterValue;
 
@@ -64,7 +64,7 @@ use crate::error::SeamError;
 /// what the meter measured, never why the station took the reading. It is what
 /// makes a settlement slot *measured* rather than interpolated, so it has to
 /// survive de-duplication and re-ordering beside the record it belongs to.
-type Delivered = (OcmfRecord, Option<String>);
+type Delivered = (RecordBuf, Option<String>);
 
 /// Why a station sent a transaction event.
 ///
@@ -251,7 +251,7 @@ pub struct Assembled {
     /// Hand these to [`emob_eichrecht::Evidence::assemble`] together with a
     /// **registry**. Nothing here has verified anything: this crate's job ends
     /// at getting the bytes out of the transport intact.
-    pub records: Vec<OcmfRecord>,
+    pub records: Vec<RecordBuf>,
     /// How many duplicate records the transport delivered.
     ///
     /// Zero on a quiet link. Non-zero is not a fault — a retry is how OCPP
@@ -299,12 +299,18 @@ impl Transaction {
 
         for event in &self.events {
             for reading in &event.signed {
-                let record = record_of(&reading.value)?;
-                if !seen.insert(ocmf::payload_digest(&record)) {
+                let owned = record_of(&reading.value)?;
+                let digest = owned
+                    .record()
+                    .map_err(|source| SeamError::BadRecord {
+                        detail: source.to_string(),
+                    })?
+                    .payload_digest();
+                if !seen.insert(digest) {
                     duplicates += 1;
                     continue;
                 }
-                delivered.push((record, reading.context.clone()));
+                delivered.push((owned, reading.context.clone()));
             }
         }
 
@@ -312,7 +318,13 @@ impl Transaction {
         // stable, so two records a station gave the same counter keep their
         // arrival order and reach the chain as the duplicate-counter finding
         // they are.
-        delivered.sort_by_key(|(record, _)| record.payload.pagination.number);
+        delivered.sort_by_key(|(record, _)| {
+            record
+                .record()
+                .ok()
+                .and_then(|r| r.payload().pagination().map(|p| p.number()))
+                .unwrap_or(0)
+        });
         Ok((delivered, duplicates))
     }
 
@@ -348,7 +360,15 @@ impl Transaction {
         // is only informative `[OCMF Tab. 19]` still knows when the CSMS
         // authorised it, and that is the instant an occupancy fee runs from.
         let started_at = events.first().map_or_else(
-            || delivered[0].0.payload.readings[0].time.instant,
+            || {
+                delivered[0]
+                    .0
+                    .record()
+                    .ok()
+                    .and_then(|r| r.payload().readings().first().and_then(ocmf::Reading::time))
+                    .and_then(instant_of)
+                    .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+            },
             |event| event.at,
         );
         let ending = events
@@ -391,7 +411,7 @@ impl Transaction {
             ending.stopped_because.unwrap_or(EndReason::Other),
         )?;
 
-        let records: Vec<OcmfRecord> = delivered.into_iter().map(|(record, _)| record).collect();
+        let records: Vec<RecordBuf> = delivered.into_iter().map(|(record, _)| record).collect();
         let charging_disagreements = charging_disagreements(&records, &session);
 
         Ok(Assembled {
@@ -413,8 +433,9 @@ impl Transaction {
 /// markers are read from records whose signatures `emob-eichrecht` checks
 /// against a registry one layer up, and a disagreement about the shape of the
 /// session is worth reporting either way.
-fn charging_disagreements(records: &[OcmfRecord], session: &Session) -> Vec<ChargingDisagreement> {
-    emob_eichrecht::chain::validate(records)
+fn charging_disagreements(records: &[RecordBuf], session: &Session) -> Vec<ChargingDisagreement> {
+    let borrowed: Vec<Record<'_>> = records.iter().filter_map(|r| r.record().ok()).collect();
+    emob_eichrecht::chain::validate(&borrowed)
         .suspended_intervals()
         .into_iter()
         .filter(|&(from, to)| !session.suspended_throughout(from, to))
@@ -435,7 +456,7 @@ fn charging_disagreements(records: &[OcmfRecord], session: &Session) -> Vec<Char
 /// one needs a different verifier rather than sessions that mysteriously will
 /// not bill — [`SeamError::UndecodableSignedData`] when the transport layer is
 /// malformed, and [`SeamError::BadRecord`] when the record itself is.
-pub fn record_of(value: &SignedMeterValue) -> Result<OcmfRecord, SeamError> {
+pub fn record_of(value: &SignedMeterValue) -> Result<RecordBuf, SeamError> {
     if let Some(method) = &value.encoding_method
         && !method.eq_ignore_ascii_case("OCMF")
     {
@@ -448,8 +469,13 @@ pub fn record_of(value: &SignedMeterValue) -> Result<OcmfRecord, SeamError> {
         .map_err(|source| SeamError::UndecodableSignedData {
             detail: source.to_string(),
         })?;
-    ocmf::parse(&text).map_err(|source| SeamError::BadRecord {
-        detail: source.to_string(),
+    // `RecordBuf` rather than a borrowed `Record`: the text was decoded out of
+    // a base64 envelope inside this function, so nothing outside owns the bytes
+    // the signature covers.
+    RecordBuf::new(text, ocmf::Profile::Interop, ocmf::Limits::default()).map_err(|source| {
+        SeamError::BadRecord {
+            detail: source.to_string(),
+        }
     })
 }
 
@@ -460,7 +486,7 @@ pub fn record_of(value: &SignedMeterValue) -> Result<OcmfRecord, SeamError> {
 /// seam: there is no path through this function for a number that was not
 /// signed.
 fn series_from(
-    delivered: &[(OcmfRecord, Option<String>)],
+    delivered: &[(RecordBuf, Option<String>)],
     direction: Direction,
 ) -> Result<MeterSeries, SeamError> {
     let mut readings = Vec::new();
@@ -476,25 +502,54 @@ fn series_from(
         // settlement slot **measured** rather than interpolated, and a seam that
         // dropped it would silently mark every quarter hour in the fleet as an
         // assumption.
-        let single = record.payload.readings.len() == 1;
-        for reading in &record.payload.readings {
+        let record = record.record().map_err(|source| SeamError::BadRecord {
+            detail: source.to_string(),
+        })?;
+        let payload = record.payload();
+        let single = payload.readings().len() == 1;
+        for reading in payload.readings() {
             // A reading without a usable register value is an event marker —
             // `[OCMF Tab. 7]` lets `RV` be omitted "if only the occurrence of an
             // error condition of the meter is to be indicated" — and it is the
             // chain's business rather than the series'.
-            let Some(energy) = reading.energy() else {
+            let Some(energy) = energy_of(reading) else {
                 continue;
             };
             let context = if single {
                 crate::kit::reading_context(context.as_deref())
             } else {
-                context_of(reading.transaction)
+                context_of(reading.transaction())
             };
-            readings
-                .push(MeterReading::new(reading.time.instant, energy, direction, context).signed());
+            let Some(at) = reading.time().and_then(instant_of) else {
+                continue;
+            };
+            readings.push(MeterReading::new(at, energy, direction, context).signed());
         }
     }
     Ok(MeterSeries::new(direction, readings)?)
+}
+
+/// A reading's register value as an [`Energy`], in whichever unit `RU` states.
+///
+/// `None` for a reading with no `RV` — `[OCMF Tab. 7]` lets it be omitted "if
+/// only the occurrence of an error condition of the meter is to be indicated" —
+/// and for one whose unit is not energy at all, which is the chain's business
+/// rather than the series'.
+fn energy_of(reading: &ocmf::Reading<'_>) -> Option<Energy> {
+    let value = reading.value()?.value();
+    match reading.unit()? {
+        ocmf::Unit::KWh => Energy::from_kwh(value).ok(),
+        ocmf::Unit::Wh => Energy::from_wh(value).ok(),
+        _ => None,
+    }
+}
+
+/// A `TM` as an instant, in the offset the meter wrote.
+fn instant_of(time: ocmf::OcmfTime) -> Option<time::OffsetDateTime> {
+    let offset = time::UtcOffset::from_whole_seconds(i32::from(time.offset_minutes) * 60).ok()?;
+    time::OffsetDateTime::from_unix_timestamp(time.unix_seconds())
+        .ok()
+        .map(|at| at.to_offset(offset))
 }
 
 /// The reading context a record's own transaction marker implies.
@@ -508,8 +563,8 @@ fn series_from(
 /// measurement nobody made.
 fn context_of(marker: Option<ocmf::TransactionMarker>) -> ReadingContext {
     match marker {
-        Some(m) if m.begins_transaction() => ReadingContext::TransactionBegin,
-        Some(m) if m.ends_transaction() => ReadingContext::TransactionEnd,
+        Some(m) if m.is_begin() => ReadingContext::TransactionBegin,
+        Some(m) if m.is_end() => ReadingContext::TransactionEnd,
         _ => ReadingContext::SamplePeriodic,
     }
 }
@@ -693,12 +748,19 @@ mod tests {
         assert_eq!(assembled.duplicates_dropped, 1);
 
         // …and the chain agrees it is a whole session.
-        let report = emob_eichrecht::chain::validate(&assembled.records);
+        let borrowed: Vec<Record<'_>> = assembled
+            .records
+            .iter()
+            .filter_map(|r| r.record().ok())
+            .collect();
+        let report = emob_eichrecht::chain::validate(&borrowed);
         assert!(
-            !report
-                .findings
-                .iter()
-                .any(|f| matches!(f, emob_eichrecht::ChainFinding::PaginationBreak { .. })),
+            !report.findings.iter().any(|f| matches!(
+                f,
+                emob_eichrecht::ChainFinding::Sequence(
+                    ocmf::session::Finding::PaginationBroken { .. }
+                )
+            )),
             "a transport retry is not a missing record: {:?}",
             report.findings
         );
@@ -733,7 +795,12 @@ mod tests {
         let counters: Vec<u64> = assembled
             .records
             .iter()
-            .map(|r| r.payload.pagination.number)
+            .map(|r| {
+                r.record()
+                    .ok()
+                    .and_then(|r| r.payload().pagination().map(|p| p.number()))
+                    .unwrap_or(0)
+            })
             .collect();
         assert_eq!(counters, vec![1, 2, 3]);
     }

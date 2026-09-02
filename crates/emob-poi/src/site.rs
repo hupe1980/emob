@@ -13,7 +13,7 @@
 //! facts that change when somebody sends an engineer, not when somebody plugs
 //! in. What changes on a minute's notice is [`crate::status`].
 
-use emob_core::{AdHocPayment, CurrentType, EvseId, PartyId, V2gCommunication};
+use emob_core::{AdHocPayment, CurrentType, EvseId, PartyId, TimeZone, V2gCommunication};
 use rust_decimal::Decimal;
 
 use crate::error::{PoiError, Result};
@@ -296,6 +296,18 @@ pub struct Site {
     pub coordinates: Coordinates,
     /// The postal address.
     pub address: Address,
+    /// The zone the site's wall clock runs on.
+    ///
+    /// Where every local time about this site is read: the daily window a
+    /// time-restricted price applies in, the opening hours, and — the reason it
+    /// is not optional — the zone `[OCPI 2.3.0 §mod_locations_location_object]`
+    /// makes a mandatory field of a Location and
+    /// `[DATEX-II-Profil]` carries as `FacilityLocation.timeZone`.
+    ///
+    /// A tariff offered at this site states the same zone
+    /// (`emob_tariff::Tariff::time_zone`); a tariff that states a different one
+    /// prices a night rate at hours this site never sees.
+    pub time_zone: TimeZone,
     /// The stations on it.
     pub stations: Vec<Station>,
 }
@@ -308,6 +320,7 @@ impl Site {
         name: impl Into<String>,
         coordinates: Coordinates,
         address: Address,
+        time_zone: TimeZone,
         stations: Vec<Station>,
     ) -> Self {
         Self {
@@ -315,6 +328,7 @@ impl Site {
             name: name.into(),
             coordinates,
             address,
+            time_zone,
             stations,
         }
     }

@@ -25,6 +25,10 @@
 //! - [`station`] — [`ChargePointProfile`] and
 //!   [`ProviderProfile`]: the facts about a charge point, and about a mobility
 //!   service provider, that regulation actually asks about.
+//! - [`zone`] — [`TimeZone`]: the named IANA zone a tariff's wall clock is read
+//!   in. An offset is what a timestamp was written with; a zone is the rule that
+//!   decides the offset, and a price per hour of the day is meaningless without
+//!   one.
 //! - [`crossing`] — [`Crossing`] and [`Note`]: a value carried onto a wire and
 //!   the account of what the crossing cost, by JSON Pointer into the document
 //!   the recipient will be reading. Shared, because three seams — OCPI, the
@@ -76,6 +80,7 @@ pub mod period;
 pub mod quantity;
 pub mod station;
 pub mod wire;
+pub mod zone;
 
 pub use crossing::{Crossing, Note};
 pub use error::{CoreError, IdError, QuantityError, Result};
@@ -92,3 +97,4 @@ pub use station::{
     Ownership, PriceConduct, PriceTransparency, ProviderProfile, QuotaPosture, RegisterPublication,
     Registration, RiskManagement, UndertakingProfile, V2gCommunication,
 };
+pub use zone::{Local, TimeZone, ZoneError};

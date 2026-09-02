@@ -47,6 +47,7 @@ let tariff = Tariff::simple(
     "ad-hoc".parse()?,
     Currency::EUR,
     TariffKind::AdHoc,
+    TimeZone::new("Europe/Berlin")?,
     vec![
         PriceComponent::new(Dimension::Flat, dec("0.50")),
         PriceComponent::new(Dimension::Energy, dec("0.49")),
@@ -355,6 +356,28 @@ whole seconds, exact, and it is the figure the amount came from:
 assert!(rated.lines_reconcile());   // base_quantity × unit_price / 3600 == amount
 ```
 
+## …and the one restriction a period carries nothing to cut on
+
+Cutting works because a period *contains* the fact about where a threshold was
+crossed: one period of 15 kWh says by construction that the tenth kilowatt-hour
+fell inside it. Energy, duration and the wall clock all accumulate.
+
+Average power does not — it is `energy / duration` over whatever window is asked
+about, and a period carries **no** information about the power inside it:
+
+```rust
+// 60 kWh in one hour, under "below 50 kW at 0.30, otherwise 0.60".
+rate(&t, &one_period).total()    // 36.00 EUR — one window, averaging 60 kW
+rate(&t, &two_halves).total()    // 34.50 EUR — 55 kWh then 5, averaging 110 and 10
+```
+
+Neither is an arithmetic error, and no cut recovers the second from the first.
+The finer answer is a **better measurement**; what the engine cannot do is make a
+low-resolution input behave like a high-resolution one. So the total is a
+function of the session *at the resolution its periods carry* — rate the periods
+the meter produced, which is what `Session::split` hands over, and
+`RatingNote::PowerJudgedPerPeriod` says why a partner's coarser document differs.
+
 ## Restrictions, including the two everybody gets wrong
 
 Time-of-day, date, energy, duration, power and weekday restrictions select which
@@ -364,13 +387,38 @@ midnight a weekday restriction turns on, which is the one threshold the tariff
 never names: without it a session running Friday 23:00 to Saturday 01:00 arrives
 as one period and is priced for both hours at Friday's rate.
 
-They are read against the **UTC offset the period carries**, because an
-`OffsetDateTime` knows an offset and not a time zone. Every session
-`emob-session` assembles carries one per period, so that is exact — including
-across a clock change, where the periods either side carry the offsets their
-readings did. A session assembled from a partner's timestamps can carry two, and
-then `rate` reports `MixedUtcOffsets` rather than placing an hour of night rate
-on the wrong side of a boundary in silence.
+They are read against the **wall clock of the tariff's own zone** —
+`Tariff::time_zone`, an IANA name. A `22:00` night rate is local civil time at
+the charge point `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and OCPI
+carries that zone on the Location, where it is mandatory
+`[OCPI 2.3.0 §mod_locations_location_object]`.
+
+Not the UTC offset the timestamps carry. An offset is what a clock was written
+with; a zone is the rule that decides it. Judged against the offset, one physical
+session under a German night tariff costs €6.00 stamped `+01:00` and €9.00
+stamped `Z` — and the second is the ordinary case, because every session an eMSP
+re-rates from a roaming partner arrives in UTC.
+
+```rust
+// The same two hours, three spellings, one price.
+for (from, to) in [
+    (datetime!(2026-01-02 21:00 +0), datetime!(2026-01-02 23:00 +0)),
+    (datetime!(2026-01-02 22:00 +1), datetime!(2026-01-03 00:00 +1)),
+    (datetime!(2026-01-03 06:00 +9), datetime!(2026-01-03 08:00 +9)),
+] {
+    let session = Chargeable::energy_only(kwh("20"), from, to)?;
+    assert_eq!(rate(&night, &session).total().to_string(), "6.00 EUR");
+}
+```
+
+The zone also places the cuts, and a civil time is not always an instant: a
+spring gap swallows an hour, so the clock passes `02:30` once; an autumn fold
+repeats one, so it passes `02:30` **twice** and a window ending there ends twice.
+Both are cut.
+
+The database is compiled in rather than read — nothing opens
+`/usr/share/zoneinfo` or looks at `TZ`, `Cargo.lock` pins its version, and a tzdb
+release moves future offsets rather than the frozen ones a settled session has.
 
 **A window that wraps midnight** — `22:00` to `06:00` — is the night tariff it
 is, rather than the empty range a naïve comparison makes of it.

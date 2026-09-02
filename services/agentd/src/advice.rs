@@ -109,19 +109,32 @@ impl Proposal {
     /// nobody reads.
     pub const EVIDENCE_SHOWN: usize = 5;
 
-    /// Sort the advice so the largest quantity is first, within a kind.
+    /// Sort the advice so the largest quantity is first, **within a
+    /// comparable group**.
     ///
-    /// Energy is compared with energy and money with money; a count is compared
-    /// with a count. Two different kinds are **not** ranked against each other,
-    /// because there is no exchange rate between a kilowatt-hour and a euro that
-    /// this daemon is entitled to invent — so they are grouped, and each group
-    /// is ordered.
+    /// Two different kinds are not ranked against each other, because there is
+    /// no exchange rate between a kilowatt-hour and a euro that this daemon is
+    /// entitled to invent.
+    ///
+    /// # …and a kind is not a group
+    ///
+    /// The same argument goes one level further. €100 and CHF 100 are both
+    /// [`AtRisk::Money`], and ordering them by amount invents the exchange rate
+    /// the paragraph above refuses. 400 sessions and 5 charge points are both
+    /// [`AtRisk::Count`], and ranking them says four hundred sessions matter
+    /// eighty times more than five dead posts, which is not a fact.
+    ///
+    /// So the group is the **unit**: the currency for money, the counted noun
+    /// for a count, kilowatt-hours for energy (there is only one). Groups are
+    /// ordered among themselves by name so a queue is stable, and each group is
+    /// ordered by magnitude (D189).
     #[must_use]
     pub fn ranked(mut self) -> Self {
         self.advice.sort_by(|a, b| {
             kind_order(&a.at_risk)
                 .cmp(&kind_order(&b.at_risk))
-                .then_with(|| compare_within_kind(&b.at_risk, &a.at_risk))
+                .then_with(|| unit_of(&a.at_risk).cmp(&unit_of(&b.at_risk)))
+                .then_with(|| compare_within_unit(&b.at_risk, &a.at_risk))
                 .then_with(|| a.headline.cmp(&b.headline))
         });
         self
@@ -146,7 +159,19 @@ const fn kind_order(at_risk: &AtRisk) -> u8 {
     }
 }
 
-fn compare_within_kind(a: &AtRisk, b: &AtRisk) -> core::cmp::Ordering {
+/// The unit two quantities have to share before their magnitudes mean
+/// anything against each other.
+fn unit_of(at_risk: &AtRisk) -> String {
+    match at_risk {
+        // One unit, so every energy is comparable with every other.
+        AtRisk::Energy(_) => "kWh".to_owned(),
+        AtRisk::Money(money) => money.currency().to_string(),
+        AtRisk::Count { of, .. } => of.clone(),
+    }
+}
+
+/// Compare two quantities **already known to share a unit**.
+fn compare_within_unit(a: &AtRisk, b: &AtRisk) -> core::cmp::Ordering {
     match (a, b) {
         (AtRisk::Energy(a), AtRisk::Energy(b)) => a.cmp(b),
         (AtRisk::Money(a), AtRisk::Money(b)) => a.amount().cmp(&b.amount()),
@@ -191,7 +216,7 @@ pub fn advisory(operator: &Principal) -> Option<Principal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emob_core::{Currency, PartyId};
+    use emob_core::{Currency, Money, PartyId};
     use emob_service::{PartyScope, Role};
     use rust_decimal::Decimal;
     use std::str::FromStr as _;
@@ -319,5 +344,82 @@ mod tests {
         assert!(line.contains("evidence-triage"), "{line}");
         assert!(line.contains("412.5 kWh"), "{line}");
         assert!(line.contains("380"), "{line}");
+    }
+
+    #[test]
+    fn two_currencies_are_two_queues_and_not_one_exchange_rate() {
+        // The module refuses to rank a kilowatt-hour against a euro. €100
+        // against CHF 100 is the same refusal one level down, and the first
+        // version of `ranked` did not make it: sorting `AtRisk::Money` by
+        // amount alone invents the rate it says it will not invent (D189).
+        let money = |amount: &str, code: &str| Advice {
+            specialist: "settlement".to_owned(),
+            headline: format!("{amount} {code}"),
+            at_risk: AtRisk::Money(Money::new(
+                Decimal::from_str_exact(amount).unwrap(),
+                Currency::new(code).unwrap(),
+            )),
+            evidence: Vec::new(),
+            covers: 1,
+            suggested: "chase it".to_owned(),
+        };
+
+        let ranked = Proposal {
+            advice: vec![
+                money("10", "CHF"),
+                money("100", "EUR"),
+                money("500", "CHF"),
+                money("900", "EUR"),
+            ],
+            considered: 4,
+        }
+        .ranked();
+
+        let order: Vec<&str> = ranked.advice.iter().map(|a| a.headline.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["500 CHF", "10 CHF", "900 EUR", "100 EUR"],
+            "one queue per currency, each ordered by its own amount"
+        );
+    }
+
+    #[test]
+    fn counts_of_different_things_are_not_ranked_against_each_other() {
+        // 400 sessions and 5 charge points are both counts, and saying the
+        // first matters eighty times more than the second is not a fact.
+        let count = |n: usize, of: &str| Advice {
+            specialist: "triage".to_owned(),
+            headline: format!("{n} {of}"),
+            at_risk: AtRisk::Count {
+                n,
+                of: of.to_owned(),
+            },
+            evidence: Vec::new(),
+            covers: n,
+            suggested: "look".to_owned(),
+        };
+
+        let ranked = Proposal {
+            advice: vec![
+                count(400, "sessions"),
+                count(5, "charge points"),
+                count(9, "charge points"),
+                count(12, "sessions"),
+            ],
+            considered: 4,
+        }
+        .ranked();
+
+        let order: Vec<&str> = ranked.advice.iter().map(|a| a.headline.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "9 charge points",
+                "5 charge points",
+                "400 sessions",
+                "12 sessions"
+            ],
+            "one queue per counted noun"
+        );
     }
 }

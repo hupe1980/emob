@@ -777,6 +777,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             components,
         )
     }

@@ -171,9 +171,10 @@ impl Tariff {
     /// A content address for this tariff.
     ///
     /// Covers every field that can change a price or a display: the id, the
-    /// currency, the kind, the tax basis, the bounds, the validity window, and
-    /// every element with its restrictions and components **in order**, because
-    /// element order decides which one applies.
+    /// currency, the kind, **the zone the wall clock is read in**, the tax
+    /// basis, the bounds, the validity window, and every element with its
+    /// restrictions and components **in order**, because element order decides
+    /// which one applies.
     ///
     /// Scale is part of it. `0.49` and `0.490` are numerically equal and are
     /// two different prices to show a driver, so they fingerprint differently —
@@ -185,6 +186,12 @@ impl Tariff {
         c.field(self.id.as_str())
             .field(self.currency.as_str())
             .field(self.kind.as_str())
+            // The zone the wall-clock restrictions are read in. Two tariffs
+            // with identical `22:00` elements in `Europe/Berlin` and
+            // `Europe/Lisbon` price the same session differently, so they are
+            // two tariffs and a record has to be able to say which one priced
+            // it.
+            .field(self.time_zone.name())
             .field(self.tax_included.as_str())
             .optional(self.min_price.map(|p| p.to_string()))
             .optional(self.max_price.map(|p| p.to_string()))
@@ -447,6 +454,7 @@ mod tests {
     use super::*;
     use crate::tariff::{Dimension, PriceComponent, TariffKind};
     use emob_core::Currency;
+    use emob_core::TimeZone;
     use rust_decimal::Decimal;
     use rust_decimal::prelude::FromStr;
     use time::macros::datetime;
@@ -460,6 +468,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec(price))],
         )
     }

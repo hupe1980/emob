@@ -134,6 +134,55 @@ OCMF's error levels are deliberately *not* on the scale. `MISMATCH` and
 an ordered scale would make "the certificate was rejected" compare as slightly
 worse than an RFID UID.
 
+## A time zone, because an offset is not one
+
+`time::OffsetDateTime` carries a **UTC offset** — what a clock happened to be
+written with. A **zone** is the rule that decides the offset at any instant,
+including on the two days a year it changes, and the two are not
+interchangeable. In this workspace the difference is paid in cents.
+
+A tariff's `0.30 from 22:00` is local civil time at the charge point
+`[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and OCPI carries the zone
+it is read in on the Location, where it is mandatory
+`[OCPI 2.3.0 §mod_locations_location_object]`. Judged against whatever offset
+the timestamps carried instead, one physical session under a German night tariff
+costs €6.00 stamped `+01:00` and €9.00 stamped `Z`.
+
+```rust
+let berlin = TimeZone::new("Europe/Berlin")?;
+
+// One instant, three spellings, one wall clock.
+assert_eq!(berlin.local(datetime!(2026-01-02 21:00 +0)).time, time!(22:00));
+assert_eq!(berlin.local(datetime!(2026-01-02 22:00 +1)).time, time!(22:00));
+
+// …and the zone knows which side of the clock change it is on.
+assert_eq!(berlin.local(datetime!(2026-07-02 21:00 +0)).time, time!(23:00));
+```
+
+**A civil time is not always an instant**, so `instants_at` returns a list. A
+spring gap swallows an hour — `02:30` never happens, and the wall clock passes it
+once, at the transition — and an autumn fold repeats one, so it passes `02:30`
+**twice**:
+
+```rust
+assert_eq!(berlin.instants_at(date!(2026-03-29), time!(2:30)).len(), 1);
+assert_eq!(berlin.instants_at(date!(2026-10-25), time!(2:30)).len(), 2);
+```
+
+A tariff whose night window ends at `02:30` ends twice on that Sunday, and a cut
+placed only at the first leaves the repeated hour priced by whatever applied
+before it.
+
+**And it reads nothing.** The database is compiled in (`jiff` with
+`tzdb-bundle-always`); nothing opens `/usr/share/zoneinfo`, reads `TZ` or asks
+the operating system anything, so two machines with different system `tzdata`
+give the same answer and `just purity` holds. `Cargo.lock` pins the version, and
+a tzdb release announces what a zone *will* do while the civil offsets of
+instants that have already happened are frozen — which are the only instants a
+settled session has. A name the database does not know is refused rather than
+silently replaced with UTC, because the substitution is invisible and moves
+prices.
+
 ## The obligation calendar
 
 "Are we AFIR-ready for 2027?" is normally a consulting engagement. Here it is a

@@ -15,10 +15,12 @@ fn main() -> Result<()> {
         Some("no-floats") => no_floats(&root),
         Some("check-citations") => check_citations(&root),
         Some("check-manifests") => check_manifests(&root),
+        Some("check-graph") => check_graph(&root),
         Some("check-all") => {
             no_floats(&root)?;
             check_citations(&root)?;
-            check_manifests(&root)
+            check_manifests(&root)?;
+            check_graph(&root)
         }
         Some("help" | "--help" | "-h") | None => {
             print_help();
@@ -44,6 +46,9 @@ cargo xtask <task>
   check-manifests   every publishable crate can be packaged *and accepted*: the
                     files its manifest promises exist, and its keywords and
                     categories are within what the registry takes
+  check-graph       no domain crate has a clock, a socket or a database in its
+                    dependency graph — the half of `just purity` that greps
+                    cannot see, because a dependency is not our source
   check-all         all of the above
 "
     );
@@ -450,6 +455,135 @@ fn array_field(text: &str, field: &str) -> Option<Vec<String>> {
 
 /// `cargo publish` cannot be undone, and it fails on a `readme` that is not
 /// there — after the version has already been consumed on the registry.
+/// The crates that promise to read no clock, open no socket and touch no
+/// filesystem — the same list `just purity` greps.
+const PURE_CRATES: [&str; 11] = [
+    "emob-core",
+    "emob-eichrecht",
+    "emob-session",
+    "emob-cdr",
+    "emob-billing",
+    "emob-tariff",
+    "emob-thg",
+    "emob-ocpp",
+    "emob-poi",
+    "emob-roam",
+    "emob-sim",
+];
+
+/// Crates whose presence in a graph means an ambient-state path was activated.
+///
+/// Each entry is here because reaching it is the *only* thing it is for: an
+/// async runtime drives sockets, a driver talks to a database, a v7 or v4
+/// identifier reads the clock or the OS random source, and a system time-zone
+/// lookup reads `TZ` and `/etc/localtime`. None of them is a crate a domain
+/// crate can hold and still be replayable.
+///
+/// Deliberately not a list of everything that *could* do I/O. `libc` is in every
+/// graph, `time` can format an instant it was handed, and `rand_core` is a trait
+/// crate the elliptic-curve stack needs to *verify* a signature it was given.
+/// A guard that failed on those would be turned off within a week, which is the
+/// failure mode of every over-broad check.
+const AMBIENT: [(&str, &str); 16] = [
+    (
+        "tokio",
+        "an async runtime, which exists to drive sockets and files",
+    ),
+    ("async-std", "an async runtime"),
+    ("smol", "an async runtime"),
+    ("mio", "the event loop under a socket"),
+    ("socket2", "sockets"),
+    ("reqwest", "an HTTP client"),
+    ("hyper", "an HTTP implementation"),
+    ("tungstenite", "a WebSocket implementation"),
+    ("axum", "an HTTP server"),
+    ("sqlx", "a database driver"),
+    ("diesel", "a database driver"),
+    ("rusqlite", "a database driver"),
+    ("tokio-postgres", "a database driver"),
+    (
+        "uuid",
+        "v4 reads the OS random source and v7 reads the clock",
+    ),
+    ("iana-time-zone", "reads `TZ` and the system zone file"),
+    ("notify", "watches the filesystem"),
+];
+
+/// No domain crate carries a clock, a socket or a database in its dependency
+/// graph.
+///
+/// # Why this is a separate guard from `just purity`
+///
+/// `just purity` greps *this workspace's* source for `SystemTime::now`, a
+/// socket and a filesystem call. It cannot see into a dependency, and a
+/// dependency is not our source — so the guarantee that a two-year-old dispute
+/// replays to the same answer rests on the feature sets the manifests declare
+/// as much as on the code the crates call. That half was reviewable and is now
+/// checked (D181): `emob-billing` carried `uuid`/`v7`, and therefore
+/// `SystemTime::now`, for sixty lines of adapter that belonged in a daemon.
+///
+/// Run with `--all-features`, because a feature is exactly how such a
+/// dependency comes back.
+fn check_graph(root: &Path) -> Result<()> {
+    let mut problems = Vec::new();
+    let mut checked = 0;
+
+    for crate_name in PURE_CRATES {
+        if !root.join("crates").join(crate_name).exists() {
+            continue;
+        }
+        let output =
+            std::process::Command::new(std::env::var("CARGO").as_deref().unwrap_or("cargo"))
+                .current_dir(root)
+                .args([
+                    "tree",
+                    "-p",
+                    crate_name,
+                    "--edges",
+                    "normal",
+                    "--all-features",
+                    "--prefix",
+                    "none",
+                ])
+                .output()
+                .with_context(|| format!("running `cargo tree` for {crate_name}"))?;
+        if !output.status.success() {
+            bail!(
+                "`cargo tree -p {crate_name}` failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        checked += 1;
+
+        let tree = String::from_utf8_lossy(&output.stdout).into_owned();
+        let names: BTreeSet<&str> = tree
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        for (dependency, why) in AMBIENT {
+            if names.contains(dependency) {
+                problems.push(format!(
+                    "{crate_name} depends on `{dependency}` — {why}. A crate that promises to be                      replayable cannot carry one, whatever it happens to call: see D181"
+                ));
+            }
+        }
+    }
+
+    if !problems.is_empty() {
+        for problem in &problems {
+            eprintln!("  {problem}");
+        }
+        bail!(
+            "{} domain crate dependency(s) reach ambient state",
+            problems.len()
+        );
+    }
+    println!(
+        "🧊 check-graph: {checked} domain crate(s) carry no clock, socket or database in their dependency graphs"
+    );
+    Ok(())
+}
+
 fn check_manifests(root: &Path) -> Result<()> {
     let crates_dir = root.join("crates");
     if !crates_dir.exists() {

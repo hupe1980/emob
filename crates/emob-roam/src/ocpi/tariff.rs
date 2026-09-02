@@ -31,6 +31,21 @@
 //! a night tariff as an all-day one — a *different* price, from a document this
 //! operator signed off. So it is [`RoamError::RestrictionNotExpressible`], for
 //! the reason the unevaluable one is refused.
+//!
+//! # The zone the wall clock is read in travels beside the tariff, not in it
+//!
+//! `22:00` is local civil time at the charge point, and OCPI puts the zone that
+//! is read in on the **Location** — `time_zone`, an IANA name, cardinality 1
+//! `[OCPI 2.3.0 §mod_locations_location_object]` — rather than on the Tariff.
+//! So this crossing cannot state it in the object it produces, and the
+//! constraint is on what the operator publishes *beside* it: every Location a
+//! tariff applies at has to carry the zone the tariff was written in.
+//!
+//! That is worth a note rather than a shrug, because it is the one fact a
+//! partner needs to reproduce a price and the one this document structurally
+//! cannot carry. [`to_ocpi`] names [`Tariff::time_zone`] by JSON Pointer, so an
+//! operator has the value to check their Locations against and a partner
+//! settling a disputed session has it in the account of the crossing.
 
 use emob_tariff::{Dimension, Restrictions, Tariff, TariffKind, TaxIncluded};
 use ocpi_kit::types::{LocalDate, LocalTime, Number};
@@ -83,8 +98,34 @@ pub fn to_ocpi(
         elements.push(
             TariffElement::builder()
                 .price_components(components)
-                .maybe_restrictions(restrictions(&element.restrictions, index, &mut crossing)?)
+                .maybe_restrictions(restrictions(&element.restrictions, index)?)
                 .build(),
+        );
+    }
+
+    // OCPI puts the zone a tariff's wall clock is read in on the **Location**,
+    // where it is mandatory, and not on the Tariff — so this document carries
+    // `22:00` and nothing that says which 22:00
+    // `[OCPI 2.3.0 §mod_locations_location_object]`. That is not a gap a
+    // sender can close inside this object; it is a constraint on what the
+    // sender must publish beside it. Naming the zone here gives the operator
+    // the value their Locations have to agree with, and gives a partner
+    // reconciling a disputed session the one fact the tariff cannot state.
+    if tariff
+        .elements
+        .iter()
+        .any(|element| element.restrictions.reads_the_wall_clock())
+    {
+        crossing.note(
+            "/elements",
+            format!(
+                "this tariff's time, date and weekday restrictions are read on the wall clock of \
+                 {}. OCPI carries that zone on the Location's `time_zone` and not on the Tariff \
+                 [OCPI 2.3.0 §mod_locations_location_object], so every Location this tariff \
+                 applies at must publish it — a partner evaluating these restrictions in any \
+                 other zone prices the night rate at the wrong hours",
+                tariff.time_zone
+            ),
         );
     }
 
@@ -138,7 +179,7 @@ pub fn to_ocpi(
 ///
 /// # A tariff that states no rate is not a tariff that cannot answer
 ///
-/// The two used to be one `None` and this refused both, which meant an ordinary
+/// The two are distinct answers, and collapsing them into one `None` means an ordinary
 /// gross price list carrying a `min_price` and no VAT rate anywhere could not be
 /// published to a partner at all — over a diagnostic that said its components
 /// carried more than one rate, which was not true of it. A basis nobody stated
@@ -251,7 +292,6 @@ pub const fn tax_included(tax: TaxIncluded) -> OcpiTaxIncluded {
 fn restrictions(
     restrictions: &Restrictions,
     index: usize,
-    crossing: &mut Crossing<()>,
 ) -> Result<Option<TariffRestrictions>, RoamError> {
     if restrictions == &Restrictions::default() {
         return Ok(None);
@@ -271,20 +311,6 @@ fn restrictions(
         day_of_week: restrictions.days_of_week.iter().copied().map(day).collect(),
         ..TariffRestrictions::default()
     };
-
-    // OCPI's `start_time`/`end_time` are local to the location, and the local
-    // zone is not in the document. Carrying the wall clock is right — it is
-    // what the tariff means — but a partner in another zone reading it as
-    // theirs prices a night rate at the wrong hours, and nothing in the
-    // document says which reading was meant.
-    if restrictions.start_time.is_some() || restrictions.end_time.is_some() {
-        crossing.note(
-            format!("/elements/{index}/restrictions"),
-            "the time restriction is a wall clock local to the charge point, and OCPI does not \
-             carry the zone [OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]. A partner \
-             reading it in their own zone prices a night rate at the wrong hours",
-        );
-    }
 
     Ok(Some(out))
 }
@@ -379,6 +405,7 @@ mod tests {
             "tariff-1".parse().unwrap(),
             emob_core::Currency::new("EUR").unwrap(),
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![Component::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
         )
     }
@@ -489,6 +516,7 @@ mod tests {
             "tariff-1".parse().unwrap(),
             emob_core::Currency::new("EUR").unwrap(),
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![Component::new(Dimension::Energy, dec("0.49"))],
         );
         unstated.min_price = Some(dec("5.00"));
@@ -513,6 +541,7 @@ mod tests {
             "tariff-1".parse().unwrap(),
             emob_core::Currency::new("EUR").unwrap(),
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![Component::new(Dimension::Energy, dec("0.49")).with_vat(dec("-100"))],
         );
         impossible.max_price = Some(dec("40.00"));

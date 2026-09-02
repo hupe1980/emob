@@ -135,9 +135,9 @@ authoritative on a day the phase drifted.
 
 And **a meter had one value at each instant**. Two readings of one register at
 one instant that disagree are a contradiction rather than an ordering question:
-a stable sort keeps the caller's order at equal keys, so the same pair used to be
-reported as a register running backwards when the larger arrived first and
-accepted in silence when the smaller did — and the arrival order of two messages
+a stable sort keeps the caller's order at equal keys, so left to the ordering the
+same pair reads as a register running backwards when the larger arrives first and
+passes in silence when the smaller does — and the arrival order of two messages
 is not evidence about a meter. `MeterError::ContradictoryReading` is asked before
 the monotonicity question; a duplicate that says the same thing still passes,
 because it contradicts nothing.

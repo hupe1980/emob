@@ -43,6 +43,7 @@ serde = [
 ]
 
 [dev-dependencies]
+ocmf           = { workspace = true }
 # The end-to-end test signs real OCMF records at test time, so it needs a
 # signing key and a hash.
 hex            = { workspace = true }

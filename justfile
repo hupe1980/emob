@@ -35,6 +35,11 @@ lint:
 # takes its time and its keys as arguments — the moment one of them reads a
 # clock or opens a socket, the replay stops being a replay.
 #
+# This greps *our* source. The other half — that no dependency drags a clock, a
+# socket or a database in behind it — is `cargo xtask check-graph`, under
+# `just guards`, because a dependency is not our source and `emob-billing` once
+# carried `uuid`/`v7` and therefore `SystemTime::now` (D181).
+#
 # 🧊 Enforce the "no I/O, no clock" promise of the domain crates
 purity:
     #!/usr/bin/env bash
@@ -63,7 +68,7 @@ test:
 test-crate crate:
     cargo test -p {{ crate }} --all-features
 
-# 🛡️ Workspace guards: no floats, citations, publishable manifests
+# 🛡️ Workspace guards: no floats, citations, publishable manifests, clean graphs
 guards:
     cargo run -q -p xtask -- check-all
 

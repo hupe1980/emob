@@ -73,7 +73,7 @@ document does not reproduce, by JSON Pointer into the invoice.
 
 ```rust
 let crossing = InvoiceBuilder::new("R-2026-0001", issued, period, cpo, driver)
-    .supplied_from("DE", dec("19"))
+    .supplied_from("DE", dec("19"))   // the country the points stand in, and its rate
     .ledger(&ledger)      // `live`, never `iter` — see below
     .due_on(due)
     .build()?;
@@ -107,10 +107,65 @@ field.
 ```rust
 // Both identifiers, or there is no category — EN 16931's BR-AE-2 and BR-AE-3
 // refuse the document anyway, and refusing it here names the missing one.
-let treatment = TaxTreatment::decide(&seller.tax, &buyer.tax, "DE", dec("19"))?;
+let rates = VatRates::new().at("DE", dec("19"));
+let treatment = TaxTreatment::decide(&seller.tax, &buyer.tax, "DE", &rates)?;
 assert_eq!(treatment.category, VatCategory::ReverseCharge);
 assert_eq!(treatment.place_of_supply, "FR");
 ```
+
+### The rate belongs to the place of supply, not to the charge point
+
+Which is why the rates are a small table rather than one number. `[UStG §3g]`
+moves the place of supply, and a **domestic** reseller moves it to a country
+that need not be the one the points stand in: a German operator running chargers
+in France and settling with a German eMSP is taxed in Germany, at 19 %, on
+kilowatt-hours drawn under a 20 % regime.
+
+```rust
+let rates = VatRates::new().at("FR", dec("20")).at("DE", dec("19"));
+
+// The roaming leg — taxed where the reseller is established.
+let settlement = TaxTreatment::decide(&cpo, &german_emsp, "FR", &rates)?;
+assert_eq!((settlement.place_of_supply.as_str(), settlement.rate), ("DE", dec("19")));
+
+// The ad-hoc leg at the same posts — taxed where they stand.
+let ad_hoc = TaxTreatment::decide(&cpo, &driver, "FR", &rates)?;
+assert_eq!((ad_hoc.place_of_supply.as_str(), ad_hoc.rate), ("FR", dec("20")));
+```
+
+A standard-rated supply whose place of supply has no stated rate is **refused**,
+because the two silent alternatives — using the rate that happened to be
+supplied, or using zero — are an invoice that over-declares its VAT and one that
+under-declares it.
+
+### And a reseller outside the Union is `O`, not `G` — which changes the document
+
+Article 38 moves the place of supply to where the reseller is established. For a
+Swiss eMSP that is outside the Union, so **no member state's VAT arises at all**:
+the transaction is outside the scope. `G` — free export item — describes goods
+that are within scope and zero-rated because they leave the customs territory,
+which electricity consumed in the Union is not.
+
+`O` is the only category in UNCL 5305 that **states no rate**, and that is not a
+detail. `BR-O-05` refuses a line carrying BT-152 at all, and a rate of zero is
+carrying it; `BR-O-02` allows no VAT identifier on either party; and once the
+seller's is gone, `BR-CO-26` still wants the buyer to be able to identify its
+supplier — so the legal registration BT-30 stops being optional on exactly that
+document.
+
+```rust
+let cpo = Counterparty::new("Stadtwerke Musterstadt GmbH", "Musterstadt", seller_tax)
+    .registered_as("HRB 12345", None);   // BT-30, and on this invoice not optional
+
+let invoice = /* … to a Swiss reseller … */;
+assert!(invoice.lines.iter().all(|line| line.vat_rate.is_none()));
+assert_eq!(to_en16931(&invoice, CEN_CORE)?.value.invoice.seller.vat_identifier, None);
+```
+
+The category type is **`en16931`'s own**: all ten codes with four predicates
+generated from the CEN artefacts, of which `forbids_exemption_reason` and
+`states_rate` are the two that decide the paragraph above. What stays here is the
+part `en16931` cannot know — which category two *parties* produce.
 
 And the books agree with the document: under a reverse charge there is **no VAT
 posting**, because the liability is the recipient's. A platform that posts 19 %
@@ -162,22 +217,34 @@ collection date, *now* for the message timestamp — and a collection file that
 differs between two runs of one job is a file no bank reconciles and no auditor
 can check. A test asserts the same inputs produce identical XML.
 
-## It names no accounts
+## It names no accounts, and it links no ledger
 
 `postings_for` produces movements addressed by **role** — receivable, energy
-revenue, service revenue, VAT payable at a rate — and `entry_for` turns them
-into a `doubleentry` draft once a caller has supplied the mapping. SKR03 and
-SKR04 disagree about the numbers and neither is a domain crate's business.
-
-A role the caller's chart cannot place is a refusal, not a dropped posting: a
-dropped posting is an entry that does not balance and a trial balance that is
-quietly wrong.
+revenue, service revenue, VAT payable at a rate — balanced before an account is
+named:
 
 ```rust
 let books = postings::postings_for(&invoice);
-assert!(books.balances());          // before an account is named
-let draft = postings::entry_for(&books, id, &invoice.number, |role| chart.get(role))?;
+assert!(books.balances());
 ```
+
+SKR03 and SKR04 disagree about the numbers, so the chart is a service's. So is
+the **journal**: posting into one needs accounts, a calendar, a policy and a
+database, and none of those can live in a crate that promises to read no clock
+and open no socket. `mako` declares `doubleentry` in exactly one manifest —
+`services/accountingd` — and in no crate; `billd` is where it belongs here.
+
+It is not only a layering argument. A bookkeeping engine brings the clock in
+through the door: `doubleentry` takes `uuid` with `v7`, and a v7 identifier is
+generated from `SystemTime::now()`. `just purity` greps this workspace's own
+source and cannot see into a dependency, so the promise that two runs of one
+billing job produce one file is kept by what the manifests *do not* declare as
+much as by what the code does not call.
+
+What crosses the seam is `Postings`: a currency, a booking date, and a balanced
+set of role-addressed movements. A role a chart cannot place is a refusal rather
+than a dropped posting — a dropped posting is an entry that does not balance and
+a trial balance that is quietly wrong.
 
 ## And it prices nothing
 
@@ -193,7 +260,6 @@ own `billing` adapter is deliberately not enabled.
 | `en16931` | the EN 16931 semantic model and its 317 rules, at the severities the authorities publish |
 | `en16931-formats` | UBL, and the XRechnung flavour of it |
 | `sepa` | pain.008, with IBAN, BIC and Creditor-Identifier validation |
-| `doubleentry` | exact integer money and an entry that is balanced by construction |
 
 ## Licence
 

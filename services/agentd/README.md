@@ -68,6 +68,26 @@ Two findings in **different** units are grouped rather than compared: there is n
 exchange rate between a kilowatt-hour and a euro that this daemon is entitled to
 invent.
 
+### …and a kind is not a group
+
+The refusal goes one level further than the kind. Ordering every `Money` by its
+amount puts €100 and CHF 100 in one queue and invents the exchange rate the
+paragraph refuses; `400 sessions` above `5 charge points` says four hundred
+sessions matter eighty times more than five dead posts.
+
+So the group is the **unit** — the currency for money, the counted noun for a
+count, kilowatt-hours for energy — and each unit is its own queue:
+
+```text
+[settlement] 500 CHF …     [triage] 9 charge points …
+[settlement]  10 CHF …     [triage] 5 charge points …
+[settlement] 900 EUR …     [triage] 400 sessions …
+[settlement] 100 EUR …     [triage]  12 sessions …
+```
+
+A magnitude means nothing without its unit, and two magnitudes are comparable
+only when the unit is the same one.
+
 ## Written as code, not as a prompt
 
 Every specialist is a deterministic function over data a daemon already holds.

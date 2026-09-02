@@ -43,6 +43,7 @@ fn ad_hoc() -> Tariff {
         "ad-hoc-dc".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![
             PriceComponent::new(Dimension::Energy, dec("0.59")),
             PriceComponent::new(Dimension::ParkingTime, dec("6.00")),

@@ -282,37 +282,12 @@ impl ClaimBuilder {
             }
         }
 
-        let mut energy = Energy::ZERO;
-        let mut sessions = 0_u32;
-        let mut earliest: Option<Date> = None;
-        let mut latest: Option<Date> = None;
-
-        for cdr in ledger.live().filter(|c| c.evse_id == profile.evse_id) {
-            let started = cdr.started_at.date();
-            if started < first || started > last {
-                continue;
-            }
-            if cdr.direction != Direction::Import {
-                self.notes.push(Note::new(
-                    format!("/records/{id}"),
-                    format!(
-                        "{} is an export: `[38k §5(1)]` counts electricity withdrawn for use in the vehicle",
-                        cdr.key.id
-                    ),
-                ));
-                continue;
-            }
-            if cdr.evidence.is_none() {
-                return Err(ThgError::Unmeasured {
-                    cdr: cdr.key.id.to_string(),
-                });
-            }
-            energy = add(energy, cdr);
-            sessions += 1;
-            earliest = Some(earliest.map_or(started, |e: Date| e.min(started)));
-            let ended = cdr.ended_at.date();
-            latest = Some(latest.map_or(ended, |l: Date| l.max(ended)));
-        }
+        let Contribution {
+            energy,
+            sessions,
+            earliest,
+            latest,
+        } = self.contribution(profile, ledger, first, last)?;
 
         if sessions == 0 {
             self.notes.push(Note::new(
@@ -341,6 +316,85 @@ impl ClaimBuilder {
         Ok(())
     }
 
+    /// What one point's records contribute to this obligation year.
+    ///
+    /// Split out of [`Self::point`] because it is the half that reads the
+    /// ledger, and the half above it reads the calendar: a point is eligible or
+    /// it is not, and *then* its records are counted.
+    ///
+    /// # Errors
+    ///
+    /// [`ThgError::Unmeasured`] for a contributing record carrying energy no
+    /// meter signed `[38k §6(3) Nr. 2]`.
+    fn contribution(
+        &mut self,
+        profile: &ChargePointProfile,
+        ledger: &CdrLedger,
+        first: Date,
+        last: Date,
+    ) -> Result<Contribution, ThgError> {
+        let id = profile.evse_id.canonical().to_string();
+        let mut out = Contribution::default();
+
+        for cdr in ledger.live().filter(|c| c.evse_id == profile.evse_id) {
+            if cdr.direction != Direction::Import {
+                self.notes.push(Note::new(
+                    format!("/records/{id}"),
+                    format!(
+                        "{} is an export: `[38k §5(1)]` counts electricity withdrawn for use in the vehicle",
+                        cdr.key.id
+                    ),
+                ));
+                continue;
+            }
+
+            // The energy this record withdrew **inside the obligation year**,
+            // period by period — not the whole record because it happened to
+            // start inside it. See `energy_in_year`.
+            let (inside, outside) = energy_in_year(cdr, first, last);
+            if inside.is_zero() {
+                continue;
+            }
+
+            // Asked only of a record that contributes. A record from another
+            // year is not this notification's to vouch for.
+            if cdr.evidence.is_none() {
+                return Err(ThgError::Unmeasured {
+                    cdr: cdr.key.id.to_string(),
+                });
+            }
+
+            if !outside.is_zero() {
+                self.notes.push(Note::new(
+                    format!("/records/{id}"),
+                    format!(
+                        "{} spans the turn of the obligation year: {inside} of it was withdrawn \
+                         in {}, and {outside} belongs to the neighbouring year and is filed \
+                         there. The record's own total is the sum of the two, so a THG file and \
+                         a billing file will state different figures for this session on purpose \
+                         `[38k §5(1)]`",
+                        cdr.key.id, self.year
+                    ),
+                ));
+            }
+
+            out.energy = sum(out.energy, inside);
+            out.sessions += 1;
+            // The day a period withdrew on is the day its quarter hour
+            // **began**, for both bounds. A settlement period is half-open, so
+            // the one running 23:45 to 00:00 withdrew nothing on the 1st — and
+            // reading its exclusive end as an inclusive day would state a
+            // window ending in a year this notification does not report.
+            for period in periods_in_year(cdr, first, last) {
+                let day = period.quarter_hour.start().date();
+                out.earliest = Some(out.earliest.map_or(day, |e: Date| e.min(day)));
+                out.latest = Some(out.latest.map_or(day, |l: Date| l.max(day)));
+            }
+        }
+
+        Ok(out)
+    }
+
     /// The notification, and the account of what did not reach it.
     ///
     /// # Errors
@@ -363,9 +417,76 @@ impl ClaimBuilder {
     }
 }
 
+/// One point's contribution to one obligation year.
+#[derive(Debug, Default)]
+struct Contribution {
+    energy: Energy,
+    sessions: u32,
+    earliest: Option<Date>,
+    latest: Option<Date>,
+}
+
 /// Adding two energies cannot fail here: both are non-negative by
 /// construction, and the sum of two non-negative decimals is one.
-fn add(total: Energy, cdr: &Cdr) -> Energy {
-    Energy::from_kwh(total.kwh() + cdr.total_energy.kwh())
+fn sum(total: Energy, more: Energy) -> Energy {
+    Energy::from_kwh(total.kwh() + more.kwh())
         .expect("the sum of two non-negative energies is non-negative")
+}
+
+/// The charging periods of a record that fall inside an obligation year.
+///
+/// # Which instant puts a period in a year
+///
+/// The **start** of its quarter hour. `[38k §5(1)]` counts the electricity
+/// *withdrawn* in the obligation year, and the quarter hour running 23:45 to
+/// 00:00 on 31 December withdrew its energy on 31 December — whatever it is
+/// labelled.
+///
+/// That distinction is load-bearing here, because German metrology labels a
+/// Messperiode by its **end** `[PTB-A 50.7 §3.1.7.2]`, so the same quarter hour
+/// appears in an MSCONS load profile under `2027-01-01T00:00`. Reading
+/// [`QuarterHour::metering_timestamp`] here would move a whole quarter hour of
+/// every New Year's Eve into the following obligation year — the same
+/// fifteen-minute shift that error causes on the market side, arriving as a tax
+/// question instead of an allocation one.
+fn periods_in_year(
+    cdr: &Cdr,
+    first: Date,
+    last: Date,
+) -> impl Iterator<Item = &emob_cdr::ChargingPeriod> {
+    cdr.periods.iter().filter(move |period| {
+        let day = period.quarter_hour.start().date();
+        day >= first && day <= last
+    })
+}
+
+/// A record's energy split at the turn of the obligation year: what was
+/// withdrawn inside it, and what was not.
+///
+/// # Why a session is not attributed whole
+///
+/// A charge that begins at 23:45 on 31 December and ends at 00:15 on 1 January
+/// withdrew half its energy in each obligation year. Attributing the record to
+/// the year it *started* in — which is what a `started_at` filter does — files
+/// the January half under December and files nothing at all in January, so the
+/// operator loses the quota on it and the notification states a figure for a
+/// year in which that electricity was not withdrawn.
+///
+/// The workspace already holds the answer: a CDR carries the quarter-hour
+/// periods `emob_session::split` produced, and that split **conserves
+/// exactly**. So the two halves sum to the record's own total to the last
+/// digit, and a session that does not cross the boundary yields its whole
+/// energy on one side and zero on the other — the ordinary case, unchanged.
+fn energy_in_year(cdr: &Cdr, first: Date, last: Date) -> (Energy, Energy) {
+    let mut inside = Energy::ZERO;
+    let mut outside = Energy::ZERO;
+    for period in &cdr.periods {
+        let day = period.quarter_hour.start().date();
+        if day >= first && day <= last {
+            inside = sum(inside, period.energy);
+        } else {
+            outside = sum(outside, period.energy);
+        }
+    }
+    (inside, outside)
 }

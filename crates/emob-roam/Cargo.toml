@@ -43,6 +43,7 @@ thiserror    = { workspace = true }
 time         = { workspace = true }
 
 [dev-dependencies]
+ocmf           = { workspace = true }
 emob-eichrecht = { workspace = true }
 # Dev only, and only for `tests/one_price_three_audiences.rs`: the claim that
 # one tariff reaches the driver, the partner and the national access point as

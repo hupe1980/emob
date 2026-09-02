@@ -72,6 +72,7 @@ include!("profile/reference_paths.rs");
 /// | `additionalInformation` | `EnergyPrice` | `0..1` `Common.MultilingualString` |
 /// | `maximumDeliveryFee` | `EnergyRate` | `0..1` `AfirFacilities.AmountOfMoney` |
 /// | `combinationWithParkingFee` | `EnergyRate` | `0..1` `Common.Boolean` |
+/// | `timeZone` | `FacilityLocation` | `0..1` `AfirFacilities.TimeZone` |
 ///
 /// The last one is the profile's only acknowledgement that parking might be
 /// priced at all — see `emob_poi::rate` for why that matters more than its
@@ -102,6 +103,12 @@ const ATTESTED_BY_DICTIONARY: &[&str] = &[
     "/energyPrice[]/timeBasedApplicability",
     "/energyPrice[]/timeBasedApplicability/fromMinute",
     "/energyPrice[]/timeBasedApplicability/toMinute",
+    // The site's zone. The instance carries `timeZone` on the *station's*
+    // `FacilityLocation` and not on the site's — the same class either side of
+    // one `locLocationExtensionG`, so the attribute exists on both and the
+    // example simply exercises one. `DATEXII_3_LocationExtension.json` declares
+    // it on `FacilityLocation` itself.
+    "/locAreaLocation/locLocationExtensionG/FacilityLocation/timeZone",
 ];
 
 /// Whether a path is one the dictionary attests where the instance is silent.
@@ -146,6 +153,7 @@ fn tariff() -> Tariff {
         id: "ad-hoc".parse().expect("a tariff id"),
         currency: Currency::EUR,
         kind: TariffKind::AdHoc,
+        time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         tax_included: TaxIncluded::Yes,
         elements: vec![emob_tariff::TariffElement::unrestricted(vec![
             PriceComponent {
@@ -195,6 +203,7 @@ fn site() -> Site {
             city: "Musterstadt".to_owned(),
             country_code: "DE".to_owned(),
         },
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![Station::new(
             Facility::new("21F02723-STATION"),
             PartyId::new("DE", "ABC").expect("a party id"),

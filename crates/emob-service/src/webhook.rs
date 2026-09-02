@@ -24,6 +24,18 @@
 //! window is right for an interactive callback and wrong for an overnight batch,
 //! and a library that picked one would be picking it for both.
 //!
+//! # The secret's encoding is stated, never inferred
+//!
+//! Standard Webhooks writes a secret as `whsec_<base64>`, and some deployments
+//! configure a passphrase instead. Guessing between them is ambiguous for
+//! exactly the secrets that look like base64: `"mysecret"` is eight ASCII bytes
+//! *and* a valid base64 string, `"hunter2"` is not, and a sender and receiver
+//! that read the same string differently disagree on every delivery.
+//!
+//! So [`Secret::standard`] and [`Secret::raw`] are two constructors and the
+//! first is fallible. The same string means two different keys, and which one a
+//! deployment wants is not something a library can infer (D188).
+//!
 //! # Comparison is constant time, and a receiver that holds no secret rejects
 //!
 //! A signature compared with `==` leaks where two differ. And a verifier
@@ -50,24 +62,59 @@ pub const TIMESTAMP_HEADER: &str = "webhook-timestamp";
 const VERSION: &str = "v1";
 
 /// A shared secret, which neither prints itself nor compares in variable time.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Secret(Vec<u8>);
 
 impl Secret {
-    /// A secret from its configured form.
+    /// A secret in the Standard Webhooks spelling — `whsec_<base64>`.
     ///
-    /// Standard Webhooks writes a secret as `whsec_<base64>`; the prefix is
-    /// stripped and the rest decoded when it is there, and the bytes are taken
-    /// as they are when it is not. Both spellings are in the field, and a
-    /// verifier that accepted only one would reject half its senders for a
-    /// reason nobody would look for.
-    #[must_use]
-    pub fn new(configured: &str) -> Self {
-        let body = configured.strip_prefix("whsec_").unwrap_or(configured);
+    /// # Errors
+    ///
+    /// [`SecretError`] when the prefix is missing or the rest is not base64.
+    ///
+    /// # Why this refuses rather than guesses
+    ///
+    /// Stripping the prefix, trying base64 and falling back to the raw bytes is
+    /// **ambiguous for exactly the secrets that look like base64**: `"mysecret"`
+    /// is eight ASCII bytes and also a valid base64 string, so it would silently
+    /// become six arbitrary ones while `"hunter2"` stayed as it is. The only
+    /// symptom is `SignatureMismatch` on every delivery, which points at the
+    /// payload rather than at the key.
+    pub fn standard(configured: &str) -> Result<Self, SecretError> {
+        let body = configured
+            .strip_prefix("whsec_")
+            .ok_or(SecretError::NotPrefixed)?;
         base64::engine::general_purpose::STANDARD
             .decode(body)
-            .map_or_else(|_| Self(configured.as_bytes().to_vec()), Self)
+            .map(Self)
+            .map_err(|_| SecretError::NotBase64)
     }
+
+    /// A secret that is the bytes it is written as.
+    ///
+    /// For a peer whose configuration is a passphrase rather than the
+    /// specification's encoding. Named so the choice is visible in a diff: the
+    /// same string means two different keys under the two constructors, and
+    /// which one a deployment wants is not something a library can infer.
+    #[must_use]
+    pub fn raw(bytes: impl AsRef<[u8]>) -> Self {
+        Self(bytes.as_ref().to_vec())
+    }
+}
+
+/// A configured secret that is not the Standard Webhooks spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SecretError {
+    /// The value does not start with `whsec_`.
+    #[error(
+        "a Standard Webhooks secret is written `whsec_<base64>`; use `Secret::raw` for a \
+         passphrase, because the same string is a different key under the two readings"
+    )]
+    NotPrefixed,
+    /// The part after the prefix is not base64.
+    #[error("the part after `whsec_` is not base64")]
+    NotBase64,
 }
 
 impl fmt::Debug for Secret {
@@ -202,7 +249,7 @@ mod tests {
 
     #[test]
     fn a_signature_authenticates_its_own_delivery_and_nothing_else() {
-        let secret = Secret::new("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw");
+        let secret = Secret::standard("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw").unwrap();
         let body = br#"{"type":"de.emob.cdr.issued"}"#;
         let header = sign(&delivery(body), &secret);
 
@@ -236,14 +283,14 @@ mod tests {
         // The deployment where somebody forgot the secret is exactly the one
         // nobody would notice.
         let body = b"{}";
-        let header = sign(&delivery(body), &Secret::new("whsec_AAAA"));
+        let header = sign(&delivery(body), &Secret::standard("whsec_AAAA").unwrap());
         assert!(!verify(&delivery(body), &[], &header));
     }
 
     #[test]
     fn a_rotation_needs_no_flag_day() {
-        let outgoing = Secret::new("whsec_b2xkc2VjcmV0");
-        let incoming = Secret::new("whsec_bmV3c2VjcmV0");
+        let outgoing = Secret::standard("whsec_b2xkc2VjcmV0").unwrap();
+        let incoming = Secret::standard("whsec_bmV3c2VjcmV0").unwrap();
         let body = b"{}";
         let header = sign_with(&delivery(body), [&outgoing, &incoming]);
 
@@ -262,14 +309,14 @@ mod tests {
         assert!(verify(&delivery(body), &[outgoing, incoming], &header));
         assert!(!verify(
             &delivery(body),
-            &[Secret::new("whsec_c29tZXRoaW5n")],
+            &[Secret::standard("whsec_c29tZXRoaW5n").unwrap()],
             &header
         ));
     }
 
     #[test]
     fn a_version_this_build_does_not_know_does_not_hide_one_it_does() {
-        let secret = Secret::new("whsec_AAAA");
+        let secret = Secret::standard("whsec_AAAA").unwrap();
         let body = b"{}";
         let mine = sign(&delivery(body), &secret);
         let mixed = format!("v1a,c29tZXRoaW5nZWxzZQ== {mine}");
@@ -282,26 +329,72 @@ mod tests {
         // bytes are what a hand-configured deployment writes. A verifier that
         // accepted only one would reject half its senders.
         let body = b"{}";
-        let prefixed = Secret::new("whsec_c2VjcmV0");
-        let bare = Secret::new("c2VjcmV0");
+        let prefixed = Secret::standard("whsec_c2VjcmV0").unwrap();
+        let bare = Secret::raw(b"secret");
         let header = sign(&delivery(body), &prefixed);
         assert!(verify(&delivery(body), &[bare], &header));
     }
 
     #[test]
     fn a_secret_never_prints_itself() {
-        assert_eq!(format!("{:?}", Secret::new("whsec_AAAA")), "Secret(…)");
+        assert_eq!(
+            format!("{:?}", Secret::standard("whsec_AAAA").unwrap()),
+            "Secret(…)"
+        );
     }
 
     #[test]
     fn signing_reads_no_clock_so_a_replayed_delivery_is_the_same_bytes() {
         // The property an outbox needs: a retry of a delivery is byte-identical
         // to the first attempt, so a receiver can de-duplicate on the signature.
-        let secret = Secret::new("whsec_AAAA");
+        let secret = Secret::standard("whsec_AAAA").unwrap();
         let body = b"{}";
         assert_eq!(
             sign(&delivery(body), &secret),
             sign(&delivery(body), &secret)
+        );
+    }
+
+    #[test]
+    fn the_two_spellings_are_two_constructors_because_one_string_is_two_keys() {
+        // `"mysecret"` is eight ASCII bytes *and* a valid base64 string, so a
+        // constructor that guessed would silently key on six arbitrary bytes —
+        // while `"hunter2"` is not base64 and would stay as it is. An operator
+        // cannot predict which they get, and the only symptom is that every
+        // delivery fails to verify.
+        assert_eq!(Secret::standard("mysecret"), Err(SecretError::NotPrefixed));
+
+        // The same string under the two readings is two different keys, and
+        // that is exactly why neither is a default.
+        let body = br#"{"type":"de.emob.cdr.issued"}"#;
+        let as_text = sign(&delivery(body), &Secret::raw("bXlzZWNyZXQ="));
+        let as_base64 = sign(
+            &delivery(body),
+            &Secret::standard("whsec_bXlzZWNyZXQ=").unwrap(),
+        );
+        assert_ne!(as_text, as_base64);
+
+        // …and each verifies only under its own.
+        assert!(verify(
+            &delivery(body),
+            &[Secret::raw("bXlzZWNyZXQ=")],
+            &as_text
+        ));
+        assert!(!verify(
+            &delivery(body),
+            &[Secret::standard("whsec_bXlzZWNyZXQ=").unwrap()],
+            &as_text
+        ));
+    }
+
+    #[test]
+    fn a_malformed_standard_secret_is_refused_rather_than_keyed_on_its_prefix() {
+        // The old fallback kept the `whsec_` prefix in the key material on the
+        // failure path while stripping it on the success path, so one typo in
+        // the base64 changed the key rather than reporting a bad secret.
+        assert_eq!(
+            Secret::standard("whsec_not base64!"),
+            Err(SecretError::NotBase64)
         );
     }
 }

@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
         "ad-hoc".parse()?,
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![PriceComponent::new(
             Dimension::Energy,
             Decimal::from_str_exact("0.49")?,

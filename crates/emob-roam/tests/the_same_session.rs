@@ -12,9 +12,8 @@
 
 use emob_cdr::{CdrBuilder, EvidenceRef};
 use emob_core::{Currency, Direction, Energy, PartyId};
-use emob_eichrecht::ocmf::KeyType;
 use emob_eichrecht::registry::{ComponentRef, RegisteredKey};
-use emob_eichrecht::{Evidence, KeyRegistry, PublicKey, ocmf};
+use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_poi::site::{
     Address, ChargingPoint, Connector, ConnectorType, Coordinates, Facility, Site,
 };
@@ -26,6 +25,8 @@ use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+use ocmf::Curve;
+use ocmf::PublicKey;
 use ocpi_kit::types::Validate;
 use p256::ecdsa::signature::hazmat::PrehashSigner;
 use p256::ecdsa::{DerSignature, SigningKey};
@@ -75,14 +76,14 @@ fn registry() -> KeyRegistry {
                 meter: METER_SERIAL.into(),
             },
             RegisteredKey::unbounded(
-                PublicKey {
-                    algorithm: KeyType::Secp256r1,
-                    bytes: signing_key()
+                PublicKey::from_sec1(
+                    Curve::Secp256r1,
+                    signing_key()
                         .verifying_key()
                         .to_encoded_point(false)
-                        .as_bytes()
-                        .to_vec(),
-                },
+                        .as_bytes(),
+                )
+                .expect("a well-formed SEC1 point"),
                 "type approval 2026-01",
             ),
         )
@@ -157,14 +158,18 @@ fn tariff() -> Tariff {
         "ad-hoc-2026".parse().unwrap(),
         Currency::new("EUR").unwrap(),
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
     )
 }
 
 fn evidence() -> Evidence {
-    let records = raw_records()
+    // The texts have to outlive the records: a `Record` borrows the bytes its
+    // signature covers, which is the format's central rule.
+    let texts = raw_records();
+    let records = texts
         .iter()
-        .map(|r| ocmf::parse(r))
+        .map(|r| ocmf::Record::parse(r))
         .collect::<Result<Vec<_>, _>>()
         .expect("well-formed OCMF");
     Evidence::assemble(&records, &registry(), at(0))
@@ -196,6 +201,7 @@ fn site() -> Site {
             city: "Berlin".to_owned(),
             country_code: "DE".to_owned(),
         },
+        time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         stations: Vec::new(),
     }
 }
@@ -334,7 +340,7 @@ fn the_record_comes_back_as_the_record_that_went_out() {
     assert_eq!(payloads.len(), 3, "the signed records arrived verbatim");
     let records: Vec<_> = payloads
         .iter()
-        .map(|p| ocmf::parse(&p.signed_data).expect("verbatim OCMF"))
+        .map(|p| ocmf::Record::parse(&p.signed_data).expect("verbatim OCMF"))
         .collect();
     let theirs = Evidence::assemble(&records, &registry(), at(0));
     assert_eq!(
@@ -558,7 +564,7 @@ fn the_signed_records_reach_the_partner_verbatim() {
     // examination.
     let records = received
         .iter()
-        .map(|p| ocmf::parse(&p.signed_data))
+        .map(|p| ocmf::Record::parse(&p.signed_data))
         .collect::<Result<Vec<_>, _>>()
         .expect("what arrived is still OCMF");
     let theirs = Evidence::assemble(&records, &registry(), at(0));

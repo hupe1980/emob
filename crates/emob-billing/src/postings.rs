@@ -9,17 +9,36 @@
 //! line disagrees with both, and a domain crate that shipped a chart of accounts
 //! would be telling a finance department how to keep its books.
 //!
-//! So this produces [`Posting`]s addressed by [`Role`], and [`entry_for`] turns
-//! them into a `doubleentry` entry once a caller has supplied the mapping. The
-//! arithmetic — which side, how much, and that the two sides are equal — is here,
-//! because that is the part that can be wrong.
+//! So this produces [`Posting`]s addressed by [`Role`]. The arithmetic — which
+//! side, how much, and that the two sides are equal — is here, because that is
+//! the part that can be wrong.
 //!
 //! # Balanced before anything is mapped
 //!
-//! [`Postings::balances`] holds by construction and is asserted anyway.
-//! `doubleentry` would refuse an unbalanced entry, but it would refuse it after
-//! the account mapping, where the diagnostic is about an `AccountId` and not
-//! about an invoice — and the fault, if there ever is one, is this module's.
+//! [`Postings::balances`] holds by construction and is asserted anyway. A ledger
+//! would refuse an unbalanced entry, but it would refuse it after the account
+//! mapping, where the diagnostic is about an account id and not about an
+//! invoice — and the fault, if there ever is one, is this module's.
+//!
+//! # And the ledger is a service's
+//!
+//! There is no bridge here into a bookkeeping engine. Posting into a journal
+//! needs a **journal** — accounts, a calendar, a policy, a database — none of
+//! which can live in a crate that promises to read no clock. `mako` declares
+//! `doubleentry` in one manifest, `services/accountingd`, and in no crate;
+//! `billd` is where it belongs here.
+//!
+//! Nor is it only layering: `doubleentry` takes `uuid` with `v7`, and a v7
+//! identifier comes from `SystemTime::now()`. `just purity` greps this
+//! workspace's source and cannot see into a dependency, so that promise is kept
+//! by what the manifests do not declare as much as by what the code does not
+//! call.
+//!
+//! What crosses the seam is [`Postings`]: a currency, a booking date, and a
+//! balanced set of role-addressed movements. A service maps [`Role`] onto its
+//! own chart, and a role its chart cannot place is a refusal rather than a
+//! dropped posting — a dropped posting is an entry that does not balance and a
+//! trial balance that is quietly wrong.
 
 use emob_core::{Currency, Money};
 use rust_decimal::Decimal;
@@ -196,11 +215,16 @@ pub fn postings_for(invoice: &Invoice) -> Postings {
     }
 
     for subtotal in &invoice.tax {
-        if subtotal.category == VatCategory::Standard && !subtotal.tax.is_zero() {
+        // A VAT liability has a rate by definition, and the one category that
+        // states none — `O`, outside the scope — has no liability to post
+        // either. The two conditions are the same fact seen twice, and the
+        // `let Some` is what makes that structural rather than remembered.
+        if let Some(rate) = subtotal.rate
+            && subtotal.category == VatCategory::Standard
+            && !subtotal.tax.is_zero()
+        {
             postings.push(Posting {
-                role: Role::VatPayable {
-                    rate: subtotal.rate,
-                },
+                role: Role::VatPayable { rate },
                 side: Side::Credit,
                 amount: subtotal.tax,
             });
@@ -218,89 +242,6 @@ pub fn postings_for(invoice: &Invoice) -> Postings {
         "an invoice's postings balance by construction"
     );
     out
-}
-
-/// Turn the roles into a `doubleentry` draft, against a caller's own accounts.
-///
-/// `account_of` maps a role to the account an operator keeps it in. It returns
-/// an `Option` so a chart with no separate service-revenue account can fold it
-/// into one — returning the same `AccountId` for two roles is fine, and the
-/// entry still balances — while a role it genuinely cannot place is a `None`
-/// this refuses on rather than silently dropping, because a dropped posting is
-/// an entry that does not balance and a trial balance that is quietly wrong.
-///
-/// The entry is a **draft**: sealing it is `doubleentry`'s own step and it needs
-/// the ledger's account registry, calendar and policy, none of which a domain
-/// crate can hold.
-///
-/// # Errors
-///
-/// [`UnmappedRole`] naming the role no account was given for.
-pub fn entry_for<F>(
-    postings: &Postings,
-    id: doubleentry::EntryId,
-    idempotency_key: &str,
-    mut account_of: F,
-) -> Result<doubleentry::Entry<doubleentry::entry::Draft, 2>, UnmappedRole>
-where
-    F: FnMut(&Role) -> Option<doubleentry::AccountId>,
-{
-    let key = doubleentry::IdempotencyKey::new(idempotency_key)
-        .map_err(|_| UnmappedRole::BadKey(idempotency_key.to_owned()))?;
-    let currency = doubleentry::Currency::new(postings.currency.as_str())
-        .map_err(|_| UnmappedRole::BadCurrency(postings.currency.to_string()))?;
-
-    let mut draft =
-        doubleentry::Entry::<doubleentry::entry::Draft, 2>::new(id, key, postings.booked_on);
-    for posting in &postings.postings {
-        let account = account_of(&posting.role).ok_or_else(|| UnmappedRole::NoAccount {
-            role: posting.role.to_string(),
-        })?;
-        // `Amount<2>` from a decimal with two places, which every amount on an
-        // invoice this crate built has: the line amounts are rounded to the
-        // currency's minor unit and the totals are their sums.
-        let amount =
-            doubleentry::Amount::<2>::parse(&posting.amount.to_string()).map_err(|_| {
-                UnmappedRole::UnrepresentableAmount {
-                    amount: posting.amount.to_string(),
-                }
-            })?;
-        draft = match posting.side {
-            Side::Debit => draft.debit(account, amount, currency),
-            Side::Credit => draft.credit(account, amount, currency),
-        };
-    }
-    Ok(draft)
-}
-
-/// Why a set of postings could not become a `doubleentry` entry.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum UnmappedRole {
-    /// A role the caller's chart of accounts has no account for.
-    #[error(
-        "no account was given for the {role} posting: dropping it would leave an entry that does \
-         not balance, so the mapping is incomplete rather than the entry"
-    )]
-    NoAccount {
-        /// Which role.
-        role: String,
-    },
-    /// The idempotency key is not one `doubleentry` accepts.
-    #[error("`{0}` is not a usable idempotency key")]
-    BadKey(String),
-    /// The currency is not one `doubleentry` knows.
-    #[error("`{0}` is not a currency `doubleentry` accepts")]
-    BadCurrency(String),
-    /// An amount does not fit two decimal places.
-    #[error(
-        "`{amount}` does not fit an exact two-decimal amount: every figure on an invoice this \
-         crate builds is rounded to the currency's minor unit, so this one came from elsewhere"
-    )]
-    UnrepresentableAmount {
-        /// The figure.
-        amount: String,
-    },
 }
 
 #[cfg(test)]
@@ -331,6 +272,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_vat(dec("19")),
@@ -451,43 +393,5 @@ mod tests {
             books.roles()
         );
         assert_eq!(books.debits().to_string(), "14.67 EUR");
-    }
-
-    #[test]
-    fn a_role_with_no_account_is_refused_rather_than_dropped() {
-        // Dropping it would leave an entry that does not balance, and a trial
-        // balance that is quietly wrong is worse than a build that stops.
-        let books = postings_for(&invoice(standard()));
-        let err = entry_for(
-            &books,
-            doubleentry::EntryId::generate(),
-            "R-1",
-            |role| match role {
-                Role::Receivable => Some(doubleentry::AccountId::from_index(1)),
-                _ => None,
-            },
-        )
-        .unwrap_err();
-        assert!(matches!(err, UnmappedRole::NoAccount { .. }), "{err}");
-        assert!(err.to_string().contains("revenue"), "{err}");
-    }
-
-    #[test]
-    fn a_complete_mapping_produces_a_draft_doubleentry_takes() {
-        // Two roles may share one account — a chart with no separate service
-        // revenue line is a legitimate chart — and the entry still balances.
-        let books = postings_for(&invoice(standard()));
-        let draft = entry_for(&books, doubleentry::EntryId::generate(), "R-1", |role| {
-            Some(doubleentry::AccountId::from_index(match role {
-                Role::Receivable => 1,
-                Role::EnergyRevenue | Role::ServiceRevenue => 2,
-                // `Role` is `#[non_exhaustive]`, so a chart that has not
-                // learned a role this build added lands here rather than
-                // failing to compile — which is the point of the arm.
-                _ => 3,
-            }))
-        })
-        .unwrap();
-        assert_eq!(draft.postings().len(), 4);
     }
 }

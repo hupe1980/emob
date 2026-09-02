@@ -77,6 +77,38 @@ once and the superseded original contributes nothing. An export is excluded with
 a note: `[38k §5(1)]` counts electricity *withdrawn* for use in the vehicle, and
 V2G runs the other way.
 
+## A session belongs to the year it was withdrawn in, not the year it started
+
+`[38k §5(1)]` counts *die im Verpflichtungsjahr entnommene Strommenge* — the
+electricity withdrawn **in** the obligation year. A charge from 23:45 on
+31 December to 00:15 on 1 January withdrew half its kilowatt-hours in each, and
+selecting records by `started_at` files the January half under December and files
+nothing at all in January.
+
+```rust
+// One 30 kWh session across midnight, filed twice and counted once.
+assert_eq!(filed(2026).megawatt_hours(), dec("0.015"));
+assert_eq!(filed(2027).megawatt_hours(), dec("0.015"));
+```
+
+Nothing needed inventing: a CDR carries the quarter-hour periods
+`emob_session::split` produced, and **that split conserves exactly**, so the two
+halves sum to the record's own total to the last digit. A session that does not
+cross the boundary yields its whole energy on one side and zero on the other.
+
+The record carries a note when it contributes to both, because an operator
+reconciling a THG file against a billing file will find two different figures for
+one session and needs to know that is deliberate.
+
+**And a settlement period is half-open.** The quarter hour running 23:45 to 00:00
+withdrew nothing on the 1st, so `[38k §6(1) S. 2 Nr. 5]`'s window takes both
+bounds from the quarter hour's **start** — reading its exclusive end as an
+inclusive day made the December file state a window ending `2027-01-01`. That is
+the `[PTB-A 50.7 §3.1.7.2]` footnote about which timestamp names a Messperiode,
+arriving as a tax question: German metrology labels that quarter hour
+`2027-01-01T00:00`, and reading the label as the withdrawal day moves a quarter
+hour of every New Year's Eve into the following obligation year.
+
 ## Three factors, and not one of them is a constant
 
 `[38k §5(3)]` multiplies four things: the energetic quantity, a counting factor

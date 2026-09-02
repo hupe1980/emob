@@ -13,6 +13,7 @@ description = "The CSMS daemon: an OCPP 1.6J/2.0.1/2.1 endpoint whose transactio
 emob-cdr       = { workspace = true }
 emob-core      = { workspace = true }
 emob-eichrecht = { workspace = true }
+ocmf           = { workspace = true }
 emob-ocpp      = { workspace = true }
 emob-session   = { workspace = true }
 emob-service   = { workspace = true }

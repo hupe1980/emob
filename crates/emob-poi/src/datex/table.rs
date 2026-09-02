@@ -165,6 +165,8 @@ struct LocationExtension {
 
 #[derive(Debug, Clone, Serialize)]
 struct FacilityLocation {
+    #[serde(rename = "timeZone")]
+    time_zone: String,
     address: Address,
 }
 
@@ -408,7 +410,9 @@ pub fn publication(
                     table_name: table_name.map(ToOwned::to_owned),
                     sites: sites
                         .iter()
-                        .map(|site| site_of(site, &publisher.language, &now, rate_for))
+                        .map(|site| {
+                            site_of(site, &publisher.language, &now, published_at, rate_for)
+                        })
                         .collect(),
                 }],
             },
@@ -428,10 +432,40 @@ impl TablePublication {
     }
 }
 
+/// The site's zone, in the only spelling `[DATEX-II-Profil]` accepts.
+///
+/// # The profile asks for an offset where the fact is a zone
+///
+/// `FacilityLocation.timeZone` is typed as a string that "identifies a time zone
+/// by specifying the difference to UTC in hours and minutes, as defined in
+/// ISO 8601", and the profile's own reference instance publishes `"+01:00"` for
+/// a site in Aachen. An ISO 8601 offset cannot express a zone that observes
+/// summer time: `+01:00` is wrong for that site from the last Sunday in March
+/// to the last Sunday in October, and it is the field a consumer would read the
+/// crate's own daily price windows against.
+///
+/// There is no honest fixed value, so this publishes the offset **in force at
+/// the moment of publication** — the one reading that is true of the document
+/// when it is issued — and [`crate::rate::RateNote::TimeZoneIsAnOffset`] says
+/// so beside it. Republishing the table across a clock change republishes the
+/// right offset, which is the behaviour the profile's shape forces on anybody
+/// filling this field in.
+fn profile_time_zone(site: &Site, published_at: time::OffsetDateTime) -> String {
+    let seconds = site.time_zone.local(published_at).offset_seconds;
+    let sign = if seconds < 0 { '-' } else { '+' };
+    let magnitude = seconds.unsigned_abs();
+    format!(
+        "{sign}{:02}:{:02}",
+        magnitude / 3600,
+        (magnitude % 3600) / 60
+    )
+}
+
 fn site_of(
     site: &Site,
     lang: &str,
     now: &str,
+    published_at: time::OffsetDateTime,
     rate_for: &dyn Fn(&ChargingPoint) -> Option<Rate>,
 ) -> SiteOut {
     SiteOut {
@@ -447,6 +481,7 @@ fn site_of(
                 },
                 extension: LocationExtension {
                     facility_location: FacilityLocation {
+                        time_zone: profile_time_zone(site, published_at),
                         address: Address {
                             postcode: site.address.postcode.clone(),
                             city: Multilingual::new(lang, &site.address.city),

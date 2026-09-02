@@ -73,4 +73,4 @@ pub use emob_core::Role;
 pub use health::{Identity, Probe, Readiness};
 pub use serve::{Server, ServerError};
 pub use shutdown::Shutdown;
-pub use webhook::Delivery;
+pub use webhook::{Delivery, SecretError};

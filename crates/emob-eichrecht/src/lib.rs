@@ -15,20 +15,31 @@
 //! whenever anything at all is wrong, and [`Evidence`] can only be built by
 //! running the whole check.
 //!
-//! # The four questions, kept apart
+//! # The questions, kept apart — and the two crates that answer them
 //!
 //! Conflating these is how a "verified" session turns out to be a signed
 //! fragment of a session somebody edited:
 //!
-//! | Question | Answered by |
-//! |---|---|
-//! | Did *this key* produce *these bytes*? | [`ocmf::verify()`] |
-//! | Is this key *this charge point's* key? | [`registry::KeyRegistry`] |
-//! | Are any records missing from the session? | [`chain::validate()`] |
-//! | May these readings be billed at all? | [`chain::validate()`], via [`ocmf::MeterState`] |
-//! | May the *duration* be billed too? | [`chain::validate()`], via [`ocmf::TimeStatus`] |
-//! | Who was charging, and did the assignment hold? | [`chain::validate()`], via [`ocmf::IdentificationLevel`] |
-//! | Can the **customer** repeat all of that? | [`mod@transparency`] |
+//! | Question | Answered by | Whose |
+//! |---|---|---|
+//! | Did *this key* produce *these bytes*? | [`ocmf::verify()`] | the format's |
+//! | Are any records missing from the session? | [`ocmf::session`] | the format's |
+//! | Is this key *this charge point's* key? | [`registry::KeyRegistry`] | **ours** |
+//! | Which quantity does each failure take away? | [`chain::validate()`] | **ours** |
+//! | May the *energy* be billed? | [`Evidence::billable_energy`] | **ours** |
+//! | May the *duration* be billed too? | [`Evidence::billable_duration`] | **ours** |
+//! | Can the **customer** repeat all of that? | [`mod@transparency`] | both |
+//!
+//! The split is not arbitrary. Reading and verifying an OCMF record is
+//! [`ocmf`]'s job, and it does it against the whole S.A.F.E. reference corpus
+//! with OpenSSL as an independent oracle — evidence this crate never had. What
+//! it will not do is decide money, and it says so: *"whether a session may be
+//! invoiced depends on tariffs, on a key registry binding each record to this
+//! charge point, and on law — none of which is in scope."*
+//!
+//! That sentence is this crate. A format crate can say a record is missing; only
+//! law can say what a missing record costs you, and the answer is not one
+//! boolean (D184).
 //!
 //! The last one is the one the law actually asks for. `[MessEG §33]` does not
 //! require a measured value to be correct, it requires the affected party to be
@@ -46,12 +57,17 @@
 //! # A whole session
 //!
 //! ```
-//! use emob_eichrecht::{Evidence, KeyRegistry, ocmf};
+//! use emob_eichrecht::{Evidence, KeyRegistry};
 //! # let raw_records: Vec<String> = vec![];
 //! # let registry = KeyRegistry::new();
 //! # let session_start = time::OffsetDateTime::UNIX_EPOCH;
 //!
-//! let records = raw_records.iter().map(|r| ocmf::parse(r)).collect::<Result<Vec<_>, _>>()?;
+//! // The texts outlive the records: a `Record` borrows the bytes its signature
+//! // covers, which is the format's central rule rather than an inconvenience.
+//! let records = raw_records
+//!     .iter()
+//!     .map(|r| ocmf::Record::parse(r))
+//!     .collect::<Result<Vec<_>, _>>()?;
 //! let evidence = Evidence::assemble(&records, &registry, session_start);
 //!
 //! match evidence.billable_energy() {
@@ -72,11 +88,16 @@
 //!
 //! # Scope
 //!
-//! What is implemented is what OCMF 1.4 defines, plus the chain rules the
-//! specification assigns to a "check component". Two curves from
-//! `[OCMF Tab. 22]` — the brainpool pair — are recognised and refused with a
-//! named error rather than silently failing: no audited pure-Rust
-//! implementation exists, and a wrong answer here is worse than no answer.
+//! The format is `ocmf`'s in full — every table, every deviation real meters
+//! make, and four of the seven algorithms of `[OCMF Tab. 22]` in pure Rust. The
+//! remaining three (the brainpool pair and secp192k1) have no audited pure-Rust
+//! arithmetic and `ocmf` reaches them through OpenSSL, which a crate that
+//! promises to open no socket and read no file may not link — so here they are
+//! recognised and refused by name rather than silently failing.
+//!
+//! What is this crate's is everything downstream of "the bytes check out": whose
+//! key it was, which quantity each failure takes away, and the file the customer
+//! repeats the check with.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
@@ -85,13 +106,18 @@
 pub mod chain;
 pub mod error;
 pub mod evidence;
-pub mod ocmf;
 pub mod registry;
 pub mod transparency;
 
-pub use chain::{ChainFinding, ChainReport, SignedMarker};
-pub use error::{OcmfError, VerifyError};
+pub use chain::{ChainFinding, ChainReport, Disqualifies, SignedMarker};
+pub use error::{EichrechtError, KeyLookupError};
 pub use evidence::{Evidence, EvidenceProblem, VerifiedRecord};
-pub use ocmf::{KeyType, OcmfRecord, PublicKey};
+// The format itself is `ocmf`'s. Re-exported so a caller reading this crate's
+// API does not have to discover which crate a `Record` came from, and so that
+// the version of `ocmf` a record was parsed with is the version this crate
+// validates against — the two cannot drift when there is only one.
+pub use ocmf::{
+    Curve, ObisCode, ParseError, Profile, PublicKey, Record, SignatureAlgorithm, VerifyError,
+};
 pub use registry::{ComponentRef, KeyRegistry, RegisteredKey, RegistryError};
-pub use transparency::{TransparencyError, TransparencyValue};
+pub use transparency::TransparencyError;

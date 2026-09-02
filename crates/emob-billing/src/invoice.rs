@@ -65,7 +65,7 @@ use emob_tariff::{Dimension, Rated};
 use rust_decimal::Decimal;
 
 use crate::error::BillingError;
-use crate::tax::{TaxStatus, TaxTreatment, VatCategory};
+use crate::tax::{TaxStatus, TaxTreatment, VatCategory, VatRates};
 
 /// Percent, as a decimal.
 const HUNDRED: Decimal = Decimal::from_parts(100, 0, 0, false, 0);
@@ -91,6 +91,17 @@ pub struct Counterparty {
     /// The electronic address and its EAS scheme — BT-34/BT-49, which
     /// `XRechnung`'s `BR-DE-*` make mandatory and the CEN core does not.
     pub electronic_address: Option<(String, String)>,
+    /// The legal registration identifier and its scheme — BT-30 for the seller,
+    /// BT-47 for the buyer. A German operator's `HRB` entry.
+    ///
+    /// Optional in general and **the only way to identify a seller** on the one
+    /// document that may not carry a VAT identifier. `BR-CO-26` requires a
+    /// buyer to be able to identify its supplier from BT-29, BT-30 **or**
+    /// BT-31, and `BR-O-02` forbids BT-31 outright on an outside-scope invoice
+    /// — so a settlement with a reseller established outside the Union is
+    /// exactly the case where this field is not optional at all. See
+    /// [`Counterparty::registered_as`].
+    pub legal_registration: Option<(String, Option<String>)>,
     /// A person to ask — BG-6 / BG-9, and its three terms.
     ///
     /// Optional in the CEN core and **mandatory on the seller** in `XRechnung`:
@@ -125,6 +136,7 @@ impl Counterparty {
             country: tax.country.to_ascii_uppercase(),
             post_code: None,
             electronic_address: None,
+            legal_registration: None,
             contact: None,
             tax,
         }
@@ -142,6 +154,18 @@ impl Counterparty {
     #[must_use]
     pub fn reachable_at(mut self, address: impl Into<String>, scheme: impl Into<String>) -> Self {
         self.electronic_address = Some((address.into(), scheme.into()));
+        self
+    }
+
+    /// The same party, with the legal registration identifier BT-30 / BT-47
+    /// carries — a German operator's `HRB` entry, optionally under a scheme.
+    ///
+    /// Worth setting on every invoice and **required** on one: an outside-scope
+    /// settlement may state no VAT identifier (`BR-O-02`), and `BR-CO-26` still
+    /// wants the buyer to be able to identify its supplier.
+    #[must_use]
+    pub fn registered_as(mut self, identifier: impl Into<String>, scheme: Option<String>) -> Self {
+        self.legal_registration = Some((identifier.into(), scheme));
         self
     }
 
@@ -231,7 +255,8 @@ pub struct InvoiceLine {
     pub quantity: Decimal,
     /// The price per unit that applied — BT-146.
     pub unit_price: Decimal,
-    /// The rate this line is taxed at — BT-152.
+    /// The rate this line is taxed at — BT-152, and `None` where the category
+    /// states none.
     ///
     /// The **component's** own rate where the tariff states one, because
     /// electricity and a service fee can sit in different categories and
@@ -240,10 +265,16 @@ pub struct InvoiceLine {
     /// the commonest tariff shape, and reading it as zero would grow the gross
     /// the driver was quoted the moment the invoice added the supply's tax.
     ///
-    /// Zero under every category that does not levy tax, whatever the tariff
-    /// said — `BR-AE-5` and its siblings require it, and the tax is the
-    /// recipient's rather than absent.
-    pub vat_rate: Decimal,
+    /// Zero under a category that does not levy tax but does state a rate —
+    /// `BR-AE-5` and its siblings require exactly that, because under a reverse
+    /// charge the tax is the recipient's rather than absent.
+    ///
+    /// **`None` under `O`**, which is the only category in UNCL 5305 that states
+    /// no rate at all. `BR-O-05` refuses a line carrying BT-152, and a rate of
+    /// zero is carrying it — so the two absences are two values here rather than
+    /// one, because they are two different statements and an invoice that makes
+    /// the wrong one comes back (D183).
+    pub vat_rate: Option<Decimal>,
     /// The line's **net** amount, rounded to the currency's minor unit —
     /// BT-131.
     pub net: Decimal,
@@ -296,8 +327,11 @@ pub const fn unit_code(dimension: Dimension) -> &'static str {
 pub struct TaxSubtotal {
     /// The category — BT-118.
     pub category: VatCategory,
-    /// The rate — BT-119.
-    pub rate: Decimal,
+    /// The rate — BT-119, and `None` under the one category that states none.
+    ///
+    /// See [`InvoiceLine::vat_rate`]: `BR-O-05` and its breakdown sibling refuse
+    /// a rate under `O`, and zero is a rate.
+    pub rate: Option<Decimal>,
     /// The taxable amount: the sum of the lines in this category — BT-116.
     pub taxable: Decimal,
     /// The tax on it — BT-117.
@@ -454,7 +488,7 @@ pub struct InvoiceBuilder<'a> {
     buyer: Counterparty,
     treatment: Option<TaxTreatment>,
     point_country: String,
-    standard_rate: Decimal,
+    rates: VatRates,
     records: Vec<&'a Cdr>,
 }
 
@@ -485,7 +519,7 @@ impl<'a> InvoiceBuilder<'a> {
             buyer,
             treatment: None,
             point_country,
-            standard_rate: Decimal::ZERO,
+            rates: VatRates::new(),
             records: Vec::new(),
         }
     }
@@ -522,20 +556,39 @@ impl<'a> InvoiceBuilder<'a> {
         self
     }
 
-    /// The country the charge points stand in, and the VAT rate in force there.
+    /// The country the charge points stand in, and the standard VAT rate in
+    /// force there.
     ///
-    /// Defaults to the seller's own country at a rate of zero, which is right
-    /// for a party that operates only at home and states its rate on its tariff
-    /// — and wrong the moment it does not, which is why it is a method rather
-    /// than an assumption.
+    /// Defaults to the seller's own country with **no** rate stated, which
+    /// builds a reverse-charge or outside-scope invoice and refuses a
+    /// standard-rated one — because a rate nobody supplied is not zero, and an
+    /// invoice that silently under-declares its VAT is worse than one that will
+    /// not build.
     ///
     /// The rate is an argument for the reason every instant in this workspace
     /// is: rates move, and an invoice replayed two years later has to reproduce
     /// the rate that was in force rather than today's.
+    ///
+    /// # …and this is not always the rate the invoice carries
+    ///
+    /// `[UStG §3g]` taxes a supply to a reseller where the **reseller** is
+    /// established, so an operator whose points stand in one country and whose
+    /// roaming partner is established in another needs the second country's
+    /// rate. State it with [`Self::vat_rate_in`]; the builder picks whichever
+    /// belongs to the place of supply it derives.
     #[must_use]
     pub fn supplied_from(mut self, country: impl Into<String>, standard_rate: Decimal) -> Self {
-        self.point_country = country.into();
-        self.standard_rate = standard_rate;
+        let country = country.into();
+        self.rates = std::mem::take(&mut self.rates).at(&country, standard_rate);
+        self.point_country = country;
+        self
+    }
+
+    /// Another country's standard rate, for a place of supply `[UStG §3g]`
+    /// moves away from the charge point.
+    #[must_use]
+    pub fn vat_rate_in(mut self, country: impl AsRef<str>, standard_rate: Decimal) -> Self {
+        self.rates = std::mem::take(&mut self.rates).at(country, standard_rate);
         self
     }
 
@@ -585,7 +638,7 @@ impl<'a> InvoiceBuilder<'a> {
                 &self.seller.tax,
                 &self.buyer.tax,
                 &self.point_country,
-                self.standard_rate,
+                &self.rates,
             )?,
         };
 
@@ -830,7 +883,7 @@ fn effective_rate(component: Option<Decimal>, treatment: &TaxTreatment) -> Decim
     // A category that does not levy tax strips at whatever the tariff quoted —
     // a gross price quoted with 19 % in it is not a price the recipient of a
     // reverse charge owes 19 % on, and the taxable amount is what is left.
-    if !treatment.category.levies_tax() {
+    if !treatment.category.carries_tax() {
         return component.unwrap_or(Decimal::ZERO);
     }
     component.unwrap_or(treatment.rate)
@@ -842,11 +895,23 @@ fn effective_rate(component: Option<Decimal>, treatment: &TaxTreatment) -> Decim
 /// `BR-G-5`, `BR-IC-5` and `BR-O-5` each require it, and they are right: under a
 /// reverse charge the tax exists and is somebody else's, so this document's rate
 /// for it is nothing.
-const fn stated_rate(effective: Decimal, treatment: &TaxTreatment) -> Decimal {
-    if treatment.category.levies_tax() {
-        effective
+/// The rate a line states, which is three answers rather than two.
+///
+/// The effective rate where the category levies tax; **zero** where it does not
+/// but still states one — `BR-AE-5` and its siblings require the figure to be
+/// there and to be zero, because under a reverse charge the tax exists and is
+/// the recipient's; and **absent** under `O`, the only category in UNCL 5305
+/// that states no rate at all, where `BR-O-05` refuses the field outright.
+///
+/// Count the answers before choosing the type, and where there are three, say
+/// three.
+const fn stated_rate(effective: Decimal, treatment: &TaxTreatment) -> Option<Decimal> {
+    if !treatment.category.states_rate() {
+        None
+    } else if treatment.category.carries_tax() {
+        Some(effective)
     } else {
-        Decimal::ZERO
+        Some(Decimal::ZERO)
     }
 }
 
@@ -868,7 +933,7 @@ fn breakdown(
     // can sit in different categories and EN 16931 states a taxable amount for
     // each. An invoice that taxed both at one rate would over-declare on one of
     // them and state a figure no accountant can reproduce.
-    let mut groups: Vec<(Decimal, Decimal)> = Vec::new();
+    let mut groups: Vec<(Option<Decimal>, Decimal)> = Vec::new();
     for line in lines {
         match groups.iter_mut().find(|(rate, _)| *rate == line.vat_rate) {
             Some((_, taxable)) => *taxable += line.net,
@@ -886,12 +951,13 @@ fn breakdown(
             // checks and `BR-S-09` computes — not the sum of per-line taxes:
             // two lines of 0.005 each round to zero apiece and to one cent
             // together, and the standard states the rule on the subtotal.
-            tax: if treatment.category.levies_tax() {
-                Money::new(taxable * rate / HUNDRED, currency)
-                    .round_to_minor_unit()
-                    .amount()
-            } else {
-                Decimal::ZERO
+            tax: match rate {
+                Some(rate) if treatment.category.carries_tax() => {
+                    Money::new(taxable * rate / HUNDRED, currency)
+                        .round_to_minor_unit()
+                        .amount()
+                }
+                _ => Decimal::ZERO,
             },
             taxable,
         })
@@ -984,6 +1050,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("1.19"))],
         )
     }
@@ -993,6 +1060,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
         )
     }
@@ -1052,6 +1120,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::No,
             elements: vec![
                 emob_tariff::TariffElement {
@@ -1112,6 +1181,7 @@ mod tests {
             "mixed".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("1.19")).with_vat(dec("19")),
                 PriceComponent::new(Dimension::Flat, dec("1.07")).with_vat(dec("7")),
@@ -1123,11 +1193,15 @@ mod tests {
         // 10 kWh at 1.19 gross is 11.90 → 10.00 net at 19 %.
         // The session fee is 1.07 gross → 1.00 net at 7 %.
         assert_eq!(invoice.lines.len(), 2, "{:?}", invoice.lines);
-        assert_eq!(invoice.lines[0].vat_rate, dec("19"));
-        assert_eq!(invoice.lines[1].vat_rate, dec("7"));
+        assert_eq!(invoice.lines[0].vat_rate, Some(dec("19")));
+        assert_eq!(invoice.lines[1].vat_rate, Some(dec("7")));
 
-        let rates: Vec<Decimal> = invoice.tax.iter().map(|t| t.rate).collect();
-        assert_eq!(rates, vec![dec("7"), dec("19")], "one subtotal per rate");
+        let rates: Vec<Option<Decimal>> = invoice.tax.iter().map(|t| t.rate).collect();
+        assert_eq!(
+            rates,
+            vec![Some(dec("7")), Some(dec("19"))],
+            "one subtotal per rate"
+        );
         assert_eq!(invoice.tax_total().to_string(), "1.97 EUR", "1.90 + 0.07");
         assert_eq!(invoice.taxable_total().to_string(), "11.00 EUR");
         assert_eq!(invoice.gross_total().to_string(), "12.97 EUR");
@@ -1143,7 +1217,7 @@ mod tests {
         let cdr = record("c-1", "10", &tariff);
         let invoice = builder(&[&cdr]).build().unwrap().value;
 
-        assert_eq!(invoice.lines[0].vat_rate, dec("19"));
+        assert_eq!(invoice.lines[0].vat_rate, Some(dec("19")));
         // 10 × 1.19 = 11.90 gross → 10.00 net at 19 %, and the gross the driver
         // was quoted survives the invoice.
         assert_eq!(invoice.taxable_total().to_string(), "10.00 EUR");

@@ -87,6 +87,7 @@ fn tariff(prices_occupancy: bool) -> Tariff {
         },
         currency: Currency::EUR,
         kind: TariffKind::AdHoc,
+        time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         tax_included: TaxIncluded::Yes,
         elements: vec![
             TariffElement {
@@ -117,6 +118,7 @@ fn per_minute_only() -> Tariff {
         "sim-ad-hoc-minute".parse().expect("a valid tariff id"),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![
             PriceComponent::new(
                 Dimension::ParkingTime,
@@ -238,8 +240,13 @@ impl ReferenceDay {
                 };
                 let (session, records) = (assembled.session, assembled.records);
 
+                // The owned records outlive the borrowed view: a `Record` borrows
+                // the bytes its signature covers, which is the format's rule
+                // rather than an inconvenience.
+                let borrowed: Vec<ocmf::Record<'_>> =
+                    records.iter().filter_map(|r| r.record().ok()).collect();
                 let evidence = Evidence::assemble(
-                    &records,
+                    &borrowed,
                     if faults.contains(&Fault::UnregisteredStation) {
                         &empty_registry
                     } else {

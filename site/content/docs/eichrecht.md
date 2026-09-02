@@ -1,7 +1,7 @@
 +++
 title = "The Eichrecht chain"
 weight = 2
-description = "How a signed meter value becomes an invoice line: OCMF parsed without destroying its signed bytes, four questions kept apart, and the reason a valid signature is not enough."
+description = "How a signed meter value becomes an invoice line: the questions kept apart, which quantity each failure takes away, and the reason a valid signature is not enough."
 
 [extra]
 nav = "Eichrecht"
@@ -30,7 +30,7 @@ own:
 ```mermaid
 flowchart LR
     RAW["OCMF records<br/>from the station"] --> P["parse<br/>signed bytes kept verbatim"]
-    P --> V["verify<br/>ECDSA, four curves"]
+    P --> V["verify<br/>ECDSA, ocmf"]
     KR[("key registry<br/>out of band")] -.->|the key, never<br/>the record's own| V
     V --> C["chain<br/>pagination, markers, states"]
     C --> E["evidence"]
@@ -53,39 +53,49 @@ What happens to a verified quantity next is
 [sessions and settlement](@/docs/settlement.md); what turns it into money is
 [tariffs](@/docs/pricing.md).
 
-## Parsing is the hard part
+## The format is `ocmf`'s, and that is the point
 
-OCMF frames a record in three pipe-separated sections:
+Parsing OCMF is the hard part, and it is not this crate's part. The
+[`ocmf`](https://crates.io/crates/ocmf) crate does it — and it does it against
+evidence a hand-rolled parser never has: the whole **S.A.F.E. Transparenzsoftware
+reference corpus**, 256 records from eleven manufacturers and 705 readings, with
+**OpenSSL's verdict on each one** as an independent oracle, plus a published
+162-case conformance suite.
 
-```text
-OCMF|{"FV":"1.4","PG":"T12345",…,"RD":[…]}|{"SD":"3045…"}
-```
-
-The signature covers the middle section **exactly as written**. The
-specification is explicit:
+The rule everything follows from is that the signature covers the payload section
+**exactly as written**:
 
 > Between signing and validation, the payload section must not be manipulated
 > (removing and adding white spaces), otherwise positive validation is not
 > possible.
 
 So a parser that deserialises the JSON and re-serialises it to hash has already
-lost. Key order, insignificant whitespace and number formatting are all free to
-change under a round trip, and each of them changes the digest. `emob-eichrecht`
-keeps the payload's raw byte span beside the typed view:
+lost — key order, insignificant whitespace, number formatting and Unicode escapes
+are all free to change under a round trip, and each of them changes the digest.
+`Record::signed_bytes()` returns a **slice of the input**, and there is no API in
+that crate that produces signable bytes from a typed value.
 
-```rust
-let record = ocmf::parse(raw)?;
-record.signed_bytes();   // the span as it arrived — never a re-serialisation
-record.payload;          // the typed view, for everything else
-```
+### What the corpus says about the specification
 
-A test holds the line:
+This is the argument for not writing it twice:
 
-```rust
-// Adding one space is a legal JSON edit and an illegal OCMF one.
-let reformatted = raw.replacen(r#"{"FV""#, r#"{ "FV""#, 1);
-assert!(matches!(verify(&ocmf::parse(&reformatted)?, &key), Err(VerifyError::SignatureMismatch)));
-```
+| Measured | Count | What a hand-rolled parser does with it |
+|---|---:|---|
+| Records omitting `MS`, which `[OCMF Tab. 3]` marks `1..1` | 229 / 256 | strict cardinality rejects nine real records in ten |
+| Readings omitting `TM`, relying on carry-forward | 205 / 705 | a reading read independently of its neighbours is wrong |
+| Readings writing `RV` as a JSON **string** | 23 | a typed deserialiser refuses them |
+| Records whose payload is pretty-printed | 9 | any re-serialisation destroys the signature |
+| OBIS codes written the way `[OCMF Tab. 25]` specifies | **0** | a canonical-form check refuses every record ever sent |
+
+Not one record in the corpus writes the OBIS code the way the table does: a
+reader built from the tables is a reader built against a document nobody sends.
+
+So departures are **reported, never swallowed**: parsing runs in a profile and
+every deviation from the specification becomes a typed finding carrying the
+offending value and the table it is measured against. A strict parser rejects
+nine real records in ten and a lawful session becomes unbillable for a schema
+reason; a lenient one accepts everything and an operator never learns their fleet
+emits records the official tool will reject.
 
 ### Numbers keep their scale
 
@@ -93,14 +103,11 @@ The same reasoning reaches inside the JSON. OCMF says a reading value's
 representation "must not be transformed by further handling methods … since this
 would change the representation of the physical quantity and thus potentially
 the number of valid digits". `2935.600 kWh` is a meter stating three decimals of
-resolution.
-
-`serde_json` routes numbers through `f64` by default, which silently turns that
-into `2935.6`. This workspace enables `arbitrary_precision` for exactly that
-reason, and reads every value as an exact decimal from the token's own text.
+resolution, and a parser that routes numbers through `f64` silently turns it into
+`2935.6`.
 
 ```rust
-assert_eq!(record.payload.readings[0].value.unwrap().to_string(), "2935.600");
+assert_eq!(record.payload().readings()[0].value().unwrap().as_str(), "2935.600");
 ```
 
 ### An omitted field is unchanged, not absent
@@ -109,29 +116,31 @@ assert_eq!(record.payload.readings[0].value.unwrap().to_string(), "2935.600");
 are omitted. However, this only applies within a signed record"
 `[OCMF Tab. 7 preamble]`. The rule is over **fields**; `RI` and `TX` are its
 examples, not its list. `RU`, `RT`, `ST` and `EF` carry forward on the same
-footing.
-
-```rust
-// The first reading is flagged `E`, the second omits `EF`. Still flagged.
-assert!(record.payload.readings[1].error_flags.energy_unusable);
-```
+footing — and 205 of the corpus's 705 readings depend on it.
 
 `EF` is the one that decides money: reading the omission as "no fault" would
-clear something the station signed. On the first reading there is nothing to
-carry, so an absent `EF` is genuinely no flags.
+clear something the station signed.
 
 ## The questions, kept apart
 
-| Question | Answered by | Skipping it means |
-|---|---|---|
-| Did *this key* produce *these bytes*? | `ocmf::verify` | anyone can bill you |
-| Is this key *this charge point's* key? | `KeyRegistry` | the record vouches for itself |
-| Are any records missing? | `chain::validate` | a session with a hole in it bills |
-| May these readings be billed? | `MeterState`, error flags | a substitute value becomes an invoice |
-| May the **duration** be billed too? | `TimeStatus`, the `t` flag | an occupancy fee is billed off an unsynchronised clock |
-| Which way did the energy go? | the OBIS code | a V2G discharge is billed as consumption |
-| Who was charging, and did it hold? | `IdentificationLevel` | a rejected certificate becomes a customer |
-| Can the **customer** repeat all of it? | `transparency::to_xml` | the law's actual requirement is unmet |
+| Question | Answered by | Whose | Skipping it means |
+|---|---|---|---|
+| Did *this key* produce *these bytes*? | `ocmf::verify` | the format's | anyone can bill you |
+| Are any records missing? | `ocmf::session` | the format's | a session with a hole in it bills |
+| Is this key *this charge point's* key? | `KeyRegistry` | **ours** | the record vouches for itself |
+| Which quantity does each failure take away? | `chain::validate` | **ours** | one boolean throws away what the format kept apart |
+| May these readings be billed? | `MeterState`, error flags | both | a substitute value becomes an invoice |
+| May the **duration** be billed too? | `TimeStatus`, the `t` flag | both | an occupancy fee is billed off an unsynchronised clock |
+| Which way did the energy go? | the OBIS code | both | a V2G discharge is billed as consumption |
+| Who was charging, and did it hold? | `IdentificationLevel` | both | a rejected certificate becomes a customer |
+| Can the **customer** repeat all of it? | `transparency::to_xml` | both | the law's actual requirement is unmet |
+
+The split is the whole design. `ocmf` says so in its own documentation —
+*"whether a session may be invoiced depends on tariffs, on a key registry binding
+each record to this charge point, and on law — none of which is in scope"* — and
+that sentence is `emob-eichrecht`. A format crate can say a record is missing;
+only law can say what a missing record costs you, and the answer is not one
+boolean.
 
 ### Signatures cannot see a deletion
 
@@ -348,7 +357,7 @@ independent verifier the industry maintains. It reads an XML container:
 ```
 
 ```rust
-let xml = transparency::to_xml(&evidence);   // hand this to the driver
+let xml = transparency::to_xml(&evidence)?;   // hand this to the driver
 ```
 
 The key comes first, because the verifier's own `values.xsd` sequences it first.
@@ -399,12 +408,12 @@ the key the station was provisioned with.
 let values = transparency::from_xml(&their_file)?;
 ```
 
-`TransparencyValue::claimed_key` is deliberately not called "the key". It is a
-claim made by the artefact under examination, and verifying a record against a
-key the same file supplied proves only that whoever wrote the file owned a
-private key — the binding travels out of band `[OCMF §Relation of Serial
-Numbers]`. What it is good for is the comparison: a file whose key differs from
-the registered one is a dispute with an answer.
+The key inside a `<value>` is a **claim made by the artefact under
+examination**, never "the key": verifying a record against a key the same file
+supplied proves only that whoever wrote the file owned a private key, because the
+binding travels out of band `[OCMF §Relation of Serial Numbers]`. What it is good
+for is the comparison — a file whose key differs from the registered one is a
+dispute with an answer.
 
 The reader is strict on purpose — no comments, no CDATA, no namespaces, no
 entity it does not know. A transparency file is machine-generated, and a
@@ -497,12 +506,13 @@ the same reasoning that makes an unevaluable tariff restriction never match.
 
 ## Curves, and the meter that named the gap
 
-`[OCMF Tab. 22]` names seven algorithms. **Four** are verified here — secp256r1
-(the default since OCMF 0.4), secp384r1, secp256k1 and secp192r1 — and the three
-that are not each say *why*, because the reasons differ and an operator needs to
-know which one they have hit: the two brainpool curves because RustCrypto's
-`bp256`/`bp384` gate their arithmetic behind `wip-arithmetic-do-not-use`, and
-secp192k1 because no pure-Rust implementation is published at all.
+`[OCMF Tab. 22]` names seven algorithms. **Four** verify in pure Rust —
+secp256r1 (the default since OCMF 0.4), secp384r1, secp256k1 and secp192r1 — and
+the three that do not are refused **by name**, so an operator learns what their
+fleet needs rather than seeing a signature mismatch. `ocmf` reaches all three
+through OpenSSL; the blocker here is the dependency rather than the arithmetic,
+because OpenSSL is a C library that opens files and a domain crate promising
+replay may not link one. A daemon may link the backend and hand a verdict in.
 
 secp192r1 is on the list because it was missing. The **eBZ LD3** data set the
 S.A.F.E. Transparenzsoftware ships as a reference sample — ordinary German
@@ -536,7 +546,6 @@ directions.
 
 ## What is not here yet 📐
 
-The retention windows per artefact — MessEV and PTB give them and the reading is
-not settled — and the seam into `emob-billing` where the verified energy becomes
-an EN 16931 invoice line. The verification half, the money that comes off it and
-the file the customer checks it with are all done.
+The retention windows per artefact: MessEV and PTB give them and the reading is
+not settled, so nothing here expires an artefact. The verification half, the
+money that comes off it and the file the customer checks it with are built.

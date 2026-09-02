@@ -74,8 +74,8 @@ them in the order that makes each one meaningful.
 
 ```rust
 use emob_core::IdentificationStrength;
-use emob_eichrecht::{ComponentRef, Evidence, KeyRegistry, PublicKey, RegisteredKey, ocmf};
-use emob_eichrecht::ocmf::KeyType;
+use emob_eichrecht::{ComponentRef, Evidence, KeyRegistry, RegisteredKey};
+use ocmf::{Curve, PublicKey, Record};
 
 // The key binding arrives out of band — from the station's type approval or
 // your provisioning system. Never from the record you are about to check.
@@ -83,14 +83,16 @@ let mut registry = KeyRegistry::new();
 registry.insert(
     ComponentRef::Meter { serial: "BQ27400330016".into() },
     RegisteredKey::unbounded(
-        PublicKey::from_hex(KeyType::Secp256r1, station_public_key)?,
+        PublicKey::from_text(station_public_key, Some(Curve::Secp256r1))?,
         "type approval 2026-01",
     ),
 )?;   // refuses a window overlapping one this component already holds
 
+// The texts outlive the records: a `Record` borrows the bytes its signature
+// covers, which is the format's central rule rather than an inconvenience.
 let records = raw_records
     .iter()
-    .map(|r| ocmf::parse(r))
+    .map(|r| Record::parse(r))
     .collect::<Result<Vec<_>, _>>()?;
 
 let evidence = Evidence::assemble(&records, &registry, session_start);
@@ -130,7 +132,7 @@ independent S.A.F.E. Transparenzsoftware reads:
 ```rust
 use emob_eichrecht::transparency;
 
-let xml = transparency::to_xml(&evidence);
+let xml = transparency::to_xml(&evidence)?;
 ```
 
 Each record verbatim, beside the public key it was checked against — the one the
@@ -181,9 +183,14 @@ construction rather than by reconciliation.
 
 ```rust
 use emob_cdr::{Acceptance, CdrBuilder, CdrLedger, EvidenceRef};
+use emob_core::TimeZone;
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, describe};
 
-let tariff = Tariff::simple(id, Currency::EUR, TariffKind::AdHoc, vec![
+// A tariff's time-of-day restrictions are local civil time at the charge point,
+// so the tariff carries the zone they are read in.
+let berlin = TimeZone::new("Europe/Berlin")?;
+
+let tariff = Tariff::simple(id, Currency::EUR, TariffKind::AdHoc, berlin, vec![
     PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
     PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_vat(dec("19")),
 ]);
@@ -513,7 +520,7 @@ happens at the line — and what that costs is reported rather than absorbed.
 use emob_billing::{Counterparty, InvoiceBuilder, TaxStatus, en16931, payment, postings};
 
 let crossing = InvoiceBuilder::new("R-2026-0001", issued, (from, to), cpo, driver)
-    .supplied_from("DE", dec("19"))
+    .supplied_from("DE", dec("19"))   // the points' country, and its rate
     .ledger(&ledger)          // `live`, never `iter`: a correction is a new record
     .due_on(due)
     .build()?;

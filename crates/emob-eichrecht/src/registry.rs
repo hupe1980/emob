@@ -34,8 +34,46 @@
 
 use std::collections::BTreeMap;
 
-use crate::error::VerifyError;
-use crate::ocmf::{OcmfRecord, PublicKey};
+use ocmf::{PublicKey, Record};
+
+use crate::error::KeyLookupError;
+
+/// A public key on the wire: the curve it is on, and its SEC1 point in hex.
+#[cfg(feature = "serde")]
+mod key_wire {
+    use ocmf::{Curve, PublicKey};
+    use serde::{Deserialize, Deserializer, Serialize as _, Serializer};
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Wire {
+        curve: String,
+        sec1: String,
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        key: &PublicKey,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        Wire {
+            curve: key.curve().name().to_owned(),
+            sec1: hex::encode(key.sec1_bytes()),
+        }
+        .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PublicKey, D::Error> {
+        use serde::de::Error as _;
+        let wire = Wire::deserialize(deserializer)?;
+        let curve = Curve::ALL
+            .into_iter()
+            .find(|c| c.name() == wire.curve)
+            .ok_or_else(|| D::Error::custom(format!("unknown curve {:?}", wire.curve)))?;
+        let bytes = hex::decode(&wire.sec1).map_err(D::Error::custom)?;
+        PublicKey::from_sec1(curve, &bytes).map_err(D::Error::custom)
+    }
+}
 
 /// How a signing component is identified.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -92,6 +130,12 @@ impl core::fmt::Display for ComponentRef {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RegisteredKey {
     /// The key material.
+    ///
+    /// Travels as its curve and its SEC1 point in hex — the shape a type
+    /// approval publishes and the shape the transparency container carries —
+    /// rather than as a derived structure, so a registry exported today is one
+    /// a different build can read.
+    #[cfg_attr(feature = "serde", serde(with = "key_wire"))]
     pub key: PublicKey,
     /// First instant this key is valid for, **inclusive**, if bounded.
     #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339::option"))]
@@ -261,42 +305,46 @@ impl KeyRegistry {
     ///
     /// # Errors
     ///
-    /// - [`VerifyError::NoSigningComponent`] when the record names none.
-    /// - [`VerifyError::NoKeyForComponent`] when nothing is registered.
+    /// - [`KeyLookupError::NoSigningComponent`] when the record names none.
+    /// - [`KeyLookupError::NoKeyForComponent`] when nothing is registered.
+    /// - [`KeyLookupError::NoKeyValidAt`] when one is and its windows have closed.
     pub fn key_for_record(
         &self,
-        record: &OcmfRecord,
+        record: &Record<'_>,
         at: time::OffsetDateTime,
-    ) -> Result<&RegisteredKey, VerifyError> {
-        let payload = &record.payload;
+    ) -> Result<&RegisteredKey, KeyLookupError> {
+        let payload = record.payload();
+        let meter = payload.meter_serial();
+        let gateway = payload.gateway_serial();
         let mut candidates: Vec<ComponentRef> = Vec::new();
 
-        if let (Some(gateway), Some(meter)) = (&payload.gateway_serial, &payload.meter_serial) {
+        if let (Some(gateway), Some(meter)) = (gateway, meter) {
             candidates.push(ComponentRef::GatewayAndMeter {
-                gateway: gateway.clone(),
-                meter: meter.clone(),
+                gateway: gateway.to_owned(),
+                meter: meter.to_owned(),
             });
         }
-        if let Some(meter) = &payload.meter_serial {
+        if let Some(meter) = meter {
             candidates.push(ComponentRef::Meter {
-                serial: meter.clone(),
+                serial: meter.to_owned(),
             });
         }
-        if let Some(gateway) = &payload.gateway_serial {
+        if let Some(gateway) = gateway {
             candidates.push(ComponentRef::Gateway {
-                serial: gateway.clone(),
+                serial: gateway.to_owned(),
             });
         }
-        if let (Some(id_type), Some(id)) = (&payload.charge_point_id_type, &payload.charge_point_id)
+        if let (Some(id_type), Some(id)) =
+            (payload.charge_point_id_type(), payload.charge_point_id())
         {
             candidates.push(ComponentRef::ChargePoint {
-                id_type: id_type.clone(),
-                id: id.clone(),
+                id_type: id_type.as_str().to_owned(),
+                id: id.to_owned(),
             });
         }
 
         if candidates.is_empty() {
-            return Err(VerifyError::NoSigningComponent);
+            return Err(KeyLookupError::NoSigningComponent);
         }
 
         // Specificity is decided by what the registry knows about the
@@ -314,8 +362,8 @@ impl KeyRegistry {
             .iter()
             .find(|candidate| self.keys.contains_key(candidate))
         else {
-            return Err(VerifyError::NoKeyForComponent {
-                serial: candidates
+            return Err(KeyLookupError::NoKeyForComponent {
+                component: candidates
                     .first()
                     .map(ToString::to_string)
                     .unwrap_or_default(),
@@ -323,7 +371,7 @@ impl KeyRegistry {
         };
 
         self.key_at(component, at)
-            .ok_or_else(|| VerifyError::NoKeyValidAt {
+            .ok_or_else(|| KeyLookupError::NoKeyValidAt {
                 component: component.to_string(),
                 at,
                 windows: self
@@ -380,29 +428,33 @@ pub enum RegistryError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocmf::{self, KeyType};
+    use ocmf::{Curve, PublicKey};
     use time::macros::datetime;
 
+    /// An uncompressed secp256r1 point whose only job is to be distinguishable.
+    ///
+    /// `0x04` is the SEC1 tag for an uncompressed point, and the registry never
+    /// does arithmetic with a key — it stores and returns one. A key that has to
+    /// be *usable* is signed for in `evidence`.
     fn key(byte: u8) -> PublicKey {
-        PublicKey {
-            algorithm: KeyType::Secp256r1,
-            bytes: vec![byte; 65],
-        }
+        let mut bytes = vec![byte; 65];
+        bytes[0] = 0x04;
+        PublicKey::from_sec1(Curve::Secp256r1, &bytes).expect("a well-formed point encoding")
     }
 
-    fn record_with(gateway: Option<&str>, meter: Option<&str>) -> OcmfRecord {
-        let mut fields = vec![r#""PG":"T1""#.to_owned()];
+    /// The text of a record identifying itself the way the arguments say.
+    fn record_text(gateway: Option<&str>, meter: Option<&str>) -> String {
+        let mut fields = vec![r#""FV":"1.0","PG":"T1""#.to_owned()];
         if let Some(g) = gateway {
             fields.push(format!(r#""GS":"{g}""#));
         }
         if let Some(m) = meter {
             fields.push(format!(r#""MS":"{m}""#));
         }
-        let raw = format!(
-            r#"OCMF|{{{},"RD":[{{"TM":"2026-01-02T10:00:00,000+0100 S","RV":1,"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}}]}}|{{"SD":"00"}}"#,
+        format!(
+            r#"OCMF|{{{},"RD":[{{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"B","RV":1,"RI":"01-00:B2.08.00*FF","RU":"kWh","EF":"","ST":"G"}}]}}|{{"SD":"00"}}"#,
             fields.join(",")
-        );
-        ocmf::parse(&raw).unwrap()
+        )
     }
 
     #[test]
@@ -416,7 +468,8 @@ mod tests {
                 RegisteredKey::unbounded(key(1), "type approval 2026-01"),
             )
             .unwrap();
-        let record = record_with(None, Some("BQ1"));
+        let text = record_text(None, Some("BQ1"));
+        let record = ocmf::Record::parse(&text).unwrap();
         let found = registry
             .key_for_record(&record, datetime!(2026-01-02 10:00 +1))
             .unwrap();
@@ -452,14 +505,20 @@ mod tests {
         let at = datetime!(2026-01-02 10:00 +1);
         assert_eq!(
             registry
-                .key_for_record(&record_with(Some("GW1"), Some("M1")), at)
+                .key_for_record(
+                    &ocmf::Record::parse(&record_text(Some("GW1"), Some("M1"))).unwrap(),
+                    at
+                )
                 .unwrap()
                 .key,
             key(1)
         );
         assert_eq!(
             registry
-                .key_for_record(&record_with(Some("GW1"), Some("M2")), at)
+                .key_for_record(
+                    &ocmf::Record::parse(&record_text(Some("GW1"), Some("M2"))).unwrap(),
+                    at
+                )
                 .unwrap()
                 .key,
             key(2)
@@ -598,7 +657,8 @@ mod tests {
             )
             .unwrap();
 
-        let record = record_with(Some("GW-1"), Some("BQ1"));
+        let text = record_text(Some("GW-1"), Some("BQ1"));
+        let record = ocmf::Record::parse(&text).unwrap();
 
         // Inside the window, the specific key resolves.
         let found = registry
@@ -611,7 +671,7 @@ mod tests {
             .key_for_record(&record, datetime!(2026-07-01 0:00 UTC))
             .unwrap_err();
         assert!(
-            matches!(err, VerifyError::NoKeyValidAt { ref component, .. }
+            matches!(err, KeyLookupError::NoKeyValidAt { ref component, .. }
                 if component.contains("GW-1")),
             "{err}"
         );
@@ -624,20 +684,22 @@ mod tests {
     #[test]
     fn an_unregistered_component_says_so() {
         let registry = KeyRegistry::new();
-        let record = record_with(None, Some("UNKNOWN"));
+        let text = record_text(None, Some("UNKNOWN"));
+        let record = ocmf::Record::parse(&text).unwrap();
         assert!(matches!(
             registry.key_for_record(&record, datetime!(2026-01-02 10:00 +1)),
-            Err(VerifyError::NoKeyForComponent { .. })
+            Err(KeyLookupError::NoKeyForComponent { .. })
         ));
     }
 
     #[test]
     fn a_record_naming_no_component_cannot_be_verified() {
         let registry = KeyRegistry::new();
-        let record = record_with(None, None);
+        let text = record_text(None, None);
+        let record = ocmf::Record::parse(&text).unwrap();
         assert!(matches!(
             registry.key_for_record(&record, datetime!(2026-01-02 10:00 +1)),
-            Err(VerifyError::NoSigningComponent)
+            Err(KeyLookupError::NoSigningComponent)
         ));
     }
 

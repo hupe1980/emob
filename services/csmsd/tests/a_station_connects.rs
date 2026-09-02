@@ -19,10 +19,10 @@ use std::time::Duration;
 
 use csmsd::{ChargePoint, Csmsd, Outcome, Provisioning};
 use emob_core::{Currency, PartyId};
-use emob_eichrecht::ocmf::{KeyType, PublicKey};
 use emob_eichrecht::registry::{ComponentRef, KeyRegistry, RegisteredKey};
 use emob_ocpp::fixtures::{OCA_1_6_SAMPLED_VALUE, OCA_KEY_HEX};
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+use ocmf::PublicKey;
 use ocpp_kit::transport::{
     Auth, AuthOutcome, BasicAuthPassword, Csms, Handle, SecurityProfile, SessionContext, Station,
 };
@@ -83,7 +83,7 @@ fn registry_holding(key_hex: &str, provenance: &str) -> KeyRegistry {
                 serial: "1DZG0028225179".into(),
             },
             RegisteredKey::unbounded(
-                PublicKey::from_hex(KeyType::Secp256k1, key_hex).unwrap(),
+                PublicKey::from_text(key_hex, Some(ocmf::Curve::Secp256k1)).unwrap(),
                 provenance,
             ),
         )
@@ -96,6 +96,7 @@ fn tariff() -> Tariff {
         "ad-hoc".parse().unwrap(),
         Currency::EUR,
         TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
         vec![
             PriceComponent::new(Dimension::Energy, Decimal::from_str_exact("0.49").unwrap())
                 .with_vat(Decimal::from(19)),

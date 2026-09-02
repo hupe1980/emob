@@ -98,6 +98,32 @@ pub enum PoiError {
         /// Why not.
         because: &'static str,
     },
+
+    /// A rate is published at a site whose wall clock runs on a different zone.
+    ///
+    /// A tariff's `22:00` is local civil time at the charge point
+    /// `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and the site says
+    /// which clock that is. A rate written in one zone and published at a site
+    /// in another states a window the driver standing there is never inside: the
+    /// feed shows a night price that starts an hour late and the session is
+    /// rated at a third time.
+    ///
+    /// Silent in every direction but this one. The document itself is
+    /// well-formed, the tariff is lawful, the site is real, and nothing fails
+    /// until somebody compares a bill against a map.
+    #[error(
+        "the rate '{rate}' is read on the wall clock of {rate_zone} and the site '{site}' runs on {site_zone}: the published price applies at hours this site never sees"
+    )]
+    RateZoneIsNotTheSites {
+        /// The rate, by its published id.
+        rate: String,
+        /// The zone its windows are read in.
+        rate_zone: String,
+        /// The site, by facility id.
+        site: String,
+        /// The zone the site runs on.
+        site_zone: String,
+    },
 }
 
 /// A convenience alias.

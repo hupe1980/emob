@@ -935,6 +935,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
         )
     }
@@ -1194,6 +1195,7 @@ mod tests {
             "ad-hoc-dc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")),
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
@@ -1272,6 +1274,7 @@ mod tests {
             "ad-hoc-dc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")),
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
@@ -1349,6 +1352,7 @@ mod tests {
             "ad-hoc-dc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")),
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
@@ -1427,6 +1431,7 @@ mod tests {
             "ad-hoc-dc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")),
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
@@ -1519,6 +1524,7 @@ mod tests {
             "ad-hoc-dc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")),
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
@@ -1848,6 +1854,7 @@ mod tests {
             "ad-hoc-dc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(Dimension::Energy, dec("0.49")),
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
@@ -1883,6 +1890,7 @@ mod tests {
             "ad-hoc-dc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
         );
         let cdr = CdrBuilder::from_session(&ended_session(), Direction::Import)
@@ -1986,6 +1994,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Time, dec("6.00"))],
         );
 
@@ -2007,6 +2016,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
         );
         let cdr = CdrBuilder::from_session(&brief_session(), Direction::Import)
@@ -2027,6 +2037,7 @@ mod tests {
             "ad-hoc".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Time, dec("6.00"))],
         );
         let precise = emob_core::ClockResolution::stated(time::Duration::seconds(10)).unwrap();
@@ -2139,6 +2150,7 @@ mod tests {
             id: "tiered".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: emob_tariff::TaxIncluded::Yes,
             elements: vec![
                 emob_tariff::TariffElement {

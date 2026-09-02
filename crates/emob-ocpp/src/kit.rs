@@ -210,7 +210,11 @@ mod tests {
         // …and the record inside is the session's, not the protocol's register.
         let record = crate::record_of(&event.signed[0].value).unwrap();
         assert_eq!(
-            record.payload.readings[1].value.unwrap().to_string(),
+            record.record().unwrap().payload().readings()[1]
+                .value()
+                .unwrap()
+                .as_str()
+                .to_owned(),
             "0.636"
         );
     }

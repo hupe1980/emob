@@ -38,7 +38,15 @@ serde      = { version = "1", features = ["derive"] }
 # document that is re-emitted must not silently reorder what a peer sent.
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 time       = { version = "0.3", features = ["std", "macros", "parsing", "formatting"] }
-uuid       = { version = "1", features = ["v4", "v7", "serde"] }
+
+# A tariff's "0.30 from 22:00" is local civil time at the charge point, and an
+# offset is not a zone: judged against whatever offset a timestamp carried, the
+# same session costs a different amount (D175). `jiff` resolves an instant into a
+# named IANA zone and does nothing else here. `tzdb-bundle-always` compiles the
+# database in; the platform and zoneinfo lookups that would read the filesystem
+# or `TZ` are off, so `just purity` holds and `Cargo.lock` pins what a replay
+# replays against.
+jiff       = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
 anyhow     = "1"
 
 # Every quantity in this workspace either *is* money or *becomes* money. A
@@ -106,27 +114,24 @@ en16931-formats = { version = "0.6", default-features = false, features = ["ubl"
 # job is a file no bank reconciles.
 sepa = { version = "0.6", default-features = false, features = ["time"] }
 
-# Balanced by construction, exact integer money, no I/O in the default build.
-# `emob-billing` produces postings by **role** and hands the chart of accounts
-# back to the caller: a domain crate that named its own accounts would be
-# telling an operator how to keep their books.
-doubleentry = { version = "0.7", default-features = false }
+# ── Eichrecht: the OCMF format ──────────────────────────────────────────────
+# The format is `ocmf`'s and the law is `emob-eichrecht`'s: that crate keeps only
+# the question `ocmf` refuses, which quantity a finding takes away (D184).
+#
+# `session` is the sequence half `[OCMF §Signing and Verification Process]`
+# assigns to a check component; `xml` is the S.A.F.E. transparency container.
+# `curves-pure` is the four that verify without a C library — secp192r1 included,
+# because the eBZ LD3 sample the Transparenzsoftware ships is signed with it. The
+# other three of `[OCMF Tab. 22]` need the crate's OpenSSL backend, which a
+# domain crate may not link, so they are refused by name.
+ocmf = { version = "0.1", default-features = false, features = [
+    "std", "verify", "curves-pure", "session", "xml",
+] }
 
-# ── Eichrecht: OCMF signature verification ──────────────────────────────────
-# The curves OCMF Table 22/23 name. secp256r1 is the default since OCMF 0.4 —
-# and secp192r1 is not a legacy curiosity: the eBZ LD3 data set shipped with the
-# S.A.F.E. Transparenzsoftware as a reference sample is signed
-# `ECDSA-secp192r1-SHA256`, so a verifier without it cannot check a common
-# German meter. The two brainpool curves have no usable pure-Rust arithmetic
-# (RustCrypto's `bp256`/`bp384` gate theirs behind `wip-arithmetic-do-not-use`),
-# which is why `emob-eichrecht` recognises and refuses them by name.
+# Signing, for the simulator's virtual meters and for test fixtures only.
+# Nothing on the billing path signs anything: `ocmf` verifies.
 sha2      = "0.10"
-p192      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 p256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
-p384      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
-k256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
-ecdsa     = { version = "0.16", features = ["der"] }
-signature = "2"
 hex       = "0.4"
 base64    = "0.22"
 
@@ -151,11 +156,9 @@ emob-service   = { path = "crates/emob-service",   version = "0.1" }
 axum               = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tokio              = { version = "1", default-features = false }
 tokio-util         = { version = "0.7", default-features = false }
-tower-http         = { version = "0.6", default-features = false, features = ["trace", "request-id"] }
 tracing            = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "std", "ansi"] }
 toml               = { version = "0.9", default-features = false, features = ["parse", "serde"] }
-http               = "1"
 
 # Standard Webhooks signatures are HMAC-SHA256 over `id.timestamp.payload`,
 # base64 — and the comparison has to be constant time, which is what `subtle`

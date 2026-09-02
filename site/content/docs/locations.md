@@ -57,7 +57,7 @@ let (rate, notes) = emob_poi::rate::publish(&tariff, "rate-1");
 ## What the profile cannot say, and is told to say anyway
 
 The profile offers six price types: `basePrice`, `flatRate`, `free`, `other`,
-`pricePerKWh` and `pricePerMinute`. Three consequences follow, and all of them
+`pricePerKWh` and `pricePerMinute`. Four consequences follow, and all of them
 are reported rather than papered over.
 
 **There is no per-hour price type.** A tariff is written and displayed per hour;
@@ -96,6 +96,22 @@ for a tier that begins at 10.5 claims the price applies over `[10, 10.5)`, where
 it does not. So a lower bound rounds **up** and an upper bound rounds **down**,
 the published band is a subset of the real one, every statement in the document
 stays true, and a note carries the figure that had to move.
+
+
+**And the zone a daily window is read in is typed as a fixed offset.**
+`FacilityLocation.timeZone` exists, the Mobilithek's own reference instance
+populates it, and the profile types it as a string that "identifies a time zone
+by specifying the difference to UTC in hours and minutes, as defined in
+ISO 8601" — so the reference instance writes `"+01:00"` for a site in Aachen.
+An offset cannot express a zone that observes summer time: that value is wrong
+for that site from the last Sunday in March to the last Sunday in October, and
+it is the field a consumer would read a published `22:00` night rate against.
+
+There is no honest fixed value, so the table publishes the offset **in force at
+the instant of publication** — the one reading that is true of the document when
+it is issued — and `RateNote::DailyWindowHasOnlyAnOffset` names the real zone
+beside it. This is the first of the four gaps that the profile gets *wrong*
+rather than merely omits.
 
 ## The register is upstream of the feed
 

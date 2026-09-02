@@ -1,9 +1,8 @@
 # emob-eichrecht
 
-German calibration law (*Eichrecht*) for EV charging, in Rust: OCMF signed meter
-values parsed **without destroying the bytes the signature covers**, verified,
-chain-validated, billable only when every check holds — and exported as the file
-the customer checks the bill with.
+German calibration law (*Eichrecht*) for EV charging, in Rust: the step between
+**a signature that checks out** and **a kilowatt-hour somebody may be invoiced
+for**.
 
 ```console
 cargo add emob-eichrecht
@@ -16,364 +15,192 @@ The signatures are on [docs.rs](https://docs.rs/emob-eichrecht).
 ## The rule this crate enforces
 
 A customer may be billed for a measured value only if they can verify it, long
-after the session — `[MessEG §33]`, `[PTB-A 50.7]`, `[REA 6-A]`. Every
-closed platform treats this as a checkbox; every open-source CSMS ignores it.
-Here it is the invariant everything hangs from:
+after the session — `[MessEG §33]`, `[PTB-A 50.7]`, `[REA 6-A]`. Every serious
+charging platform treats this as a checkbox; every open-source CSMS ignores it.
+Here it is the invariant everything else hangs from:
 
 > **A value that does not verify does not bill.**
 
 And it is a property of the types rather than a convention: the only way to
-obtain a billable quantity is `Evidence::billable_energy()`, which returns
-`None` whenever anything at all is wrong.
+obtain a billable quantity is `Evidence::billable_energy()`, which returns `None`
+whenever anything at all is wrong, and an `Evidence` can only be built by running
+the whole check.
 
-```rust
-use emob_eichrecht::{Evidence, KeyRegistry, ocmf};
+## This crate does not implement OCMF
 
-let records = raw.iter().map(|r| ocmf::parse(r)).collect::<Result<Vec<_>, _>>()?;
-let evidence = Evidence::assemble(&records, &registry, session_start);
+[`ocmf`](https://crates.io/crates/ocmf) does, against the whole **S.A.F.E.
+Transparenzsoftware reference corpus** — 256 records from eleven manufacturers,
+705 readings — with **OpenSSL's verdict on each one** as an independent oracle,
+plus a published 162-case conformance suite. What that measurement says about the
+specification is the argument for not writing it twice:
 
-match evidence.billable_energy() {
-    Some(energy) => println!("bill {energy}"),          // 29.500 kWh
-    None => for reason in evidence.reasons() {
-        eprintln!("blocked: {reason}");                  // → an operator queue, not an invoice
-    },
-}
-```
+| Measured | Count | What a hand-rolled parser does with it |
+|---|---:|---|
+| Records omitting `MS`, which `[OCMF Tab. 3]` marks `1..1` | 229 / 256 | strict cardinality rejects nine real records in ten |
+| Readings omitting `TM`, relying on carry-forward | 205 / 705 | a reading read independently of its neighbours is wrong |
+| Readings writing `RV` as a JSON **string** | 23 | a typed deserialiser refuses them |
+| Records whose payload is pretty-printed | 9 | any re-serialisation destroys the signature |
+| OBIS codes written the way `[OCMF Tab. 25]` specifies | **0** | a canonical-form check refuses every record ever sent |
 
-## Why parsing is the hard part
+Not one record in the corpus writes the OBIS code the way the table does.
 
-The signature covers the payload section **exactly as written** — "between
-signing and validation, the payload section must not be manipulated (removing
-and adding white spaces), otherwise positive validation is not possible."
+The format is not here, and neither is the sequence check
+`[OCMF §Signing and Verification Process]` assigns to a check component, nor the
+transparency container. What is here is the one thing `ocmf` refuses, in its own
+words:
 
-A parser that deserialises the JSON and re-serialises it to verify has already
-lost: key order, whitespace and number formatting are each free to change, and
-every one of them changes the hash. So this parser keeps the payload's raw byte
-span, and `signed_bytes()` returns that span rather than anything reconstructed.
+> It reports findings. Whether a session may be invoiced depends on tariffs, on
+> a key registry binding each record to *this* charge point, and on law — none
+> of which is in scope.
 
-The same reasoning reaches inside the JSON. `RV` is read as an exact decimal
-from the token's own text, so `2935.600` keeps three decimal places: OCMF says
-the representation "must not be transformed … since this would change the
-representation of the physical quantity and thus potentially the number of valid
-digits."
-
-```rust
-let record = ocmf::parse(raw)?;
-assert_eq!(record.payload.readings[0].value.unwrap().to_string(), "2935.600");
-// One added space anywhere in the payload and the signature no longer matches —
-// which is correct, and which a re-serialising parser cannot tell you.
-```
-
-### An omitted field is unchanged, not absent
-
-"For the readings, fields that have an identical value to the previous reading
-are omitted. However, this only applies within a signed record"
-`[OCMF Tab. 7 preamble]`. The rule is over **fields** — `RI` and `TX` are its
-examples, not its list — so `RU`, `RT`, `ST` and `EF` carry forward on the same
-footing.
-
-```rust
-// The first reading is flagged `E`, the second omits `EF`. Still flagged.
-assert!(record.payload.readings[1].error_flags.energy_unusable);
-```
-
-`EF` is the one that decides money: reading the omission as "no fault" would
-clear something the station signed. On the *first* reading there is nothing to
-carry, so an absent `EF` is no flags and an absent `ST` is still an error.
+A format crate can say a record is missing. Only law can say what a missing
+record costs you, and the answer is **not one boolean**.
 
 ## The questions, kept apart
 
 Conflating these is how a "verified" session turns out to be a signed fragment
 of a session somebody edited:
 
-| Question | Answered by |
-|---|---|
-| Did *this key* produce *these bytes*? | `ocmf::verify` |
-| Is this key *this charge point's* key? | `registry::KeyRegistry` |
-| Are any records missing from the session? | `chain::validate` |
-| May these readings be billed at all? | `chain::validate`, via `MeterState` |
-| May the **duration** be billed too? | `chain::validate`, via `TimeStatus` |
-| Which way did the energy go? | `chain::validate`, via `ObisCode` |
-| Who was charging, and did the assignment hold? | `chain::validate`, via `IdentificationLevel` |
-| Can the **customer** repeat all of that? | `transparency::to_xml` |
-
-**Signatures alone cannot see a deletion.** Drop the middle records of a session
-and every remaining signature still verifies. The specification assigns that
-check to a "check component": pagination must be contiguous, the first record
-must open the transaction and the last must close it. `chain::validate` is that
-component, and it also enforces what a signature says nothing about — that the
-meter was in state `G`, that no error flag disqualified the energy, that the
-register ran forwards, that both readings are on the same OBIS register, and
-that every record naming a signing component names the **same** one
-`[OCMF §Relation of Serial Numbers]`.
-
-That last one takes its reference from the first record that *names* a component,
-not from the first record: OCMF permits a station to omit `MS`, and an anchor the
-assembler chooses is an anchor they can use to switch the check off.
-
-**A substitute value is not a measurement.** `ST=S` means the meter produced a
-number because it could not measure one. Perfectly legitimate telemetry, and
-never a basis for an invoice.
-
-**The user assignment can *fail*.** `MISMATCH`, `INVALID`, `OUTDATED`,
-`UNKNOWN` `[OCMF Tab. 11]` are not weak assignments — the UIDs did not match,
-the certificate did not check out, the trust anchor had expired. The energy was
-measured and there is nobody provably behind it, so they block. They are
-deliberately **not** on the ordered strength scale: putting them at the bottom
-would make "the certificate was rejected" compare as slightly worse than an RFID
-UID, and some `>=` would then bill it.
-
-**The key binding travels out of band.** A verifier that takes the public key
-from the record it is checking has verified nothing. `KeyRegistry` is populated
-from type approval documents or provisioning — never from a record — and keys
-carry validity windows, so a meter exchanged in June does not make January's
-sessions unverifiable.
-
-Those windows are **half-open**, `[from, until)`. With two inclusive bounds a
-meter exchanged at midnight has two keys covering that instant, and the registry
-answers with whichever was inserted first — so the same session verifies or does
-not depending on insertion order. Half-open windows partition the timeline
-exactly, which is what a key history is. A *gap* between two windows stays a gap:
-a record from a month with no registered key fails to resolve rather than
-falling through to a neighbouring one.
-
-The partition is **enforced**, not assumed: `insert` is fallible and refuses a
-window that overlaps one the component already holds — two unbounded keys for one
-meter being the ordinary form of the mistake.
-
-It also refuses an **empty** one. A window with `until <= from` — a transcribed
-date, two fields swapped in a provisioning run — covers no instant at all, and
-the overlap sweep cannot see it, because an empty interval overlaps nothing. It
-would register cleanly, verify nothing, and leave the component reading as
-unprovisioned at every instant — which is indistinguishable from a component
-nobody registered, in the one place an operator goes to ask.
+| Question | Answered by | Whose |
+|---|---|---|
+| Did *this key* produce *these bytes*? | `ocmf::verify()` | the format's |
+| Are any records missing from the session? | `ocmf::session` | the format's |
+| Is this key *this charge point's* key? | `KeyRegistry` | **ours** |
+| Which quantity does each failure take away? | `chain::validate()` | **ours** |
+| May the *energy* be billed? | `Evidence::billable_energy` | **ours** |
+| May the *duration* be billed too? | `Evidence::billable_duration` | **ours** |
+| Can the **customer** repeat all of that? | `transparency` | both |
 
 ## Four quantities, not one
 
-OCMF distinguishes them and so does this. `EF` flags energy (`E`) and time (`t`)
-separately, `TM` states how far the clock can be trusted `[OCMF Tab. 19]`, `IL`
-states how the user was identified, and the OBIS code states which way the energy
-went. Collapsing them into one boolean throws away exactly the distinctions the
-format was shaped to carry:
+OCMF states them separately and so does this. A record carries `EF` flags for
+energy (`E`) and time (`t`) apart `[OCMF Tab. 7]`, states its clock's
+trustworthiness separately again `[OCMF Tab. 19]`, and states how the user was
+identified separately from both `[OCMF Tab. 11]`. Collapsing them into one
+boolean throws away exactly the distinctions the format was shaped to carry:
+
+- a session on an **unsynchronised clock** has perfectly good energy and a
+  duration nobody can defend — a per-kWh tariff bills it and a per-minute tariff
+  must not;
+- a session whose **identification failed** has good energy and nobody to bill
+  it to.
 
 ```rust
-let report = chain::validate(&records);
+let evidence = Evidence::assemble(&records, &registry, session_start);
 
-// Same session, clock status `U` — unsynchronised.
-assert_eq!(report.billable_energy.unwrap().to_string(), "29.500 kWh");
-assert!(!report.is_billable_for_time());
+evidence.billable_energy();          // Some(0.268 kWh) — the register held up
+evidence.billable_duration();        // None — the clock was only informative
+evidence.identification_strength();  // the weakest level any record asserted
+evidence.direction();                // Import, off the OBIS code the meter signed
 ```
 
-A session on an unsynchronised clock has perfectly good energy and a duration
-nobody can defend — so a per-kWh tariff bills it and a per-minute occupancy fee
-`[AFIR Art. 5(4)]` must not. A faulty register is the mirror image: no energy,
-and the car was still plugged in for twenty minutes.
+`ChainFinding::disqualifies()` is that mapping, and it is **total** over
+`ocmf::session::Finding` with a fallback of `Both`: a fault a later release of
+that crate adds must not be able to widen what this build bills by being
+unrecognised.
 
-`ChainFinding::disqualifies()` says which quantity each finding takes away, and
-a test asserts that every finding takes away at least one — a finding that
-disqualified nothing would be a finding that changes no answer.
+### …and five rules that are about billing rather than about the format
 
-Three more the chain catches and signatures cannot: a chain with **two** `TX=B`
-markers is two charging processes concatenated, and the subtraction spans both;
-an identification level that changes mid-session is two records disagreeing
-about who was charging; and a `TX=X` marker means "time and/or energy are no
-longer usable **from this reading (incl.)**" `[OCMF Tab. 7]` — the transaction
-carries on, the numbers may not be billed across it.
+| Rule | Source | Disqualifies |
+|---|---|---|
+| The billed register is not one `[OCMF Tab. 25]` reserved and never defined | `[OCMF Tab. 25]` | energy |
+| The reading is in an energy unit at all — `mOhm` is a lawful `RU` | `[OCMF Tab. 7, RU]` | energy |
+| Cable-loss compensation is reported against an accumulation register | `[OCMF Tab. 7, CL]` | both |
+| …and is reset at `TX=B`, so the session's own loss is `CL_end` | `[OCMF Tab. 7, CL]` | both |
+| The identification level does not change mid-session | `[OCMF Tab. 11]` | both |
 
-## The OBIS code is read, not carried
+## The key is this charge point's, or it proves nothing
 
-`[OCMF Tab. 25]` reserves a range of OBIS codes that say exactly what a
-charging session's registers mean:
+`[OCMF §Relation of Serial Numbers]` puts the binding between a signing component
+and its key **out of band** — a type approval, a provisioning run — so a key that
+arrives beside a record proves only that whoever sent it owns a private key.
 
-| C field | Meaning |
-|---|---|
-| `B0` / `B1` | Total import — at the meter / at the vehicle |
-| `B2` / `B3` | **Transaction** import — at the meter / at the vehicle |
-| `C0` / `C1` | Total export |
-| `C2` / `C3` | **Transaction** export |
-
-So the signed register itself states the direction:
+`KeyRegistry` holds the binding, and its windows are **half-open**. A station
+whose key is replaced has two keys over its life, and a record from before the
+swap must still verify years later:
 
 ```rust
-let code = ObisCode::new("01-00:C2.08.00*FF");
-assert_eq!(code.direction(), Some(Direction::Export));
-assert_eq!(code.scope(), Some(RegisterScope::Transaction));
-assert!(code.is_accumulation_register());
+registry.insert(component, RegisteredKey::valid_between(key, from, until)?)?;
 ```
 
-A crate whose central claim is that import and export **never net** cannot
-afford to hold that as an opaque string and take the direction from somewhere
-else — a session recorded as a draw whose register says `C2` is a V2G discharge
-billed as consumption. `emob-cdr` refuses exactly that.
+With two inclusive bounds a meter exchanged at midnight has two keys covering
+that instant and the answer depends on insertion order. `[from, until)` makes
+consecutive windows partition the timeline exactly, which is what a key history
+is — and an *empty* window is refused, because a window covering no instant reads
+exactly like a component nobody registered.
 
-Ordinary IEC 62056 codes still state a direction (`1.8.0` drawn, `2.8.0` fed
-back) and nothing about the scope. **Anything else states no direction at all** —
-not import by default, because a caller that needs one should have to get it from
-elsewhere and know that it did.
-
-The table also reserves `B4`–`BF` and `C4`–`C7` **for future use**, and a code
-from there is a third case again — it blocks the energy:
-
-```rust
-assert!(ObisCode::new("01-00:B4.08.00*FF").is_reserved_for_future_use());
-```
-
-An unrecognised manufacturer register is still evidence and still bills. A
-reserved code is a billing-relevant quantity the specification has claimed and
-not published — the same argument the unknown error flag makes about a
-character.
-
-Reading the `D` field is also what makes the cable-loss rules checkable: `CL`
-may be reported "only when RI is indicating an accumulation register reading",
-and it "must be reset at TX=B" `[OCMF Tab. 7]`. A transaction opening on a
-non-zero cumulated loss is carrying compensation from the previous session into
-this one. The loss itself is never subtracted — the compensation is already
-inside `RV` — but it is carried onto the report, because a partner disputing the
-energy will ask how much of it was cable.
-
-And it comes back as an `Energy`, not a bare decimal: `CL` "is given in the same
-unit as RV which is specified in RU" `[OCMF Tab. 7, CL]`, and `RU` is `Wh` on
-ordinary German hardware. Reported raw beside a `billable_energy` in kWh, a
-420 Wh cable loss reads as 420 kWh — a figure a thousand times larger than the
-session it exists to explain, in the middle of a dispute about that session.
+The two failures are kept apart, because an operator acts on the difference:
+nothing registered is a provisioning gap; a key whose window has closed is a key
+that was replaced without the replacement being registered.
 
 ## The transparency file
 
-`[MessEG §33]` does not require a measured value to be *correct*. It requires
-the affected party to be able to **check** it — so a platform that verifies
-internally and reports "verified" has satisfied nobody.
+`[MessEG §33]` does not require a measured value to be correct. It requires the
+affected party to be able to **check** it — so a platform that verifies
+internally and reports "verified" has satisfied nobody. The deliverable is the
+container the S.A.F.E. Transparenzsoftware reads.
+
+Writing it is `ocmf::xml`'s job. What is this crate's is **which records go in**:
+only the ones whose signatures verified against a *registered* key, because a
+container built from raw records hands a driver a file whose verifier says
+"valid" about a record no registry ever vouched for.
 
 ```rust
-use emob_eichrecht::transparency;
-
-let xml = transparency::to_xml(&evidence);   // hand this to the driver
+let xml = transparency::to_xml(&evidence)?;   // only what held up
+let back = transparency::from_xml(&xml)?;     // and it reads back, for a dispute
 ```
 
-That is the XML container the S.A.F.E. Transparenzsoftware reads: one `<value>`
-per record, each carrying the record **verbatim** — a reassembled one hashes
-differently — beside the public key it was checked against.
-
-Every `<value>` of one session carries **one** `transactionId`, because that is
-what the verifier groups by rather than what it numbers records with: its
-`MainView` collects `getValues(currentTransactionId)` and hands the whole list
-to `verifyTransaction`, which is where the begin/end pairing and the energy
-difference happen. Writing each record's pagination counter there instead is
-schema-valid and degrades one session into N single-record transactions the
-driver cannot pair. `to_xml_with_transaction_id` takes the operator's own
-number, which is what makes the driver's file line up with the driver's invoice.
-
-The `context` label is a statement about the whole data set, so a record
-carrying `TX=B` **and** `TX=E` — the `MR` configuration, and the shape of the
-eBZ LD3 reference record — is neither half of a transaction and is labelled
-neither.
-
-It takes an `Evidence` rather than a pile of records on purpose. A file that
-took keys as arguments could be exported with the key that makes it verify
-rather than the key the station was registered with, and the whole binding
-travels out of band. A record that did not verify has no key binding and
-therefore no `<value>`; `reasons()` is what explains that to the operator.
-
-A session that does **not** bill still gets a file. The customer's right to
-check does not depend on the answer, and a dispute is precisely when it matters.
-
-`transparency::from_xml` reads one back, because the export is only half of the
-duty: the other half arrives when a driver disputes a bill and sends the file
-back, and an operator has to check its records against **its own** registry.
-`TransparencyValue::claimed_key` is named for what it is — the file's claim, not
-a binding — because verifying a record against a key the same file supplied
-proves only that whoever wrote the file owned a private key. The comparison
-against the registered key is the check worth making.
+The part that is easy to get wrong is not the schema, it is `transactionId`: the
+verifier **groups** by it and then wants exactly one `Transaction.Begin` and one
+`Transaction.End` per group. A writer that numbers its records `1, 2, 3…`
+produces a schema-valid file it refuses — and a writer that puts an id on a
+record carrying *both* markers makes it look for a partner that does not exist.
+`ocmf::xml` groups the way S.A.F.E.'s own 257 reference values are grouped,
+counted: 223 of them are a whole transaction in one record and none carries an
+id.
 
 ## The records also state the shape of the session
 
-Eight of `[OCMF Tab. 7, TX]`'s ten markers are structure. Two are facts nothing
-else in the evidence carries, and they are the intervals money turns on: `S`
-("Suspended = Transaction active, but currently not charging") and `T` (a tariff
-change).
+`[OCMF Tab. 7, TX]` names ten markers. Most are structure, and two are facts
+about the session nothing else in the evidence states:
+
+- `S` — "Suspended = Transaction active, but currently not charging";
+- `T` — a tariff change.
+
+Both are exactly the intervals money turns on. `[AFIR Art. 5(4)]` prices the time
+a vehicle is connected and *not* charging per minute, and until now that interval
+reached a CDR only from OCPP's `chargingState` — a protocol field, asserted by
+the same party that issues the invoice.
 
 ```rust
-for (from, to) in evidence.suspended_intervals() { /* signed occupancy */ }
+evidence.suspended_intervals();      // what the meter signed, not what the CSMS said
+evidence.tariff_change_instants();   // `[PTB-A 50.7 §3.1.7.2]` wants these on a grid boundary
 ```
 
-`[AFIR Art. 5(4)]` prices those minutes per minute, and the only other account of
-them is OCPP's `chargingState` — a protocol field asserted by the same party that
-issues the invoice. `emob-ocpp` compares the two.
-
-A **note, never a refusal**: `S` is optional, so its absence says nothing and
-most of the fleet never emits one. Its presence against a contrary protocol claim
-is two stories about one event, and only one of them is signed.
-
-## The two ways a duration stops being billable
-
-`[OCMF Tab. 19]` says how far a station's clock can be trusted, and this crate
-turns that into `Evidence::billable_duration()`. `[REA 6-A §3.1]` adds the other
-half — "Messwerte unterhalb der kürzest möglichen Zeitspanne werden nicht für
-Abrechnungszwecke verwendet" — and `emob-cdr` enforces it where the tariff is
-known.
-
-The two are the same rule from opposite ends: there the clock cannot be
-**placed**, here the span cannot be **resolved**. Both leave a session whose
-register an invoice may use and whose duration it may not, which is why the two
-quantities were separated in the first place.
-
-## Tested against a meter it did not write
-
-Every other fixture here is signed at test time with a key the test also holds,
-which proves the crate agrees with itself. The suite therefore also runs an
-**eBZ LD3** record — ordinary German charging hardware — from the reference data
-set the S.A.F.E. Transparenzsoftware ships, against the key it is published
-with:
-
-```rust
-assert_eq!(evidence.billable_energy().unwrap().to_string(), "0.268 kWh");
-assert!(!evidence.is_billable_for_time());   // its clock is only informative
-```
-
-It found three things a self-signed fixture cannot reach: an unimplemented
-curve, a non-canonical DER signature, and a framing assumption about pipes.
+Empty for the ordinary station that never emits `S` — the marker is optional — so
+it is evidence *for* a fee where it exists, never a precondition of one.
 
 ## Scope
 
-OCMF 1.4 in full, plus the chain rules the specification assigns to a verifier.
-
-**High `s` is not a forgery.** For every ECDSA signature `(r, s)` the pair
-`(r, n − s)` verifies the same message, and plain ECDSA — all `[OCMF Tab. 22]`
-names — accepts both. Bitcoin requires the low half, and `k256` enforces it
-inside `verify`; a DZG DVH4013 in the reference corpus signs with the high half,
-`openssl` accepts it, and this build answered `SignatureMismatch` — the
-diagnostic for tampering. Signatures are normalised before verification on every
-curve, which accepts exactly what plain ECDSA accepts and nothing more.
-
-**Curves.** `[OCMF Tab. 22]` names seven algorithms and four are verified here:
-secp256r1 (the OCMF default), secp384r1, secp256k1 and **secp192r1** — which is
-not a legacy curiosity, since it is what the eBZ reference record signs with.
-The other three are recognised and refused **by name**, each for its own reason:
-the brainpool pair because RustCrypto gates `bp256`/`bp384`'s arithmetic behind
-`wip-arithmetic-do-not-use`, secp192k1 because no pure-Rust implementation is
-published at all. A wrong answer is worse than none, so none of them is
-approximated with a neighbouring curve.
-
-**Signature encoding.** `SM` calls for DER, and real meters do not emit
-canonical DER: the eBZ firmware pads both integers to a fixed 24 bytes
-regardless of sign, so its `r` reads as negative to a strict parser and its `s`
-carries a `0x00` it does not need. Each INTEGER's content is read as an unsigned
-magnitude and re-emitted minimally before verification — lenient about
-**encoding**, strict about **structure**: anything that is not a SEQUENCE of
-exactly two INTEGERs is refused.
-
-**Hashing.** OCMF pairs SHA-256 with *every* curve it names, and only two of
-them have a 32-byte field. The usual typed-digest APIs expect the hash to be
-exactly the field width, so verification goes through the prehash path, which
-applies the X9.62 conversion in both directions — left-padding a short hash,
-truncating a long one.
+Four of the seven algorithms of `[OCMF Tab. 22]` verify in pure Rust, secp192r1
+included: the eBZ LD3 sample the Transparenzsoftware ships is signed
+`ECDSA-secp192r1-SHA256`, so a verifier without it cannot check a common German
+meter. The remaining three — the brainpool pair and secp192k1 — have no audited
+pure-Rust arithmetic; `ocmf` reaches them through OpenSSL, which a crate that
+promises to open no socket and read no file may not link, so here they are
+recognised and refused **by name** rather than silently failing.
 
 ## No I/O, no clock
 
 Nothing here opens a socket, reads a file or asks the time. The key registry is
 handed in already populated and every instant is an argument, so a whole fleet's
-verification runs as a deterministic unit test — and a dispute from two years
-ago is replayed exactly as it happened.
+verification runs as a deterministic unit test — and a dispute from two years ago
+is replayed exactly as it happened.
+
+`cargo xtask check-graph` enforces the other half of that: no clock, socket or
+database may appear in this crate's *dependency* graph either, because the purity
+guard greps this workspace's source and cannot see into a dependency.
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

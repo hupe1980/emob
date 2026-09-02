@@ -14,6 +14,7 @@ rust-version.workspace = true
 [dependencies]
 emob-core      = { workspace = true }
 emob-eichrecht = { workspace = true }
+ocmf           = { workspace = true }
 emob-session   = { workspace = true }
 emob-tariff    = { workspace = true }
 ocpp-kit       = { workspace = true, features = ["std", "csms", "v1_6", "v2_0_1", "v2_1"] }
@@ -29,6 +30,7 @@ serde = [
     "dep:serde",
     "emob-core/serde",
     "emob-eichrecht/serde",
+    "ocmf/serde",
     "emob-session/serde",
     "emob-tariff/serde",
     "time/serde-well-known",

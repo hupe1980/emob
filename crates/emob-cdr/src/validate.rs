@@ -708,6 +708,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(
                 emob_tariff::Dimension::Energy,
                 dec(price),
@@ -996,6 +997,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(
                 emob_tariff::Dimension::Time,
                 dec("6.00"),
@@ -1037,6 +1039,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(
                 emob_tariff::Dimension::Time,
                 dec("6.00"),
@@ -1128,6 +1131,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![
                 PriceComponent::new(emob_tariff::Dimension::Energy, dec("0.49")),
                 PriceComponent::new(emob_tariff::Dimension::Time, dec("6.00")),

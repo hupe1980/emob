@@ -57,7 +57,7 @@
 //! use emob_poi::feed::Feed;
 //! use emob_poi::rate;
 //! use emob_poi::site::*;
-//! use emob_core::{EvseId, PartyId};
+//! use emob_core::{EvseId, PartyId, TimeZone};
 //! use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
 //! use rust_decimal::Decimal;
 //!
@@ -65,6 +65,7 @@
 //!     "ad-hoc".parse()?,
 //!     emob_core::Currency::EUR,
 //!     TariffKind::AdHoc,
+//!     emob_core::TimeZone::new("Europe/Berlin")?,
 //!     vec![PriceComponent::new(Dimension::Energy, Decimal::from_str_exact("0.49")?)],
 //! );
 //! let (published_rate, notes) = rate::publish(&tariff, "rate-1");
@@ -83,6 +84,7 @@
 //!         longitude: Decimal::from_str_exact("6.104507")?,
 //!     },
 //!     Address::default(),
+//!     TimeZone::new("Europe/Berlin")?,
 //!     vec![Station::new(
 //!         Facility::new("station-1"),
 //!         PartyId::new("DE", "ABC")?,

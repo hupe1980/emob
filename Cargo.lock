@@ -206,19 +206,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 
 [[package]]
-name = "blake3"
-version = "1.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
-dependencies = [
- "arrayvec",
- "cc",
- "cfg-if",
- "constant_time_eq",
- "cpufeatures 0.3.1",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -308,16 +295,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "cc"
-version = "1.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ad534f4357a5264cce5019c989cf66a4f0dc4e0d1b1d15f8aacec0ff7360273"
-dependencies = [
- "find-msvc-tools",
- "shlex",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -340,12 +317,6 @@ name = "const-oid"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
-
-[[package]]
-name = "constant_time_eq"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "cpufeatures"
@@ -408,6 +379,7 @@ dependencies = [
  "emob-service",
  "emob-session",
  "emob-tariff",
+ "ocmf",
  "ocpp-kit",
  "rust_decimal",
  "time",
@@ -540,19 +512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "doubleentry"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c9d8b8aa59d617705b1d34f378bd7b809f99b3ff2162187b056f3ab8be15d61"
-dependencies = [
- "blake3",
- "smallvec",
- "thiserror",
- "time",
- "uuid",
-]
-
-[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -604,7 +563,6 @@ dependencies = [
 name = "emob-billing"
 version = "0.1.0"
 dependencies = [
- "doubleentry",
  "emob-cdr",
  "emob-core",
  "emob-eichrecht",
@@ -613,6 +571,7 @@ dependencies = [
  "en16931",
  "en16931-formats",
  "hex",
+ "ocmf",
  "p256",
  "rust_decimal",
  "sepa",
@@ -632,6 +591,7 @@ dependencies = [
  "emob-session",
  "emob-tariff",
  "hex",
+ "ocmf",
  "p256",
  "rust_decimal",
  "serde",
@@ -646,6 +606,7 @@ name = "emob-core"
 version = "0.1.0"
 dependencies = [
  "iso15118",
+ "jiff",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -657,13 +618,10 @@ dependencies = [
 name = "emob-eichrecht"
 version = "0.1.0"
 dependencies = [
- "base64",
  "emob-core",
  "hex",
- "k256",
- "p192",
+ "ocmf",
  "p256",
- "p384",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -681,6 +639,7 @@ dependencies = [
  "emob-eichrecht",
  "emob-session",
  "emob-tariff",
+ "ocmf",
  "ocpp-kit",
  "rust_decimal",
  "serde",
@@ -714,6 +673,7 @@ dependencies = [
  "emob-session",
  "emob-tariff",
  "hex",
+ "ocmf",
  "ocpi-kit",
  "p256",
  "rust_decimal",
@@ -767,6 +727,7 @@ dependencies = [
  "emob-session",
  "emob-tariff",
  "hex",
+ "ocmf",
  "p256",
  "rust_decimal",
  "sha2 0.10.9",
@@ -797,6 +758,7 @@ dependencies = [
  "emob-session",
  "emob-tariff",
  "hex",
+ "ocmf",
  "p256",
  "rust_decimal",
  "serde",
@@ -813,6 +775,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e7bffd0720d850ef7d1bcdc32f52130a3248191890a32157cb30f183b76af7"
 dependencies = [
  "rust_decimal",
+ "serde",
  "thiserror",
  "time",
 ]
@@ -865,12 +828,6 @@ dependencies = [
  "rand_core 0.6.4",
  "subtle",
 ]
-
-[[package]]
-name = "find-msvc-tools"
-version = "0.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "fluent-uri"
@@ -1268,6 +1225,7 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -1294,6 +1252,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "142bd39932ad231f10513df9ab62661fead8719872150b7ad02a2df79f4e141e"
 
 [[package]]
 name = "js-sys"
@@ -1367,7 +1331,6 @@ dependencies = [
  "cfg-if",
  "ecdsa",
  "elliptic-curve",
- "once_cell",
  "sha2 0.10.9",
 ]
 
@@ -1439,9 +1402,9 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "mio"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
  "wasi",
@@ -1539,6 +1502,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "ocmf"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d63c4d16b9568151bd02d9b8ec161ce585877ea888349f162a15648cdfe5113"
+dependencies = [
+ "ecdsa",
+ "k256",
+ "p192",
+ "p256",
+ "p384",
+ "quick-xml 0.42.0",
+ "rust_decimal",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror",
 ]
 
 [[package]]
@@ -1751,6 +1732,15 @@ name = "quick-xml"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -2029,7 +2019,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1d99bb63b4908ba1730c6af3c2d1626e98192008343c12d57ac24827fd29256"
 dependencies = [
- "quick-xml",
+ "quick-xml 0.41.0",
  "thiserror",
  "time",
 ]
@@ -2175,12 +2165,6 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
-
-[[package]]
-name = "shlex"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-hook-registry"
@@ -2614,17 +2598,6 @@ name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
-
-[[package]]
-name = "uuid"
-version = "1.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
-dependencies = [
- "getrandom 0.4.3",
- "js-sys",
- "wasm-bindgen",
-]
 
 [[package]]
 name = "uuid-simd"

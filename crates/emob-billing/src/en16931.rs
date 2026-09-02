@@ -45,6 +45,7 @@ use rust_decimal::Decimal;
 
 use crate::error::BillingError;
 use crate::invoice::{Counterparty, Invoice, InvoiceLine, PaymentDetails};
+use crate::tax::VatCategory;
 
 /// The CEN core specification identifier — BT-24.
 pub const CEN_CORE: &str = "urn:cen.eu:en16931:2017";
@@ -113,8 +114,8 @@ pub fn to_en16931(
         invoice.currency.as_str(),
     )
     .business_process(BILLING_PROCESS)
-    .seller(party(&invoice.seller))
-    .buyer(party(&invoice.buyer));
+    .seller(party(&invoice.seller, invoice.treatment.category))
+    .buyer(party(&invoice.buyer, invoice.treatment.category));
 
     if let Some(terms) = &invoice.payment_terms {
         builder = builder.payment_terms(terms.clone());
@@ -137,11 +138,14 @@ pub fn to_en16931(
             taxable_amount: amount(subtotal.taxable, invoice, "taxable amount")?,
             tax_amount: amount(subtotal.tax, invoice, "tax amount")?,
             category: Code::new(subtotal.category.code()),
-            rate: Some(Percentage::new(subtotal.rate)),
+            // `None` under `O`, the only category that states no rate:
+            // `BR-O-05`'s breakdown sibling refuses the field, and zero is the
+            // field. `TaxSubtotal::rate` already carries the distinction.
+            rate: subtotal.rate.map(Percentage::new),
             exemption_reason: None,
             exemption_reason_code: None,
         };
-        if subtotal.category.needs_exemption_reason() {
+        if subtotal.category.requires_exemption_reason() {
             // BT-120. `[UStG §14a]` asks for the same sentence in German law,
             // and `TaxTreatment` is where it was decided rather than invented
             // here.
@@ -254,7 +258,8 @@ fn invoice_line(
     invoice: &Invoice,
     line: &InvoiceLine,
 ) -> Result<en16931::InvoiceLine, BillingError> {
-    let vat_rate = Percentage::new(line.vat_rate);
+    // BT-152, absent under `O` — see `InvoiceLine::vat_rate`.
+    let vat_rate = line.vat_rate.map(Percentage::new);
     let mut built = en16931::InvoiceLine {
         id: line.id.clone(),
         note: None,
@@ -279,7 +284,7 @@ fn invoice_line(
         },
         vat: LineVat {
             category: Code::new(invoice.treatment.category.code()),
-            rate: Some(vat_rate),
+            rate: vat_rate,
         },
         item: Item {
             name: Some(line.description.clone()),
@@ -327,13 +332,39 @@ fn payment_instructions(details: &PaymentDetails) -> PaymentInstructions {
     }
 }
 
-fn party(counterparty: &Counterparty) -> Party {
+/// A party, as the document's own VAT category permits it to be stated.
+///
+/// # The identifier that has to be left off
+///
+/// Almost every category *wants* a VAT identifier — `BR-AE-2` and `BR-AE-3`
+/// refuse a reverse charge without one on both sides, which is why
+/// [`crate::TaxTreatment::decide`] refuses to produce that category without
+/// them. `O` is the exception and it runs the other way: `BR-O-02` allows
+/// **none** — not the seller's BT-31, not a tax representative's BT-63, not the
+/// buyer's BT-48 — because a supply outside the scope of the tax is not one any
+/// VAT registration is being exercised under.
+///
+/// A German operator invoicing a reseller established outside the Union
+/// therefore omits its own identifier from that document, which is exactly the
+/// field a platform would fill in from a customer master without asking.
+fn party(counterparty: &Counterparty, category: VatCategory) -> Party {
+    let identifiers_allowed = category != VatCategory::OutOfScope;
     Party {
         name: Some(counterparty.name.clone()),
         trading_name: None,
         identifiers: Vec::new(),
-        legal_registration: None,
-        vat_identifier: counterparty.tax.vat_identifier.clone(),
+        legal_registration: counterparty
+            .legal_registration
+            .as_ref()
+            .map(|(identifier, scheme)| {
+                scheme.as_ref().map_or_else(
+                    || Identifier::new(identifier.clone()),
+                    |scheme| Identifier::schemed(identifier.clone(), scheme.clone()),
+                )
+            }),
+        vat_identifier: identifiers_allowed
+            .then(|| counterparty.tax.vat_identifier.clone())
+            .flatten(),
         tax_registration: None,
         additional_legal_information: None,
         electronic_address: counterparty

@@ -31,6 +31,7 @@ serde = [
 ]
 
 [dev-dependencies]
+ocmf           = { workspace = true }
 # The end-to-end test signs real OCMF records at test time, so the year it files
 # starts at a meter rather than at a constant — which is the whole point of
 # § 6(3) Nr. 2.

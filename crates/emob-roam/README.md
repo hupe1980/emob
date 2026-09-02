@@ -145,6 +145,24 @@ different one, from a document this operator signed off. Both are
 matters: every restriction this build can express arrives at the partner with
 the value it was set to.
 
+## The zone a `22:00` is read in is not in the tariff document
+
+OCPI writes a tariff's time, date and weekday restrictions in **local civil time
+at the charge point** `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and
+puts the zone they are read in on the **Location** — `time_zone`, an IANA name,
+cardinality 1 `[OCPI 2.3.0 §mod_locations_location_object]`. Not on the Tariff.
+
+So a Tariff object carries `22:00` and nothing that says which `22:00`, and that
+is not a gap a sender can close inside the object: it is a constraint on what the
+sender publishes *beside* it. Every Location a tariff applies at has to carry the
+zone the tariff was written in.
+
+That is worth a note rather than a shrug, because it is the one fact a partner
+needs to reproduce a price and the one this document structurally cannot carry.
+`to_ocpi` names the tariff's own zone by JSON Pointer, so an operator has the
+value to check its Locations against and a partner settling a disputed session
+has it in the account of the crossing.
+
 ## Routing is a question the identifier already answers
 
 `DE-ABC-C00122045-6` states, in its first five characters, the provider that

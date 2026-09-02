@@ -251,7 +251,7 @@ impl Conformance {
 ///
 /// ```
 /// use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, check_afir};
-/// use emob_core::Currency;
+/// use emob_core::{Currency, TimeZone};
 /// use rust_decimal::Decimal;
 /// use std::str::FromStr;
 ///
@@ -262,6 +262,7 @@ impl Conformance {
 ///     "t".parse()?,
 ///     Currency::EUR,
 ///     TariffKind::AdHoc,
+///     TimeZone::new("Europe/Berlin")?,
 ///     vec![PriceComponent::new(Dimension::Time, dec("6.00"))],
 /// );
 /// assert!(check_afir(&by_the_minute, dec("22")).is_lawful());
@@ -397,6 +398,7 @@ mod tests {
     use super::*;
     use crate::tariff::{PriceComponent, TariffElement, TaxIncluded};
     use emob_core::Currency;
+    use emob_core::TimeZone;
     use rust_decimal::prelude::FromStr;
 
     fn dec(s: &str) -> Decimal {
@@ -408,6 +410,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
             components,
         )
     }
@@ -574,6 +577,7 @@ mod tests {
             "t".parse().unwrap(),
             Currency::EUR,
             TariffKind::Contract,
+            TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Time, dec("6.00"))],
         );
         assert!(check_afir(&t, dec("150")).is_lawful());
@@ -610,6 +614,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![],
             min_price: None,
@@ -648,6 +653,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![TariffElement {
                 components: vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
@@ -677,6 +683,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement::unrestricted(vec![PriceComponent::new(
@@ -723,6 +730,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![
                 TariffElement {
@@ -785,6 +793,7 @@ mod tests {
             id: "t".parse().unwrap(),
             currency: Currency::EUR,
             kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             tax_included: TaxIncluded::Yes,
             elements: vec![TariffElement::unrestricted(vec![])],
             min_price: None,
