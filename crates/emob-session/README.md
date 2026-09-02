@@ -7,6 +7,11 @@ divides across the quarter hours the market settles in.
 cargo add emob-session
 ```
 
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[Sessions and settlement](https://hupe1980.github.io/emob/docs/settlement/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-session).
+
+
 ## The quarter-hour split conserves energy exactly
 
 A session running 10:01 to 10:22 has to be settled against two quarter hours,
@@ -128,6 +133,15 @@ as measured. The station chose that instant for its own reasons, and treating
 the coincidence as a clock-aligned measurement reports a settlement as
 authoritative on a day the phase drifted.
 
+And **a meter had one value at each instant**. Two readings of one register at
+one instant that disagree are a contradiction rather than an ordering question:
+a stable sort keeps the caller's order at equal keys, so the same pair used to be
+reported as a register running backwards when the larger arrived first and
+accepted in silence when the smaller did — and the arrival order of two messages
+is not evidence about a meter. `MeterError::ContradictoryReading` is asked before
+the monotonicity question; a duplicate that says the same thing still passes,
+because it contradicts nothing.
+
 ## No daylight-saving branch
 
 A quarter hour here is an instant plus fifteen minutes of real time. Every civil
@@ -142,10 +156,20 @@ Six ways a session starts, and two things depend on which:
 
 | Path | Contract-free | Strongest honest identification |
 |---|---|---|
-| `AdHoc` | ✅ (the one AFIR requires) | trusted |
-| `PlugAndCharge` | | secure |
-| `Roaming`, `RemoteCommand` | | trusted |
-| `LocalList`, `AutoCharge` | | hearsay |
+| `AdHoc` | ✅ (the one AFIR requires) | trusted — no contract, so nothing for a certificate to certify |
+| `PlugAndCharge` | | secure — `ISO15118_PNC` `[OCMF Tab. 15]` |
+| `LocalList` | | secure — a local list decides against an RFID card, and `RFID_PSK` `[OCMF Tab. 13]` is a secured one |
+| `Roaming`, `RemoteCommand` | | certified — `OCPP_CERTIFIED` `[OCMF Tab. 14]` certifies the mapping with a backend certificate |
+| `AutoCharge` | | hearsay — a MAC address off the wire |
+
+
+**The ceiling is read off Tables 13–16, not off who decided.** `[OCMF Tab. 11]`
+grades *how the user was identified*; Tables 13–16 say which identifications each
+mechanism can carry, and the two axes are largely orthogonal. A ceiling set from
+the decision-maker refuses ordinary hardware — a local list decides against an
+RFID card, and a secured card is Table 11's own example of `SECURE`. What stays
+low is what cannot rise: an unauthenticated MAC address, and an ad-hoc session
+that presented no contract for anything to certify.
 
 `AutoCharge` recognises a vehicle by its MAC address. It is not a standard, not
 authenticated and trivially spoofable, and it is kept rigorously distinct from
@@ -196,6 +220,16 @@ assert!(session.suspended_throughout(at(45), at(60)));   // half an hour to pric
 `emob-cdr` uses the same history the other way round: energy across a quarter
 hour the session logged as suspended from end to end means the meter and the
 state machine disagree, and it refuses the record rather than picking one.
+
+**And the interval is asked two ways, because there are four states.**
+`charging_throughout` is not the negation of `suspended_throughout`: `Pending` is
+authorised with nothing flowing and `Ended` is over, and both are "connected and
+not charging" — which is exactly what the fee prices. Where a meter reading
+exists it is the evidence, so a slot is charging unless the session says it was
+suspended throughout; where nothing was measured there is none, so the question
+has to run the other way round. Asking `!suspended_throughout` there would read
+"the record never said suspended" as "the vehicle was charging", which is an
+absence standing in for a claim.
 
 Import and export are separate registers counting separate quantities, and one
 session can hold both. They never net: 18 kWh drawn and 5 kWh returned is 18 and

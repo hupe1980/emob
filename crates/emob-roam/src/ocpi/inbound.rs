@@ -134,7 +134,7 @@ pub fn from_ocpi(
 
     let inbound = Inbound {
         cdr: Cdr {
-            key,
+            key: key.clone(),
             session_id: session_id_of(cdr, &key_hint(cdr))?,
             evse_id: emob_core::EvseId::parse(cdr.cdr_location.evse_id.as_str()).map_err(
                 |error| RoamError::UnreadableField {
@@ -154,12 +154,18 @@ pub fn from_ocpi(
             direction: Direction::Import,
             evidence,
             cost: None,
+            // The same CPO by construction: OCPI keys a CDR per
+            // `country_code`/`party_id`, and a credit reference names a record
+            // of the sender's own. The party is the one already parsed for
+            // this record's own key rather than a second reading of the same
+            // two fields — a second reading needs a fallback, and a fallback
+            // here would key a correction onto a party nobody has.
             supersedes: cdr
                 .credit_reference_id
                 .as_ref()
                 .and_then(|previous| previous.as_str().parse().ok())
                 .map(|id| CdrKey {
-                    party: key_party(cdr),
+                    party: key.party.clone(),
                     id,
                 }),
         },
@@ -167,14 +173,6 @@ pub fn from_ocpi(
     };
 
     Ok(crossing.map(|()| inbound))
-}
-
-/// The party a superseded record belongs to — the same CPO, by construction:
-/// OCPI keys a CDR per `country_code`/`party_id` and a credit reference names a
-/// record of the sender's own.
-fn key_party(cdr: &ocpi_kit::v2_3_0::Cdr) -> emob_core::PartyId {
-    emob_core::PartyId::new(cdr.country_code.as_str(), cdr.party_id.as_str())
-        .unwrap_or_else(|_| emob_core::PartyId::new("XX", "XXX").expect("a literal party"))
 }
 
 /// A description of the record, for an error that cannot name a field.

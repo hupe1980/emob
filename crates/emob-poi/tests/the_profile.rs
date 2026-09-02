@@ -405,12 +405,25 @@ fn the_price_in_the_feed_is_the_tariffs_own_decimal_and_not_a_second_computation
     assert!(json.contains(r#""taxIncluded": true"#), "{json}");
     assert!(json.contains(r#""maximumDeliveryFee": 100"#), "{json}");
 
-    // …and the profile could not carry the occupancy fee, which is said rather
-    // than swallowed.
-    assert!(matches!(
-        notes.as_slice(),
-        [rate::RateNote::OccupancyFeeHasNoPriceType { .. }]
-    ));
+    // …and the two things the profile could not carry are said rather than
+    // swallowed: it has no price type for an occupancy fee, and no tax flag on
+    // a delivery fee — so the `100` above is published without the document
+    // being able to state that tax is inside it.
+    assert!(
+        notes
+            .iter()
+            .any(|note| matches!(note, rate::RateNote::OccupancyFeeHasNoPriceType { .. })),
+        "{notes:?}"
+    );
+    assert!(
+        notes.iter().any(|note| matches!(
+            note,
+            rate::RateNote::DeliveryFeeHasNoTaxBasis { field, tax_included: true, .. }
+                if *field == "maximumDeliveryFee"
+        )),
+        "{notes:?}"
+    );
+    assert_eq!(notes.len(), 2, "{notes:?}");
 }
 
 #[test]

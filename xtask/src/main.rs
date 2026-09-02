@@ -71,8 +71,8 @@ fn rust_sources(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Every prose file that makes regulatory claims: the READMEs, the site, and
-/// the architecture notes when they are present.
+/// Every prose file that makes regulatory claims: the crate and service
+/// READMEs, the site, and the architecture notes when they are present.
 ///
 /// A citation in a document is the same promise as a citation in a comment —
 /// "this rule comes from that paragraph of that text" — and a reader who cannot
@@ -85,7 +85,7 @@ fn prose_sources(root: &Path) -> Result<Vec<PathBuf>> {
     if readme.exists() {
         files.push(readme);
     }
-    for top in ["crates", "site/content", "concepts"] {
+    for top in ["crates", "services", "site/content", "concepts"] {
         collect(&root.join(top), "md", &mut files)?;
     }
     files.sort();

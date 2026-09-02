@@ -153,9 +153,10 @@ impl MeterSeries {
     ///
     /// # Errors
     ///
-    /// [`MeterError`] when the readings are empty, mix directions, or contain a
-    /// register that runs backwards — the last being a fault to escalate, never
-    /// a negative quantity to bill.
+    /// [`MeterError`] when the readings are empty, mix directions, contradict
+    /// each other about one instant, or contain a register that runs
+    /// backwards — the last being a fault to escalate, never a negative
+    /// quantity to bill.
     pub fn new(direction: Direction, mut readings: Vec<MeterReading>) -> Result<Self, MeterError> {
         if readings.is_empty() {
             return Err(MeterError::Empty);
@@ -170,6 +171,25 @@ impl MeterSeries {
         readings.sort_by_key(|r| r.at);
 
         for pair in readings.windows(2) {
+            // Two readings of one register at one instant that disagree about
+            // its value. A meter had one value at that moment, so one of the
+            // two is wrong — and which one decides the energy either side of
+            // the boundary.
+            //
+            // Asked **before** the monotonicity question, because otherwise the
+            // sort decides which fault is reported: the same contradiction is
+            // `RegisterRanBackwards` when the larger value happens to be sorted
+            // first, and silently accepted when the smaller is. A stable sort
+            // preserves the caller's order at equal keys, so that is the
+            // arrival order of two messages — which is not evidence about a
+            // meter.
+            if pair[0].at == pair[1].at && pair[0].register != pair[1].register {
+                return Err(MeterError::ContradictoryReading {
+                    at: pair[0].at,
+                    one: pair[0].register,
+                    other: pair[1].register,
+                });
+            }
             if pair[1].register < pair[0].register {
                 return Err(MeterError::RegisterRanBackwards {
                     at: pair[1].at,
@@ -276,6 +296,26 @@ pub enum MeterError {
         /// The later, smaller value.
         to: Energy,
     },
+
+    /// Two readings state different values for one register at one instant.
+    ///
+    /// A meter had one value at that moment, so one of the two is wrong — and
+    /// which one decides the energy on both sides of the boundary. Kept apart
+    /// from [`Self::RegisterRanBackwards`] because it is a different fault with
+    /// a different fix: a register that decreased over time is a metrology
+    /// incident, while two values at one instant is a station or a transport
+    /// sending the same reading twice with different content.
+    #[error(
+        "two readings state different values for one register at {at}: {one} and {other}. A meter had one value at that instant"
+    )]
+    ContradictoryReading {
+        /// When.
+        at: time::OffsetDateTime,
+        /// One of the two values.
+        one: Energy,
+        /// The other.
+        other: Energy,
+    },
 }
 
 #[cfg(test)]
@@ -296,6 +336,52 @@ mod tests {
             Direction::Import,
             context,
         )
+    }
+
+    #[test]
+    fn two_values_for_one_instant_are_a_contradiction_rather_than_an_order() {
+        // A meter had one value at that moment. Which of the two is believed
+        // decides the energy on both sides of the boundary, and the sort cannot
+        // decide it: a stable sort preserves the caller's order at equal keys,
+        // so the same contradiction read as `RegisterRanBackwards` when the
+        // larger value arrived first and was silently accepted when the smaller
+        // did.
+        let descending = MeterSeries::new(
+            Direction::Import,
+            vec![
+                reading(0, "10.000", ReadingContext::TransactionBegin),
+                reading(30, "30.000", ReadingContext::SamplePeriodic),
+                reading(30, "28.000", ReadingContext::TransactionEnd),
+            ],
+        );
+        let ascending = MeterSeries::new(
+            Direction::Import,
+            vec![
+                reading(0, "10.000", ReadingContext::TransactionBegin),
+                reading(30, "28.000", ReadingContext::SamplePeriodic),
+                reading(30, "30.000", ReadingContext::TransactionEnd),
+            ],
+        );
+        for series in [descending, ascending] {
+            assert!(
+                matches!(series, Err(MeterError::ContradictoryReading { .. })),
+                "the arrival order of two messages is not evidence about a meter: {series:?}"
+            );
+        }
+
+        // …and a retransmission that says the same thing is not a
+        // contradiction, because it does not contradict anything.
+        assert!(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    reading(0, "10.000", ReadingContext::TransactionBegin),
+                    reading(30, "30.000", ReadingContext::TransactionEnd),
+                    reading(30, "30.000", ReadingContext::TransactionEnd),
+                ],
+            )
+            .is_ok()
+        );
     }
 
     #[test]

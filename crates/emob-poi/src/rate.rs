@@ -33,8 +33,16 @@
 //!   surcharge the Regulation names cannot be published as a number under the
 //!   profile the same Regulation requires.
 //!
-//! Neither is a reason to refuse to publish. Both are reasons to say so, which
-//! is what [`RateNote`] is for.
+//! - **A delivery fee cannot say whether tax is in it.** Every `EnergyPrice`
+//!   carries `taxIncluded` and `taxRate`; `EnergyRate`'s `minimumDeliveryFee`
+//!   and `maximumDeliveryFee` are a bare `AmountOfMoney` with neither. The one
+//!   figure on the rate that is a session **total** rather than a unit price is
+//!   therefore the one a consumer cannot qualify — and reading a net minimum as
+//!   gross is out by the whole VAT rate, on the number a driver most wants to
+//!   compare.
+//!
+//! None of these is a reason to refuse to publish. All of them are reasons to
+//! say so, which is what [`RateNote`] is for.
 //!
 //! # What the profile *can* say, in whole units
 //!
@@ -283,9 +291,12 @@ pub enum RateNote {
         /// Which applicability — `energyBasedApplicability` or
         /// `timeBasedApplicability`.
         applicability: &'static str,
-        /// The lower bound, in the tariff's own unit.
+        /// The lower bound, in the unit the **field** is stated in — kWh, or
+        /// minutes for a duration the tariff itself holds in seconds. The same
+        /// unit [`Self::BoundNarrowedToWholeUnits`] reports, because two scales
+        /// for one restriction in one report is a report nobody can act on.
         from: Decimal,
-        /// The upper bound.
+        /// The upper bound, in the same unit.
         to: Decimal,
     },
     /// A price applies only under conditions the published rate omits.
@@ -298,6 +309,76 @@ pub enum RateNote {
         /// Which condition was dropped.
         restriction: &'static str,
     },
+    /// A minimum or maximum delivery fee is published with no tax basis.
+    ///
+    /// `EnergyPrice` carries `taxIncluded` and `taxRate`; `EnergyRate`'s
+    /// `minimumDeliveryFee` and `maximumDeliveryFee` are a bare `AmountOfMoney`
+    /// with neither. So the one figure on the rate that is a **total** rather
+    /// than a unit price is the one the profile cannot say whether tax is inside
+    /// — and a consumer reading a net minimum as gross is out by the whole VAT
+    /// rate on the number a driver most wants to compare.
+    ///
+    /// Raised only where the tariff actually states a basis. A party outside a
+    /// tax regime has nothing to say and nothing is lost.
+    DeliveryFeeHasNoTaxBasis {
+        /// Which bound — `minimumDeliveryFee` or `maximumDeliveryFee`.
+        field: &'static str,
+        /// The figure as published.
+        amount: Decimal,
+        /// Whether that figure includes tax, which the document cannot state.
+        tax_included: bool,
+    },
+}
+
+impl core::fmt::Display for RateNote {
+    /// One line per note, for an operator queue — the same shape
+    /// [`emob_tariff::RatingNote`] and `emob_core::Note` carry, because a gap
+    /// in a published price and a gap in a rated one land in the same inbox.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::OccupancyFeeHasNoPriceType { per_minute } => write!(
+                f,
+                "the occupancy fee of {per_minute} per minute is published as `other`: [AFIR Art. 5(4)] permits it by name and [DATEX-II-Profil Tab. A.116] has no price type for parking"
+            ),
+            Self::HourlyPriceIsNotExactPerMinute { hourly, published } => write!(
+                f,
+                "{hourly} per hour has no exact price per minute; the feed states {published} and the exact hourly figure is in `additionalInformation` beside it"
+            ),
+            Self::BoundNarrowedToWholeUnits {
+                field,
+                exact,
+                published,
+            } => write!(
+                f,
+                "{field} carries whole units only: the tariff's {exact} is published as {published}, so the band stated is a subset of the band charged"
+            ),
+            Self::BandTooNarrowToPublish {
+                applicability,
+                from,
+                to,
+            } => write!(
+                f,
+                "the band {from}–{to} is narrower than one whole unit, so {applicability} is omitted and the price reads as unconditional"
+            ),
+            Self::RestrictionNotPublished { restriction } => write!(
+                f,
+                "this price applies only under a {restriction} condition, which [DATEX-II-Profil] cannot state: the published price reads as unconditional"
+            ),
+            Self::DeliveryFeeHasNoTaxBasis {
+                field,
+                amount,
+                tax_included,
+            } => write!(
+                f,
+                "{field} is published as {amount} {}: [DATEX-II-Profil] gives `EnergyPrice` a `taxIncluded` flag and gives the delivery fee none, so a consumer cannot tell which, and reading it the other way is out by the whole VAT rate",
+                if *tax_included {
+                    "including tax"
+                } else {
+                    "excluding tax"
+                }
+            ),
+        }
+    }
 }
 
 /// Sixty minutes in an hour — the whole of the per-hour to per-minute problem.
@@ -343,6 +424,24 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
                 time,
                 &mut notes,
             ));
+        }
+    }
+
+    // The delivery fees carry no tax flag of their own — the profile gives one
+    // to every `EnergyPrice` and none to `EnergyRate`'s two bounds — so the one
+    // figure on the rate that is a session *total* is the one it cannot qualify.
+    if let Some(included) = tax_included {
+        for (field, bound) in [
+            ("minimumDeliveryFee", tariff.min_price),
+            ("maximumDeliveryFee", tariff.max_price),
+        ] {
+            if let Some(amount) = bound {
+                notes.push(RateNote::DeliveryFeeHasNoTaxBasis {
+                    field,
+                    amount,
+                    tax_included: included,
+                });
+            }
         }
     }
 
@@ -483,9 +582,14 @@ fn time_applicability_of(
         && from >= to
     {
         notes.push(RateNote::BandTooNarrowToPublish {
+            // In **minutes**, the unit the field is stated in and the unit
+            // `BoundNarrowedToWholeUnits` reports beside it. The tariff holds a
+            // duration in seconds, and a note that said "the band 600–630 is
+            // narrower than one whole unit" would put two scales on one
+            // restriction in one report.
             applicability: "timeBasedApplicability",
-            from: Decimal::from(restrictions.min_duration_s.unwrap_or_default()),
-            to: Decimal::from(restrictions.max_duration_s.unwrap_or_default()),
+            from: minutes(restrictions.min_duration_s.unwrap_or_default()),
+            to: minutes(restrictions.max_duration_s.unwrap_or_default()),
         });
         return None;
     }
@@ -673,6 +777,35 @@ mod tests {
     }
 
     #[test]
+    fn a_band_narrower_than_a_whole_unit_reports_it_in_the_unit_the_field_uses() {
+        // `fromMinute`/`toMinute` are whole minutes and the tariff holds a
+        // duration in seconds. A note saying "the band 600–630 is narrower than
+        // one whole unit" beside a `BoundNarrowedToWholeUnits` reported in
+        // minutes puts two scales on one restriction in one report.
+        let mut element =
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.30"))]);
+        element.restrictions.min_duration_s = Some(600); // 10 min
+        element.restrictions.max_duration_s = Some(630); // 10.5 min
+        let mut tariff = tariff_of(vec![]);
+        tariff.elements = vec![element];
+
+        let (_, notes) = publish(&tariff, "r");
+        let narrow = notes
+            .iter()
+            .find_map(|note| match note {
+                RateNote::BandTooNarrowToPublish { from, to, .. } => Some((*from, *to)),
+                _ => None,
+            })
+            .expect("the band narrows to nothing and has to say so");
+        assert_eq!(narrow, (dec("10"), dec("10.5")), "minutes, not seconds");
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.to_string().contains("narrower than one whole unit"))
+        );
+    }
+
+    #[test]
     fn a_time_of_day_restriction_does_survive() {
         let mut element =
             TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.30"))]);
@@ -687,5 +820,44 @@ mod tests {
             rate.prices[0].period.as_ref().unwrap().daily,
             Some((time::macros::time!(21:00), time::macros::time!(6:00)))
         );
+    }
+
+    #[test]
+    fn a_delivery_fee_is_published_with_a_tax_basis_the_profile_cannot_state() {
+        // Every `EnergyPrice` carries `taxIncluded`; `EnergyRate`'s two bounds
+        // carry nothing. So the one figure on the rate that is a session total
+        // is the one a consumer cannot qualify, and reading a net minimum as
+        // gross is out by the whole VAT rate.
+        let mut tariff = tariff_of(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        tariff.tax_included = TaxIncluded::No;
+        tariff.min_price = Some(dec("5.00"));
+
+        let (rate, notes) = publish(&tariff, "r");
+        assert_eq!(rate.minimum_delivery_fee, Some(dec("5.00")));
+        assert!(
+            notes.iter().any(|note| matches!(
+                note,
+                RateNote::DeliveryFeeHasNoTaxBasis { field, tax_included: false, .. }
+                    if *field == "minimumDeliveryFee"
+            )),
+            "{notes:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.to_string().contains("excluding tax")),
+            "{notes:?}"
+        );
+
+        // A tariff that states no bound has nothing to qualify, and one outside
+        // a tax regime has nothing to say.
+        let (_, quiet) = publish(&tariff_of(vec![]), "r");
+        assert!(quiet.is_empty());
+
+        let mut outside = tariff_of(vec![]);
+        outside.tax_included = TaxIncluded::NotApplicable;
+        outside.max_price = Some(dec("40.00"));
+        let (_, none) = publish(&outside, "r");
+        assert!(none.is_empty(), "{none:?}");
     }
 }

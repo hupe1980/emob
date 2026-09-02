@@ -289,7 +289,7 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
     // shadow the `{ENERGY}` element behind it, and the specification's own
     // advice is to write a tariff exactly that way: "always add a 'default'
     // Price Component per dimension". Objecting to it would push an operator
-    // off the recommended shape and onto the one this crate used to misprice.
+    // off the shape the specification recommends.
     let mut covered: Vec<(Dimension, usize)> = Vec::new();
     for (index, element) in tariff.elements.iter().enumerate() {
         if element.components.is_empty() {
@@ -370,7 +370,7 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
                     component.dimension,
                     Dimension::Time | Dimension::ParkingTime
                 )
-                && !divides_exactly_into_minutes(component.price)
+                && crate::display::price_per_minute(component.price).is_none()
             {
                 objections.push(Objection::NotShowablePerMinute {
                     dimension: component.dimension,
@@ -390,17 +390,6 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
 
     objections.sort_by_key(|o| !o.is_breach());
     Conformance { objections }
-}
-
-/// Whether an hourly price has an exact price per minute.
-///
-/// A decimal terminates only when its denominator's prime factors are two and
-/// five; sixty carries a three, so `2.50 / 60` does not terminate and `0.36 / 60`
-/// does. Rather than reasoning about factors, the division is done and undone:
-/// a quotient the arithmetic had to truncate does not multiply back.
-fn divides_exactly_into_minutes(per_hour: Decimal) -> bool {
-    let per_minute = per_hour / Decimal::from(60);
-    per_minute * Decimal::from(60) == per_hour
 }
 
 #[cfg(test)]

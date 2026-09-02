@@ -210,6 +210,45 @@ impl Session {
             .any(|change| change.at > from && change.at < to)
     }
 
+    /// Whether the session was charging for the whole of `[from, to)`.
+    ///
+    /// # Not the negation of [`Self::suspended_throughout`]
+    ///
+    /// There are four states and two of them are neither: a [`Pending`] session
+    /// is authorised with no energy moving, and an [`Ended`] one is over. Both
+    /// are "connected and not charging" — which is what `[AFIR Art. 5(4)]`'s
+    /// occupancy fee prices — and neither is suspended.
+    ///
+    /// The distinction only bites where nothing was measured, and there it
+    /// decides money. A slot the meter reported energy in is charging unless the
+    /// session says it was suspended throughout, because the energy is the
+    /// evidence; a stretch of the window the meter said **nothing** about has no
+    /// such evidence, so the question has to be put the other way round — did
+    /// the operator's own record say the vehicle was charging — and answered
+    /// `false` when it did not say so at all. Asking `!suspended_throughout`
+    /// there would read "the session never said suspended" as "the vehicle was
+    /// charging", which is an absence standing in for a claim.
+    ///
+    /// [`Pending`]: SessionState::Pending
+    /// [`Ended`]: SessionState::Ended
+    #[must_use]
+    pub fn charging_throughout(
+        &self,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> bool {
+        if to <= from {
+            return false;
+        }
+        if self.state_at(from) != Some(SessionState::Charging) {
+            return false;
+        }
+        !self
+            .history
+            .iter()
+            .any(|change| change.at > from && change.at < to)
+    }
+
     /// Move to a new state at an instant.
     ///
     /// # Errors
@@ -491,6 +530,43 @@ mod tests {
             !s.suspended_throughout(at(60), at(80)),
             "the session ended at 70"
         );
+    }
+
+    #[test]
+    fn charging_throughout_is_not_the_negation_of_suspended_throughout() {
+        // Four states, two of which are neither — and the gap between the two
+        // questions is where an occupancy fee gets charged for time nobody
+        // measured. `emob-cdr` fills the unmetered part of a session's window
+        // from this, and it has to ask "did the record say charging" rather
+        // than "did it fail to say suspended".
+        let mut s = session();
+        s.transition_to(SessionState::Charging, at(20)).unwrap();
+        s.transition_to(SessionState::Suspended, at(40)).unwrap();
+        s.end(at(70), EndReason::Local).unwrap();
+
+        // Pending: neither. Connected, authorised, no energy moving — which is
+        // exactly what the fee is for.
+        assert!(!s.charging_throughout(at(0), at(20)));
+        assert!(!s.suspended_throughout(at(0), at(20)));
+
+        assert!(s.charging_throughout(at(20), at(40)));
+        assert!(!s.suspended_throughout(at(20), at(40)));
+
+        assert!(!s.charging_throughout(at(45), at(60)));
+        assert!(s.suspended_throughout(at(45), at(60)));
+
+        // Ended: neither, again, and the car may still be in the bay.
+        assert!(!s.charging_throughout(at(75), at(90)));
+        assert!(!s.suspended_throughout(at(75), at(90)));
+
+        // A transition strictly inside disqualifies either answer: the interval
+        // held two states, so neither is true *throughout* it.
+        assert!(!s.charging_throughout(at(30), at(50)));
+        assert!(!s.suspended_throughout(at(30), at(50)));
+
+        // …and an empty or reversed interval is nothing at all.
+        assert!(!s.charging_throughout(at(30), at(30)));
+        assert!(!s.charging_throughout(at(30), at(20)));
     }
 
     #[test]

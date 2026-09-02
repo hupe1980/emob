@@ -12,6 +12,10 @@ operating stack.
 cargo add emob-sim
 ```
 
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[Architecture](https://hupe1980.github.io/emob/docs/architecture/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-sim).
+
 ## The demo that cannot lie
 
 ```rust

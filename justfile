@@ -39,7 +39,7 @@ lint:
 purity:
     #!/usr/bin/env bash
     set -uo pipefail
-    pure="emob-core emob-eichrecht emob-session emob-cdr emob-tariff emob-ocpp emob-poi emob-roam emob-sim"
+    pure="emob-core emob-eichrecht emob-session emob-cdr emob-billing emob-tariff emob-thg emob-ocpp emob-poi emob-roam emob-sim"
     fail=0
     for crate in $pure; do
         [ -d "crates/$crate/src" ] || continue
@@ -84,7 +84,8 @@ doc:
 msrv:
     cargo +{{ msrv }} check --all-features \
         -p emob-core -p emob-eichrecht -p emob-session -p emob-cdr \
-        -p emob-tariff -p emob-ocpp -p emob-poi -p emob-sim
+        -p emob-tariff -p emob-ocpp -p emob-poi -p emob-billing -p emob-thg -p emob-service \
+        -p emob-sim
     @echo "🔒 the crates that promise {{ msrv }} build on {{ msrv }}"
 
 # `cargo publish` cannot be undone, so the dry run is the cheap half of the

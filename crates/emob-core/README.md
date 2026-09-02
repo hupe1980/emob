@@ -2,11 +2,18 @@
 
 The domain model every other [`emob`](https://github.com/hupe1980/emob) crate is
 written against: the identifiers the e-mobility market runs on, the quantities
-that become money, and the regulatory calendar a charge point is judged against.
+that become money, the grid they settle on, the regulatory calendar a charge
+point, a provider and the company behind both are judged against, and the account
+a value owes when it is carried onto somebody else's wire.
 
 ```console
 cargo add emob-core
 ```
+
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[The obligation calendar](https://hupe1980.github.io/emob/docs/compliance/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-core).
+
 
 ## Identifiers: two grammars, one identity, and the text that arrived
 
@@ -106,6 +113,14 @@ ISO 4217 gives the yen no minor unit and the dinar three, so
 `round_to_minor_unit` reads `Currency::minor_unit_digits` — a total rounded to
 two decimals in yen invents a hundredth of a unit that does not exist.
 
+And it rounds **to** that unit in both directions. `round_dp` narrows a value
+that is too precise and leaves one that is not alone, so `11.90 / 1.19` comes
+back as `10` and an invoice line prints `10 EUR` beside `8.44 EUR` — the same
+money, and a document that looks broken. Money is the one quantity here where
+scale is a property of the *currency* rather than a claim by the instrument that
+measured it, which is the exact opposite of the rule `Energy` keeps and the
+reason the two are separate types.
+
 ## One scale, two claims about it
 
 `IdentificationStrength` lives here rather than in either crate that reads it,
@@ -143,9 +158,9 @@ for finding in report.failing() {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Thirty-three duties from AFIR, Delegated Regulation (EU) 2025/656, LSV 2026,
-MessEG/PTB-A and the THG-Quote preconditions, as dated, cited, executable rules.
-Four properties make it trustworthy:
+Forty duties from AFIR, Delegated Regulation (EU) 2025/656, LSV 2026,
+MessEG/PTB-A, the THG-Quote's four preconditions and the NIS2/CRA cybersecurity regime,
+as dated, cited, executable rules. Four properties make it trustworthy:
 
 Three of them come from `[REA 6-A]`, the Regelermittlungsausschuss's e-mobility
 rulebook, and all three bind a DC station that meters on the **AC side, before
@@ -190,8 +205,55 @@ assert_eq!(assess_provider(&provider, date!(2026-09-01)).verdict(), Verdict::Fai
 ```
 
 In Germany one company usually wears both hats, and the provider half is the
-half nobody checks. A test asserts that every duty in the calendar is answerable
-by exactly one of the two profiles, so none can go quietly unassessable.
+half nobody checks.
+
+### …and a third subject, because cybersecurity law binds the company
+
+`[NIS2 Anh. I]` names this industry in the Energy sector by its role — *operators
+of a recharging point responsible for the management and operation of a
+recharging point which provides a recharging service to end users, including in
+the name and on behalf of a mobility service provider* — and **none of what it
+asks is a fact about a point**:
+
+```rust
+use emob_core::obligation::{assess_undertaking, ObligationId, Status};
+use emob_core::station::{RiskManagement, UndertakingProfile};
+use emob_core::PartyId;
+use time::macros::date;
+
+let mut operator = UndertakingProfile::bare(PartyId::new("DE", "CPO")?);
+operator.operates_recharging_points = true;
+operator.employees = 400;
+operator.risk_management = RiskManagement::complete();
+
+let report = assess_undertaking(&operator, date!(2026-09-01));
+assert_eq!(report.status_of(ObligationId::Nis2RiskManagement), Some(Status::Satisfied));
+assert_eq!(report.status_of(ObligationId::Nis2Registration),   Some(Status::Failing));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The ten risk-management measures are a **conjunction**, because `[NIS2 Art.
+21(2)]` says the measures "shall include at least the following": nine of ten is
+not ninety per cent of a duty, and `RiskManagement::missing()` names the gaps
+rather than scoring them.
+
+Two things in that regime are easy to get wrong, and both are tested:
+
+- **The financial half of the size test is an `and`.** An SME is *fewer than 250
+  staff **and** (turnover ≤ €50 M **and/or** balance sheet ≤ €43 M)*; negated,
+  an undertaking exceeds the ceilings when it employs 250 or more **or** when
+  turnover **and** balance sheet are both above. Every summary checked writes
+  "250 employees or €50 million turnover" and drops the second conjunct, which
+  puts an asset-light €60 M operator in the essential class it is not in.
+- **A directive binds from the day the Member State transposed it.** `[NIS2 Art.
+  41]` said apply from 18.10.2024; Germany's NIS2UmsuCG came into force on
+  06.12.2025, and the calendar uses the German day. The Cyber Resilience Act
+  beside it is a Regulation, so `[CRA Art. 71]`'s own dates apply directly
+  everywhere.
+
+A test asserts that every duty in the calendar is answerable by **exactly one**
+of the three profiles, so none can go quietly unassessable — and so that adding
+a fourth subject cannot leave a duty behind.
 
 ## The dates the text actually gives
 
@@ -251,6 +313,35 @@ decides money with a protocol implementation in its tree, and the agreement is
 still a build failure rather than a hope.
 
 [`iso15118`]: https://github.com/hupe1980/iso15118
+
+## A crossing owes an account
+
+A canonical value carried onto a wire is not a re-encoding. The wire has its own
+model, and where the two disagree something gives: a quantity is rounded, a
+distinction is collapsed, a fact has no field to live in. A `From` impl makes
+those decisions silently, once, at the moment nobody is looking — and the
+consequence surfaces weeks later as two parties holding two different numbers
+for one session.
+
+So every translation onto a wire in this workspace returns a `Crossing<T>`: the
+value, and the account, by RFC 6901 pointer into the document the **recipient**
+will be looking at.
+
+```rust
+let crossing = emob_ocpp::to_ocpp(&tariff, at)?;
+for reason in crossing.reasons() {
+    // /energy/prices/0: this tariff's prices are gross and OCPP 2.1 quotes
+    //                   them net: 0.49 at 19 % is …, which the wire carries
+    //                   as …. Grossed back up by the station that is …
+}
+```
+
+It lives here rather than in one of the seams for the same reason `QuarterHour`
+does: three crates now state rules about it. OCPI in `emob-roam`, the DATEX II
+national access point feed in `emob-poi`, and OCPP 2.1's tariff in `emob-ocpp`
+answer one question, and a partner reading an account of a version downgrade and
+an operator reading an account of what a charge point's screen cannot show are
+asking it in the same words.
 
 ## No I/O, no clock
 

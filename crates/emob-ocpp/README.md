@@ -1,12 +1,17 @@
 # emob-ocpp
 
-**The OCPP seam** — from a charging station's transaction events to a session
-that can be billed, with the rule that no float from the telemetry ledger ever
-becomes a kilowatt-hour on an invoice.
+**The OCPP seam, in both directions** — a charging station's transaction events
+become a session that can be billed, and the tariff that bills it becomes the
+price on the station's own screen. With the rule that no float from the
+telemetry ledger ever becomes a kilowatt-hour on an invoice.
 
 ```console
 cargo add emob-ocpp
 ```
+
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[The OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-ocpp).
 
 Part of [emob](https://github.com/hupe1980/emob), the open-source e-mobility
 operating stack. It is the only crate here that depends on
@@ -108,6 +113,66 @@ that is worth an operator's attention rather than a silent preference for either
 side — `[AFIR Art. 5(4)]` prices those minutes differently, and the invoicing
 party controls only one of the two accounts.
 
+## The price goes the other way
+
+The money comes **in** across this seam, out of a signature. The **price** goes
+out across it.
+
+`[AFIR Art. 5(4)]` requires the ad-hoc price to be "known to end users **before
+they initiate** a recharging session", and the place a driver learns it is the
+charge point's own display. Until OCPP 2.1 there was no structured way to put it
+there — 2.0.1 could send a `DisplayMessage` string and a running `CostUpdated`
+number, both computed somewhere else — so the price on the screen came from a
+field somebody typed while the price on the invoice came from the tariff engine.
+That is the drift `emob-tariff` exists to make unrepresentable, surviving in the
+one place the article regulates.
+
+OCPP 2.1's *Tariff and Cost* block closes it, and `emob_ocpp::to_ocpp` is the
+crossing:
+
+```rust
+let crossing = emob_ocpp::to_ocpp(&tariff, at)?;          // the same Tariff that rates
+let request = v2_1::SetDefaultTariffRequest::new(0, crossing.value);
+for note in crossing.reasons() { /* what the wire could not carry exactly */ }
+```
+
+**The two models are one model.** OCPI orders *elements* and picks, per
+dimension, the first whose restrictions match; OCPP 2.1 orders *prices* inside
+each dimension and picks the first whose conditions match. Projecting the
+element list onto one price list per dimension — in order — is exactly the
+projection `emob_tariff::matching_component` already performs at rating time, so
+the station selects the component the invoice is built from by construction.
+
+The tariff's `description`, which OCPP 2.1 requires the station to **show**, is
+`describe().full_disclosure()`: every tier with its conditions, in the order the
+article prescribes. And `cost_updated` turns a `Rated` into the running total
+`CostUpdated` carries — the same figure the CDR will state.
+
+### What the wire cannot say is a refusal, not a note
+
+The rule is the roaming edge's: a loss in the driver's disfavour that the
+document does not show is a refusal, because a note attached to a number the
+receiver reads at face value is not something they can act on.
+
+| What | Why it is refused |
+|---|---|
+| a time price with no exact per-minute spelling | OCPP's field **is** `priceMinute` — the article's own unit — and €2.50 an hour is €0.041666… a minute. A rounded figure is a price the station charges and the tariff does not. Quote an hourly rate divisible by three |
+| a dimension charged at two VAT rates | OCPP carries one `taxRates` list per dimension, so the second tier would be taxed at the first tier's rate |
+| a session fee conditioned on a quantity | `TariffConditionsFixed` carries the wall clock and nothing else. Published without its condition the fee is not narrower but **wider**: the station charges it on every session |
+| an unevaluable restriction | for the reason `emob-roam` refuses it onto OCPI |
+
+What is merely *visible* is carried with an account: a `step_size` OCPP has no
+field for, a `valid_until` it has no field for, the residual a gross price
+leaves when the wire quotes net, and the tiers past the tenth that OCPP's
+ten-line `description` cannot hold — that last one a note rather than a refusal
+because it changes nothing that is *charged*, and a station displaying no price
+at all is a worse breach of the same article than one displaying ten tiers of
+twelve.
+
+The finished document is then handed to `ocpp-kit`'s own validator, because the
+bounds above are a list somebody maintains and the schema is the kit's to own. A
+tariff a station would refuse is refused here instead.
+
 ## What it does not do
 
 It does not speak OCPP. [`ocpp-kit`](https://github.com/hupe1980/ocpp-kit) does
@@ -125,7 +190,9 @@ It holds one job, and it is a boundary rather than a quarantine. Folding it into
 `emob-cdr` would put **`ocpp-kit` in the dependency graph of every
 crate that decides money**. Today `emob-core`, `emob-session`, `emob-eichrecht`,
 `emob-tariff` and `emob-cdr` build with no OCPP anywhere in their tree, and this
-crate is the reason: it is the only one on both sides.
+crate is the reason: it is the only one on both sides. That is also why the
+tariff crossing lives here and the edge points **this** way — `emob-ocpp`
+depends on `emob-tariff`, never the reverse.
 
 The billing chain should be buildable, testable and auditable without a protocol
 implementation in it, and a boundary the compiler enforces is the only kind that

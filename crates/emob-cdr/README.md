@@ -8,6 +8,11 @@ exactly once, and validated without ever being silently repaired.
 cargo add emob-cdr
 ```
 
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[Sessions and settlement](https://hupe1980.github.io/emob/docs/settlement/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-cdr).
+
+
 ## A CDR is a claim, not a session with a total on it
 
 A session is what happened. A CDR is a claim about it, sent to somebody who was
@@ -117,6 +122,16 @@ gap with periods carrying **no energy**, marked `Interpolated` because the zero
 is an assumption rather than a measurement, and split on the same quarter-hour
 grid as everything else.
 
+**Their `charging` flag is read too.** "The meter said nothing" and "the vehicle
+was not charging" are different claims, and only the second is one the operator's
+own records make — a station that stops sending `MeterValues` while its own state
+machine still says `Charging` would otherwise be billed an occupancy fee per
+minute for time it says the car was taking energy. So the fill is built where
+the session history is in scope, cuts at its state changes as well as at the
+grid, and asks `Session::charging_throughout`, which is **not** the negation of
+`suspended_throughout`: `Pending` and `Ended` are neither, and both are exactly
+the "connected and not charging" the fee prices.
+
 And when the meter and the state machine disagree — energy across a quarter hour
 the session logged as suspended from end to end — the builder refuses rather than
 picking one, because guessing is how a driver is billed for a charge the
@@ -215,6 +230,29 @@ The key is the `(party, id)` pair, never the bare id: OCPI makes a CDR id unique
 per party, so two CPOs may each have a CDR `1` and a ledger keyed on the id
 alone will drop one of them.
 
+### …and a correction chain has one end
+
+A correction is a *new* CDR, so a ledger holding a session and its correction
+holds both. Two records that both supersede one key are two corrections of one
+session — both live, neither superseded, and the session billed twice, which is
+the failure content equality is checked to prevent arriving one link along.
+
+```rust
+ledger.accept(first);                     // Stored
+ledger.accept(correction_of(&first));     // Stored
+ledger.accept(another_correction_of(&first));
+// Forked { supersedes: DE*ABC/1, held: DE*ABC/2 }
+
+let owed: Energy = ledger.live().map(|cdr| cdr.total_energy).sum();
+```
+
+`live()` is the set a billing run sums: everything the ledger holds that nothing
+else in it supersedes. `iter()` is every record, superseded ones included. A
+record that supersedes *itself* is refused for the mirror reason — stored, it
+would be superseded by its own presence and billed by nothing — and a correction
+that arrives **before** the record it corrects is still stored, because roaming
+transports do not order deliveries.
+
 ## Validation reports, and never repairs
 
 A CDR this crate builds cannot fail its own arithmetic. One that arrives from a
@@ -229,11 +267,21 @@ if !report.is_settleable() {
     // the signed record claims secure identification but the authorisation
     //   path supports at most hearsay
     // the price was computed for 18.000 kWh but the record claims 20.000 kWh
+    // the price charges 1800 s of TIME and the record's own periods account
+    //   for 900 s
 }
 ```
 
 Every problem at once, not the first — a partner integration is debugged by
-seeing all of what is wrong in one pass. And nothing is mutated: a CDR whose
+seeing all of what is wrong in one pass.
+
+The quantity is checked for the **energy and the minutes**, and the two are not
+symmetric. `[AFIR Art. 5(4)]` prices occupancy per minute, so the minutes are
+the half of a settlement most often disputed — but charging for *less* time than
+the record spans is the ordinary shape of a lawful tariff: an occupancy fee that
+begins after four hours prices nothing on a thirty-minute session. So a
+shortfall is revenue nobody charged and an excess is money the payer is asked to
+accept on the sender's word, and only the excess blocks. And nothing is mutated: a CDR whose
 periods do not sum to its total is never quietly adjusted to sum, because that
 would be inventing a number on behalf of somebody who will be invoiced for it.
 

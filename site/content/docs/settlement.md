@@ -1,7 +1,10 @@
 +++
 title = "Sessions and settlement"
-weight = 3
-description = "The quarter-hour split that conserves energy exactly, why interpolated slots say so, and how a CDR is accepted once without letting a partner restate a settled number."
+weight = 4
+description = "The quarter-hour split that conserves energy exactly, why interpolated slots say so, how a CDR is accepted once without letting a partner restate a settled number, and the EN 16931 invoice it becomes."
+
+[extra]
+nav = "Settlement"
 +++
 
 # Sessions and settlement ✅
@@ -52,6 +55,19 @@ Compute the **cumulative** value at each boundary once, and take differences:
 ```text
 slot[i] = cumulative(boundary[i+1]) − cumulative(boundary[i])
 ```
+
+```mermaid
+flowchart LR
+    R1["reading<br/>10:01 · 0 kWh"] --> B1["10:15<br/>interpolated"]
+    B1 --> B2["10:22 · 7 kWh<br/>reading"]
+    B1 -. "slot 1 = c(10:15) − c(10:01)" .-> S1["10:00 slot"]
+    B2 -. "slot 2 = c(10:22) − c(10:15)" .-> S2["10:15 slot"]
+
+    classDef mid fill:#b8410f22,stroke:#b8410f
+    class B1 mid
+```
+
+Whatever `c(10:15)` was rounded to, it appears once with each sign and cancels.
 
 The sum telescopes. Every interior boundary appears once positive and once
 negative and cancels exactly, whatever it was rounded to. What remains is
@@ -181,10 +197,20 @@ happened.
 
 | Path | Contract-free | Strongest honest identification |
 |---|---|---|
-| `AdHoc` | ✅ — the one `[AFIR Art. 5(1)]` requires | trusted |
-| `PlugAndCharge` | | secure |
-| `Roaming`, `RemoteCommand` | | trusted |
-| `LocalList`, `AutoCharge` | | hearsay |
+| `AdHoc` | ✅ — the one `[AFIR Art. 5(1)]` requires | trusted — no contract, so nothing for a certificate to certify |
+| `PlugAndCharge` | | secure — `ISO15118_PNC` `[OCMF Tab. 15]` |
+| `LocalList` | | secure — a local list decides against an RFID card, and `RFID_PSK` `[OCMF Tab. 13]` is a secured one |
+| `Roaming`, `RemoteCommand` | | certified — `OCPP_CERTIFIED` `[OCMF Tab. 14]` certifies the mapping with a backend certificate |
+| `AutoCharge` | | hearsay — a MAC address off the wire |
+
+
+**The ceiling is read off Tables 13–16, not off who decided.** `[OCMF Tab. 11]`
+grades *how the user was identified*; Tables 13–16 say which identifications each
+mechanism can carry, and the two axes are largely orthogonal. A ceiling set from
+the decision-maker refuses ordinary hardware — a local list decides against an
+RFID card, and a secured card is Table 11's own example of `SECURE`. What stays
+low is what cannot rise: an unauthenticated MAC address, and an ad-hoc session
+that presented no contract for anything to certify.
 
 `AutoCharge` recognises a vehicle by its MAC address. It is not a standard, not
 authenticated and trivially spoofable, and it is kept rigorously apart from Plug
@@ -297,6 +323,21 @@ gap with periods carrying **no energy**, marked `Interpolated` because the zero
 is an assumption rather than a measurement, split on the same quarter-hour grid
 as everything else, and the total is untouched.
 
+**And their `charging` flag is read, not assumed.** It is tempting to call
+unmetered time occupancy by definition — no readings, no energy, so the car was
+sitting there — but "the meter said nothing" and "the vehicle was not charging"
+are different claims, and only the second is one the operator's own records make.
+A station that stops sending `MeterValues` while its own state machine still says
+`Charging` would otherwise be billed an occupancy fee per minute for time it says
+the car was taking energy, on the strength of an absence.
+
+So the fill is built where the session history is still in scope, cuts at the
+session's state changes as well as at the grid, and asks
+`Session::charging_throughout` — which is **not** the negation of
+`suspended_throughout`. There are four states and two of them are neither:
+`Pending` is authorised with nothing flowing and `Ended` is over, and both are
+"connected and not charging", which is exactly what the fee prices.
+
 ## Tokens are never stored raw
 
 ```rust
@@ -327,6 +368,27 @@ untouched and a human is told what moved.
 
 The key is the `(party, id)` pair, never the bare id: OCPI makes a CDR id unique
 per party, so two CPOs may each have a CDR `1`.
+
+### …and a correction chain has one end
+
+A correction is a *new* CDR, so a ledger holding a session and its correction
+holds both. Two records that both supersede one key are two corrections of one
+session — both live, neither superseded, and the session billed twice: the same
+failure content equality is checked to prevent, one link along.
+
+```rust
+ledger.accept(another_correction_of(&first));
+// Forked { supersedes: DE*ABC/1, held: DE*ABC/2 }
+
+let owed: Energy = ledger.live().map(|cdr| cdr.total_energy).sum();
+```
+
+`live()` is the set a billing run sums: everything the ledger holds that nothing
+else in it supersedes. `iter()` is every record, superseded ones included. A
+record that supersedes *itself* is refused for the mirror reason — stored, it
+would be superseded by its own presence and billed by nothing — and a correction
+that arrives **before** the record it corrects is still stored, because roaming
+transports do not order deliveries.
 
 ## Validation reports, and never repairs
 
@@ -366,13 +428,22 @@ payer pays and the quantity check does not reach it. And two periods can have
 ascending starts, sit inside the session, sum to the record's own total, and
 still put fifteen minutes in both.
 
+The quantity is checked for the **minutes** as well as the kilowatt-hours, and
+the two are not symmetric. `[AFIR Art. 5(4)]` prices occupancy per minute, which
+makes the minutes the half of a roaming settlement most often disputed — but a
+record that charges for *less* time than it spans is the ordinary shape of a
+lawful tariff: an occupancy fee that begins after four hours prices nothing on a
+thirty-minute session, and a dimension no element matched costs nothing at all.
+So a shortfall is revenue nobody charged, an excess is money the payer is asked
+to accept on the sender's word, and only the excess blocks.
+
 A blocking finding has to be a fault, not a shape the checker did not expect.
 `CostEnergyMismatch` therefore runs only where an energy price was actually
 charged: "this tariff charges nothing per kWh" sums to zero the same way "this
 price was computed for 0 kWh" does, and a per-minute tariff below 50 kW is
 lawful. That case is a warning instead — a dropped energy line looks identical
 from the record alone, and the receiving party is told rather than left to
-notice (D78).
+notice.
 
 Every note the rating made is surfaced as a warning, so a minimum charge or a
 block rounding reaches the receiving party as a term of the price rather than as
@@ -391,11 +462,12 @@ so what leaves the process has to be legible to them:
 }
 ```
 
-None of that was what the types produced. `time`'s own `Serialize` writes an
-instant as `[2026, 2, 10, 0, 0, 0, 1, 0, 0]`, a date as `[year, ordinal]`, and a
-three-byte `Currency` newtype as `[69, 85, 82]`. All of it round-trips through
-this codebase perfectly, which is why nothing noticed: `from_str(to_string(x))
-== x` holds for **any** encoding, including one nobody else can read (D85).
+None of that is what a derived encoding produces. `time`'s own `Serialize` writes
+an instant as `[2026, 2, 10, 0, 0, 0, 1, 0, 0]`, a date as `[year, ordinal]`, and
+a three-byte `Currency` newtype as `[69, 85, 82]`. All of it round-trips through
+one codebase perfectly, and that is exactly why a round-trip test cannot catch
+it: `from_str(to_string(x)) == x` holds for **any** encoding, including one
+nobody else can read.
 
 Two faults underneath. Every wire this stack meets — OCPI, OCPP, OICP,
 EN 16931 — writes an instant as RFC 3339 and a currency as its ISO 4217 code. And
@@ -430,7 +502,126 @@ periods *are* the rating periods, a receiving party re-rating the record reads
 exactly the slices the issuer did. See
 [Tariffs and price transparency](@/docs/pricing.md).
 
+## …and the record becomes an invoice ✅
+
+A CDR is a claim. An invoice is a **demand**, and it is the document a tax
+authority reads, a partner pays against and an auditor asks for.
+`emob-billing` is the seam between them, and
+three things there are decisions rather than mappings.
+
+### The rounding happens once, at the line
+
+A rated line is exact and unrounded; an invoice amount is a figure in a
+currency's minor unit. EN 16931 states its totals as sums of the **line**
+amounts — `BT-106 = Σ BT-131`, and per VAT category `BT-116 = Σ BT-131` — so the
+rounding has to happen at the line, or the document cannot satisfy both at once.
+Rounding per category and apportioning back to lines produces an invoice whose
+own lines do not add up to its own subtotals, which is the first thing every
+validator in this space checks.
+
+The document's taxable amount therefore need not equal what the records came to
+exactly — at most a minor unit per line, and real money. So it is reported the
+way every other inexact crossing in this workspace is:
+
+```rust
+let crossing = InvoiceBuilder::new("R-2026-0001", issued, period, cpo, driver)
+    .supplied_from("DE", dec("19"))
+    .ledger(&ledger)         // `live`, never `iter`: a correction is a new record
+    .due_on(due)
+    .build()?;
+
+assert!(crossing.value.reconciles());     // its subtotals reproduce its lines
+crossing.value.rounding_residual();       // …and what that cost, exactly
+for reason in crossing.reasons() { … }    // named per record, by JSON Pointer
+```
+
+The tax follows from the *rounded* figure, so that residual is the whole of what
+the document approximates. A tiered session keeps its tiers, because a tiered
+invoice has to show them.
+
+**And the rate is a property of the line.** The *category* belongs to the whole
+document — a supply is a reverse charge or it is not — but electricity and a
+service fee can sit in different VAT categories, so the breakdown has one taxable
+amount per rate:
+
+```rust
+invoice.lines[0].vat_rate;   // 19 — the energy component's own
+invoice.lines[1].vat_rate;   //  7 — the service fee's
+invoice.tax.len();           //  2 — and the standard's own BR-S-08 checks it
+```
+
+### The verdict is the deliverable, not the XML
+
+An invoice that serialises and does not validate is an invoice that comes back.
+
+```rust
+let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE)?;
+assert!(crossed.value.is_valid());
+
+// The German public buyer's document, or the terms it is missing.
+match en16931::xrechnung(&invoice) {
+    Ok(xml) => submit(&xml.value),
+    Err(BillingError::NotCollectable { reason }) => eprintln!("{reason}"),
+    Err(other) => return Err(other.into()),
+}
+```
+
+`Validated<XRechnung>` is a type that cannot be constructed from an invalid
+invoice — the same discipline `Evidence::billable_energy` applies to a
+kilowatt-hour one layer down. And `BR-CO-25`, which says an invoice with
+something owing has to state when, is asked at **construction**: the answer is a
+commercial term the caller holds, and this crate reads no clock to invent one.
+
+### A roaming settlement is not taxed where the charge point stands
+
+Recharging an EV is a single composite supply of **goods** — the electricity —
+which the Court of Justice settled in C-282/22. `[UStG §3g]` then says a supply
+of electricity **to a reseller** is made where that reseller is established, and
+an e-mobility provider buying sessions through roaming is exactly a reseller: it
+does not consume the electricity, it resells it.
+
+```rust
+let treatment = TaxTreatment::decide(&cpo.tax, &emsp.tax, "DE", dec("19"))?;
+assert_eq!(treatment.category, VatCategory::ReverseCharge);
+assert_eq!(treatment.place_of_supply, "FR");
+```
+
+Putting 19 % on that invoice charges tax that may not be charged and that the
+partner cannot reclaim. The ad-hoc leg does not share the rule — a driver paying
+at the point is not a reseller — so **two sessions at one post a minute apart can
+carry different VAT**, which is why the treatment is decided per invoice from the
+parties rather than per station from a configuration field.
+
+A cross-border reverse charge missing a VAT identifier on either side is refused,
+naming the party that has none: EN 16931's `BR-AE-2` and `BR-AE-3` refuse that
+document anyway, and refusing it where the rule lives means the message names the
+missing identifier instead of a rule id.
+
+### …and the books agree with the document
+
+Under a reverse charge there is **no VAT posting**, because the liability is the
+recipient's. A platform that posts 19 % and omits it from the invoice has a VAT
+return that reconciles against nothing it sent.
+
+```rust
+let books = postings::postings_for(&invoice);
+assert!(books.balances());     // before a single account is named
+```
+
+The movements are addressed by *role* — receivable, energy revenue, service
+revenue, VAT payable at a rate — and a caller maps them onto its own chart. SKR03
+and SKR04 disagree about the numbers and neither is a domain crate's business. A
+role the chart cannot place is refused rather than dropped: a dropped posting is
+an entry that does not balance and a trial balance that is quietly wrong.
+
+Nothing here reads a clock. `sepa` defaults a collection date and a message
+timestamp off the system clock, and a collection file that differs between two
+runs of one billing job is a file no bank reconciles — so every one of those
+fields is an argument, and a test asserts the same inputs produce the same bytes.
+
 ## What is not here yet 📐
 
-The EN 16931 invoice and the SEPA and double-entry postings are `emob-billing`;
-the OCPI/OICP wire translation is `emob-roam`. Both are designed and not built.
+The service that decides *when* a month closes, holds the contracts an invoice is
+addressed to and submits the document — `billd` and `empd` — is designed and not
+built. So are CII and ZUGFeRD: UBL is the syntax the German platforms accept, and
+nothing has asked for the other yet.

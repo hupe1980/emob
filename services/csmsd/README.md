@@ -8,8 +8,14 @@ Part of [emob](https://github.com/hupe1980/emob). Not published: a service is
 deployed, not depended on.
 
 ```console
-CSMSD_BIND=0.0.0.0:9000 cargo run -p csmsd
+CSMSD_BIND=0.0.0.0:9000 CSMSD_HTTP_BIND=0.0.0.0:9001 cargo run -p csmsd
 ```
+
+Two listeners: the OCPP endpoint stations connect to, and the `emob-service`
+shell an orchestrator probes — `/health/live`, `/health/ready`, `/about`.
+
+📖 The seam this daemon is deliberately thin around is described in
+**[The OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/)**.
 
 ## Two ledgers, side by side, doing different jobs
 
@@ -92,6 +98,27 @@ station sends its own `publicKey` beside every signed value and offers a
 `MeterPublicKey` configuration key `[OCA SMV §3.3.1]`; neither is a binding, and
 a CSMS that trusted either would verify every record against whichever key made
 it verify. The `KeyRegistry` comes from a type approval.
+
+## Stopping without dropping a record
+
+A station holds a WebSocket for the length of a session, so killing this process
+mid-transaction does not lose a *request* — it loses the `StopTransaction` that
+carries the signed meter record, and that session becomes a kilowatt-hour nobody
+can bill and a driver who was charged nothing.
+
+So on `SIGTERM` the daemon stops reporting **ready** first, and only then drains.
+By the time the window starts, the orchestrator has already stopped routing
+stations here.
+
+The readiness surface names what it is waiting for rather than answering `200`
+and hoping: a `csmsd` whose key registry has not loaded refuses every session
+that arrives, and that looks like a fleet fault until the probe says otherwise.
+
+```console
+$ curl -s localhost:9001/health/ready
+key-registry: not started
+provisioning: not started
+```
 
 ## The one piece of protocol the daemon owns
 

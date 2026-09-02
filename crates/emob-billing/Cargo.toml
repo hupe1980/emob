@@ -1,0 +1,54 @@
+[package]
+name        = "emob-billing"
+description = "Rated EV charging records turned into money: invoice lines whose rounding is stated rather than discovered, the German VAT treatment of a roaming settlement as an executable rule, an EN 16931 e-invoice, a SEPA collection and balanced double-entry postings"
+keywords    = ["ev-charging", "invoice", "en16931", "sepa", "vat"]
+categories  = ["finance", "data-structures"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+emob-cdr     = { workspace = true }
+emob-tariff  = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+# ── The invoice, the payment and the books ──────────────────────────────────
+# Three sibling crates that already own their standards, taken with default
+# features off: nothing here needs a database, a PDF or an XML *parser*. What is
+# taken is the semantic model and its 317 business rules, the pain.008 writer,
+# and a ledger that is balanced by construction.
+en16931         = { workspace = true }
+en16931-formats = { workspace = true }
+sepa            = { workspace = true }
+doubleentry     = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = [
+    "dep:serde",
+    "emob-core/serde",
+    "emob-cdr/serde",
+    "emob-tariff/serde",
+    "rust_decimal/serde",
+    "time/serde-well-known",
+]
+
+[dev-dependencies]
+# The end-to-end test signs real OCMF records at test time and runs them through
+# the same path a station would, so the month it closes starts at a meter rather
+# than at a constant.
+emob-eichrecht = { workspace = true }
+emob-session   = { workspace = true }
+hex            = { workspace = true }
+p256           = { workspace = true }
+serde_json     = { workspace = true }
+sha2           = { workspace = true }

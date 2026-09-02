@@ -87,7 +87,13 @@ footer nav{padding:0 0 .8rem;max-width:none}
 .cards{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));margin:1.5rem 0}
 .card{border:1px solid var(--line);border-radius:8px;padding:1rem 1.1rem;background:var(--soft)}
 .card h3{margin:0 0 .35rem;font-size:1rem}
+.card:has(a){transition:border-color .12s ease,transform .12s ease}
+.card:has(a):hover{border-color:var(--accent);transform:translateY(-1px)}
 .card p{margin:0;color:var(--muted);font-size:.92rem}
+.docnav{display:flex;flex-wrap:wrap;gap:.4rem;margin:0 0 1.8rem;font-size:.86rem}
+.docnav a{display:inline-block;padding:.28rem .7rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--soft);white-space:nowrap}
+.docnav a:hover{text-decoration:none;border-color:var(--accent);color:var(--accent)}
+.docnav a[aria-current=page]{border-color:var(--accent);background:var(--accent);color:#fff;font-weight:600}
 .toc{border:1px solid var(--line);border-radius:8px;padding:.9rem 1.1rem;margin:1.6rem 0;background:var(--soft);font-size:.94rem}
 .toc strong{display:block;font-size:.8rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:.5rem}
 .toc ul{margin:0;padding-left:1.1rem}
@@ -134,13 +140,10 @@ figure.diagram figcaption{font-size:.88rem;color:var(--muted);text-align:center;
 <main id="content">{% block content %}{% endblock %}</main>
 <footer>
   <nav>
-    <a href="{{ get_url(path='@/docs/getting-started.md') }}">Getting started</a> ·
-    <a href="{{ get_url(path='@/docs/architecture.md') }}">Architecture</a> ·
-    <a href="{{ get_url(path='@/docs/eichrecht.md') }}">Eichrecht</a> ·
-    <a href="{{ get_url(path='@/docs/settlement.md') }}">Settlement</a> ·
-    <a href="{{ get_url(path='@/docs/pricing.md') }}">Tariffs</a> ·
-    <a href="{{ get_url(path='@/docs/roaming.md') }}">Roaming</a> ·
-    <a href="{{ get_url(path='@/docs/compliance.md') }}">Compliance</a> ·
+    {%- set docs = get_section(path="docs/_index.md") %}
+    {%- for p in docs.pages %}
+    <a href="{{ p.permalink }}">{{ p.extra.nav | default(value=p.title) }}</a> ·
+    {%- endfor %}
     <a href="{{ config.extra.repository }}" rel="noopener">Source</a>
   </nav>
   MIT OR Apache-2.0 · Not affiliated with the Open Charge Alliance, the

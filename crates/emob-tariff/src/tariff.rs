@@ -53,6 +53,26 @@ pub enum Dimension {
 }
 
 impl Dimension {
+    /// The stable token this dimension is written as wherever an encoding has
+    /// to survive a refactor — the fingerprint above all.
+    ///
+    /// The same spelling `[OCPI 2.3.0 §Tariff]` and `[OCPP 2.1 Part 2]` use, so
+    /// the token is one an outside reader recognises rather than an internal
+    /// name. It is deliberately **not** `Debug`: a derived `Debug` is a
+    /// rendering of a variant name, and renaming a variant would silently split
+    /// one tariff into two across a refactor — the exact failure
+    /// [`crate::TariffFingerprint`] exists to prevent, committed by the code
+    /// that computes it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Energy => "ENERGY",
+            Self::Time => "TIME",
+            Self::ParkingTime => "PARKING_TIME",
+            Self::Flat => "FLAT",
+        }
+    }
+
     /// The unit a price for this dimension is quoted in.
     #[must_use]
     pub const fn unit(self) -> &'static str {
@@ -86,6 +106,12 @@ impl Dimension {
     #[must_use]
     pub const fn is_energy(self) -> bool {
         matches!(self, Self::Energy)
+    }
+}
+
+impl core::fmt::Display for Dimension {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -323,6 +349,26 @@ pub enum TaxIncluded {
     NotApplicable,
 }
 
+impl TaxIncluded {
+    /// The stable token this basis is written as in a fingerprint.
+    ///
+    /// See [`Dimension::as_str`] for why a derived `Debug` is not one.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Yes => "YES",
+            Self::No => "NO",
+            Self::NotApplicable => "NOT_APPLICABLE",
+        }
+    }
+}
+
+impl core::fmt::Display for TaxIncluded {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Who a tariff is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -336,6 +382,25 @@ pub enum TariffKind {
     AdHoc,
     /// The price under a contract with an e-mobility provider.
     Contract,
+}
+
+impl TariffKind {
+    /// The stable token this kind is written as in a fingerprint.
+    ///
+    /// See [`Dimension::as_str`] for why a derived `Debug` is not one.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdHoc => "ad_hoc",
+            Self::Contract => "contract",
+        }
+    }
+}
+
+impl core::fmt::Display for TariffKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A tariff.
@@ -445,24 +510,97 @@ impl Tariff {
         self.dimensions().iter().any(|d| d.is_energy())
     }
 
-    /// The VAT rate that governs the whole tariff, when its components agree.
+    /// The VAT rate that governs the whole tariff — and, where there is none,
+    /// which of the two reasons applies.
     ///
-    /// `None` when different components carry different rates — which is
-    /// lawful (a service fee and delivered electricity can sit in different
-    /// categories) and means a caller wanting one number has to ask for the
-    /// breakdown instead.
+    /// See [`VatBasis`]: "no component states a rate" and "the components
+    /// disagree" are different facts with different answers, and an
+    /// `Option<Decimal>` that returns `None` for both makes the first
+    /// unrepresentable.
     #[must_use]
-    pub fn uniform_vat(&self) -> Option<Decimal> {
+    pub fn vat_basis(&self) -> VatBasis {
         let mut rates = self
             .elements
             .iter()
             .flat_map(|e| e.components.iter().map(|c| c.vat));
-        let first = rates.next()?;
-        if rates.all(|r| r == first) {
-            first
-        } else {
-            None
+        let Some(first) = rates.next() else {
+            // A tariff with no components at all states no rate.
+            return VatBasis::Unstated;
+        };
+        if !rates.all(|r| r == first) {
+            return VatBasis::Mixed;
         }
+        first.map_or(VatBasis::Unstated, VatBasis::Rate)
+    }
+}
+
+/// What one tariff's components say, together, about VAT.
+///
+/// # Why this is not an `Option<Decimal>`
+///
+/// It was, and the two `None`s meant different things. A tariff whose
+/// components state no rate at all is the ordinary shape of a price list from a
+/// party that quotes gross and leaves the rate to the invoice; a tariff whose
+/// components state *different* rates has no single taxable amount and genuinely
+/// cannot answer the question. Collapsing them made every crossing that needs a
+/// rate — OCPI's `PriceLimit`, OCPP 2.1's `Price` — refuse the first with the
+/// second's diagnostic, so a lawful gross tariff with a `min_price` could not be
+/// published to a partner or to a station, and the reason it gave was untrue.
+///
+/// The arithmetic already had the answer one layer down:
+/// [`crate::Rated::tax_summary`] reads an absent rate as zero per cent, so an
+/// unstated basis grosses up by a factor of one and net equals gross. Stating
+/// the three cases here is what lets the crossings agree with the rating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum VatBasis {
+    /// Every component that states a rate states this one.
+    Rate(Decimal),
+    /// No component states a rate at all.
+    ///
+    /// Not the same as zero per cent *stated*: a record should not claim a rate
+    /// nobody wrote down. It **is** zero for any arithmetic that needs a
+    /// divisor, which is what [`Self::rate`] returns and what the rating engine
+    /// already does.
+    Unstated,
+    /// Components state different rates.
+    ///
+    /// Lawful — delivered electricity and a service fee can sit in different
+    /// categories — and it means there is no single taxable amount, so a field
+    /// that holds one cannot be filled.
+    Mixed,
+}
+
+impl VatBasis {
+    /// The rate to compute with, where the arithmetic needs one.
+    ///
+    /// `None` only for [`Self::Mixed`], which is the only case with no answer.
+    #[must_use]
+    pub const fn rate(self) -> Option<Decimal> {
+        match self {
+            Self::Rate(rate) => Some(rate),
+            Self::Unstated => Some(Decimal::ZERO),
+            Self::Mixed => None,
+        }
+    }
+
+    /// The rate to **state** on a record, where one has to be written down.
+    ///
+    /// `None` for both [`Self::Unstated`] and [`Self::Mixed`], because neither
+    /// is a rate anybody wrote.
+    #[must_use]
+    pub const fn stated(self) -> Option<Decimal> {
+        match self {
+            Self::Rate(rate) => Some(rate),
+            Self::Unstated | Self::Mixed => None,
+        }
+    }
+
+    /// Whether the components disagree, which is the one case with no answer.
+    #[must_use]
+    pub const fn is_mixed(self) -> bool {
+        matches!(self, Self::Mixed)
     }
 }
 
@@ -546,6 +684,68 @@ mod tests {
             valid_until: None,
         };
         assert_eq!(t.dimensions(), vec![Dimension::Energy, Dimension::Flat]);
+    }
+
+    #[test]
+    fn a_tariff_that_states_no_rate_is_not_a_tariff_that_cannot_answer() {
+        // The distinction the crossings turn on. Both used to be `None`, and a
+        // gross price list naming no VAT rate anywhere could not publish a
+        // `min_price` to OCPI or to a 2.1 station — refused with a diagnostic
+        // about a second rate it did not have.
+        let unstated = Tariff::simple(
+            "t".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+        );
+        assert_eq!(unstated.vat_basis(), VatBasis::Unstated);
+        // Zero for the arithmetic, exactly as `Rated::tax_summary` reads it…
+        assert_eq!(unstated.vat_basis().rate(), Some(Decimal::ZERO));
+        // …and nothing to write on a record, because nobody wrote it.
+        assert_eq!(unstated.vat_basis().stated(), None);
+        assert!(!unstated.vat_basis().is_mixed());
+
+        let agreed = Tariff::simple(
+            "t".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![
+                PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+                PriceComponent::new(Dimension::Flat, dec("0.50")).with_vat(dec("19")),
+            ],
+        );
+        assert_eq!(agreed.vat_basis(), VatBasis::Rate(dec("19")));
+        assert_eq!(agreed.vat_basis().stated(), Some(dec("19")));
+
+        let mixed = Tariff::simple(
+            "t".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![
+                PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+                PriceComponent::new(Dimension::Flat, dec("0.50")).with_vat(dec("7")),
+            ],
+        );
+        assert_eq!(mixed.vat_basis(), VatBasis::Mixed);
+        assert_eq!(
+            mixed.vat_basis().rate(),
+            None,
+            "the one case with no answer"
+        );
+        assert!(mixed.vat_basis().is_mixed());
+
+        // A component that states a rate beside one that does not is two rates,
+        // 19 and 0 — which is `Mixed` and not a uniform 19.
+        let half_stated = Tariff::simple(
+            "t".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![
+                PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+                PriceComponent::new(Dimension::Flat, dec("0.50")),
+            ],
+        );
+        assert_eq!(half_stated.vat_basis(), VatBasis::Mixed);
     }
 
     #[test]

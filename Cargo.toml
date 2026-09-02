@@ -5,11 +5,15 @@ members = [
     "crates/emob-eichrecht",
     "crates/emob-session",
     "crates/emob-cdr",
+    "crates/emob-billing",
     "crates/emob-tariff",
+    "crates/emob-thg",
     "crates/emob-ocpp",
     "crates/emob-poi",
     "crates/emob-sim",
     "crates/emob-roam",
+    "crates/emob-service",
+    "services/agentd",
     "services/csmsd",
     "xtask",
 ]
@@ -72,6 +76,42 @@ ocpi-kit = { version = "0.2", default-features = false, features = ["v2_3_0", "v
 # asserts the two spellings are one spelling, which is a test rather than a hope.
 iso15118 = { version = "0.3", default-features = false }
 
+# ── The money leaves the platform ───────────────────────────────────────────
+# Only `emob-billing` sees these. Three standards this workspace has no business
+# re-reading — EN 16931 and its two mandatory syntaxes, ISO 20022's SEPA
+# messages, and double-entry bookkeeping — each already owned by a sibling crate
+# that carries the rules as well as the shapes.
+#
+# `en16931` is taken **without** its `billing` adapter: the arithmetic that
+# decides what a session costs is `emob-tariff`'s, and a second engine that could
+# produce a different number for the same session is the drift this workspace
+# exists to make unrepresentable. `time` rather than `chrono`, because every
+# instant here is a `time::OffsetDateTime`.
+en16931 = { version = "0.6", default-features = false, features = ["time"] }
+
+# The syntax half, `ubl` only. `cii` and `zugferd` are the other two mandatory
+# formats and nothing in this workspace asks for them yet; `roxmltree` and
+# `lopdf` come with *reading* a document, and emob writes.
+en16931-formats = { version = "0.6", default-features = false, features = ["ubl"] }
+
+# pain.008 for the collection, and the IBAN/BIC/Creditor-Id validation that
+# stops an unpayable instruction being written in the first place. Its `time`
+# feature so a date crosses as a date.
+#
+# Note for `emob-billing`: this crate's builders **default** several fields off
+# the system clock — `IsoDate::today()` for a collection date, `now` for the
+# message timestamp. Every one of them is an argument at this workspace's seam,
+# because a domain crate that reads a clock cannot be replayed (see `just
+# purity`), and a collection file that differs between two runs of one billing
+# job is a file no bank reconciles.
+sepa = { version = "0.6", default-features = false, features = ["time"] }
+
+# Balanced by construction, exact integer money, no I/O in the default build.
+# `emob-billing` produces postings by **role** and hands the chart of accounts
+# back to the caller: a domain crate that named its own accounts would be
+# telling an operator how to keep their books.
+doubleentry = { version = "0.7", default-features = false }
+
 # ── Eichrecht: OCMF signature verification ──────────────────────────────────
 # The curves OCMF Table 22/23 name. secp256r1 is the default since OCMF 0.4 —
 # and secp192r1 is not a legacy curiosity: the eBZ LD3 data set shipped with the
@@ -100,6 +140,36 @@ emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.1" }
 emob-poi       = { path = "crates/emob-poi",       version = "0.1" }
 emob-sim       = { path = "crates/emob-sim",       version = "0.1" }
 emob-roam      = { path = "crates/emob-roam",      version = "0.1" }
+emob-billing   = { path = "crates/emob-billing",   version = "0.1" }
+emob-thg       = { path = "crates/emob-thg",       version = "0.1" }
+emob-service   = { path = "crates/emob-service",   version = "0.1" }
+
+# ── The daemon shell ────────────────────────────────────────────────────────
+# Only `emob-service` and the daemons above it see these. Every domain crate
+# stays sans-I/O: the clock and the socket live here so a two-year-old dispute
+# can be replayed without either.
+axum               = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+tokio              = { version = "1", default-features = false }
+tokio-util         = { version = "0.7", default-features = false }
+tower-http         = { version = "0.6", default-features = false, features = ["trace", "request-id"] }
+tracing            = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "std", "ansi"] }
+toml               = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+http               = "1"
+
+# Standard Webhooks signatures are HMAC-SHA256 over `id.timestamp.payload`,
+# base64 — and the comparison has to be constant time, which is what `subtle`
+# is for. A signature compared with `==` leaks where two differ, one byte of
+# timing at a time.
+hmac   = { version = "0.12", default-features = false }
+subtle = { version = "2", default-features = false }
+
+# ── The agent plane ─────────────────────────────────────────────────────────
+# Only `agentd`. The runtime whose journal is the plan of record: every effect
+# performed at most once, written to an append-only hash-chained log, and read
+# back on replay. `manifest` because what an agent may do has to be a file a
+# reviewer sees in a diff rather than a builder call nobody reads.
+agentplane = { version = "0.26", default-features = false, features = ["redb", "manifest"] }
 
 [profile.release]
 opt-level     = 3

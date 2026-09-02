@@ -21,6 +21,16 @@
 //! immutable and a correction is a *new* CDR that supersedes the old one. So
 //! the only honest test for "is this the same record" is whether it says the
 //! same thing, and that is what this does.
+//!
+//! # A correction chain has to have one end
+//!
+//! The immutability rule moves the ambiguity rather than removing it. Two
+//! records that both supersede one key are two corrections of one session, and
+//! the ledger holding both cannot say which is current — an upsert's problem,
+//! arriving through the door that was built to avoid it. [`CdrLedger::accept`]
+//! refuses the second, and [`CdrLedger::live`] is the set a billing run reads:
+//! everything not superseded by something the ledger also holds. Summing
+//! [`CdrLedger::iter`] instead bills a corrected session twice.
 
 use std::collections::BTreeMap;
 
@@ -43,6 +53,24 @@ pub enum Acceptance {
         /// How the two differ, in words.
         difference: String,
     },
+    /// Two records would correct the same one, and nothing says which is
+    /// current.
+    ///
+    /// A correction is a new CDR that supersedes the old one, which makes the
+    /// chain the only statement of what is owed. A second correction of the
+    /// same record forks it: both are stored, neither is superseded, and a
+    /// billing run reading the live set bills the session twice — the exact
+    /// failure content equality is checked to prevent, arriving one link along.
+    ///
+    /// Not accepted, for the reason a [`Self::Conflict`] is not: whichever of
+    /// the two is right, choosing needs somebody who knows why the first
+    /// correction was wrong.
+    Forked {
+        /// The record both corrections claim to replace.
+        supersedes: CdrKey,
+        /// The correction already held.
+        held: CdrKey,
+    },
 }
 
 impl Acceptance {
@@ -55,7 +83,7 @@ impl Acceptance {
     /// Whether this needs a human.
     #[must_use]
     pub const fn is_conflict(&self) -> bool {
-        matches!(self, Self::Conflict { .. })
+        matches!(self, Self::Conflict { .. } | Self::Forked { .. })
     }
 }
 
@@ -79,7 +107,34 @@ impl CdrLedger {
     ///
     /// Idempotent: offering the same CDR any number of times stores it once and
     /// reports [`Acceptance::Duplicate`] thereafter.
+    ///
+    /// A correction is checked as well as a record: one that supersedes itself,
+    /// or that forks a chain another correction already owns, is refused rather
+    /// than stored beside it. See [`Acceptance::Forked`].
     pub fn accept(&mut self, cdr: Cdr) -> Acceptance {
+        if let Some(previous) = &cdr.supersedes {
+            // A record cannot correct itself. Stored, it would be superseded by
+            // its own presence and vanish from every live set — a CDR that
+            // exists and is billed by nothing.
+            if *previous == cdr.key {
+                return Acceptance::Forked {
+                    supersedes: previous.clone(),
+                    held: cdr.key.clone(),
+                };
+            }
+            // …and a chain has one end. The check runs before the identity
+            // check below so that re-offering the *same* correction still
+            // reports `Duplicate`: a retransmission is not a fork.
+            if let Some(held) = self.corrector_of(previous)
+                && *held != cdr.key
+            {
+                return Acceptance::Forked {
+                    supersedes: previous.clone(),
+                    held: held.clone(),
+                };
+            }
+        }
+
         match self.entries.get(&cdr.key) {
             None => {
                 self.entries.insert(cdr.key.clone(), cdr);
@@ -128,9 +183,38 @@ impl CdrLedger {
     /// Whether a key has been superseded by a later correction.
     #[must_use]
     pub fn is_superseded(&self, key: &CdrKey) -> bool {
+        self.corrector_of(key).is_some()
+    }
+
+    /// The record that supersedes a key, if the ledger holds one.
+    #[must_use]
+    pub fn corrector_of(&self, key: &CdrKey) -> Option<&CdrKey> {
         self.entries
             .values()
-            .any(|cdr| cdr.supersedes.as_ref() == Some(key))
+            .find(|cdr| cdr.supersedes.as_ref() == Some(key))
+            .map(|cdr| &cdr.key)
+    }
+
+    /// The records a billing run may act on: everything this ledger holds that
+    /// nothing else in it supersedes.
+    ///
+    /// **The set to sum**, and the reason it exists rather than being left to
+    /// each caller: a correction is a *new* record, so a ledger holding a
+    /// session and its correction holds both, and
+    /// `iter().map(total_energy).sum()` bills that session twice. Filtering
+    /// with [`Self::is_superseded`] per record is the same answer at quadratic
+    /// cost, which is what a caller writes when the ledger does not offer it.
+    ///
+    /// Order is the ledger's own — by party, then by record id.
+    pub fn live(&self) -> impl Iterator<Item = &Cdr> {
+        let superseded: std::collections::BTreeSet<&CdrKey> = self
+            .entries
+            .values()
+            .filter_map(|cdr| cdr.supersedes.as_ref())
+            .collect();
+        self.entries
+            .values()
+            .filter(move |cdr| !superseded.contains(&cdr.key))
     }
 }
 
@@ -371,5 +455,93 @@ mod tests {
         let only = cdr("1", "118.000");
         ledger.accept(only.clone());
         assert!(!ledger.is_superseded(&only.key));
+    }
+
+    #[test]
+    fn the_live_set_is_what_a_billing_run_sums() {
+        // A correction is a *new* record, so a ledger holding a session and its
+        // correction holds both. Summing `iter()` bills that session twice —
+        // the failure content equality is checked to prevent, one link along.
+        let mut ledger = CdrLedger::new();
+        let first = cdr("1", "118.000");
+        ledger.accept(first.clone());
+
+        let mut correction = cdr("2", "120.000");
+        correction.supersedes = Some(first.key.clone());
+        ledger.accept(correction.clone());
+
+        assert_eq!(ledger.iter().count(), 2);
+        let live: Vec<&CdrKey> = ledger.live().map(|cdr| &cdr.key).collect();
+        assert_eq!(live, vec![&correction.key]);
+
+        let billed: Energy = ledger.live().map(|cdr| cdr.total_energy).sum();
+        assert_eq!(billed, kwh("20.000"), "the corrected figure, once");
+    }
+
+    #[test]
+    fn a_second_correction_of_one_record_is_a_fork_and_is_refused() {
+        // Both would be live, neither superseded, and the session billed twice.
+        // Whichever is right, choosing needs somebody who knows why the first
+        // correction was wrong.
+        let mut ledger = CdrLedger::new();
+        let first = cdr("1", "118.000");
+        ledger.accept(first.clone());
+
+        let mut correction = cdr("2", "120.000");
+        correction.supersedes = Some(first.key.clone());
+        assert_eq!(ledger.accept(correction.clone()), Acceptance::Stored);
+
+        let mut second = cdr("3", "121.000");
+        second.supersedes = Some(first.key.clone());
+        let answer = ledger.accept(second);
+        assert_eq!(
+            answer,
+            Acceptance::Forked {
+                supersedes: first.key.clone(),
+                held: correction.key.clone(),
+            }
+        );
+        assert!(
+            answer.is_conflict(),
+            "a fork needs a human, like a conflict"
+        );
+        assert_eq!(ledger.len(), 2, "the fork was not stored");
+
+        // …and re-offering the correction the ledger already holds is still a
+        // retransmission rather than a fork.
+        assert_eq!(ledger.accept(correction), Acceptance::Duplicate);
+    }
+
+    #[test]
+    fn a_record_that_supersedes_itself_is_refused() {
+        // Stored, it would be superseded by its own presence and vanish from
+        // every live set: a CDR that exists and is billed by nothing.
+        let mut ledger = CdrLedger::new();
+        let mut ouroboros = cdr("1", "118.000");
+        ouroboros.supersedes = Some(ouroboros.key.clone());
+
+        assert!(ledger.accept(ouroboros).is_conflict());
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn a_correction_may_arrive_before_the_record_it_corrects() {
+        // Roaming transports do not order deliveries, and OCPI lets a partner
+        // send a correction standalone. Refusing one whose original has not
+        // landed yet would drop the only record of what is owed.
+        let mut ledger = CdrLedger::new();
+        let first = cdr("1", "118.000");
+        let mut correction = cdr("2", "120.000");
+        correction.supersedes = Some(first.key.clone());
+
+        assert_eq!(ledger.accept(correction.clone()), Acceptance::Stored);
+        assert_eq!(ledger.accept(first.clone()), Acceptance::Stored);
+
+        let live: Vec<&CdrKey> = ledger.live().map(|cdr| &cdr.key).collect();
+        assert_eq!(
+            live,
+            vec![&correction.key],
+            "the order does not change what is owed"
+        );
     }
 }

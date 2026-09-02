@@ -111,5 +111,9 @@ pub use crossing::{Crossing, Note};
 pub use error::RoamError;
 pub use ocpi::inbound::{Inbound, from_ocpi};
 pub use ocpi::preflight::{Finding, Report, Severity, SignedDataPolicy, preflight};
-pub use partner::{OcpiVersion, Partner, PartnerRegistry, Reach, Role};
+// `Role` is `emob-core`'s: two crates state rules about what a party does on an
+// OCPI wire, and two enums for one concept is a conversion table between two
+// vocabularies that agree.
+pub use emob_core::Role;
+pub use partner::{OcpiVersion, Partner, PartnerRegistry, Reach};
 pub use token::{RoamingToken, TokenType};

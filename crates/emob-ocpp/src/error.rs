@@ -109,4 +109,35 @@ pub enum SeamError {
     /// The session could not be assembled from the events.
     #[error(transparent)]
     Session(#[from] SessionError),
+
+    /// A tariff states something OCPP 2.1's tariff object cannot, and dropping
+    /// it would widen the price at the station.
+    ///
+    /// A refusal rather than a note, and the rule is the roaming edge's: a note
+    /// attached to a number the receiver is entitled to read at face value is
+    /// not something the receiver can act on. Where the loss is merely visible —
+    /// a block size, a version's expiry — the crossing notes it and carries the
+    /// tariff.
+    #[error("this tariff does not cross onto OCPP 2.1 at {pointer}: {reason}")]
+    TariffNotCarriedByOcpp {
+        /// JSON Pointer into the OCPP tariff the station would have read.
+        pointer: String,
+        /// What could not be said, and why saying it wrong would be worse.
+        reason: String,
+    },
+
+    /// A figure outside what OCPP-J's decimal can carry.
+    ///
+    /// `ocpp-kit`'s `Decimal` is a 64-bit mantissa at a scale of at most
+    /// eighteen — the JSON number OCPP actually sends, kept exact rather than
+    /// rounded through an `f64`. A value wider than that is refused rather than
+    /// truncated, because a truncated price is a price the station charges and
+    /// the tariff does not.
+    #[error("{value} is outside what an OCPP decimal can carry (field {pointer})")]
+    UnrepresentableDecimal {
+        /// JSON Pointer to the field it would have gone in.
+        pointer: String,
+        /// The figure.
+        value: String,
+    },
 }

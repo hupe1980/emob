@@ -1,7 +1,10 @@
 +++
 title = "Tariffs and price transparency"
-weight = 4
-description = "Why the price a driver is shown and the price they are charged come from one object, why rating has to walk the session's periods for tiers to mean anything, and why a per-minute-only tariff is unlawful above 50 kW."
+weight = 5
+description = "Why the price a driver is shown, the price a partner settles against, the price in the national access point feed and the price they are charged all come from one object, why rating has to walk the session's periods for tiers to mean anything, and why a per-minute-only tariff is unlawful above 50 kW."
+
+[extra]
+nav = "Tariffs"
 +++
 
 # Tariffs and price transparency ✅
@@ -39,6 +42,71 @@ Two implementations of "which price applies" would be exactly the drift this
 crate exists to prevent, one level down — so `describe` asks the same question
 `rate` asks about a session's first period, and the price shown is the price the
 first kilowatt-hour is billed at.
+
+## One price, three audiences
+
+The same number leaves this workspace three times, and each departure is its own
+duty:
+
+| Audience | Wire | Duty |
+|---|---|---|
+| the driver, at the point, **before** they start | OCPP 2.1 `SetDefaultTariff` | `[AFIR Art. 5(4)]` |
+| the roaming partner who will settle against it | OCPI 2.3.0 `Tariff` | the number two companies reconcile |
+| the national access point | DATEX II `EnergyRate` | `[AFIR Art. 20(2)(c)]` |
+
+Almost every stack computes it three times, in three systems, and reconciles
+none of them against the invoice. The failure is asymmetric: the screen is read
+by the driver who pays, the feed by route planners and comparison sites, and the
+invoice by nobody until it is disputed.
+
+```mermaid
+flowchart LR
+    T["one Tariff"]
+    T -->|"rate()"| I["the invoice"]
+    T -->|"describe() → OCPP 2.1"| A["the driver,<br/>at the point"]
+    T -->|"OCPI 2.3.0"| B["the roaming<br/>partner"]
+    T -->|"DATEX II"| C["the national<br/>access point"]
+
+    classDef one fill:#b8410f22,stroke:#b8410f
+    class T one
+```
+
+```rust
+let ocpp = emob_ocpp::to_ocpp(&tariff, at)?;                       // the screen
+let ocpi = emob_roam::ocpi::tariff::to_ocpi(&tariff, &party, at)?; // the partner
+let (nap, _) = emob_poi::rate::publish(&tariff, "rate-1");         // the feed
+
+assert_eq!(ocpp.value.energy.unwrap().prices[0].price_kwh.to_string(), "0.59");
+assert_eq!(ocpi.value.elements[0].price_components[0].price.get(), dec("0.59"));
+assert_eq!(nap.prices[0].value, dec("0.59"));
+```
+
+Until OCPP 2.1 the first of the three had no structured wire at all — 2.0.1
+could send a display string and a running cost number, both computed somewhere
+else — so the one audience the article actually names was the one served from a
+field somebody typed. OCPP 2.1's *Tariff and Cost* block closes it.
+
+**The station selects the tier the invoice is built from, by construction.**
+OCPI orders *elements* and picks, per dimension, the first whose restrictions
+match. OCPP 2.1 orders *prices* inside each dimension and picks the first whose
+conditions match — the same rule read from the other side. Projecting the
+element list per dimension, in order, is the projection the rating engine
+already performs, so the crossing is a re-shaping rather than a second
+implementation of "which price applies".
+
+And OCPP 2.1 requires the station to **show** the tariff's own `description`,
+which is `describe().full_disclosure()`: every tier with its conditions, in the
+order the article prescribes. The disclosure duty and the rating travel in one
+object.
+
+Each of the three crossings returns the value **and an account of what it cost**,
+and each draws the same line: a loss in the driver's disfavour that the document
+does not show is a **refusal**, not a note. What that means on each wire is
+covered where the wire is — [the OCPP seam](@/docs/ocpp.md#what-the-wire-cannot-say-is-a-refusal-not-a-note)
+for the station, [Roaming](@/docs/roaming.md#some-crossings-are-a-falsehood-and-those-are-refused)
+for the partner, and
+[Locations](@/docs/locations.md#what-the-profile-cannot-say-and-is-told-to-say-anyway)
+for the access point.
 
 ## The price is chosen per dimension, not per element
 
@@ -114,11 +182,34 @@ fifteen are charged at 0.39, while the same session as three periods of five is
 charged correctly. A price that depends on the granularity of the input is not a
 price.
 
-So the thresholds themselves become the cut points. Every energy, duration and
-**wall-clock** restriction in the tariff is applied to every period that crosses
-one — **energy exactly at an energy threshold**, because energy is what is being
-tiered and what is being settled; **time exactly at a clock threshold**, because
-22:00 is 22:00; and the other quantity in proportion, to the second:
+So the thresholds themselves become the cut points: every energy, duration and
+wall-clock restriction in the tariff, applied to every period that crosses one.
+
+```mermaid
+flowchart LR
+    P["one period<br/>15 kWh · 21:00→23:00"] --> C{"cut at every<br/>threshold inside it"}
+    C -->|"10 kWh"| A["10 kWh @ 0.39"]
+    C -->|"22:00"| B["3.5 kWh @ 0.59"]
+    C --> D["1.5 kWh @ 0.30<br/>night rate"]
+
+    classDef cut fill:#b8410f22,stroke:#b8410f
+    class C cut
+```
+
+Each kind of threshold is cut in the quantity it is *about*:
+
+- **Energy exactly at an energy threshold**, because energy is what is being
+  tiered and what is being settled.
+- **Time exactly at a clock threshold**, because 22:00 is 22:00 — read in the
+  UTC offset the period itself carries, and on every day the period spans.
+- **The local midnight a weekday restriction turns on**, which is the one
+  threshold the tariff never names: without it a session running Friday 23:00 to
+  Saturday 01:00 arrives as a single period and is priced for both hours at
+  Friday's rate, invisibly, because nothing failed to match.
+- **The other quantity in proportion, to the second.** Splitting a quarter hour
+  at a kilowatt-hour boundary assumes constant power across it, which a tapering
+  curve does not deliver; the residual is under a second of a per-minute fee, and
+  sub-second boundaries would lose whole seconds and stop the durations summing.
 
 ```rust
 // One period of 30 kWh, three of ten, or ninety-six quarter hours:
@@ -241,13 +332,28 @@ display-versus-bill drift this crate exists to make unrepresentable; not
 rounding it shows nobody anything. Neither is a price "known to end users before
 they initiate a recharging session", so it is a breach with the remedy in the
 message: quote an hourly rate divisible by three. €6.00 an hour is €0.10 a
-minute (D77).
+minute.
+
+On OCPI that can only ever be an objection: OCPI's unit is the hour, and the
+document is well-formed either way. **OCPP 2.1's field is `priceMinute`** — the
+article's own unit — so the same tariff has no representation on the wire that
+reaches the driver, and the crossing refuses rather than writing a rounded
+figure the station would then charge:
+
+```rust
+assert!(to_ocpi(&two_fifty_an_hour, &party, at).is_ok());     // OCPI has no objection
+assert!(emob_ocpp::to_ocpp(&two_fifty_an_hour, at).is_err()); // the station cannot state it
+```
+
+The conversion lives in one function — `price_per_minute`, which returns
+`Option` rather than dividing and hoping — and the display, the conformance
+check and the wire all ask it.
 
 A VAT rate of exactly −100 % is refused for the same kind of reason one layer
 along: a gross amount is `net × (1 + rate/100)`, so at that rate there is no net
 at all and an invoice under the tariff could state no taxable amount
 `[UStG §14]`. It is also the one value that would divide by zero inside the
-rating engine (D75).
+rating engine.
 
 It also reports what is merely incoherent: a minimum above the maximum (no
 session total satisfies both), and an element **every** one of whose dimensions
@@ -437,6 +543,10 @@ Beyond those, time of day, calendar date, cumulative energy, cumulative duration
 average power and weekday all select which elements apply.
 
 ## What is not here yet 📐
+
+*Publishing* a version — deciding when a new one takes effect, telling partners,
+and pushing `SetDefaultTariff` to the estate's 2.1 stations — belongs with
+`tarifd`. All three payloads exist; the service that decides *when* does not.
 
 The EN 16931 invoice itself — the breakdown above is the input it needs, and
 `emob-billing` is where it becomes an XRechnung or ZUGFeRD document, a SEPA

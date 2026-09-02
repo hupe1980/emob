@@ -134,6 +134,28 @@ pub enum RoamError {
         restriction: String,
     },
 
+    /// A restriction this build *can* evaluate does not fit the field OCPI
+    /// carries it in.
+    ///
+    /// The same argument as [`Self::UnevaluableRestriction`] arriving from the
+    /// other side, and the reason it is a refusal rather than a defaulted
+    /// value: OCPI's `LocalTime` and `LocalDate` are narrower than the types
+    /// this workspace restricts on, and a bound that will not fit has exactly
+    /// two silent outcomes — dropped, which **widens** the element at the
+    /// partner, or replaced with a default, which moves it. A `start_time` that
+    /// fell back to midnight would publish a night tariff as an all-day one.
+    #[error(
+        "tariff element {element} restricts on `{field}`, which OCPI cannot carry as written          ({detail}) — dropping it widens the element at the partner and defaulting it moves it,          so neither is a translation of this tariff"
+    )]
+    RestrictionNotExpressible {
+        /// Which element, by index.
+        element: usize,
+        /// Which restriction.
+        field: &'static str,
+        /// What the wire type said.
+        detail: String,
+    },
+
     /// A gross tariff's price bound has no pre-tax figure to publish.
     ///
     /// OCPI requires `before_taxes` on a `min_price`/`max_price` and means it
@@ -152,6 +174,26 @@ pub enum RoamError {
     NoRateForPriceLimit {
         /// Which bound — `min_price` or `max_price`.
         field: String,
+    },
+
+    /// A gross bound carries a VAT rate no taxable amount can be recovered from.
+    ///
+    /// Kept apart from [`Self::NoRateForPriceLimit`] because the two have
+    /// different fixes, and reporting either as the other sends an operator
+    /// looking for a second rate that is not there. A gross amount is
+    /// `net × (1 + rate/100)`, so at exactly −100 % the factor is zero and no
+    /// net grosses up to a non-zero bound: the rate is the fault rather than the
+    /// number of them.
+    #[error(
+        "`{field}` is a gross bound and this tariff carries a VAT rate of {rate} %, at which no \
+         net amount grosses up to it: the pre-tax figure OCPI requires does not exist. Correct \
+         the rate"
+    )]
+    ImpossibleVatRateForPriceLimit {
+        /// Which bound — `min_price` or `max_price`.
+        field: String,
+        /// The rate that arrived.
+        rate: rust_decimal::Decimal,
     },
 
     /// A field of a partner's document is one this side's types refuse.

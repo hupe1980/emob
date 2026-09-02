@@ -105,12 +105,13 @@ pub mod tariff;
 pub mod version;
 
 pub use conformance::{Conformance, Objection, check_afir};
-pub use display::{DisplayLine, PriceDescription, Tier, describe};
+pub use display::{DisplayLine, PriceDescription, Tier, describe, price_per_minute};
 pub use rating::{
     Adjustment, AdjustmentKind, Chargeable, ChargeableError, Line, Period, Rated, RatingNote,
-    SessionState, TaxLine, rate,
+    SessionState, TaxLine, element_matches, matching_component, rate,
 };
 pub use tariff::{
     Dimension, PriceComponent, Restrictions, Tariff, TariffElement, TariffKind, TaxIncluded,
+    VatBasis,
 };
 pub use version::{TariffFingerprint, TariffHistory, TariffHistoryError};

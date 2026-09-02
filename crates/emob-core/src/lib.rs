@@ -25,6 +25,11 @@
 //! - [`station`] — [`ChargePointProfile`] and
 //!   [`ProviderProfile`]: the facts about a charge point, and about a mobility
 //!   service provider, that regulation actually asks about.
+//! - [`crossing`] — [`Crossing`] and [`Note`]: a value carried onto a wire and
+//!   the account of what the crossing cost, by JSON Pointer into the document
+//!   the recipient will be reading. Shared, because three seams — OCPI, the
+//!   DATEX II national access point feed and OCPP 2.1's tariff — answer the
+//!   same question and must answer it in the same words.
 //! - [`obligation`] — the obligation calendar: AFIR, DA-656, LSV 2026,
 //!   MessEG/PTB-A and the THG preconditions as dated, cited, executable rules,
 //!   with [`assess`](obligation::assess()) and
@@ -62,6 +67,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod check_digit;
+pub mod crossing;
 pub mod error;
 pub mod identification;
 pub mod ids;
@@ -71,15 +77,18 @@ pub mod quantity;
 pub mod station;
 pub mod wire;
 
+pub use crossing::{Crossing, Note};
 pub use error::{CoreError, IdError, QuantityError, Result};
 pub use identification::IdentificationStrength;
 pub use ids::{
-    CdrId, ContractId, Emaid, EvcoId, EvseId, LocationId, PartyId, SessionId, StationId, TariffId,
+    CdrId, ContractId, Emaid, EvcoId, EvseId, LocationId, PartyId, Role, SessionId, StationId,
+    TariffId,
 };
 pub use period::{ClockResolution, ClockResolutionError, QuarterHour};
 pub use quantity::{Currency, Direction, Energy, Money};
 pub use station::{
     Accessibility, AdHocPayment, ChargePointProfile, ChargingMode, CurrentType, DataPublication,
-    EnergyMeasurementPoint, MeteringPosture, Notice, OperatorChange, Ownership, PriceConduct,
-    PriceTransparency, ProviderProfile, Registration, V2gCommunication,
+    EnergyMeasurementPoint, FurtherIdentifiers, MeteringPosture, Nis2Class, Notice, OperatorChange,
+    Ownership, PriceConduct, PriceTransparency, ProviderProfile, QuotaPosture, RegisterPublication,
+    Registration, RiskManagement, UndertakingProfile, V2gCommunication,
 };

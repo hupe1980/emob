@@ -21,6 +21,16 @@
 //! [`Restrictions::unevaluable`](emob_tariff::Restrictions::unevaluable), and
 //! the rating engine will decline to match the element. The invariant survives
 //! the round trip in both directions, which is the property worth having.
+//!
+//! # …and the same argument for a restriction that will not *fit*
+//!
+//! OCPI's `LocalTime` and `LocalDate` are narrower than the types this
+//! workspace restricts on, and a bound that does not fit has exactly two silent
+//! outcomes: dropped, which widens the element at the partner, or replaced with
+//! a default, which moves it. A `start_time` falling back to midnight publishes
+//! a night tariff as an all-day one — a *different* price, from a document this
+//! operator signed off. So it is [`RoamError::RestrictionNotExpressible`], for
+//! the reason the unevaluable one is refused.
 
 use emob_tariff::{Dimension, Restrictions, Tariff, TariffKind, TaxIncluded};
 use ocpi_kit::types::{LocalDate, LocalTime, Number};
@@ -73,7 +83,7 @@ pub fn to_ocpi(
         elements.push(
             TariffElement::builder()
                 .price_components(components)
-                .maybe_restrictions(restrictions(&element.restrictions, index, &mut crossing))
+                .maybe_restrictions(restrictions(&element.restrictions, index, &mut crossing)?)
                 .build(),
         );
     }
@@ -122,11 +132,20 @@ pub fn to_ocpi(
 /// note can repair a number a partner is entitled to read at face value.
 ///
 /// So a gross tariff's bound is converted, at the rate the tariff's own
-/// components carry. That rate exists exactly when they agree on one, which is
-/// the same condition [`emob_tariff::Tariff::uniform_vat`] answers and the same
-/// choice the rating engine makes when a minimum charge lands on a session with
-/// no lines. Where they do not agree there is no pre-tax figure to state, and
-/// this refuses rather than inventing one.
+/// components carry — [`emob_tariff::Tariff::vat_basis`], the same question the
+/// OCPP crossing asks and the same choice the rating engine makes when a
+/// minimum charge lands on a session with no lines.
+///
+/// # A tariff that states no rate is not a tariff that cannot answer
+///
+/// The two used to be one `None` and this refused both, which meant an ordinary
+/// gross price list carrying a `min_price` and no VAT rate anywhere could not be
+/// published to a partner at all — over a diagnostic that said its components
+/// carried more than one rate, which was not true of it. A basis nobody stated
+/// is zero per cent for the arithmetic, exactly as
+/// [`emob_tariff::Rated::tax_summary`] already reads it, so `before_taxes`
+/// equals the bound and there is nothing to note. Only [`VatBasis::Mixed`] has
+/// no answer.
 ///
 /// # Errors
 ///
@@ -142,17 +161,20 @@ fn limit(
     match tariff.tax_included {
         TaxIncluded::Yes => {
             let rate = tariff
-                .uniform_vat()
+                .vat_basis()
+                .rate()
                 .ok_or_else(|| RoamError::NoRateForPriceLimit {
                     field: pointer.trim_start_matches('/').to_owned(),
                 })?;
             let factor = rust_decimal::Decimal::ONE + rate / rust_decimal::Decimal::from(100);
             // A rate of exactly −100 % makes the factor zero and no net grosses
             // up to a non-zero amount at it — the same hole the rating engine
-            // reports rather than dividing into.
+            // reports rather than dividing into. Its own variant, because the
+            // fix is to correct the rate and not to find a second one.
             if factor.is_zero() {
-                return Err(RoamError::NoRateForPriceLimit {
+                return Err(RoamError::ImpossibleVatRateForPriceLimit {
                     field: pointer.trim_start_matches('/').to_owned(),
+                    rate,
                 });
             }
             let net = emob_core::Money::new(amount / factor, tariff.currency)
@@ -218,20 +240,28 @@ pub const fn tax_included(tax: TaxIncluded) -> OcpiTaxIncluded {
 }
 
 /// The restrictions, where there are any.
+///
+/// # Errors
+///
+/// [`RoamError::RestrictionNotExpressible`] when a bound does not fit the field
+/// OCPI carries it in. Neither silent outcome is a translation: a dropped
+/// restriction **widens** the element at the partner, and a defaulted one moves
+/// it — a `start_time` falling back to midnight publishes a night tariff as an
+/// all-day one.
 fn restrictions(
     restrictions: &Restrictions,
     index: usize,
     crossing: &mut Crossing<()>,
-) -> Option<TariffRestrictions> {
+) -> Result<Option<TariffRestrictions>, RoamError> {
     if restrictions == &Restrictions::default() {
-        return None;
+        return Ok(None);
     }
 
     let out = TariffRestrictions {
-        start_time: restrictions.start_time.map(local_time),
-        end_time: restrictions.end_time.map(local_time),
-        start_date: restrictions.start_date.and_then(local_date),
-        end_date: restrictions.end_date.and_then(local_date),
+        start_time: local_time(restrictions.start_time, index, "start_time")?,
+        end_time: local_time(restrictions.end_time, index, "end_time")?,
+        start_date: local_date(restrictions.start_date, index, "start_date")?,
+        end_date: local_date(restrictions.end_date, index, "end_date")?,
         min_kwh: restrictions.min_kwh.map(Number::new),
         max_kwh: restrictions.max_kwh.map(Number::new),
         min_power: restrictions.min_power_kw.map(Number::new),
@@ -256,17 +286,41 @@ fn restrictions(
         );
     }
 
-    Some(out)
+    Ok(Some(out))
 }
 
 /// A wall-clock time, which OCPI carries without a zone.
-fn local_time(time: time::Time) -> LocalTime {
-    LocalTime::new(time.hour(), time.minute()).unwrap_or(LocalTime::MIDNIGHT)
+fn local_time(
+    time: Option<time::Time>,
+    element: usize,
+    field: &'static str,
+) -> Result<Option<LocalTime>, RoamError> {
+    time.map(|t| {
+        LocalTime::new(t.hour(), t.minute()).map_err(|error| RoamError::RestrictionNotExpressible {
+            element,
+            field,
+            detail: error.to_string(),
+        })
+    })
+    .transpose()
 }
 
 /// A calendar date.
-fn local_date(date: time::Date) -> Option<LocalDate> {
-    LocalDate::new(date.year(), u8::from(date.month()), date.day()).ok()
+fn local_date(
+    date: Option<time::Date>,
+    element: usize,
+    field: &'static str,
+) -> Result<Option<LocalDate>, RoamError> {
+    date.map(|d| {
+        LocalDate::new(d.year(), u8::from(d.month()), d.day()).map_err(|error| {
+            RoamError::RestrictionNotExpressible {
+                element,
+                field,
+                detail: error.to_string(),
+            }
+        })
+    })
+    .transpose()
 }
 
 /// A weekday. Both vocabularies are the seven days.
@@ -422,6 +476,59 @@ mod tests {
     }
 
     #[test]
+    fn a_gross_bound_on_a_tariff_that_states_no_rate_at_all_is_published() {
+        // The case the previous reading could not tell from the one above, and
+        // refused with its diagnostic: an ordinary gross price list that names
+        // no VAT rate anywhere. There is nothing to strip out, so the bound
+        // before taxes *is* the bound — which is what `Rated::tax_summary`
+        // already computes one layer down, reading an absent rate as zero.
+        //
+        // Refusing it stopped a lawful tariff reaching a partner at all, over a
+        // message that said its components carried more than one rate.
+        let mut unstated = Tariff::simple(
+            "tariff-1".parse().unwrap(),
+            emob_core::Currency::new("EUR").unwrap(),
+            TariffKind::AdHoc,
+            vec![Component::new(Dimension::Energy, dec("0.49"))],
+        );
+        unstated.min_price = Some(dec("5.00"));
+
+        let crossing = to_ocpi(&unstated, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
+        let min = crossing.value.min_price.as_ref().unwrap();
+        assert_eq!(min.before_taxes.get(), dec("5.00"));
+        assert_eq!(min.after_taxes.unwrap().get(), dec("5.00"));
+        assert!(
+            crossing.is_lossless(),
+            "nothing was rounded, so there is nothing to say: {:?}",
+            crossing.notes()
+        );
+    }
+
+    #[test]
+    fn a_gross_bound_at_minus_one_hundred_per_cent_names_the_rate_rather_than_a_second_one() {
+        // A rate this hostile has no net that grosses up to the bound. Its own
+        // variant, because "correct the rate" and "you have two rates" send an
+        // operator to different places.
+        let mut impossible = Tariff::simple(
+            "tariff-1".parse().unwrap(),
+            emob_core::Currency::new("EUR").unwrap(),
+            TariffKind::AdHoc,
+            vec![Component::new(Dimension::Energy, dec("0.49")).with_vat(dec("-100"))],
+        );
+        impossible.max_price = Some(dec("40.00"));
+
+        let err = to_ocpi(&impossible, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RoamError::ImpossibleVatRateForPriceLimit { ref field, rate }
+                    if field == "max_price" && rate == dec("-100")
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_net_tariffs_bound_is_the_figure_it_already_states() {
         let mut net = simple();
         net.tax_included = TaxIncluded::No;
@@ -447,6 +554,52 @@ mod tests {
             crossing.reasons().any(|r| r.contains("zone")),
             "a partner in another zone prices the night rate at the wrong hours"
         );
+    }
+
+    #[test]
+    fn every_restriction_this_build_can_express_reaches_the_partner() {
+        // The failure this guards is a *silent* one: a bound that does not fit
+        // the field OCPI carries it in has two quiet outcomes and both are
+        // wrong — dropped, the element widens at the partner; defaulted, it
+        // moves. A `start_time` defaulting to midnight publishes a night tariff
+        // as an all-day one.
+        //
+        // Both conversions refuse rather than repair, and neither is reachable
+        // from a `time::Time` or a `time::Date` — so what is worth asserting is
+        // the property rather than the error: every field set here arrives,
+        // with the value it was set to.
+        let mut tariff = simple();
+        tariff.elements[0].restrictions = Restrictions {
+            start_time: Some(time::macros::time!(22:00)),
+            end_time: Some(time::macros::time!(6:00)),
+            start_date: Some(time::macros::date!(2026 - 04 - 01)),
+            end_date: Some(time::macros::date!(2027 - 01 - 01)),
+            min_kwh: Some(dec("10")),
+            max_kwh: Some(dec("50")),
+            min_power_kw: Some(dec("11")),
+            max_power_kw: Some(dec("150")),
+            min_duration_s: Some(600),
+            max_duration_s: Some(7200),
+            days_of_week: vec![time::Weekday::Saturday, time::Weekday::Sunday],
+            unevaluable: Vec::new(),
+        };
+
+        let crossing = to_ocpi(&tariff, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
+        let r = crossing.value.elements[0].restrictions.as_ref().unwrap();
+
+        assert_eq!(r.start_time.unwrap().to_string(), "22:00");
+        assert_eq!(r.end_time.unwrap().to_string(), "06:00");
+        assert_eq!(r.start_date.unwrap().to_string(), "2026-04-01");
+        assert_eq!(r.end_date.unwrap().to_string(), "2027-01-01");
+        assert_eq!(r.min_kwh.unwrap().get(), dec("10"));
+        assert_eq!(r.max_kwh.unwrap().get(), dec("50"));
+        assert_eq!(r.min_power.unwrap().get(), dec("11"));
+        assert_eq!(r.max_power.unwrap().get(), dec("150"));
+        assert_eq!(r.min_duration, Some(600));
+        assert_eq!(r.max_duration, Some(7200));
+        assert_eq!(r.day_of_week, vec![DayOfWeek::Saturday, DayOfWeek::Sunday]);
+        // …and the one thing the crossing genuinely cannot carry is said.
+        assert!(crossing.reasons().any(|reason| reason.contains("zone")));
     }
 
     #[test]

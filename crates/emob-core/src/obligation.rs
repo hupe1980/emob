@@ -67,7 +67,7 @@ use time::macros::date;
 
 use crate::station::{
     AdHocPayment, ChargePointProfile, ChargingMode, CurrentType, EnergyMeasurementPoint, Ownership,
-    ProviderProfile, Registration,
+    ProviderProfile, Registration, UndertakingProfile,
 };
 
 /// A stable identifier for one obligation.
@@ -154,6 +154,20 @@ pub enum ObligationId {
     ReaRectificationLossDisclosed,
     /// THG-Quote requires a register entry and third-party access.
     ThgEligibility,
+    /// An undertaking in scope must give the competent authority its details.
+    Nis2Registration,
+    /// …and take the ten risk-management measures the article enumerates.
+    Nis2RiskManagement,
+    /// …and be able to send an early warning within twenty-four hours.
+    Nis2IncidentEarlyWarning,
+    /// The management body must approve the measures and oversee them.
+    Nis2ManagementApproval,
+    /// …and its members must attend cybersecurity training.
+    Nis2ManagementTraining,
+    /// A manufacturer must report actively exploited vulnerabilities.
+    CraVulnerabilityReporting,
+    /// …and place only conformity-assessed products on the market.
+    CraEssentialRequirements,
 }
 
 impl ObligationId {
@@ -194,6 +208,13 @@ impl ObligationId {
             Self::ReaRectificationAttributable => "rea-rectification-attributable",
             Self::ReaRectificationLossDisclosed => "rea-rectification-loss-disclosed",
             Self::ThgEligibility => "thg-eligibility",
+            Self::Nis2Registration => "nis2-registration",
+            Self::Nis2RiskManagement => "nis2-risk-management",
+            Self::Nis2IncidentEarlyWarning => "nis2-incident-early-warning",
+            Self::Nis2ManagementApproval => "nis2-management-approval",
+            Self::Nis2ManagementTraining => "nis2-management-training",
+            Self::CraVulnerabilityReporting => "cra-vulnerability-reporting",
+            Self::CraEssentialRequirements => "cra-essential-requirements",
         }
     }
 }
@@ -229,6 +250,18 @@ pub enum Rule {
         /// Whether the provider meets it.
         satisfied: fn(&ProviderProfile) -> bool,
     },
+    /// The duty binds the **undertaking** — the company rather than one of its
+    /// points or one of the roles it plays.
+    ///
+    /// `[NIS2 Anh. I]` names charge point operators in the Energy sector, and
+    /// `[CRA Art. 13]` binds whoever places a product with digital elements on
+    /// the market. Neither is a fact about a charge point.
+    Undertaking {
+        /// Whether the duty binds this undertaking at all.
+        applicable: fn(&UndertakingProfile) -> bool,
+        /// Whether it meets it.
+        satisfied: fn(&UndertakingProfile) -> bool,
+    },
 }
 
 impl core::fmt::Debug for Rule {
@@ -236,6 +269,7 @@ impl core::fmt::Debug for Rule {
         f.write_str(match self {
             Self::ChargePoint { .. } => "Rule::ChargePoint",
             Self::Provider { .. } => "Rule::Provider",
+            Self::Undertaking { .. } => "Rule::Undertaking",
         })
     }
 }
@@ -249,6 +283,8 @@ pub enum Scope {
     ChargePoint,
     /// A mobility service provider.
     MobilityServiceProvider,
+    /// The undertaking itself.
+    Undertaking,
 }
 
 /// One regulatory duty: what it demands, of whom, from when, and who says so.
@@ -283,6 +319,7 @@ impl Obligation {
         match self.rule {
             Rule::ChargePoint { .. } => Scope::ChargePoint,
             Rule::Provider { .. } => Scope::MobilityServiceProvider,
+            Rule::Undertaking { .. } => Scope::Undertaking,
         }
     }
 }
@@ -396,6 +433,33 @@ const REA_6A_PUBLISHED: Date = date!(2017 - 03 - 16);
 /// market "bis zum 31. Dezember 2017", so the duty compares against the day
 /// after.
 const AC_METERING_CUTOFF: Date = date!(2018 - 01 - 01);
+
+/// The day the NIS2 duties began binding an undertaking **in Germany**.
+///
+/// # Why this is not the Directive's own date
+///
+/// `[NIS2 Art. 41]` obliges Member States to adopt the rules by 17.10.2024 and
+/// to apply them from 18.10.2024. A directive binds nobody directly: what binds
+/// an undertaking is the national law, and Germany's — the `NIS2UmsuCG`, which
+/// rewrites the BSIG — was promulgated on 05.12.2025 and came into force the
+/// following day, with no general transitional period.
+///
+/// Using the Directive's date would report every German operator in breach for
+/// fourteen months during which no German authority could act, which is exactly
+/// the failure the ordering in [`judge`] exists to prevent, arriving through
+/// the data instead. A calendar for a market judges against the law of that
+/// market, and says which one it means.
+///
+/// The Regulation beside it needs no such note: `[CRA Art. 71]` applies
+/// directly in every Member State on the days it names.
+const NIS2_DE_IN_FORCE: Date = date!(2025 - 12 - 06);
+
+/// `[CRA Art. 71(2)]` — the reporting duties of Article 14 apply from this day,
+/// fifteen months before the rest of the Regulation.
+const CRA_REPORTING_APPLIES: Date = date!(2026 - 09 - 11);
+
+/// `[CRA Art. 71(2)]` — "Diese Verordnung gilt ab dem 11. Dezember 2027."
+const CRA_APPLIES: Date = date!(2027 - 12 - 11);
 
 /// The calendar itself.
 ///
@@ -972,17 +1036,130 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::ThgEligibility,
-        title: "THG-Quote requires a register entry and access for third parties",
-        citation: "[38k §6]",
+        title: "THG-Quote requires a publishable register entry, lawful metering and an issued operator code",
+        citation: "[38k §6(3)]",
         applies_from: date!(2022 - 01 - 01),
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public(),
+            // Four cumulative conditions, and the notice they presuppose. Nr. 1
+            // asks whether the *notified* point is published or publishable, so
+            // the Anzeige is a premise of the paragraph rather than a fifth
+            // condition — but a point with no notice has nothing to publish.
             satisfied: |p| {
-                p.registration.commissioning_notified_on.is_some() && p.open_to_third_parties
+                p.registration.commissioning_notified_on.is_some() && p.quota.is_eligible()
             },
         },
-        remedy: "register the point and keep it open to third parties, or forgo the quota",
+        remedy: "publish the register entry or consent to its publication, sign the conformity declaration the authority provides, and obtain an operator identification code — or forgo the quota",
+    },
+    // ── NIS2: the duties that name this industry by its role ───────────────
+    //
+    // `[NIS2 Anh. I]`, Energy, Electricity: "Betreiber von Ladepunkten, die für
+    // die Verwaltung und den Betrieb eines Ladepunkts zuständig sind und
+    // Endnutzern einen Aufladedienst erbringen, auch im Namen und Auftrag eines
+    // Mobilitätsdienstleisters". Every duty below binds the **undertaking**,
+    // which is why it needed a third profile rather than a field on a point.
+    //
+    // Articles 20, 21 and 23 bind essential and important entities alike; the
+    // classes differ in how they are supervised (`[NIS2 Art. 32]` against
+    // `[NIS2 Art. 33]`), not in what they owe.
+    Obligation {
+        id: ObligationId::Nis2Registration,
+        title: "An undertaking in scope must give the competent authority its details",
+        citation: "[NIS2 Art. 3(4)]",
+        applies_from: NIS2_DE_IN_FORCE,
+        applies_until: None,
+        rule: Rule::Undertaking {
+            applicable: UndertakingProfile::is_in_nis2_scope,
+            satisfied: |u| u.registered_with_the_authority,
+        },
+        remedy: "submit name, address, contact details, sector and the Member States served to the competent authority; changes follow within two weeks",
+    },
+    Obligation {
+        id: ObligationId::Nis2RiskManagement,
+        title: "…and take all ten cybersecurity risk-management measures",
+        citation: "[NIS2 Art. 21(2)]",
+        applies_from: NIS2_DE_IN_FORCE,
+        applies_until: None,
+        rule: Rule::Undertaking {
+            applicable: UndertakingProfile::is_in_nis2_scope,
+            // "shall include **at least** the following" — a conjunction, not a
+            // score. Nine of ten is not ninety per cent of a duty.
+            satisfied: |u| u.risk_management.is_complete(),
+        },
+        remedy: "close the measures RiskManagement::missing() names: the article lists them as a floor, so each one absent is the duty unmet",
+    },
+    Obligation {
+        id: ObligationId::Nis2IncidentEarlyWarning,
+        title: "…and be able to warn the CSIRT within twenty-four hours of a significant incident",
+        citation: "[NIS2 Art. 23(4)]",
+        applies_from: NIS2_DE_IN_FORCE,
+        applies_until: None,
+        rule: Rule::Undertaking {
+            applicable: UndertakingProfile::is_in_nis2_scope,
+            satisfied: |u| u.can_warn_within_24_hours,
+        },
+        remedy: "stand up the three-step path the article prescribes: an early warning within 24 h, an incident notification within 72 h, and a final report within a month of it",
+    },
+    Obligation {
+        id: ObligationId::Nis2ManagementApproval,
+        title: "The management body must approve the measures and oversee their implementation",
+        citation: "[NIS2 Art. 20(1)]",
+        applies_from: NIS2_DE_IN_FORCE,
+        applies_until: None,
+        rule: Rule::Undertaking {
+            applicable: UndertakingProfile::is_in_nis2_scope,
+            satisfied: |u| u.management_approved_measures,
+        },
+        remedy: "put the measures to the management body: the same paragraph makes its members liable for infringements of the article",
+    },
+    Obligation {
+        id: ObligationId::Nis2ManagementTraining,
+        title: "…and its members must attend cybersecurity training",
+        citation: "[NIS2 Art. 20(2)]",
+        applies_from: NIS2_DE_IN_FORCE,
+        applies_until: None,
+        rule: Rule::Undertaking {
+            applicable: UndertakingProfile::is_in_nis2_scope,
+            satisfied: |u| u.management_trained,
+        },
+        remedy: "train the management body, and offer the same regularly to all employees — the article requires the first and calls for the second",
+    },
+    // ── CRA: the duties of whoever ships the software ──────────────────────
+    //
+    // A Regulation rather than a Directive, so `[CRA Art. 71]`'s dates are the
+    // dates, in every Member State, with no transposition in between.
+    //
+    // Whether they bind at all is the one genuinely per-deployment question in
+    // this calendar: an operator running somebody else's hardware on somebody
+    // else's platform is not a manufacturer, and one that publishes a station
+    // firmware or a driver app under its own name is.
+    Obligation {
+        id: ObligationId::CraVulnerabilityReporting,
+        title: "A manufacturer must report an actively exploited vulnerability within twenty-four hours",
+        citation: "[CRA Art. 14]",
+        applies_from: CRA_REPORTING_APPLIES,
+        applies_until: None,
+        rule: Rule::Undertaking {
+            applicable: |u| u.places_digital_products_on_the_market,
+            satisfied: |u| u.can_report_exploited_vulnerabilities,
+        },
+        remedy: "open the path to the coordinator CSIRT and ENISA on the single reporting platform: an early warning within 24 h, a vulnerability notification within 72 h, and a final report within 14 days of a corrective measure",
+    },
+    Obligation {
+        id: ObligationId::CraEssentialRequirements,
+        title: "…and place only conformity-assessed products with digital elements on the market",
+        citation: "[CRA Art. 13]",
+        applies_from: CRA_APPLIES,
+        applies_until: None,
+        rule: Rule::Undertaking {
+            applicable: |u| u.places_digital_products_on_the_market,
+            // Two halves of one duty: the product meets the essential
+            // requirements of Annex I Part I, and the vulnerability handling of
+            // Part II is in place for as long as it is supported.
+            satisfied: |u| u.products_conformity_assessed && u.coordinated_vulnerability_disclosure,
+        },
+        remedy: "assess the product against Annex I Part I, put the Part II vulnerability handling and a coordinated disclosure policy in place, and carry the CE marking",
     },
 ];
 
@@ -993,7 +1170,7 @@ pub fn assess(point: &ChargePointProfile, on: Date) -> Assessment {
         .iter()
         .map(|obligation| {
             let status = match obligation.rule {
-                Rule::Provider { .. } => Status::DifferentScope,
+                Rule::Provider { .. } | Rule::Undertaking { .. } => Status::DifferentScope,
                 Rule::ChargePoint {
                     applicable,
                     satisfied,
@@ -1038,7 +1215,7 @@ pub fn assess_provider(provider: &ProviderProfile, on: Date) -> Assessment {
         .iter()
         .map(|obligation| {
             let status = match obligation.rule {
-                Rule::ChargePoint { .. } => Status::DifferentScope,
+                Rule::ChargePoint { .. } | Rule::Undertaking { .. } => Status::DifferentScope,
                 Rule::Provider {
                     applicable,
                     satisfied,
@@ -1054,6 +1231,63 @@ pub fn assess_provider(provider: &ProviderProfile, on: Date) -> Assessment {
     Assessment {
         subject: provider.party.to_string(),
         scope: Scope::MobilityServiceProvider,
+        on,
+        findings,
+    }
+}
+
+/// Judge one undertaking against the whole calendar on one date.
+///
+/// The third subject, and the one that carries the cybersecurity duties. An
+/// operator whose every charge point is faultless and whose provider half
+/// discloses everything can still be in breach here — `[NIS2 Anh. I]` names
+/// charge point operators in the Energy sector, and none of what it asks is a
+/// fact about a charge point.
+///
+/// ```
+/// use emob_core::obligation::{assess_undertaking, ObligationId, Status};
+/// use emob_core::station::{RiskManagement, UndertakingProfile};
+/// use emob_core::PartyId;
+/// use time::macros::date;
+///
+/// let mut operator = UndertakingProfile::bare(PartyId::new("DE", "CPO")?);
+/// operator.operates_recharging_points = true;
+/// operator.employees = 400;
+/// operator.risk_management = RiskManagement::complete();
+///
+/// let report = assess_undertaking(&operator, date!(2026-09-01));
+/// assert_eq!(
+///     report.status_of(ObligationId::Nis2RiskManagement),
+///     Some(Status::Satisfied),
+/// );
+/// assert_eq!(
+///     report.status_of(ObligationId::Nis2Registration),
+///     Some(Status::Failing),
+/// );
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn assess_undertaking(undertaking: &UndertakingProfile, on: Date) -> Assessment {
+    let findings = CALENDAR
+        .iter()
+        .map(|obligation| {
+            let status = match obligation.rule {
+                Rule::ChargePoint { .. } | Rule::Provider { .. } => Status::DifferentScope,
+                Rule::Undertaking {
+                    applicable,
+                    satisfied,
+                } => judge(obligation, on, undertaking, applicable, satisfied),
+            };
+            Finding {
+                obligation: *obligation,
+                status,
+            }
+        })
+        .collect();
+
+    Assessment {
+        subject: undertaking.party.to_string(),
+        scope: Scope::Undertaking,
         on,
         findings,
     }
@@ -1115,8 +1349,9 @@ mod tests {
     use crate::ids::{EvseId, PartyId};
     use crate::station::{
         Accessibility, AdHocPayment, ChargePointProfile, CurrentType, DataPublication,
-        EnergyMeasurementPoint, MeteringPosture, Notice, OperatorChange, Ownership,
-        PriceTransparency, ProviderProfile, Registration, V2gCommunication,
+        EnergyMeasurementPoint, FurtherIdentifiers, MeteringPosture, Nis2Class, Notice,
+        OperatorChange, Ownership, PriceTransparency, ProviderProfile, QuotaPosture,
+        RegisterPublication, Registration, RiskManagement, UndertakingProfile, V2gCommunication,
     };
     use rust_decimal::Decimal;
 
@@ -1165,7 +1400,12 @@ mod tests {
             bills_by_energy: true,
             ..MeteringPosture::default()
         };
-        point.open_to_third_parties = true;
+        point.quota = QuotaPosture {
+            publication: RegisterPublication::Published,
+            conformity_declared: true,
+            operator_code_assigned: true,
+            further_identifiers: FurtherIdentifiers::NoneAnnounced,
+        };
         point
     }
 
@@ -2100,9 +2340,9 @@ mod tests {
 
     #[test]
     fn the_provider_half_of_article_five_is_a_real_check() {
-        // The duty that used to be a stub. A provider that hides its e-roaming
-        // costs inside the kWh price is in breach of Art. 5(5) even though
-        // every one of its charge points is faultless.
+        // A provider that hides its e-roaming costs inside the kWh price is
+        // in breach of Art. 5(5) even though every one of its charge points is
+        // faultless.
         let mut provider = ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap());
         let report = assess_provider(&provider, date!(2026 - 09 - 01));
         assert_eq!(
@@ -2160,7 +2400,13 @@ mod tests {
         let mid = in_force_on(date!(2026 - 06 - 01)).count();
         let late = in_force_on(date!(2027 - 06 - 01)).count();
         assert!(early < mid && mid < late, "{early} {mid} {late}");
-        assert_eq!(late, CALENDAR.len(), "everything is in force by mid-2027");
+        // The last date in the calendar is `[CRA Art. 71(2)]`'s 11.12.2027, so
+        // "everything" is a day in 2028 rather than mid-2027.
+        assert_eq!(
+            in_force_on(date!(2028 - 01 - 01)).count(),
+            CALENDAR.len(),
+            "everything is in force once the Cyber Resilience Act applies"
+        );
     }
 
     #[test]
@@ -2191,21 +2437,209 @@ mod tests {
     fn every_obligation_is_assessable_by_exactly_one_profile() {
         // The property the `Rule` enum buys: no duty is stubbed out to be
         // unreachable, which is what the old `applicable: |_| false` shape did
-        // to Art. 5(5).
+        // to Art. 5(5). With three subjects the property is the same one —
+        // exactly one of the three answers each duty — and it is the check that
+        // catches a fourth subject being added and a duty forgotten.
+        let on = date!(2028 - 01 - 01);
         let point = compliant_point(date!(2027 - 03 - 01));
         let provider = ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap());
-        let by_point = assess(&point, date!(2027 - 06 - 01));
-        let by_provider = assess_provider(&provider, date!(2027 - 06 - 01));
+        let undertaking = UndertakingProfile::bare(PartyId::new("DE", "CPO").unwrap());
+        let reports = [
+            assess(&point, on),
+            assess_provider(&provider, on),
+            assess_undertaking(&undertaking, on),
+        ];
 
         for o in CALENDAR {
-            let a = status_of(&by_point, o.id);
-            let b = status_of(&by_provider, o.id);
-            assert_ne!(
-                (a == Status::DifferentScope),
-                (b == Status::DifferentScope),
+            let answering = reports
+                .iter()
+                .filter(|report| status_of(report, o.id) != Status::DifferentScope)
+                .count();
+            assert_eq!(
+                answering, 1,
                 "{} must be answerable by exactly one profile",
                 o.id
             );
         }
+    }
+
+    // ── The third subject ──────────────────────────────────────────────────
+
+    fn operator() -> UndertakingProfile {
+        let mut u = UndertakingProfile::bare(PartyId::new("DE", "CPO").unwrap());
+        u.operates_recharging_points = true;
+        u
+    }
+
+    #[test]
+    fn the_financial_half_of_the_size_test_is_a_conjunction() {
+        // `[NIS2 Art. 2(1)]` reaches an entity that qualifies as medium-sized
+        // "or exceeds the ceilings", and the Recommendation defines an SME as
+        // fewer than 250 staff **and** (turnover ≤ €50 M **and/or** balance
+        // sheet ≤ €43 M). Negated, the financial half becomes an **and** — so
+        // an asset-light operator turning over €60 M on a €20 M balance sheet
+        // does not exceed the ceilings, and every summary that writes
+        // "250 employees or €50 million turnover" puts it in the wrong class.
+        let mut light = operator();
+        light.employees = 90;
+        light.annual_turnover_eur = Decimal::from(60_000_000);
+        light.balance_sheet_total_eur = Decimal::from(20_000_000);
+        assert!(!light.exceeds_medium_ceilings());
+        assert_eq!(light.nis2_class(), Some(Nis2Class::Important));
+
+        // Both above, and it is essential.
+        let mut heavy = light.clone();
+        heavy.balance_sheet_total_eur = Decimal::from(44_000_000);
+        assert!(heavy.exceeds_medium_ceilings());
+        assert_eq!(heavy.nis2_class(), Some(Nis2Class::Essential));
+
+        // Headcount alone is enough, on either side of the financial test.
+        let mut many = operator();
+        many.employees = 250;
+        assert_eq!(many.nis2_class(), Some(Nis2Class::Essential));
+    }
+
+    #[test]
+    fn a_small_operator_is_out_of_scope_and_says_so_rather_than_passing() {
+        // Out of scope is `NotApplicable`, not `Satisfied`: a five-person
+        // operator that has done nothing is not compliant with NIS2, it is
+        // simply not bound — and the two are different answers to an auditor.
+        let mut tiny = operator();
+        tiny.employees = 5;
+        tiny.annual_turnover_eur = Decimal::from(900_000);
+        tiny.balance_sheet_total_eur = Decimal::from(400_000);
+        assert_eq!(tiny.nis2_class(), None);
+
+        let report = assess_undertaking(&tiny, date!(2026 - 09 - 01));
+        assert_eq!(
+            report.status_of(ObligationId::Nis2RiskManagement),
+            Some(Status::NotApplicable)
+        );
+        assert_eq!(report.verdict(), Verdict::Compliant);
+    }
+
+    #[test]
+    fn an_undertaking_that_operates_no_points_is_not_an_annex_one_entity() {
+        // A pure mobility service provider is not of an Annex I type: the entry
+        // covers operating points "in the name and on behalf of" a provider,
+        // which describes the operator. Its Article 5(5) duties are assessed
+        // against `ProviderProfile` instead.
+        let mut msp = UndertakingProfile::bare(PartyId::new("DE", "MSP").unwrap());
+        msp.employees = 4_000;
+        assert_eq!(msp.nis2_class(), None);
+    }
+
+    #[test]
+    fn the_ten_measures_are_a_conjunction_and_the_finding_names_the_gaps() {
+        let mut u = operator();
+        u.employees = 300;
+        u.risk_management = RiskManagement::complete();
+        u.risk_management.supply_chain_security = false;
+        u.risk_management.cryptography = false;
+
+        assert!(
+            !u.risk_management.is_complete(),
+            "nine of ten is not the duty"
+        );
+        assert_eq!(
+            u.risk_management.missing(),
+            vec!["(d) supply-chain security", "(h) cryptography"]
+        );
+        assert_eq!(
+            assess_undertaking(&u, date!(2026 - 09 - 01))
+                .status_of(ObligationId::Nis2RiskManagement),
+            Some(Status::Failing)
+        );
+    }
+
+    #[test]
+    fn a_directive_binds_from_the_day_the_member_state_transposed_it() {
+        // `[NIS2 Art. 41]` told Member States to apply the rules from
+        // 18.10.2024. A directive binds nobody directly, and Germany's
+        // transposition came into force on 06.12.2025 — so reporting a breach
+        // in between would name fourteen months in which no German authority
+        // could act.
+        let mut u = operator();
+        u.employees = 300;
+
+        assert_eq!(
+            assess_undertaking(&u, date!(2025 - 06 - 01))
+                .status_of(ObligationId::Nis2RiskManagement),
+            Some(Status::NotYetInForce)
+        );
+        assert_eq!(
+            assess_undertaking(&u, date!(2025 - 12 - 06))
+                .status_of(ObligationId::Nis2RiskManagement),
+            Some(Status::Failing)
+        );
+    }
+
+    #[test]
+    fn the_regulation_beside_it_needs_no_transposition_and_has_two_dates() {
+        // `[CRA Art. 71(2)]` applies directly: the reporting duty of Article 14
+        // from 11.09.2026, and everything else from 11.12.2027.
+        let mut manufacturer = operator();
+        manufacturer.employees = 300;
+        manufacturer.places_digital_products_on_the_market = true;
+
+        let before = assess_undertaking(&manufacturer, date!(2026 - 09 - 10));
+        assert_eq!(
+            before.status_of(ObligationId::CraVulnerabilityReporting),
+            Some(Status::NotYetInForce)
+        );
+        let after = assess_undertaking(&manufacturer, date!(2026 - 09 - 11));
+        assert_eq!(
+            after.status_of(ObligationId::CraVulnerabilityReporting),
+            Some(Status::Failing)
+        );
+        assert_eq!(
+            after.status_of(ObligationId::CraEssentialRequirements),
+            Some(Status::NotYetInForce),
+            "the rest of the Regulation waits fifteen months"
+        );
+    }
+
+    #[test]
+    fn an_operator_that_ships_nothing_owes_the_manufacturer_nothing() {
+        // The one genuinely per-deployment question in this calendar. An
+        // operator running somebody else's hardware on somebody else's platform
+        // is not a manufacturer, and reporting it in breach of the CRA would be
+        // a duty applied to the wrong party.
+        let mut u = operator();
+        u.employees = 300;
+        assert_eq!(
+            assess_undertaking(&u, date!(2028 - 01 - 01))
+                .status_of(ObligationId::CraEssentialRequirements),
+            Some(Status::NotApplicable)
+        );
+    }
+
+    #[test]
+    fn an_operator_faultless_at_every_point_can_still_be_in_breach_as_a_company() {
+        // The whole argument for a third subject, as a test: the charge points
+        // pass, the provider half passes, and the undertaking does not.
+        let point = compliant_point(date!(2026 - 01 - 01));
+        assert_eq!(
+            assess(&point, date!(2026 - 09 - 01)).verdict(),
+            Verdict::Compliant
+        );
+
+        let mut u = operator();
+        u.employees = 300;
+        assert_eq!(
+            assess_undertaking(&u, date!(2026 - 09 - 01)).verdict(),
+            Verdict::Failing
+        );
+
+        // …and it becomes compliant only when every one of the five is met.
+        u.registered_with_the_authority = true;
+        u.risk_management = RiskManagement::complete();
+        u.can_warn_within_24_hours = true;
+        u.management_approved_measures = true;
+        u.management_trained = true;
+        let report = assess_undertaking(&u, date!(2026 - 09 - 01));
+        assert_eq!(report.verdict(), Verdict::Compliant);
+        assert_eq!(report.scope, Scope::Undertaking);
+        assert_eq!(report.subject, "DE*CPO");
     }
 }

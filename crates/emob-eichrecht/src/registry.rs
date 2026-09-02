@@ -188,13 +188,32 @@ impl KeyRegistry {
     /// # Errors
     ///
     /// [`RegistryError::OverlappingWindows`] when the component already holds a
-    /// key whose window shares an instant with this one.
+    /// key whose window shares an instant with this one, and
+    /// [`RegistryError::EmptyWindow`] when the offered window covers no instant
+    /// at all.
     pub fn insert(
         &mut self,
         component: ComponentRef,
         key: RegisteredKey,
     ) -> Result<(), RegistryError> {
         let name = component.to_string();
+
+        // A window that ends before it begins covers nothing — `covers` is
+        // `from <= at < until`, which no instant satisfies when `until <= from`.
+        // The overlap sweep below cannot see it either: an empty interval
+        // overlaps nothing by construction, so it registers cleanly and then
+        // verifies nothing, and an operator reading the registry believes the
+        // component is provisioned. The same shape `TariffHistory` refuses in a
+        // price history, for the same reason and with the same answer.
+        if let (Some(from), Some(until)) = (key.valid_from, key.valid_until)
+            && until <= from
+        {
+            return Err(RegistryError::EmptyWindow {
+                component: name,
+                window: window_of(&key),
+            });
+        }
+
         let existing = self.keys.entry(component).or_default();
         if let Some(clash) = existing.iter().find(|held| held.overlaps(&key)) {
             return Err(RegistryError::OverlappingWindows {
@@ -339,6 +358,22 @@ pub enum RegistryError {
         held: String,
         /// The window offered.
         offered: String,
+    },
+
+    /// A key's window covers no instant.
+    ///
+    /// `[from, until)` with `until <= from` is empty, so the key can never be
+    /// the one a record verifies against — and nothing downstream would say so:
+    /// the component would simply have no key at every instant, which reads
+    /// exactly like a component nobody registered.
+    #[error(
+        "the key offered for {component} is valid over {window}, which is no instant at all:          a half-open window ending at or before it begins can never be the key a record          verifies against, and the component would read as unprovisioned"
+    )]
+    EmptyWindow {
+        /// Which signing component.
+        component: String,
+        /// The window offered.
+        window: String,
     },
 }
 
@@ -690,6 +725,47 @@ mod tests {
             registry
                 .insert(component, RegisteredKey::unbounded(key(2), "b"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn a_window_that_covers_no_instant_is_refused_rather_than_stored() {
+        // `[from, until)` with `until <= from` is empty, and the overlap sweep
+        // cannot see it: an empty interval overlaps nothing, so it would
+        // register cleanly, verify nothing, and leave an operator reading the
+        // registry believing the component is provisioned. `TariffHistory`
+        // refuses the same shape in a price history for the same reason.
+        let component = ComponentRef::Meter {
+            serial: "BQ1".into(),
+        };
+        let mut registry = KeyRegistry::new();
+
+        let inverted = RegisteredKey {
+            key: key(1),
+            valid_from: Some(datetime!(2026-06-01 00:00 UTC)),
+            valid_until: Some(datetime!(2026-01-01 00:00 UTC)),
+            provenance: "a typo in a provisioning run".into(),
+        };
+        let err = registry
+            .insert(component.clone(), inverted)
+            .expect_err("an empty window");
+        assert!(matches!(err, RegistryError::EmptyWindow { .. }), "{err}");
+        assert!(err.to_string().contains("no instant at all"), "{err}");
+
+        // …and one that opens and closes at the same instant is the same fault.
+        let instantaneous = RegisteredKey {
+            key: key(1),
+            valid_from: Some(datetime!(2026-06-01 00:00 UTC)),
+            valid_until: Some(datetime!(2026-06-01 00:00 UTC)),
+            provenance: "a".into(),
+        };
+        assert!(registry.insert(component.clone(), instantaneous).is_err());
+
+        // Nothing was stored, so the component is still open for a real key.
+        assert!(
+            registry
+                .insert(component, RegisteredKey::unbounded(key(2), "b"))
+                .is_ok()
         );
     }
 }

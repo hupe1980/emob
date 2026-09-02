@@ -1043,6 +1043,51 @@ fn preflight(tariff: &Tariff, session: &Chargeable) -> Vec<RatingNote> {
     notes
 }
 
+/// Every value in a tariff at which the answer to "which element applies" can
+/// change.
+struct Thresholds {
+    energy: Vec<Decimal>,
+    duration: Vec<u64>,
+    clock: Vec<time::Time>,
+    date: Vec<time::Date>,
+}
+
+impl Thresholds {
+    /// Gather them once, across every element.
+    fn of(tariff: &Tariff) -> Self {
+        let mut out = Self {
+            energy: Vec::new(),
+            duration: Vec::new(),
+            clock: Vec::new(),
+            date: Vec::new(),
+        };
+        for element in &tariff.elements {
+            let r = &element.restrictions;
+            out.energy.extend(r.min_kwh.into_iter().chain(r.max_kwh));
+            out.duration
+                .extend(r.min_duration_s.into_iter().chain(r.max_duration_s));
+            out.clock.extend(r.start_time.into_iter().chain(r.end_time));
+            out.date.extend(r.start_date.into_iter().chain(r.end_date));
+            // A weekday restriction changes which element applies at **local
+            // midnight**, on every day the period spans — and unlike a
+            // `start_date`, it names no date to cut at. Without this a session
+            // running from Friday 23:00 to Saturday 01:00 in one period is
+            // priced for two hours at Friday's rate under a weekday tariff —
+            // the one threshold with no value in the tariff to cut at, and
+            // invisible, because nothing fails to match.
+            //
+            // Midnight is a `start_time`-shaped cut rather than a date-shaped
+            // one, so it goes in with the clock thresholds and the day walk in
+            // `clock_cut_offsets` puts one at the start of every day the period
+            // touches.
+            if !r.days_of_week.is_empty() {
+                out.clock.push(time::Time::MIDNIGHT);
+            }
+        }
+        out
+    }
+}
+
 /// Cut every period wherever a tariff threshold falls inside it.
 ///
 /// # Why this is not the caller's job
@@ -1061,11 +1106,13 @@ fn preflight(tariff: &Tariff, session: &Chargeable) -> Vec<RatingNote> {
 ///
 /// **The wall clock is one of them**, and in this market the common one: "0.30
 /// from 22:00" restricts *when the period is* and fails the same way judged only
-/// at a period's start. [`Restrictions::start_time`], [`Restrictions::end_time`]
-/// and the midnight a [`Restrictions::start_date`] or [`Restrictions::end_date`]
-/// turns on cut on equal footing with the kilowatt-hours — read off the local
-/// clock the period carries, because that is the frame
-/// [`matches_restrictions`] judges them in, and on every day the period spans.
+/// at a period's start. [`Restrictions::start_time`], [`Restrictions::end_time`],
+/// the midnight a [`Restrictions::start_date`] or [`Restrictions::end_date`]
+/// turns on, and — because a weekday changes at midnight and names no date to
+/// cut at — every local midnight a [`Restrictions::days_of_week`] period spans,
+/// all cut on equal footing with the kilowatt-hours. Read off the local clock
+/// the period carries, because that is the frame [`matches_restrictions`] judges
+/// them in, and on every day the period spans.
 ///
 /// # What is divided exactly, and what is divided proportionally
 ///
@@ -1083,17 +1130,12 @@ fn preflight(tariff: &Tariff, session: &Chargeable) -> Vec<RatingNote> {
 /// per-minute fee, and the alternative — sub-second period boundaries — would
 /// lose whole seconds to `whole_seconds()` and stop the durations summing.
 fn subdivide_at_thresholds(tariff: &Tariff, periods: &[Period]) -> Vec<Period> {
-    let mut energy_thresholds: Vec<Decimal> = Vec::new();
-    let mut duration_thresholds: Vec<u64> = Vec::new();
-    let mut clock_thresholds: Vec<time::Time> = Vec::new();
-    let mut date_thresholds: Vec<time::Date> = Vec::new();
-    for element in &tariff.elements {
-        let r = &element.restrictions;
-        energy_thresholds.extend(r.min_kwh.into_iter().chain(r.max_kwh));
-        duration_thresholds.extend(r.min_duration_s.into_iter().chain(r.max_duration_s));
-        clock_thresholds.extend(r.start_time.into_iter().chain(r.end_time));
-        date_thresholds.extend(r.start_date.into_iter().chain(r.end_date));
-    }
+    let Thresholds {
+        energy: energy_thresholds,
+        duration: duration_thresholds,
+        clock: clock_thresholds,
+        date: date_thresholds,
+    } = Thresholds::of(tariff);
     if energy_thresholds.is_empty()
         && duration_thresholds.is_empty()
         && clock_thresholds.is_empty()
@@ -1371,21 +1413,16 @@ fn accumulate(into: &mut Vec<Accumulator>, component: &PriceComponent, quantity:
 /// own VAT.
 ///
 /// So with no lines the rate comes from the tariff's own components, when they
-/// agree on one. When they do not, there is genuinely no answer and `None` is
-/// the honest one — a tariff mixing rates and charging a minimum for nothing
-/// has a question for its author, not for this function.
+/// agree on one — [`Tariff::vat_basis`], which is the same question the OCPI and
+/// OCPP crossings ask, asked through the same function rather than reimplemented
+/// here. Where the components state nothing, or disagree, there is no rate
+/// anybody wrote down and `None` is the honest answer: a tariff mixing rates and
+/// charging a minimum for nothing has a question for its author.
 fn adjustment_vat(tariff: &Tariff, lines: &[Line]) -> Option<Decimal> {
     if let Some(largest) = lines.iter().max_by_key(|l| l.amount.abs()) {
         return largest.vat;
     }
-
-    let mut rates = tariff
-        .elements
-        .iter()
-        .flat_map(|e| e.components.iter())
-        .map(|c| c.vat);
-    let first = rates.next()?;
-    rates.all(|rate| rate == first).then_some(first).flatten()
+    tariff.vat_basis().stated()
 }
 
 /// Apply the tariff's minimum and maximum to the line total.
@@ -1621,10 +1658,9 @@ mod tests {
 
     #[test]
     fn a_tiered_tariff_charges_each_tier_at_its_own_price() {
-        // The correction this rewrite exists for. "The first 10 kWh at 0.39,
-        // the rest at 0.59" — rated against the session total, a 30 kWh session
-        // would be repriced entirely at 0.59, including the ten kilowatt-hours
-        // the driver was quoted at 0.39.
+        // "The first 10 kWh at 0.39, the rest at 0.59" — rated against the
+        // session total, a 30 kWh session would be repriced entirely at 0.59,
+        // including the ten kilowatt-hours the driver was quoted at 0.39.
         let t = tiered(vec![
             TariffElement {
                 components: vec![PriceComponent::new(Dimension::Energy, dec("0.39"))],
@@ -2487,6 +2523,67 @@ mod tests {
     }
 
     #[test]
+    fn a_session_crossing_midnight_is_cut_at_the_weekday_boundary() {
+        // A weekday changes at local midnight and names no date to cut at, so
+        // a period that spans one would otherwise be priced end to end at the
+        // day it started in.
+        // Friday 23:00 to Saturday 01:00 is one hour of each.
+        let weekend = TariffElement {
+            components: vec![PriceComponent::new(Dimension::Energy, dec("0.29"))],
+            restrictions: Restrictions {
+                days_of_week: vec![time::Weekday::Saturday, time::Weekday::Sunday],
+                ..Restrictions::default()
+            },
+        };
+        let t = tiered(vec![
+            weekend,
+            TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]),
+        ]);
+
+        // 2026-01-02 is a Friday. One period, two hours, twenty kilowatt-hours.
+        let overnight = Chargeable::energy_only(
+            kwh("20"),
+            datetime!(2026-01-02 23:00 +1),
+            datetime!(2026-01-03 01:00 +1),
+        )
+        .unwrap();
+
+        let r = rate(&t, &overnight);
+        assert_eq!(
+            r.lines.len(),
+            2,
+            "one line per side of midnight: {:?}",
+            r.lines
+        );
+        assert_eq!(r.lines[0].unit_price, dec("0.49"), "the Friday hour");
+        assert_eq!(r.lines[0].quantity, dec("10"));
+        assert_eq!(r.lines[1].unit_price, dec("0.29"), "the Saturday hour");
+        assert_eq!(r.lines[1].quantity, dec("10"));
+        // 10 × 0.49 + 10 × 0.29
+        assert_eq!(r.exact_total().amount(), dec("7.80"));
+        assert_eq!(
+            r.quantity_for(Dimension::Energy),
+            dec("20"),
+            "and the cut conserves, like every other one"
+        );
+
+        // …and the answer does not depend on how the caller sliced it.
+        let sliced = Chargeable::new(
+            (0..8)
+                .map(|i| {
+                    Period::charging(
+                        datetime!(2026-01-02 23:00 +1) + time::Duration::minutes(15 * i),
+                        datetime!(2026-01-02 23:00 +1) + time::Duration::minutes(15 * (i + 1)),
+                        kwh("2.5"),
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(rate(&t, &sliced).exact_total().amount(), dec("7.80"));
+    }
+
+    #[test]
     fn a_period_nothing_matches_is_named_rather_than_swallowed() {
         let t = tiered(vec![TariffElement {
             components: vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
@@ -2517,8 +2614,8 @@ mod tests {
     fn one_dimension_charged_at_two_vat_rates_is_two_taxable_amounts() {
         // A tiered tariff whose tiers sit in different tax categories. Reading
         // one rate off the first line and applying it to the summed amount —
-        // which is what a per-dimension cost on the wire used to do — taxes the
-        // second tier at the first tier's rate.
+        // the shape a per-dimension cost on the wire invites — taxes the second
+        // tier at the first tier's rate.
         let t = tiered(vec![
             TariffElement {
                 components: vec![

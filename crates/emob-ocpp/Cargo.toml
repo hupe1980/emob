@@ -15,10 +15,12 @@ rust-version.workspace = true
 emob-core      = { workspace = true }
 emob-eichrecht = { workspace = true }
 emob-session   = { workspace = true }
+emob-tariff    = { workspace = true }
 ocpp-kit       = { workspace = true, features = ["std", "csms", "v1_6", "v2_0_1", "v2_1"] }
+rust_decimal   = { workspace = true }
 serde          = { workspace = true, optional = true }
 thiserror      = { workspace = true }
-time           = { workspace = true }
+time           = { workspace = true, features = ["formatting"] }
 
 [features]
 default = ["serde"]
@@ -28,12 +30,12 @@ serde = [
     "emob-core/serde",
     "emob-eichrecht/serde",
     "emob-session/serde",
+    "emob-tariff/serde",
     "time/serde-well-known",
 ]
 
 
 [dev-dependencies]
-emob-cdr    = { workspace = true }
-emob-tariff = { workspace = true }
+emob-cdr     = { workspace = true }
 rust_decimal = { workspace = true }
 serde_json   = { workspace = true }

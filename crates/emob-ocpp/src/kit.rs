@@ -193,8 +193,8 @@ mod tests {
 
     #[test]
     fn the_signed_value_reaches_this_crate_through_the_funnel() {
-        // What used to need three version-specific extractions: `DomainEvent`
-        // carries the signed values now, so this is a `match`.
+        // One path for all three generations: `DomainEvent` carries the
+        // signed values, so lifting one out is a `match`.
         let observed = observe_v16(&oca_stop());
         let event = event_from(&observed.event).expect("a transaction event");
 

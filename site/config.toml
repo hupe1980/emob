@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/emob"
 title = "emob"
-description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, a quarter-hour split that conserves energy exactly, AFIR and Eichrecht as executable cited rules, and no binary float anywhere near the money."
+description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, a quarter-hour split that conserves energy exactly, one tariff that reaches the driver, the roaming partner and the national access point as one number, AFIR and Eichrecht as executable cited rules, and no binary float anywhere near the money."
 default_language = "en"
 compile_sass = false
 build_search_index = false
@@ -25,12 +25,11 @@ tagline    = "open-source charging operations for the European market"
 #   stat_floats       cargo xtask no-floats
 #   stat_curves       emob_eichrecht::ocmf::verify::KeyType
 #
-# A number here that no longer matches its source is worse than no number, so
-# they are checked whenever the architecture page's crate table changes.
-stat_obligations = "33"
-stat_tests       = "579"
+# A number here that no longer matches its source is worse than no number.
+stat_obligations = "40"
+stat_tests       = "662"
 stat_crates      = "9"
 stat_floats      = "0"
 stat_curves      = "4"
 
-keywords = "EV charging, CPO, EMP, eMSP, OCPP, OCPI, OICP, ISO 15118, OCMF, Eichrecht, AFIR, Plug and Charge, roaming, Rust, charging station management"
+keywords = "EV charging, CPO, EMP, eMSP, CSMS, OCPP 2.1, OCPI 2.3.0, OICP, ISO 15118, OCMF, Eichrecht, AFIR, NIS2, Cyber Resilience Act, DATEX II, Plug and Charge, roaming, CDR, Rust, charging station management"

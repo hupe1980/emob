@@ -15,12 +15,14 @@ emob-core      = { workspace = true }
 emob-eichrecht = { workspace = true }
 emob-ocpp      = { workspace = true }
 emob-session   = { workspace = true }
+emob-service   = { workspace = true }
 emob-tariff    = { workspace = true }
 ocpp-kit       = { workspace = true, features = ["std", "tokio", "csms", "v1_6", "v2_0_1", "v2_1"] }
 anyhow         = { workspace = true }
 rust_decimal   = { workspace = true }
 time           = { workspace = true }
-tokio          = { version = "1.45", features = ["rt-multi-thread", "macros", "signal"] }
+tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing        = { workspace = true }
 
 [dev-dependencies]
 ocpp-kit     = { workspace = true, features = ["std", "tokio", "csms", "station", "v1_6", "v2_0_1", "v2_1"] }

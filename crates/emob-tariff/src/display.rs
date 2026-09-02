@@ -308,9 +308,50 @@ const fn display_unit(dimension: Dimension) -> &'static str {
 /// Convert a stored price into its display unit.
 pub(crate) fn price_in_display_unit(dimension: Dimension, price: Decimal) -> Decimal {
     match dimension {
-        Dimension::Time | Dimension::ParkingTime => price / Decimal::from(60),
+        Dimension::Time | Dimension::ParkingTime => price / MINUTES_PER_HOUR,
         Dimension::Energy | Dimension::Flat => price,
     }
+}
+
+/// Minutes in an hour.
+const MINUTES_PER_HOUR: Decimal = Decimal::from_parts(60, 0, 0, false, 0);
+
+/// An hourly price as the **exact** price per minute, or `None` when there is
+/// none.
+///
+/// # Why this is a `Option` rather than a division
+///
+/// `[AFIR Art. 5(4)]` asks for a price per minute; OCPI carries a price per
+/// hour; `[OCPP 2.1 Part 2, TariffTimePrice]` carries `priceMinute` and so
+/// makes the conversion a *wire* value rather than a display one. A decimal
+/// terminates only when its denominator's prime factors are two and five, and
+/// sixty carries a three — so an ordinary occupancy fee of €2.50 an hour is
+/// €0.041666… a minute and has no exact decimal spelling at all.
+///
+/// Rounding it states a price the tariff does not charge, which is the
+/// display-versus-bill drift this crate exists to make unrepresentable. So the
+/// question has one answer or none, and every caller that needs the figure —
+/// the display, the AFIR conformance check, and the OCPP 2.1 tariff crossing in
+/// `emob-ocpp` — asks it here rather than dividing and hoping. €6.00 an hour is
+/// €0.10 a minute; €2.50 an hour is not a price this market can quote.
+///
+/// ```
+/// use emob_tariff::price_per_minute;
+/// use rust_decimal::Decimal;
+/// # use std::str::FromStr;
+/// assert_eq!(
+///     price_per_minute(Decimal::from_str("6.00")?),
+///     Some(Decimal::from_str("0.10")?)
+/// );
+/// assert_eq!(price_per_minute(Decimal::from_str("2.50")?), None);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn price_per_minute(per_hour: Decimal) -> Option<Decimal> {
+    // The division is done and undone rather than reasoned about in factors: a
+    // quotient the arithmetic had to truncate does not multiply back.
+    let per_minute = per_hour / MINUTES_PER_HOUR;
+    (per_minute * MINUTES_PER_HOUR == per_hour).then_some(per_minute)
 }
 
 #[cfg(test)]

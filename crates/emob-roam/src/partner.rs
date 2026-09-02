@@ -33,7 +33,7 @@
 //! everything, and [`PartnerRegistry::route`] prefers a direct peer wherever
 //! it has one.
 
-use emob_core::{ContractId, PartyId};
+use emob_core::{ContractId, PartyId, Role};
 
 /// Which OCPI version a partner speaks.
 ///
@@ -65,17 +65,6 @@ impl core::fmt::Display for OcpiVersion {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-/// What a party does on the wire.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Role {
-    /// Operates charge points. Sends CDRs.
-    Cpo,
-    /// Holds driver contracts. Receives CDRs and pays against them.
-    Emsp,
-    /// Routes for others.
-    Hub,
 }
 
 /// How a record reaches the party that will pay it.

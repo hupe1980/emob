@@ -44,6 +44,11 @@ time         = { workspace = true }
 
 [dev-dependencies]
 emob-eichrecht = { workspace = true }
+# Dev only, and only for `tests/one_price_three_audiences.rs`: the claim that
+# one tariff reaches the driver, the partner and the national access point as
+# one number cannot be checked from inside any one of the three crates that
+# carry it.
+emob-ocpp      = { workspace = true }
 hex            = { workspace = true }
 p256           = { workspace = true }
 serde_json     = { workspace = true }

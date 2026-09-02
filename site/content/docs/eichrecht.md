@@ -2,6 +2,9 @@
 title = "The Eichrecht chain"
 weight = 2
 description = "How a signed meter value becomes an invoice line: OCMF parsed without destroying its signed bytes, four questions kept apart, and the reason a valid signature is not enough."
+
+[extra]
+nav = "Eichrecht"
 +++
 
 # The Eichrecht chain ✅
@@ -189,6 +192,13 @@ The partition is enforced rather than assumed: `insert` refuses a window that
 overlaps one the component already holds — two unbounded keys for one meter being
 the ordinary form of the mistake.
 
+It also refuses an **empty** one. A window with `until <= from` — a transcribed
+date, two fields swapped in a provisioning run — covers no instant at all, and
+the overlap sweep cannot see it, because an empty interval overlaps nothing. It
+would register cleanly, verify nothing, and leave the component reading as
+unprovisioned at every instant — which is indistinguishable from a component
+nobody registered, in the one place an operator goes to ask.
+
 A *gap* between two windows stays a gap. A record from a month with no
 registered key fails to resolve rather than falling through to a neighbouring
 key, because inventing a binding is how a forged record verifies.
@@ -370,7 +380,7 @@ and degrades one session into N single-record transactions the driver cannot
 pair — the exact failure `[MessEG §33]` is about, produced by the code written to
 prevent it. OCMF has no transaction number of its own, so `to_xml` derives one
 from the counter the transaction opened at, and `to_xml_with_transaction_id`
-takes the operator's own when there is one (D74).
+takes the operator's own when there is one.
 
 The `context` label follows the same reading. It is a statement about the whole
 data set, so a record carrying `TX=B` **and** `TX=E` — the `MR` configuration,
@@ -414,19 +424,21 @@ assert_eq!(evidence.billable_energy().unwrap().to_string(), "0.268 kWh");
 assert!(!evidence.is_billable_for_time());   // its clock is only informative
 ```
 
-Three of the four cost a defect:
+Each one exercises something a self-signed fixture cannot reach:
 
-| Record | What it broke |
+| Record | What only a real meter produces |
 |---|---|
-| eBZ LD3 (secp192r1) | a curve the build refused, and a DER wrapper it rejected — both below (D34–D35) |
-| DZG DVH4013 / Nano (secp256k1) | a signature with `s` in the **high half** of the curve order, which `k256` refuses on Bitcoin's malleability rule and plain ECDSA allows (D82) |
-| DZG + TwinCharger Pro | `RV` written as a **quoted string**, padded with spaces (D83) |
-| TwinCharger Pro | `FV` and `CT` written as **numbers** where the tables say String (D83) |
+| eBZ LD3 (secp192r1) | a curve the default toolbox does not carry, and a DER wrapper a strict reader rejects — both below |
+| DZG DVH4013 / Nano (secp256k1) | a signature with `s` in the **high half** of the curve order, which the secp256k1 library refuses on Bitcoin's malleability rule and plain ECDSA allows |
+| DZG + TwinCharger Pro | `RV` written as a **quoted string**, padded with spaces |
+| TwinCharger Pro | `FV` and `CT` written as **numbers** where the tables say String |
 
 The secp256k1 case is the sharpest. A self-signed fixture uses a signer that
 naturally produces low `s`, so no amount of self-signed corpus contains the
-high-`s` case — and the failure it produces is `SignatureMismatch`, the
-diagnostic for tampering, on a meter that has done nothing wrong.
+high-`s` case — and the failure it produces is a signature mismatch, the
+diagnostic for **tampering**, on a meter that has done nothing wrong. A verifier
+that reports it has told an operator to investigate a fraud that did not happen,
+and will keep doing so for every session that meter signs.
 
 Three defects from four records is not a rate that suggests the list is
 finished, which is why every format this workspace claims to read carries at

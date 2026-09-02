@@ -12,6 +12,11 @@ operating stack.
 cargo add emob-poi
 ```
 
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[Locations and the national access point](https://hupe1980.github.io/emob/docs/locations/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-poi).
+
+
 ## One number, two duties
 
 `[AFIR Art. 5(2)]` makes the price a driver is shown before a session the price
@@ -38,8 +43,8 @@ let (rate, notes) = emob_poi::rate::publish(&tariff, "rate-1");
 ## What the profile cannot say, and is told to say anyway
 
 `[DATEX-II-Profil Tab. A.116]` offers six price types: `basePrice`, `flatRate`,
-`free`, `other`, `pricePerKWh`, `pricePerMinute`. Two things follow, and both
-are reported rather than papered over.
+`free`, `other`, `pricePerKWh`, `pricePerMinute`. Three things follow, and all
+of them are reported rather than papered over.
 
 **There is no per-hour price type.** A tariff is written and displayed per hour;
 the profile only counts minutes. The conversion is a division by sixty, and
@@ -54,6 +59,15 @@ above. The profile's only hook for it is `EnergyRate.combinationWithParkingFee`
 parking costs. The one surcharge the Regulation names cannot be published as a
 number under the profile the same Regulation requires. It goes out as `other`
 with a sentence, and the note is what keeps the gap from being forgotten.
+
+**And a delivery fee cannot say whether tax is in it.** Every `EnergyPrice` in
+the profile carries `taxIncluded` and `taxRate`; `EnergyRate`'s
+`minimumDeliveryFee` and `maximumDeliveryFee` are a bare `AmountOfMoney` with
+neither. So the one figure on a rate that is a session **total** rather than a
+unit price is the one a consumer cannot qualify — and reading a net minimum as
+gross is out by the whole VAT rate, on the number a driver comparing two
+operators looks at first. The fee is published in the basis the tariff states,
+and a note says which that is.
 
 ## The register is upstream of the feed
 

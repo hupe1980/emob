@@ -347,6 +347,10 @@ pub struct CdrBuilder<'a> {
     /// read off the session's state machine rather than guessed from the
     /// energy.
     charging: Vec<bool>,
+    /// The parts of the session window the meter series does not cover, already
+    /// cut at the settlement grid and at the session's own state changes, with
+    /// each one's `charging` read off the same state machine.
+    unmetered: Vec<ChargingPeriod>,
     clock: ClockResolution,
     evidence: Option<EvidenceRef>,
     tariff: Option<&'a Tariff>,
@@ -412,6 +416,26 @@ impl<'a> CdrBuilder<'a> {
             charging.push(!suspended);
         }
 
+        // The meter series spans the readings; the session spans the parking
+        // space. A car that finishes charging at 11:00 and is collected at
+        // 13:00 leaves two hours the split knows nothing about, and those two
+        // hours are exactly what `[AFIR Art. 5(4)]`'s occupancy fee is for.
+        //
+        // The gap is filled **here**, where the session is still in scope,
+        // because its `charging` flag is the same stated fact as every other
+        // period's and has to come from the same place. Filled in `build()` it
+        // could only be derived — from the absence of readings — and the flag
+        // this record carries is the one the article prices, so a gap the
+        // operator's own state machine calls charging would have been billed as
+        // occupancy on the strength of a meter that said nothing at all.
+        let metered_from = split.slots.first().map_or(ended_at, |slot| slot.from);
+        let metered_to = split
+            .slots
+            .last()
+            .map_or(session.started_at, |slot| slot.to);
+        let mut unmetered = unmetered_periods(session, session.started_at, metered_from);
+        unmetered.extend(unmetered_periods(session, metered_to, ended_at));
+
         Ok(Self {
             key: None,
             session_id: session.id.clone(),
@@ -421,6 +445,7 @@ impl<'a> CdrBuilder<'a> {
             auth_path: session.authorization.path,
             split,
             charging,
+            unmetered,
             clock: ClockResolution::default(),
             evidence: None,
             tariff: None,
@@ -583,20 +608,12 @@ impl<'a> CdrBuilder<'a> {
             })
             .collect();
 
-        // The meter series spans the readings; the session spans the parking
-        // space. A car that finishes charging at 11:00 and is collected at
-        // 13:00 leaves two hours the split knows nothing about — and those two
-        // hours are exactly what `[AFIR Art. 5(4)]`'s occupancy fee is for. A
-        // record that stops at the last reading cannot bill them, and a record
-        // that stretches the last reading over them bills energy that did not
-        // flow. So the gap is filled with periods carrying no energy, marked
-        // interpolated because the zero is an assumption rather than a
-        // measurement.
-        let metered_from = periods.first().map_or(ended_at, |p| p.start);
-        let metered_to = periods.last().map_or(started_at, |p| p.end);
-        let mut occupancy = occupancy_periods(started_at, metered_from);
-        occupancy.extend(occupancy_periods(metered_to, ended_at));
-        periods.extend(occupancy);
+        // …and the parts of the window the meter said nothing about, worked out
+        // in `from_session` where the session's own history was still in scope.
+        // A record that stops at the last reading cannot bill the two hours a
+        // car sat there after finishing, and one that stretches the last reading
+        // over them bills energy that did not flow.
+        periods.extend(self.unmetered);
         periods.sort_by_key(|p| p.start);
 
         let mut cdr = Cdr {
@@ -718,36 +735,79 @@ fn charged_durations(rated: &Rated) -> Vec<(Dimension, time::Duration)> {
         .collect()
 }
 
-/// The quarter hours between two instants, as periods that moved no energy.
+/// The part of a session window the meter series does not cover, as periods
+/// that moved no energy.
 ///
-/// Split at the settlement boundaries like everything else, so an occupancy
-/// interval that crosses 11:15 is two periods and the market side sees the same
-/// grid the energy did.
-fn occupancy_periods(from: time::OffsetDateTime, to: time::OffsetDateTime) -> Vec<ChargingPeriod> {
+/// Cut at the settlement boundaries like everything else, so an interval that
+/// crosses 11:15 is two periods and the market side sees the same grid the
+/// energy did — **and** at every state change the session recorded inside it,
+/// so each piece has one answer to "was the vehicle charging" rather than a
+/// quarter hour that held two.
+///
+/// # The flag is read, not assumed
+///
+/// It is tempting to call unmetered time occupancy by definition: no readings,
+/// no energy, so the vehicle was sitting there — which is what
+/// `[AFIR Art. 5(4)]`'s fee prices. But "the meter said nothing" and "the
+/// vehicle was not charging" are different claims, and only the second is one
+/// the operator's own records make. A station that stops sending `MeterValues`
+/// while its session state machine still says `Charging` produces a gap that
+/// would be billed per minute as occupancy on the strength of an absence — the
+/// same shape as inferring the flag from `energy == 0`, which this crate refuses
+/// one field away.
+///
+/// So the state machine answers — and it is asked
+/// [`Session::charging_throughout`] rather than the negation of
+/// `suspended_throughout`, because with no reading to stand as evidence the
+/// burden runs the other way: a piece is charging when the operator's own record
+/// says it was, and occupancy otherwise. `Pending` and `Ended` are neither
+/// charging nor suspended, and both are exactly the "connected and not charging"
+/// the fee is for. The energy is `ZERO` and [`Provenance::Interpolated`] either
+/// way, because that zero *is* assumed from the absence of readings.
+fn unmetered_periods(
+    session: &Session,
+    from: time::OffsetDateTime,
+    to: time::OffsetDateTime,
+) -> Vec<ChargingPeriod> {
     let mut periods = Vec::new();
     if to <= from {
         return periods;
     }
+
+    // The grid boundaries and the session's own transitions, together, in one
+    // ascending list — the same construction `emob_session::split` uses, for
+    // the same reason: a boundary that changes the answer has to be a cut.
+    let mut cuts: Vec<time::OffsetDateTime> = Vec::new();
     let mut slot = QuarterHour::containing(from);
     while slot.start() < to {
-        let (start, end) = (slot.start().max(from), slot.end().min(to));
-        // A slot the gap only touches at its edge contributes nothing.
+        if slot.start() > from {
+            cuts.push(slot.start());
+        }
+        slot = slot.next();
+    }
+    cuts.extend(
+        session
+            .history()
+            .iter()
+            .map(|change| change.at)
+            .filter(|at| *at > from && *at < to),
+    );
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    let mut start = from;
+    for end in cuts.into_iter().chain(core::iter::once(to)) {
         if end > start {
             periods.push(ChargingPeriod {
-                quarter_hour: slot,
+                quarter_hour: QuarterHour::containing(start),
                 start,
                 end,
                 energy: Energy::ZERO,
-                // Time the meter said nothing about is time the vehicle was
-                // connected and not charging — which is exactly what an
-                // occupancy fee prices `[AFIR Art. 5(4)]`.
-                charging: false,
-                // The zero is assumed from the absence of readings, not
-                // measured.
+                charging: session.charging_throughout(start, end),
                 provenance: Provenance::Interpolated,
             });
         }
-        slot = slot.next();
+        start = end;
     }
     periods
 }
@@ -1165,7 +1225,7 @@ mod tests {
 
     #[test]
     fn a_taper_is_not_an_occupancy_even_when_it_moved_nothing() {
-        // The distinction that used to be guessed from `energy == 0`. A car at
+        // The distinction a guess from `energy == 0` gets wrong. A car at
         // 100 % state of charge can leave a quarter hour at exactly 0.000 kWh
         // while the session's own state machine still says Charging — and
         // billing that quarter hour at the occupancy rate charges a driver for
@@ -1409,19 +1469,126 @@ mod tests {
     }
 
     #[test]
+    fn a_gap_the_session_calls_charging_is_not_billed_as_occupancy() {
+        // The mirror of `a_taper_is_not_an_occupancy`, one field along. A
+        // station that goes quiet — a dropped `MeterValues`, a WAN outage —
+        // while its own session state machine still says `Charging` leaves a
+        // stretch of the window nothing measured. Reading that silence as
+        // "connected and not charging" bills the driver an occupancy fee per
+        // minute `[AFIR Art. 5(4)]` for time the operator's own record says the
+        // car was taking energy, and no field on the record would show it.
+        //
+        // The flag is a stated fact everywhere else on this type. It is one
+        // here too.
+        let mut s = Session::open(
+            "s-quiet".parse().unwrap(),
+            "DE*AB7*E840*6487".parse().unwrap(),
+            Authorization::ad_hoc(),
+            at(0),
+        );
+        s.transition_to(emob_session::SessionState::Charging, at(0))
+            .unwrap();
+        s.attach_series(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    MeterReading::new(
+                        at(0),
+                        kwh("100.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionBegin,
+                    ),
+                    MeterReading::new(
+                        at(30),
+                        kwh("110.000"),
+                        Direction::Import,
+                        ReadingContext::SampleClock,
+                    ),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        // Suspended at 10:50, twenty minutes after the meter last spoke, and
+        // collected at 11:05.
+        s.transition_to(emob_session::SessionState::Suspended, at(50))
+            .unwrap();
+        s.end(at(65), EndReason::Local).unwrap();
+
+        let occupancy = Tariff::simple(
+            "ad-hoc-dc".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            vec![
+                PriceComponent::new(Dimension::Energy, dec("0.49")),
+                PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
+            ],
+        );
+
+        let cdr = CdrBuilder::from_session(&s, Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-1".parse().unwrap())
+            .rated_with(&occupancy)
+            .build()
+            .unwrap();
+
+        // 10:30–10:45 and 10:45–10:50 are unmetered and the session says
+        // charging; 10:50–11:00 and 11:00–11:05 are unmetered and suspended.
+        let unmetered: Vec<(i64, i64, bool)> = cdr
+            .periods
+            .iter()
+            .filter(|p| p.start >= at(30))
+            .map(|p| {
+                (
+                    (p.start - at(0)).whole_minutes(),
+                    (p.end - at(0)).whole_minutes(),
+                    p.charging,
+                )
+            })
+            .collect();
+        assert_eq!(
+            unmetered,
+            vec![
+                (30, 45, true),
+                (45, 50, true),
+                (50, 60, false),
+                (60, 65, false)
+            ],
+            "the cut lands on the state change as well as on the grid"
+        );
+
+        // Fifteen minutes of occupancy, not thirty-five: the twenty minutes the
+        // session called charging are not a fee.
+        let rated = &cdr.cost.as_ref().unwrap().rated;
+        assert_eq!(rated.base_quantity_for(Dimension::ParkingTime), dec("900"));
+        assert_eq!(rated.amount_for(Dimension::ParkingTime), Some(dec("1.50")));
+        assert!(cdr.conserves());
+        assert!(
+            crate::validate(&cdr).is_settleable(),
+            "{:?}",
+            crate::validate(&cdr).findings
+        );
+    }
+
+    #[test]
     fn a_session_wider_than_its_readings_claims_no_measurement_it_does_not_have() {
         // The station authorises at 10:00 and sends its first meter value at
         // 10:20. Clamping the settlement slot to the session window would make
         // the first period claim 10:15–10:30 for energy that was only measured
         // from 10:20, and would leave the twenty minutes before it unbilled as
         // occupancy. The slot carries its own window instead.
+        //
+        // The session stays `Pending` until the transaction's register opens,
+        // which is what "authorised, and no energy has moved" means — so those
+        // twenty minutes are connected-and-not-charging by the operator's own
+        // record rather than by the meter's silence.
         let mut s = Session::open(
             "s-late".parse().unwrap(),
             "DE*AB7*E840*6487".parse().unwrap(),
             Authorization::ad_hoc(),
             at(0),
         );
-        s.transition_to(emob_session::SessionState::Charging, at(0))
+        s.transition_to(emob_session::SessionState::Charging, at(20))
             .unwrap();
         s.attach_series(
             MeterSeries::new(

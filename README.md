@@ -7,17 +7,29 @@ value survives in, and the driver contract all of it turns into an invoice.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-> 🚧 **Status: early.** Nine domain crates are real, tested and green —
+📖 **[Documentation](https://hupe1980.github.io/emob/docs/)** ·
+[Getting started](https://hupe1980.github.io/emob/docs/getting-started/) ·
+[The Eichrecht chain](https://hupe1980.github.io/emob/docs/eichrecht/) ·
+[Architecture](https://hupe1980.github.io/emob/docs/architecture/)
+
+> 🚧 **Status: early.** Twelve domain crates are real, tested and green —
 > [`emob-core`](crates/emob-core), [`emob-eichrecht`](crates/emob-eichrecht),
 > [`emob-session`](crates/emob-session), [`emob-cdr`](crates/emob-cdr),
 > [`emob-tariff`](crates/emob-tariff), [`emob-ocpp`](crates/emob-ocpp),
-> [`emob-poi`](crates/emob-poi), [`emob-roam`](crates/emob-roam) and
-> [`emob-sim`](crates/emob-sim) — with **621 tests**, an end-to-end test that
-> drives the Open Charge Alliance's own OCPP example message from the wire to a
-> taxable amount and back out again as a file the driver's verifier reads,
-> records from **five** vendors this workspace did not write, one session that
-> settles at the same money over three roaming paths, and a
-> **hundred-station fleet run** that reconciles exactly.
+> [`emob-poi`](crates/emob-poi), [`emob-roam`](crates/emob-roam),
+> [`emob-billing`](crates/emob-billing), [`emob-thg`](crates/emob-thg),
+> [`emob-service`](crates/emob-service)
+> and [`emob-sim`](crates/emob-sim) — with two daemons on top of them and
+> **782 tests**, an end-to-end test that drives the Open Charge Alliance's own
+> OCPP example message from the wire to a taxable amount and back out again as a
+> file the driver's verifier reads, records from **five** real meters this
+> workspace did not write, one session that settles at the same money over three
+> roaming paths, one price that reads the same to the driver at the point, the
+> roaming partner and the national access point, a month that closes from the
+> meter to a validated e-invoice, a SEPA collection and a balanced set of
+> postings, a year that files its THG-Quote notification with every ineligible
+> point refused by name, and a **hundred-station fleet run** that reconciles
+> exactly.
 > Everything else is designed and not yet built, and this README marks which is
 > which rather than blurring the two.
 
@@ -35,16 +47,17 @@ that already exist as siblings rather than re-implemented: [`ocpp-kit`],
 
 ```mermaid
 flowchart LR
-    EV["vehicle"] --> CS["station"]
-    CS -->|OCPP| SES["session"]
+    EV["vehicle"] --> CS["charge point"]
+    CS -->|"OCPP 1.6 / 2.0.1 / 2.1"| SES["session"]
     CS -->|"signed OCMF"| EICH["Eichrecht<br/>chain"]
     EICH -->|"verified, or a reason"| CDR
     SES -->|"quarter-hour split"| CDR["CDR<br/>energy + price"]
     TAR["tariff"] --> CDR
-    TAR --> DISP["price shown"]
-    CDR --> ROAM["roaming<br/>OCPI"]
+    CDR -->|OCPI| ROAM["roaming<br/>partner"]
     CDR --> INV["invoice"]
-    RULES["obligation<br/>calendar"] -.->|dated · cited| CS
+    TAR -->|"OCPP 2.1"| CS
+    TAR -->|"DATEX II"| NAP["national<br/>access point"]
+    RULES["obligation<br/>calendar"] -.->|"dated · cited"| CS
     RULES -.-> TAR
 ```
 
@@ -59,7 +72,7 @@ Every arrow is a place a kilowatt-hour can quietly become the wrong number.
 [`iso15118`]: https://github.com/hupe1980/iso15118
 [`eebus`]: https://github.com/hupe1980/eebus
 
-## The twenty properties that decide quality
+## The twenty-seven properties that decide quality
 
 ### A value that does not verify does not bill
 
@@ -296,8 +309,9 @@ for finding in report.failing() {
 }
 ```
 
-Thirty-three duties from AFIR, Delegated Regulation (EU) 2025/656, LSV 2026,
-MessEG/PTB-A and the THG-Quote preconditions, each dated, cited and executable.
+Forty duties from AFIR, Delegated Regulation (EU) 2025/656, LSV 2026,
+MessEG/PTB-A, the THG-Quote's four preconditions and the NIS2/CRA cybersecurity
+regime, each dated, cited and executable.
 Two of them are paragraphs of Article 5 that compliance models simply do not
 carry: **5(3)**, which the Regulation names *by number* as one of the two
 paragraphs authorities must monitor `[AFIR Art. 5(6)]`, and **5(11)**, which
@@ -331,6 +345,53 @@ assert_eq!(assess_provider(&provider, today).verdict(), Verdict::Failing);
 An operator whose every charge point is faultless can still be in breach as a
 provider — and in Germany, where one company usually wears both hats, that is
 the half nobody checks.
+
+### …and the law binds a third subject nobody models
+
+`[NIS2 Anh. I]` names this industry in the Energy sector by its role, in as many
+words: *operators of a recharging point responsible for the management and
+operation of a recharging point which provides a recharging service to end
+users, including in the name and on behalf of a mobility service provider*.
+Precisely the operator whose points the profile above describes — and **none of
+what it asks is a fact about a point**. Size, governance, whether an early
+warning can leave the building inside a day: those are facts about the
+undertaking.
+
+```rust
+let report = assess_undertaking(&operator, date!(2026-09-01));
+// [NIS2 Art. 21(2)]  close the measures RiskManagement::missing() names
+// [NIS2 Art. 20(2)]  train the management body, and offer the same regularly
+//                    to all employees
+```
+
+Seven duties: five from NIS2 — registration, the ten risk-management measures,
+the 24 h early warning, the management body's approval and its training — and
+two from the Cyber Resilience Act, which bind only an undertaking that places a
+product with digital elements on the market. The ten measures are a
+**conjunction**, because the article says the measures "shall include at least
+the following": nine of ten is not ninety per cent of a duty, and
+`RiskManagement::missing()` names the gaps rather than scoring them.
+
+Two things in that regime are easy to get wrong and both are tested:
+
+**The financial half of the size test is an `and`.** `[NIS2 Art. 2(1)]` reaches
+an entity that qualifies as medium-sized under Recommendation 2003/361/EC or
+exceeds those ceilings, and the Recommendation defines an SME as *fewer than 250
+staff **and** (turnover ≤ €50 M **and/or** balance sheet ≤ €43 M)*. Negated, the
+financial half becomes a conjunction — so an asset-light operator turning over
+€60 M on a €20 M balance sheet does **not** exceed the ceilings. Every secondary
+source checked writes "250 employees or €50 million turnover" and drops the
+balance-sheet conjunct, which puts that operator in a class it is not in.
+
+**A directive binds from the day the Member State transposed it.** `[NIS2 Art.
+41]` told Member States to apply the rules from 18.10.2024; a directive binds
+nobody directly, and Germany's NIS2UmsuCG came into force on 06.12.2025. The
+calendar dates the NIS2 duties from the German day, because reporting a breach
+in between would name fourteen months in which no German authority could act.
+The Cyber Resilience Act beside it is a Regulation, so `[CRA Art. 71]`'s own
+dates are the dates — 11.09.2026 for the reporting duty, 11.12.2027 for the
+rest — in every Member State, with no transposition in between. Treating "the EU
+date" as one thing is how a compliance model gets both wrong.
 
 ### The quarter-hour split conserves energy exactly
 
@@ -497,6 +558,72 @@ rounding it shows a driver twenty-eight digits. Neither is a price "known to end
 users before they initiate a recharging session", so the tariff is refused and
 the remedy is in the message. €6.00 an hour is €0.10 a minute and passes.
 
+### One price, three audiences, and the screen the article regulates
+
+A CPO states its ad-hoc price to three parties, and each is a duty:
+
+| Audience | Wire | Duty |
+|---|---|---|
+| the driver, at the point, **before** starting | OCPP 2.1 `SetDefaultTariff` | `[AFIR Art. 5(4)]` |
+| the roaming partner who settles against it | OCPI 2.3.0 `Tariff` | the number two companies reconcile |
+| the national access point | DATEX II `EnergyRate` | `[AFIR Art. 20(2)(c)]` |
+
+Almost every stack computes that number three times, in three systems, and
+reconciles none of them against the invoice. The failure is asymmetric: the
+screen is read by the driver who pays, the feed by route planners, and the
+invoice by nobody until it is disputed.
+
+Here the three crossings read one `Tariff` — the value `rate()` charges with:
+
+```rust
+let ocpp = emob_ocpp::to_ocpp(&tariff, at)?;           // the charge point's screen
+let ocpi = emob_roam::ocpi::tariff::to_ocpi(&tariff, &party, at)?;   // the partner
+let (nap, _) = emob_poi::rate::publish(&tariff, "rate-1");           // the feed
+
+assert_eq!(ocpp.value.energy.unwrap().prices[0].price_kwh.to_string(), "0.59");
+assert_eq!(ocpi.value.elements[0].price_components[0].price.get(), dec("0.59"));
+assert_eq!(nap.prices[0].value, dec("0.59"));
+```
+
+**The station selects the tier the invoice is built from, by construction.**
+OCPI orders *elements* and picks, per dimension, the first whose restrictions
+match; OCPP 2.1 orders *prices* inside each dimension and picks the first whose
+conditions match. Projecting the element list per dimension, in order, is the
+projection `matching_component` already performs at rating time — so the
+crossing is a re-shaping and not a second implementation of "which price
+applies". Had the two rules differed, the honest answer would have been to
+refuse the crossing: a charge point showing a different tier from the CDR is
+worse than a charge point showing nothing.
+
+And OCPP 2.1 requires the station to **display** the tariff's own `description`,
+which is `describe().full_disclosure()` — every tier with its conditions, in the
+order the article prescribes. The disclosure duty and the rating travel in one
+object.
+
+The unit turns the €2.50-an-hour objection above into something sharper. OCPI's
+field is per hour, so there the tariff is well-formed and merely unlawful.
+**OCPP 2.1's field is `priceMinute`** — the article's own unit — so the same
+tariff has no representation at all, and the crossing refuses rather than
+writing a rounded figure the station would charge:
+
+```rust
+assert!(to_ocpi(&two_fifty_an_hour, &party, at).is_ok());     // OCPI has no objection
+assert!(emob_ocpp::to_ocpp(&two_fifty_an_hour, at).is_err()); // the station cannot state it
+```
+
+Three more losses are refusals for the same reason — **in the driver's disfavour
+and invisible in the document**: a dimension charged at two VAT rates (OCPP
+carries one `taxRates` list per dimension, so the second tier would be taxed at
+the first's), a session fee conditioned on a quantity (`TariffConditionsFixed`
+carries the wall clock and nothing else, so publishing it stripped makes the
+station charge it on *every* session), and an unevaluable restriction. What is
+merely visible — a `step_size` OCPP has no field for, a `valid_until` it has no
+field for, the residual a gross price leaves when the wire quotes net, the tiers
+past the tenth that OCPP's ten-line `description` cannot hold — is carried with
+an account. The finished document then goes through `ocpp-kit`'s own validator,
+because the bounds are a list somebody maintains and the schema is the kit's to
+own.
+
 ### Money is never a float, and scale is information
 
 Every quantity here either is money or becomes money.
@@ -526,6 +653,14 @@ otherwise make the loss invisible.
 Rounding follows the currency's own minor unit rather than a hard-coded two:
 ISO 4217 gives the yen none and the dinar three, and a total rounded to two
 decimals in yen invents a hundredth of a unit that does not exist.
+
+**Money is the one place scale belongs to the unit rather than the instrument**,
+and it is the exception that makes the rule above coherent. `round_dp` narrows a
+value that is too precise and leaves one that is not alone, so `11.90 / 1.19`
+comes back as `10` and an invoice prints `10 EUR` beside `8.44 EUR` — the same
+money, and a document that looks broken. A euro has two decimal places whatever
+arithmetic produced the figure; a kilowatt-hour's scale is a claim the meter
+made. `Money` and `Energy` are separate types for exactly that reason.
 
 ### What cannot be evaluated is not assumed open
 
@@ -842,8 +977,10 @@ The same shape catches a **price bound**. OCPI's `min_price`/`max_price` bound
 the session's cost *before taxes*, and the field is mandatory — so writing a
 gross tariff's own figure into it publishes a minimum the partner enforces a VAT
 rate too high, against the driver, out of a document this operator signed off.
-The bound is converted at the rate the tariff's components carry, and a gross
-tariff whose components carry more than one rate is refused: there is no pre-tax
+The bound is converted at the rate the tariff's components carry. Where they
+state **none** there is no tax to strip and the two figures are one number —
+which is what the rating engine has always done with an absent rate. Only where
+they state *different* rates is the bound refused: there is no single pre-tax
 figure, and inventing one is the failure.
 
 **And the record comes back.** A crossing that only goes one way makes this
@@ -910,27 +1047,225 @@ One genuinely signed session goes out over three paths — self-roaming, OCPI
 arrive verbatim and re-verify at the far end against the *receiver's* registry,
 never against the key the document carries.
 
+**And the account is one vocabulary, not three.** `Crossing<T>` and its
+pointer-addressed `Note` live in `emob-core`, beside the settlement grid, for
+the same reason that type is there: three seams now owe one. OCPI, the DATEX II
+national access point feed and OCPP 2.1's tariff answer the same question, and a
+partner reading what a version downgrade cost and an operator reading what a
+charge point's screen cannot show should be reading the same kind of sentence.
+
+### The rounding happens once, and the document says what it cost
+
+An invoice amount is a figure in a currency's minor unit; a rated line is exact
+and unrounded. Somewhere between the meter and the document a number gets
+rounded, and where it happens is not a style question.
+
+EN 16931 states its totals as sums of the **line** amounts — `BT-106 = Σ BT-131`,
+and per VAT category `BT-116 = Σ BT-131`. Both are sums of already-rounded
+figures, so the rounding has to happen at the line or the document cannot satisfy
+both at once. Rounding per category and apportioning back to lines produces an
+invoice whose own lines do not add up to its own subtotals, which is the first
+thing every validator in this space checks.
+
+That means the document's taxable amount need not equal what the records came to
+exactly — at most a minor unit per line, and real money. So it gets the treatment
+the rest of this workspace gives an inexact crossing:
+
+```rust
+let crossing = InvoiceBuilder::new("R-2026-0001", issued, period, cpo, driver)
+    .supplied_from("DE", dec("19"))
+    .ledger(&ledger)          // `live`, never `iter` — a correction is a new record
+    .due_on(due)
+    .build()?;
+
+assert!(crossing.value.reconciles());          // its subtotals reproduce its lines
+crossing.value.rounding_residual();            // …and what that cost, exactly
+for reason in crossing.reasons() { … }         // named per record, by JSON Pointer
+```
+
+The tax follows from the *rounded* taxable amount, by the standard's own rule, so
+that residual is the whole of what the document approximates. A tiered session
+keeps its tiers, because a tiered invoice has to show them.
+
+And the verdict is the deliverable, not the XML. `to_en16931` returns the
+semantic document **and** its report; `xrechnung` will not hand back a document
+its profile rejects, because `Validated<XRechnung>` cannot be constructed from an
+invalid invoice — the same discipline `Evidence::billable_energy` applies to a
+kilowatt-hour one layer down. `BR-CO-25` — something is owed, so say when — is
+asked at construction instead, because the answer is a commercial term the caller
+holds and this crate reads no clock to invent one.
+
+Nothing here reads a clock at all, which matters more than usual: `sepa` defaults
+a collection date and a message timestamp off the system clock, and a collection
+file that differs between two runs of one billing job is a file no bank
+reconciles. Every one of those fields is an argument, and a test asserts the same
+inputs produce the same bytes.
+
+### A roaming settlement is not taxed where the charge point stands
+
+Recharging an EV is a single composite supply of **goods** — the electricity —
+which the Court of Justice settled in C-282/22. `[UStG §3g]` then says a supply
+of electricity **to a reseller** is made where that reseller is established, and
+an e-mobility provider buying sessions through roaming is exactly a reseller: it
+does not consume the electricity, it resells it.
+
+So a German CPO settling with a French eMSP is not making a German supply. The
+place of supply is France, German VAT does not arise, and the invoice states the
+reverse charge with the partner's own identifier on it `[UStG §13b]`:
+
+```rust
+let treatment = TaxTreatment::decide(&cpo.tax, &emsp.tax, "DE", dec("19"))?;
+assert_eq!(treatment.category, VatCategory::ReverseCharge);
+assert_eq!(treatment.place_of_supply, "FR");
+```
+
+Putting 19 % on that invoice charges tax that may not be charged and that the
+partner cannot reclaim. The ad-hoc leg does not share the rule — a driver paying
+at the point is not a reseller — so **two sessions at one post a minute apart can
+carry different VAT**, which is why the treatment is decided per invoice from the
+parties and not per station from a configuration field.
+
+A cross-border reverse charge with a VAT identifier missing on either side is
+refused, naming the party that has none. EN 16931's `BR-AE-2` and `BR-AE-3`
+refuse that document anyway; refusing it where the rule lives means the message
+names the missing identifier instead of a rule id.
+
+And the books agree with the document. Under a reverse charge there is **no VAT
+posting**, because the liability is the recipient's — a platform that posts 19 %
+and omits it from the invoice has a VAT return that reconciles against nothing it
+sent. The postings are addressed by *role* rather than by account number, because
+SKR03 and SKR04 disagree about the numbers and a chart of accounts is not a
+domain crate's business.
+
+### A valid token is not permission to read somebody else's session
+
+A roaming node holds several companies' sessions in one process, and its worst
+failure is not losing one. It is serving party A's CDRs to party B — a
+competitor's charging volumes, its tariffs and its drivers' movements — out of an
+endpoint that answered a perfectly good credential.
+
+A reverse proxy cannot catch that, because the proxy does not know which party
+owns a record. Ownership is a field on the record, so the check lives where that
+field is in scope:
+
+```rust
+let peer = Principal::peer(theirs, Role::Emsp, Capabilities::of([caps::CDR_READ]));
+
+peer.may_act_for(caps::CDR_READ, &theirs);   // true
+peer.may_act_for(caps::CDR_READ, &ours);     // false — valid token, somebody else's record
+peer.may_act_for(caps::CDR_WRITE, &theirs);  // false — reaching it is not writing it
+```
+
+Three questions kept apart — **who** (a constant-time token comparison), **what**
+(a capability set) and **whose records** (a party scope) — because collapsing any
+two is how every roaming leak has happened.
+
+Capabilities rather than roles, because an agent has to be able to hold *less*
+than the operator it acts for: `Role::Cpo` delegated to an agent is still
+`Role::Cpo`, while a capability set delegated is a subset, and `attenuate`
+returns `None` rather than clamping when a request would widen either axis. Two
+pattern forms and no more — `emob.cdr.read` or `emob.cdr.*` — because attenuation
+has to be decidable by containment, and the wildcard widens at a **segment**
+boundary, so `emob.cdr.*` does not admit `emob.cdrs.read`.
+
+An empty grant permits nothing. An empty readiness set is not ready. A webhook
+verifier with no secret rejects. The state a misconfiguration falls into is the
+safe one, because the deployment where somebody forgot is exactly the one nobody
+would notice.
+
+### An agent proposes; it cannot move money, and that is a property
+
+`agentd` answers the question no single domain call can: not *is this chain
+sound* but *of four hundred refusals overnight, is that four hundred support
+tickets or one meter*.
+
+```text
+[evidence-triage] BQ27400330016: the meter was in state Substitute at record 2,
+                  which may not be billed
+                  (3800.000 kWh at risk across 380) — a device fault rather than
+                  a dispute: raise it with the station vendor…
+```
+
+The same shape for tariffs: `check_afir` decides whether one tariff is lawful at
+one power, and what it cannot say is that the **same** tariff is an ordinary
+product on the 22 kW posts and a breach on the two 150 kW cabinets beside them —
+because `[AFIR Art. 5(4)]` binds a tariff at the power the point offers it at,
+and no tariff document says which points those are.
+
+"Advisory only" used to be a sentence in a design note. Two things make it
+structural: the output type is a **leaf** — nothing in the workspace consumes an
+`Advice`, so there is no path from an agent's answer into a document — and a
+specialist's principal comes from `attenuate`, so no agent principal can hold a
+capability that writes, and a test asserts every write case.
+
+The specialists are deterministic functions; none calls a model. What the runtime
+provides for one is not inference but the **journal**: the run, its input, its
+answer and every effect in an append-only hash-chained log, with a replay that
+re-executes the logic and reads each effect back rather than performing it again.
+"Why did the queue say that in March" becomes a replay instead of an argument.
+
+### Notified is not published, and the quota turns on the difference
+
+A public kilowatt-hour is worth money twice — once from the driver, once from a
+fuel supplier that has to reduce the emissions of what it sells. `[38k §6(3)]`
+states **four cumulative conditions** between the two, and failing any of them
+is invisible: the point charges, the session bills, the money arrives, and the
+quota does not. The operator finds out a year later, about energy nobody can go
+back and measure differently.
+
+The condition most implementations get wrong is the first. It asks whether the
+regulator has **published** the notified point, or the third party has
+**consented** to publication — not whether the Anzeige was made. Those are
+different facts from different regulations: `[LSV26 §4(1)]` requires the notice
+and says nothing about publication, so reading eligibility off the notice date
+passes every point in a compliant estate.
+
+```rust
+point.registration = Registration::notified_on(date!(2025 - 03 - 10));
+point.quota.publication = RegisterPublication::Withheld;      // not eligible
+point.quota.publication = RegisterPublication::ConsentGiven;  // eligible
+```
+
+So a point that fails one is a refusal that names the remedy, rather than a line
+quietly missing from a file:
+
+```text
+DEABCE00042 is not eligible: publish the register entry or consent to its
+publication, sign the conformity declaration the authority provides, and obtain
+an operator identification code — or forgo the quota
+```
+
+Only energy a meter signed reaches the notification, because Nr. 2 asks for
+exactly what `emob-eichrecht` already decided. And none of `[38k §5(3)]`'s three
+factors is a constant: the counting factor steps down in 2035 and 2036, Anlage 3
+is a three-row table, and the average emissions value is **announced in the
+Bundesanzeiger by 31 October for the following obligation year** — so it is an
+argument, carried with the notice it came from.
+
 ## Layout
 
 | Crate | What it holds | State |
 |---|---|---|
-| [`emob-core`](crates/emob-core) | Identifiers in both grammars, text-preserving; exact energy and money; the charge-point and provider profiles; the obligation calendar | ✅ |
+| [`emob-core`](crates/emob-core) | Identifiers in both grammars, text-preserving; exact energy and money; the settlement grid; the charge-point, provider **and undertaking** profiles; the obligation calendar over all three; and `Crossing`, the account a value owes when it is carried onto somebody else's wire | ✅ |
 | [`emob-eichrecht`](crates/emob-eichrecht) | OCMF parse/verify on four curves, the key registry, the four-quantity session chain, the evidence record, the transparency file | ✅ |
 | [`emob-session`](crates/emob-session) | Authorisation paths, cumulative meter series, the timestamped state machine, and the quarter-hour split | ✅ |
 | [`emob-cdr`](crates/emob-cdr) | The record, its price, idempotent acceptance, pre-flight validation | ✅ |
-| [`emob-tariff`](crates/emob-tariff) | Period-based rating with tiers and VAT, the display derived from it, the AFIR shape check, validity windows and a content fingerprint | ✅ |
-| [`emob-ocpp`](crates/emob-ocpp) | The OCPP seam: signed meter values lifted out of transaction events, and no field a float could arrive in | ✅ |
+| [`emob-tariff`](crates/emob-tariff) | Period-based rating with tiers and VAT, the display derived from it, the AFIR shape check, validity windows and a content fingerprint — one object, read by the invoice, the driver's screen, the roaming partner and the national access point | ✅ |
+| [`emob-ocpp`](crates/emob-ocpp) | The OCPP seam, both ways: signed meter values lifted out of transaction events with no field a float could arrive in, and the tariff carried onto OCPP 2.1's *Tariff and Cost* block so the price on the station's screen is the object that rates the CDR | ✅ |
 | [`emob-poi`](crates/emob-poi) | The register and the national access point feed: DATEX II AFIR Recharging, with the published price carried from the tariff that rates the session | ✅ |
 | [`emob-roam`](crates/emob-roam) | The roaming edge: the canonical record onto OCPI 2.3.0 and 2.2.1 with the crossing's cost by JSON Pointer, and routing read out of the contract identifier itself. OICP and eMIP are still 📐 | ✅ |
 | [`emob-sim`](crates/emob-sim) | A deterministic fleet: virtual stations that sign genuine OCMF, eight seeded faults, and a day that reconciles exactly — assembled from OCPP events | ✅ |
 | `emob-pnc` | Plug & Charge contracts, OPCP pools, multi-PKI | 📐 |
 | `emob-smart` | Load management, OCPP charging profiles, DER control, § 14a guard, V2G | 📐 |
-| `emob-billing` | Rated CDRs → EN 16931 e-invoice → SEPA → double-entry postings | 📐 |
+| [`emob-thg`](crates/emob-thg) | The greenhouse-gas quota: `[38k §6(3)]`'s four conditions per point, and a notification built only from energy a meter signed. Notified is not published, and no factor is a constant | ✅ |
+| [`emob-billing`](crates/emob-billing) | Rated CDRs → an EN 16931 e-invoice and the verdict on it, a SEPA collection, and postings addressed by role. The rounding happens once, at the line, and the residual is reported | ✅ |
+| [`emob-service`](crates/emob-service) | The daemon shell, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature | ✅ |
 
 | Service | What it does | State |
 |---|---|---|
 | [`csmsd`](services/csmsd) | The CSMS a station connects to: OCPP 1.6J/2.0.1/2.1 on `ocpp-kit` transport, the two ledgers side by side, the chain from a signed value to a settled record | ✅ |
-| `roamd`, `empd`, `pncd`, `poid`, `tarifd`, `billd`, `opsd`, `agentd`, `sited` | | 📐 |
+| [`agentd`](services/agentd) | The advisory plane on `agentplane` — specialists that correlate across many exact answers, and cannot move money by construction | ✅ |
+| `roamd`, `empd`, `pncd`, `poid`, `tarifd`, `billd`, `opsd`, `sited` | | 📐 |
 
 `emob-roam` is the one crate whose MSRV is not the workspace's. Everything that
 decides money promises **1.94**, which is the floor the sibling workspaces
@@ -985,11 +1320,11 @@ Every regulatory claim in the code cites a document, section and page from
 and indexed with retrieval URLs in `specs/README.md`, so the corpus can be
 rebuilt from a fresh clone.
 
-The rules are read from the primary text. Eight of the corrections the build
-forced on the design are places where the obvious reading of a secondary source
-is wrong — a renovation that is not a deployment, an exemption that is a date
-rather than a technology, a paragraph that limits its first two subparagraphs
-and not its third.
+The rules are read from the primary text, and a surprising number of them turn
+on a reading the summaries get wrong: a renovation that is not a deployment, an
+exemption that is a date rather than a technology, a paragraph that limits its
+first two subparagraphs and not its third, an SME threshold whose financial half
+is an `and` where every restatement writes `or`.
 
 ## License
 

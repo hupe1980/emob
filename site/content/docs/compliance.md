@@ -1,16 +1,20 @@
 +++
 title = "The obligation calendar"
-weight = 6
-description = "AFIR, DA-656, LSV 2026, MessEG and the THG preconditions as dated, cited, executable rules — why applicability and satisfaction stay separate questions, and why a duty has to know who it binds."
+weight = 8
+description = "AFIR, DA-656, LSV 2026, MessEG, the THG preconditions and the NIS2/CRA cybersecurity regime as dated, cited, executable rules over three subjects — why applicability and satisfaction stay separate questions, and why a duty has to know who it binds."
+
+[extra]
+nav = "Compliance"
 +++
 
 # The obligation calendar ✅
 
 European charging regulation is a set of duties with dates attached. Most of
 them arrive between 2024 and 2028, several bind only some points, some bind the
-*provider* rather than the point, and a few carve out explicit exemptions. "Are
-we ready?" is therefore a question with a date, a subject and an answer per
-duty — which is a query, not a document.
+*provider* rather than the point, some bind the **undertaking** rather than
+either, and a few carve out explicit exemptions. "Are we ready?" is therefore a
+question with a date, a subject and an answer per duty — which is a query, not a
+document.
 
 ```rust
 let report = assess(&point, date!(2027-01-01));
@@ -20,9 +24,27 @@ for finding in report.failing() {
 }
 ```
 
+## Three subjects, because the law binds three
+
+```mermaid
+flowchart TB
+    CAL["the calendar<br/>40 dated, cited duties"]
+    CAL -->|"assess"| P["charge point<br/>power · access · dates · payment"]
+    CAL -->|"assess_provider"| M["mobility service provider<br/>disclosure · roaming surcharge"]
+    CAL -->|"assess_undertaking"| U["the undertaking<br/>size · governance · incident reporting"]
+
+    classDef one fill:#b8410f22,stroke:#b8410f
+    class CAL one
+```
+
+Every duty is answered by **exactly one** of the three, and a test asserts it —
+so no duty can be quietly unassessable, and adding a fourth subject cannot leave
+one behind. An operator whose every charge point is faultless can be in breach as
+a provider, and in breach again as a company.
+
 ## What is in it
 
-Thirty-three duties over two subjects.
+Forty duties over three subjects.
 
 | Duty | Source | From | Reads |
 |---|---|---|---|
@@ -58,7 +80,14 @@ Thirty-three duties over two subjects.
 | AC metering before the rectifier only in DC stations placed on the market before 2018 and **at most** 50 kW | `[REA 6-A]` | 16.03.2017 | the same number as AFIR's threshold, pointing the other way |
 | …and only where the rectification belongs to **one** session | `[REA 6-A]` | 16.03.2017 | a shared rectifier fails it |
 | …and the customer must be told the rectification loss is inside the value | `[REA 6-A]` | 16.03.2017 | a value nobody can interpret is one nobody can check |
-| THG-Quote: register entry + third-party access | `[38k §6]` | standing | public |
+| THG-Quote: publishable register entry, lawful metering, issued operator code | `[38k §6(3)]` | standing | public |
+| The undertaking gives the authority its details | `[NIS2 Art. 3(4)]` | 06.12.2025 | `UndertakingProfile` — an Annex I type of at least medium size |
+| …and takes **all ten** risk-management measures | `[NIS2 Art. 21(2)]` | 06.12.2025 | a conjunction, not a score |
+| …and can warn the CSIRT **within 24 h** | `[NIS2 Art. 23(4)]` | 06.12.2025 | then 72 h, then a report within a month |
+| The **management body** approves and oversees the measures | `[NIS2 Art. 20(1)]` | 06.12.2025 | the same paragraph makes its members liable |
+| …and its members attend cybersecurity training | `[NIS2 Art. 20(2)]` | 06.12.2025 | required for the body, called for for all staff |
+| A **manufacturer** reports an exploited vulnerability within 24 h | `[CRA Art. 14]` | 11.09.2026 | only where products with digital elements are placed on the market |
+| …and places only conformity-assessed products on the market | `[CRA Art. 13]` | 11.12.2027 | Annex I Part I ∧ the Part II vulnerability handling |
 
 ## Four properties that make it trustworthy
 
@@ -129,7 +158,7 @@ which is the whole purpose of the subparagraph.
 
 ### Every duty is assessable against something
 
-`[AFIR Art. 5(5)]` binds the **mobility service provider**, not the point. An
+`[AFIR Art. 5(5)]` binds the **mobility service provider**, not the point. A
 calendar that kept it in the table with an applicability test always returning
 `false` could only ever report "different scope" — which looks assessable and is
 not, and is worse than leaving it out.
@@ -154,9 +183,70 @@ assert_eq!(assess_provider(&provider, today).verdict(), Verdict::Failing);
 
 An operator whose every charge point is faultless can still be in breach as a
 provider. In Germany one company usually wears both hats, and the provider half
-is the half nobody checks. A test asserts that **every duty in the calendar is
-answerable by exactly one of the two profiles**, so none can go quietly
-unassessable again.
+is the half nobody checks.
+
+### …and a third subject, because cybersecurity law binds the company
+
+`[NIS2 Anh. I]` names this industry in the Energy sector by its role, in as many
+words: *"Betreiber von Ladepunkten, die für die Verwaltung und den Betrieb eines
+Ladepunkts zuständig sind und Endnutzern einen Aufladedienst erbringen, auch im
+Namen und Auftrag eines Mobilitätsdienstleisters"*. Precisely the operator whose
+points the profile above describes — and **none of what it asks is a fact about
+a point**. Size, governance, whether an early warning can leave the building
+inside a day: those are facts about the undertaking.
+
+```rust
+let mut operator = UndertakingProfile::bare(PartyId::new("DE", "CPO")?);
+operator.operates_recharging_points = true;
+operator.employees = 400;
+operator.risk_management = RiskManagement::complete();
+operator.risk_management.supply_chain_security = false;
+
+assert_eq!(operator.nis2_class(), Some(Nis2Class::Essential));
+assert_eq!(operator.risk_management.missing(), vec!["(d) supply-chain security"]);
+assert_eq!(
+    assess_undertaking(&operator, today).status_of(ObligationId::Nis2RiskManagement),
+    Some(Status::Failing),
+);
+```
+
+Seven duties: five from NIS2 — registration, the ten risk-management measures,
+the 24-hour early warning, the management body's approval, and its training —
+and two from the Cyber Resilience Act, which bind only an undertaking that
+places a product with digital elements on the market. The ten measures are a
+**conjunction**, because the article says the measures "shall include at least
+the following": nine of ten is not ninety per cent of a duty.
+
+Two things in that regime are easy to get wrong and both are tested.
+
+**The financial half of the size test is an `and`.** `[NIS2 Art. 2(1)]` reaches
+an entity that qualifies as medium-sized under Recommendation 2003/361/EC or
+exceeds those ceilings, and the Recommendation defines an SME as *fewer than 250
+staff **and** (turnover ≤ €50 M **and/or** balance sheet ≤ €43 M)*:
+
+```text
+exceeds the ceilings  ⇔  employees ≥ 250  ∨  (turnover > €50 M ∧ balance sheet > €43 M)
+```
+
+Every secondary source checked writes "250 employees or €50 million turnover"
+and drops the balance-sheet conjunct, which puts an asset-light operator turning
+over €60 M on a €20 M balance sheet in the essential class it is not in.
+
+**A directive binds from the day the Member State transposed it.** `[NIS2 Art.
+41]` obliged Member States to apply the rules from 18.10.2024. A directive binds
+nobody directly: Germany's NIS2UmsuCG came into force on 06.12.2025, with no
+general transitional period, and that is the day the calendar uses. Dating the
+duties from the Directive would report every German operator in breach for
+fourteen months in which no German authority could act.
+
+The Cyber Resilience Act beside it is a **Regulation**, so `[CRA Art. 71]`'s own
+dates are the dates in every Member State — 11.09.2026 for the reporting duty,
+11.12.2027 for the rest — with no transposition in between. Treating "the EU
+date" as one thing is how a compliance model gets both instruments wrong.
+
+A test asserts that **every duty in the calendar is answerable by exactly one of
+the three profiles**, so none can go quietly unassessable again — and so that
+adding a fourth subject cannot leave a duty behind.
 
 ## The two paragraphs the Regulation itself names
 
@@ -314,6 +404,32 @@ support inside the text, and it is a separate constant
 choice and argue with it. `Notice::delay_days` reports how late a filing was, so
 a stricter policy does not have to re-derive the arithmetic.
 
+## The quota's four conditions, and the one that is not the Anzeige
+
+`[38k §6(3)]` puts **four cumulative conditions** between a public
+kilowatt-hour and the greenhouse-gas quota it is worth a second time.
+`QuotaPosture` is four fields in the paragraph's own order.
+
+Nr. 1 asks whether the regulator has **published** the notified point, or the
+third party has **consented** to publication. It does not ask whether the
+Anzeige was made: `[LSV26 §4(1)]` requires the notice and says nothing about
+publication, so a point can be duly notified, on the register, and not
+publishable. Eligibility read off a notice date passes every point that has
+one — which, in a compliant estate, is every point.
+
+Nr. 2 wants the quantity determined in conformity with the measuring and
+calibration law, which is what `emob-eichrecht` decides per record — so
+`emob-thg` refuses a record with no evidence rather than summing it. Nr. 3
+wants an identification code **issued** to the operator by an ID registration
+organisation `[AFIR Art. 20(1)]`; a well-formed `EvseId` says the operator
+*uses* a code, not that a registered organisation issued it.
+
+Nr. 4's further identifying features exist only *"sofern die zuständige Stelle
+solche durch Bekanntgabe im Bundesanzeiger bestimmt hat"*, and today none are
+announced. `FurtherIdentifiers` has three states for that reason: `false` would
+block every claim in the country and `true` would keep passing on the day an
+announcement lands.
+
 ## Planning
 
 ```rust
@@ -325,9 +441,10 @@ for o in starting_between(date!(2026-09-01), date!(2027-12-31)) {
 
 ## What is not here yet 📐
 
-NIS2 and the Cyber Resilience Act bind the operator as an *undertaking* rather
-than a point or a provider, so they want a third profile beside the two that
-exist — the shape is already there, and the duties go in when the German
-transposition text stops moving. The AFIR TEN-T flag is an input: resolving which
-points sit "along" the network from corridor data is an operations question, not
-a domain one.
+The Cyber Resilience Act's *artefacts* — the SBOM, the declared support period,
+the update channel — are a build pipeline rather than a calendar entry; the
+calendar carries the duty that requires them. The AFIR TEN-T flag is an input:
+resolving which points sit "along" the network from corridor data is an
+operations question, not a domain one. And the NIS2 supervision regimes
+(`[NIS2 Art. 32]` against `[NIS2 Art. 33]`) differ by class rather than by
+duty, so the class is reported and the duties are judged the same for both.

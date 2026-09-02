@@ -11,6 +11,11 @@ operating stack.
 cargo add emob-roam
 ```
 
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[Roaming](https://hupe1980.github.io/emob/docs/roaming/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-roam).
+
+
 ## Translation is where roaming money goes missing
 
 A CDR is a claim sent to somebody who was not there and who will pay against
@@ -20,7 +25,8 @@ one of those decisions once, silently, at the moment nobody is looking. The
 consequence surfaces six weeks later as two companies holding two different
 numbers for one session, with nothing in either document explaining the gap.
 
-So every translation here returns a `Crossing`: the value, and the account.
+So every translation here returns a `Crossing` — `emob_core::Crossing`, the same
+account the OCPP 2.1 and DATEX II seams return: the value, and what it cost.
 
 ```rust
 let crossing = emob_roam::ocpi::cdr::to_ocpi(&cdr, partner, &context)?;
@@ -37,7 +43,8 @@ for reason in crossing.reasons() {
 
 The account composes with `ocpi-kit`'s own: a partner on 2.2.1 gets one report
 of what reaching them cost, rather than two half-reports that only mean
-something read together.
+something read together. That fold is the one part of it that is OCPI's alone,
+so it is an extension trait here rather than a method on the shared type.
 
 ## A duration in hours is usually not a decimal
 
@@ -121,6 +128,22 @@ spoofable. This workspace keeps them apart precisely because the market
 conflates them, so the crossing says the distinction was lost — and points at
 the one place on the record where it survives, the identification strength read
 off the signed meter data.
+
+## A restriction that will not fit is not a restriction to drop
+
+The tariff crossing refuses an element carrying a restriction this build cannot
+evaluate, because publishing it stripped does not narrow the element — it
+**widens** it, and the partner then prices the session under conditions nobody
+checked.
+
+The same argument covers a restriction the build *can* evaluate and OCPI cannot
+carry as written. A bound that does not fit its field has two silent outcomes:
+dropped, the element widens; defaulted, it moves. A `start_time` falling back to
+midnight publishes a night tariff as an all-day one — not a wider price but a
+different one, from a document this operator signed off. Both are
+`RoamError::RestrictionNotExpressible`, and a test asserts the property that
+matters: every restriction this build can express arrives at the partner with
+the value it was set to.
 
 ## Routing is a question the identifier already answers
 

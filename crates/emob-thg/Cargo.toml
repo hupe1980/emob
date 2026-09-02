@@ -1,0 +1,43 @@
+[package]
+name        = "emob-thg"
+description = "The German greenhouse-gas quota for public EV charging as executable law: 38. BImSchV § 6(3) eligibility per point, the § 5(3) counting factor and Anlage 3 drive efficiency, and a § 8 notification built only from kilowatt-hours a meter signed"
+keywords    = ["ev-charging", "thg-quote", "bimschv", "compliance", "germany"]
+categories  = ["science", "data-structures"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+emob-cdr     = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = [
+    "dep:serde",
+    "emob-core/serde",
+    "emob-cdr/serde",
+    "rust_decimal/serde",
+    "time/serde-well-known",
+]
+
+[dev-dependencies]
+# The end-to-end test signs real OCMF records at test time, so the year it files
+# starts at a meter rather than at a constant — which is the whole point of
+# § 6(3) Nr. 2.
+emob-eichrecht = { workspace = true }
+emob-session   = { workspace = true }
+emob-tariff    = { workspace = true }
+hex            = { workspace = true }
+p256           = { workspace = true }
+serde_json     = { workspace = true }
+sha2           = { workspace = true }

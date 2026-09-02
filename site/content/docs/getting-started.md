@@ -1,16 +1,21 @@
 +++
 title = "Getting started"
 weight = 1
-description = "Install the crates that exist, verify a charging session under German calibration law, split it across quarter hours, build a CDR, send it to a roaming partner with an account of what the crossing cost, ask the obligation calendar whether a charge point is ready for 2027, and run a hundred-station fleet that reconciles exactly."
+description = "Install the crates that exist, verify a charging session under German calibration law, split it across quarter hours, build a CDR, price it, publish that price to a roaming partner, to the national access point and to the charge point's own screen, close a month into an e-invoice and a SEPA collection, ask the obligation calendar whether you are ready for 2027, and run a hundred-station fleet that reconciles exactly."
+
+[extra]
+nav = "Getting started"
 +++
 
 # Getting started
 
-Nine crates are built from this workspace today. Everything on this page runs. ✅
+Twelve crates are built from this workspace today, with two daemons on top of
+them. Everything on this page runs. ✅
 
 ```console
 cargo add emob-core emob-eichrecht emob-session emob-cdr emob-tariff \
-          emob-ocpp emob-poi emob-roam emob-sim
+          emob-ocpp emob-poi emob-roam emob-billing emob-thg emob-service \
+          emob-sim
 ```
 
 ## Which one do I need?
@@ -25,16 +30,40 @@ yours, and its dependencies come with it.
 | Split a session across the quarter hours the market settles on | `emob-session` |
 | Turn a session into a record another company will pay against | `emob-cdr` |
 | Price a session, and show the same price before it starts | `emob-tariff` |
-| Ask whether a charge point is ready for a date in the regulation | `emob-core` |
+| Ask whether a charge point, a provider or the company is ready for a date in the regulation | `emob-core` |
 | Parse an eMAID or EVSE id without losing how it was written | `emob-core` |
 | Lift a signed value out of an OCPP transaction | `emob-ocpp` |
+| Put the price on the charge point's own screen, over OCPP 2.1 | `emob-ocpp` |
 | Publish locations and prices to the national access point | `emob-poi` |
 | Send a record to a roaming partner, or check one that arrived | `emob-roam` |
+| Turn a month of records into an e-invoice, a SEPA collection and postings | `emob-billing` |
+| File the year's THG-Quote notification, and find out which points are not eligible | `emob-thg` |
+| Write a daemon: settings, a readiness probe, a graceful stop — and decide whether a credential may reach a record | `emob-service` |
 | Test all of the above against a fleet that signs for real | `emob-sim` |
 
-Every crate does **no I/O and reads no clock** — instants and keys are arguments.
-That is what makes a two-year-old dispute answerable by replaying the check
-exactly as it ran, and it is enforced by a build guard rather than by review.
+Every **domain** crate does no I/O and reads no clock — instants and keys are
+arguments. That is what makes a two-year-old dispute answerable by replaying the
+check exactly as it ran, and it is enforced by a build guard rather than by
+review. `emob-service` is the one shared place that stops being true, and it is
+where the daemons live.
+
+```mermaid
+flowchart LR
+    A["emob-eichrecht<br/>verify"] --> B["emob-session<br/>split"]
+    B --> C["emob-cdr<br/>record + price"]
+    T["emob-tariff"] --> C
+    O["emob-ocpp<br/>the seam"] --> B
+    C --> R["emob-roam<br/>partner"]
+    C --> I["emob-billing<br/>invoice · SEPA · books"]
+    T --> P["emob-poi<br/>access point"]
+    T --> O
+    K["emob-core<br/>ids · money · duties"] -.-> A & B & C & T & R & P & O & I
+
+    classDef base fill:#88888818,stroke:#888,stroke-dasharray:4 3
+    class K base
+```
+
+The rest of this page walks that chain left to right.
 
 ## Verify a charging session
 
@@ -250,6 +279,30 @@ An operator whose every charge point is faultless can still be in breach as a
 provider — and in Germany, where one company usually wears both hats, that is
 the half nobody checks.
 
+And the **company itself** is a third subject. `[NIS2 Anh. I]` names charge point
+operators in the Energy sector by their role, and nothing it asks is a fact about
+a point:
+
+```rust
+use emob_core::obligation::{assess_undertaking, ObligationId, Status};
+use emob_core::station::{RiskManagement, UndertakingProfile};
+
+let mut operator = UndertakingProfile::bare(PartyId::new("DE", "CPO")?);
+operator.operates_recharging_points = true;
+operator.employees = 400;
+operator.risk_management = RiskManagement::complete();
+operator.risk_management.supply_chain_security = false;
+
+// Nine of ten is not ninety per cent of a duty: the article says the measures
+// "shall include at least the following".
+assert_eq!(operator.risk_management.missing(), vec!["(d) supply-chain security"]);
+assert_eq!(
+    assess_undertaking(&operator, date!(2026-09-01))
+        .status_of(ObligationId::Nis2RiskManagement),
+    Some(Status::Failing),
+);
+```
+
 `ChargePointProfile::bare` starts every flag at its **non-compliant** value on
 purpose. A fixture that starts compliant hides the obligation it was written to
 exercise.
@@ -391,6 +444,113 @@ the specification gives 0.00 its own meaning, *free of charge* — and so is a
 tariff element published without a restriction this build cannot evaluate, which
 does not narrow the element but widens it.
 
+## Publish it to the national access point
+
+`[AFIR Art. 20(2)]` obliges an operator to publish static and dynamic data
+through the national access point, free of charge — in Germany the Mobilithek, in
+the DATEX II Recharging profile, from **14 April 2026**.
+
+```rust
+use emob_poi::{Feed, rate};
+use emob_poi::datex::{InformationStatus, Publisher};
+
+// The feed publishes the tariff that rates the session, not a copy of it.
+let (published, notes) = rate::publish(&tariff, "rate-1");
+for note in &notes { eprintln!("{note}"); }
+
+let json = Feed { publisher, information_status: InformationStatus::Test,
+                  table, table_name, sites, rate_for: &|_| Some(published.clone()) }
+    .table(published_at)?
+    .to_json()?;
+
+assert!(json.contains(r#""value": 0.49"#));        // exact decimal, end to end
+assert!(json.contains(r#""maxPowerAtSocket": 150000"#));   // and watts, as asked
+```
+
+A point the register knows is decommissioned cannot be published as `available`:
+the type that carries a status has no constructor for that pair, so the document
+cannot be built. See [Locations](@/docs/locations.md).
+
+## Put the price on the charge point's own screen
+
+`[AFIR Art. 5(4)]` regulates the price a driver is shown **before** they start,
+and the place they see it is the station. OCPP 2.1's *Tariff and Cost* block is
+the first structured way to put it there:
+
+```rust
+use ocpp_kit::v2_1::SetDefaultTariffRequest;
+
+let crossing = emob_ocpp::to_ocpp(&tariff, at)?;      // the same Tariff that rates
+for reason in crossing.reasons() {
+    eprintln!("{reason}");
+    // /energy/prices/0: OCPP 2.1 quotes prices excluding tax and carries at
+    //                   most eighteen decimals: 0.49 at 19 % is …
+}
+let request = SetDefaultTariffRequest::new(0, crossing.value);  // evseId 0 = all
+```
+
+The station selects the tier the CDR will be rated at **by construction**: OCPI
+picks the first element with a component for a dimension whose restrictions
+match, OCPP picks the first price inside that dimension whose conditions match,
+and projecting one onto the other in order is the projection the rating engine
+already performs.
+
+Four things are refused rather than noted, because they would widen the price
+against the driver invisibly — a time price with no exact per-minute spelling
+(OCPP's field *is* per minute), a dimension charged at two VAT rates, a session
+fee conditioned on a quantity, and an unevaluable restriction. Everything else
+crosses with an account, and the finished document goes through `ocpp-kit`'s own
+schema validator before it is returned.
+
+## Close a month
+
+A CDR is a claim; an invoice is a demand, and it is the document a tax authority
+reads. `emob-billing` is the seam, and its one real decision is **where the
+rounding happens**: EN 16931 states its totals as sums of the line amounts, so it
+happens at the line — and what that costs is reported rather than absorbed.
+
+```rust
+use emob_billing::{Counterparty, InvoiceBuilder, TaxStatus, en16931, payment, postings};
+
+let crossing = InvoiceBuilder::new("R-2026-0001", issued, (from, to), cpo, driver)
+    .supplied_from("DE", dec("19"))
+    .ledger(&ledger)          // `live`, never `iter`: a correction is a new record
+    .due_on(due)
+    .build()?;
+
+let invoice = crossing.value;
+assert!(invoice.reconciles());                     // subtotals reproduce the lines
+assert_eq!(invoice.gross_total().to_string(), "31.04 EUR");
+for reason in crossing.reasons() { eprintln!("{reason}"); }
+// /totals/taxable: the records came to 26.0800840336… exactly and this invoice
+//                  states 26.08 EUR: a difference of −0.0000840336…
+
+// The European document, and the verdict on it before anything is sent.
+let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE)?;
+assert!(crossed.value.is_valid());
+
+// …and the books, balanced before an account is named.
+assert!(postings::postings_for(&invoice).balances());
+```
+
+Sell the same three sessions to an e-mobility provider in another member state
+and the document changes shape, because `[UStG §3g]` taxes a supply of
+electricity to a **reseller** where the reseller is established:
+
+```rust
+let emsp = Counterparty::new("Mobilité SAS", "Lyon",
+                             TaxStatus::reseller("FR", "FR12345678901"));
+// …
+assert_eq!(invoice.treatment.category, VatCategory::ReverseCharge);
+assert_eq!(invoice.tax_total().to_string(), "0 EUR");
+assert!(!postings_for(&invoice).roles().iter()
+    .any(|r| matches!(r, Role::VatPayable { .. })));   // not our liability
+```
+
+Every date is an argument — the issue date, the due date, the collection date,
+the pain.008 timestamp — so two runs of one billing job produce the same bytes.
+See [Sessions and settlement](@/docs/settlement.md).
+
 ## Building the workspace
 
 ```console
@@ -408,3 +568,17 @@ decides money promises **1.94** — the floor the sibling workspaces carry and
 consume — while `emob-roam` declares 1.96, because `ocpi-kit` does. Raising the
 shared floor to take one wire would make every downstream pay for a protocol it
 does not use.
+
+## Where next
+
+| If you want to know… | Read |
+|---|---|
+| why a signed meter value is harder than it looks | [The Eichrecht chain](@/docs/eichrecht.md) |
+| how the protocol's numbers stay out of the money | [The OCPP seam](@/docs/ocpp.md) |
+| why the quarter-hour split conserves exactly | [Sessions and settlement](@/docs/settlement.md) |
+| why the price shown is the price charged | [Tariffs and price transparency](@/docs/pricing.md) |
+| what a feed can and cannot say about a price | [Locations and the national access point](@/docs/locations.md) |
+| what a crossing costs, and when it refuses | [Roaming](@/docs/roaming.md) |
+| where an invoice's rounding happens, and who owes the VAT | [Sessions and settlement](@/docs/settlement.md) |
+| which of three subjects a duty binds | [The obligation calendar](@/docs/compliance.md) |
+| how the crates fit together, and why | [Architecture](@/docs/architecture.md) |

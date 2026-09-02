@@ -48,7 +48,7 @@ use ocpi_kit::v2_3_0::cdrs::{
 use ocpi_kit::v2_3_0::{Price, TaxAmount};
 use rust_decimal::Decimal;
 
-use crate::crossing::Crossing;
+use crate::crossing::{AbsorbLossy as _, Crossing};
 use crate::error::RoamError;
 use crate::ocpi::location::{bounded, bounded_ocpi};
 use crate::partner::Partner;
@@ -246,7 +246,7 @@ pub fn to_ocpi(
         Dimension::Flat,
     ]
     .into_iter()
-    .filter_map(|d| component_price(&cost.rated, d, currency))
+    .filter_map(|d| component_price(&cost.rated, d))
     .map(|p| p.after_taxes().get())
     .sum();
     let whole = cost.rated.gross().amount();
@@ -298,17 +298,13 @@ pub fn to_ocpi(
         // OCPI breaks the total out per dimension and most implementations
         // fill only `total_cost`, which leaves the receiver unable to check
         // any part of it against its own tariff. The lines are already there.
-        .maybe_total_fixed_cost(component_price(&cost.rated, Dimension::Flat, currency))
+        .maybe_total_fixed_cost(component_price(&cost.rated, Dimension::Flat))
         .total_energy(Number::new(cdr.total_energy.kwh()))
-        .maybe_total_energy_cost(component_price(&cost.rated, Dimension::Energy, currency))
+        .maybe_total_energy_cost(component_price(&cost.rated, Dimension::Energy))
         .total_time(Number::new(total_time))
-        .maybe_total_time_cost(component_price(&cost.rated, Dimension::Time, currency))
+        .maybe_total_time_cost(component_price(&cost.rated, Dimension::Time))
         .total_parking_time(Number::new(total_parking_time))
-        .maybe_total_parking_cost(component_price(
-            &cost.rated,
-            Dimension::ParkingTime,
-            currency,
-        ))
+        .maybe_total_parking_cost(component_price(&cost.rated, Dimension::ParkingTime))
         .maybe_credit_reference_id(
             cdr.supersedes
                 .as_ref()
@@ -582,11 +578,7 @@ fn price(rated: &Rated) -> Price {
 /// the two sides separately and taking the tax as the remainder keeps
 /// `before_taxes + tax` equal to the amount, which is the identity a receiver
 /// checks.
-fn component_price(
-    rated: &Rated,
-    dimension: Dimension,
-    _currency: emob_core::Currency,
-) -> Option<Price> {
+fn component_price(rated: &Rated, dimension: Dimension) -> Option<Price> {
     // Per VAT rate, not per dimension. One dimension can be charged at two
     // prices — that is what a tier is — and the two tiers can sit in different
     // tax categories. Reading the rate off the first line and applying it to

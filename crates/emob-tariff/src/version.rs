@@ -108,10 +108,14 @@ impl<'de> serde::Deserialize<'de> for TariffFingerprint {
 /// A canonical writer: every value goes in with an explicit format and a
 /// terminator, so no two different tariffs can encode to the same bytes.
 ///
-/// Nothing here uses a `Display` impl from another crate. A fingerprint that
-/// changed because `time` reformatted a date would silently split one tariff
-/// into two across a dependency bump, and the whole point of the value is that
-/// it does not move unless the tariff does.
+/// Nothing here uses a `Display` impl from another crate, and nothing here uses
+/// a **derived `Debug`** either. A fingerprint that changed because `time`
+/// reformatted a date would silently split one tariff into two across a
+/// dependency bump; one that changed because a variant was renamed would do the
+/// same across a refactor of this crate, which is the easier mistake to make and
+/// the harder one to notice. Every enum that goes in has a declared token —
+/// [`Dimension::as_str`](crate::Dimension::as_str) and its siblings — and the
+/// whole point of the value is that it does not move unless the tariff does.
 struct Canonical(Vec<u8>);
 
 impl Canonical {
@@ -180,8 +184,8 @@ impl Tariff {
         let mut c = Canonical::new();
         c.field(self.id.as_str())
             .field(self.currency.as_str())
-            .field(&format!("{:?}", self.kind))
-            .field(&format!("{:?}", self.tax_included))
+            .field(self.kind.as_str())
+            .field(self.tax_included.as_str())
             .optional(self.min_price.map(|p| p.to_string()))
             .optional(self.max_price.map(|p| p.to_string()))
             .optional(self.valid_from.map(instant))
@@ -198,7 +202,7 @@ fn fingerprint_element(c: &mut Canonical, element: &TariffElement) {
     fingerprint_restrictions(c, &element.restrictions);
     c.count(element.components.len());
     for component in &element.components {
-        c.field(&format!("{:?}", component.dimension))
+        c.field(component.dimension.as_str())
             .field(&component.price.to_string())
             .optional(component.vat.map(|v| v.to_string()))
             .field(&component.step_size.to_string());
@@ -206,6 +210,18 @@ fn fingerprint_element(c: &mut Canonical, element: &TariffElement) {
 }
 
 fn fingerprint_restrictions(c: &mut Canonical, r: &Restrictions) {
+    // Canonical, because a set of weekdays is a set: `[Mon, Tue]` and
+    // `[Tue, Mon]` restrict identically and price identically, and a
+    // fingerprint that moved between them would report one tariff as two —
+    // which is the failure this value exists to prevent, pointed the other way.
+    let mut days: Vec<u8> = r
+        .days_of_week
+        .iter()
+        .map(|day| day.number_days_from_monday())
+        .collect();
+    days.sort_unstable();
+    days.dedup();
+
     c.optional(r.start_time.map(clock))
         .optional(r.end_time.map(clock))
         .optional(r.start_date.map(date))
@@ -216,9 +232,9 @@ fn fingerprint_restrictions(c: &mut Canonical, r: &Restrictions) {
         .optional(r.max_power_kw.map(|v| v.to_string()))
         .optional(r.min_duration_s.map(|v| v.to_string()))
         .optional(r.max_duration_s.map(|v| v.to_string()))
-        .count(r.days_of_week.len());
-    for day in &r.days_of_week {
-        c.field(&day.number_days_from_monday().to_string());
+        .count(days.len());
+    for day in &days {
+        c.field(&day.to_string());
     }
     // An unevaluable restriction is part of the tariff's identity even though
     // this build cannot judge it: two tariffs differing only in one are two

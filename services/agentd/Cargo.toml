@@ -1,0 +1,30 @@
+[package]
+name        = "agentd"
+description = "The advisory plane for emob: specialists that correlate across many exact answers, on a runtime whose journal is the plan of record — and which cannot move money, by construction"
+publish     = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+emob-service = { workspace = true }
+emob-tariff  = { workspace = true }
+
+# The runtime whose journal is the plan of record. `redb` is the embedded store
+# a single instance uses; `manifest` is what makes a specialist that needs a
+# model a reviewable file rather than a builder call.
+agentplane   = { workspace = true }
+
+anyhow       = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

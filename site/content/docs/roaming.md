@@ -1,7 +1,10 @@
 +++
 title = "Roaming"
-weight = 5
+weight = 7
 description = "One canonical model, every wire native, and translation cost recorded rather than absorbed: OCPI 2.3.0 and 2.2.1, the crossings that are refusals, and the pre-flight an eMSP owes itself before paying a partner's record."
+
+[extra]
+nav = "Roaming"
 +++
 
 # Roaming ✅
@@ -102,12 +105,23 @@ something a partner will act on.
 | A **V2G discharge** | `ENERGY_EXPORT` is Session-only and `total_energy` carries no sign, so the partner reads a discharge as a draw and settles backwards — paying the operator for energy the *driver* supplied |
 | An **unrated** record | `total_cost` is required, and the specification gives the obvious placeholder its own meaning: `0.00` is *free of charge*. Sending zero answers the question permanently, in the partner's favour |
 | A tariff element stripped of an **unevaluable restriction** | Dropping a condition does not narrow the element, it *widens* it — at the partner it then matches wherever the rest holds, and their re-rating disagrees with ours in the driver's disfavour, from a document we published |
-| A **gross price bound** on a tariff mixing VAT rates | `min_price`/`max_price` bound the cost *before taxes* and the field is mandatory. The gross figure written there is a minimum the partner enforces a VAT rate too high, against the driver. Where the components agree on a rate the bound is converted at it; where they do not there is no pre-tax figure, and inventing one is the failure |
+| A **gross price bound** on a tariff mixing VAT rates | `min_price`/`max_price` bound the cost *before taxes* and the field is mandatory. The gross figure written there is a minimum the partner enforces a VAT rate too high, against the driver. Where the components agree on a rate the bound is converted at it; where they state **none**, there is no tax to strip and the two figures are the same number; only where they state *different* rates is there no pre-tax figure, and inventing one is the failure |
+| A restriction that does **not fit** its field | OCPI's local time and local date are narrower than the types a tariff restricts on, and a bound that will not fit has two silent outcomes: dropped, the element widens; **defaulted, it moves**. A start time falling back to midnight publishes a night tariff as an all-day one — not a wider price but a different one |
 
 The unevaluable-restriction rule is the outward face of a rule
 [the rating engine](@/docs/pricing.md) applies inward: a condition this build
 cannot judge never matches, so it can neither price a session nor be published as
 though it were absent.
+
+### The same line, one wire along
+
+[The OCPP seam](@/docs/ocpp.md#what-the-wire-cannot-say-is-a-refusal-not-a-note)
+is not a roaming wire and draws the line in exactly the same place, because the
+argument is not about roaming: **a loss in the driver's disfavour that the
+document does not show is a refusal.** Three seams now return the same
+`Crossing` — the roaming edge, the charge point's own screen, and the national
+access point feed — and the type lives in the shared vocabulary crate for that
+reason rather than in whichever one needed it first.
 
 ## …and the record comes back
 
@@ -198,4 +212,10 @@ One genuinely signed session settles at the **same money** over three paths —
 self-roaming, OCPI 2.3.0 and OCPI 2.2.1 — with the signed records arriving
 verbatim and re-verifying at the far end against the receiver's own registry.
 
-OICP (Hubject) and eMIP (GIREVE legacy) are 📐: designed, not written.
+The tariff crosses too, and the same session's price reads identically to the
+partner, to the driver at the point and to the national access point — see
+[Tariffs](@/docs/pricing.md#one-price-three-audiences).
+
+OICP (Hubject) and eMIP (GIREVE legacy) are 📐: designed, not written. So are
+OCPI's Sessions and Tokens modules, which are a service's publishing surface
+rather than a settlement question.

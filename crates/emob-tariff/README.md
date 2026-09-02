@@ -11,6 +11,26 @@ is unlawful above 50 kW.
 cargo add emob-tariff
 ```
 
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[Tariffs and price transparency](https://hupe1980.github.io/emob/docs/pricing/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-tariff).
+
+
+## One tariff, four readers
+
+A price leaves this crate four ways, and the whole design is that it is one
+number:
+
+| Reader | Through | Duty |
+|---|---|---|
+| the driver, at the point, before starting | `describe()` → OCPP 2.1 `SetDefaultTariff` (`emob-ocpp`) | `[AFIR Art. 5(4)]` |
+| the session being invoiced | `rate()` | the money |
+| the roaming partner | `emob-roam` → OCPI 2.3.0 | what two companies settle |
+| the national access point | `emob-poi` → DATEX II | `[AFIR Art. 20(2)(c)]` |
+
+Almost every stack computes that number in four places and reconciles none of
+them against the invoice.
+
 ## One tariff, two readers
 
 A charging tariff has two jobs that platforms normally implement twice: it
@@ -46,7 +66,12 @@ A test walks every dimension and asserts that each displayed price equals the
 price that rated it. `describe()` and `rate()` also pick the applicable element
 through the **same predicate**, so the tier shown is the tier the first
 kilowatt-hour is billed at — two implementations of "which element applies"
-would be exactly the drift this crate exists to prevent, one level down.
+would be exactly the drift this crate exists to prevent, one level down. So does
+the OCPP 2.1 crossing in `emob-ocpp`: OCPP orders prices *inside* each dimension
+and picks the first whose conditions match, which is OCPI's per-dimension rule
+read from the other side, so the projection is the one `matching_component`
+already performs and the charge point selects the component the invoice is built
+from.
 
 ## A session is a sequence of periods, and that is not a detail
 
@@ -137,6 +162,14 @@ restrictions and components **in order**, because the first matching element
 prices the period. Scale is part of it: `0.49` and `0.490` are numerically equal
 and are two different prices to show a driver.
 
+The encoding borrows nothing — not another crate's `Display`, and not a derived
+`Debug`. A fingerprint that moved because `time` reformatted a date would split
+one tariff into two across a dependency bump; one that moved because a variant
+was renamed would do it across a refactor. Every enum goes in through a declared
+token (`Dimension::as_str` and its siblings), spelled the way OCPI and OCPP
+spell it. And a *set* of weekdays goes in sorted, because `[Mon, Tue]` and
+`[Tue, Mon]` are one restriction and one price.
+
 And `[AFIR Art. 5(4)]` settles which version governs a session. The price must
 be "known to end users **before they initiate** a recharging session", so a CPO
 that raises its price at 10:15 has not raised it for the driver who plugged in
@@ -180,6 +213,29 @@ assert_eq!(rated.net().amount() + rated.tax().amount(), rated.gross().amount());
 `TaxIncluded::Yes` means the component prices are gross and the tax is stripped
 out of them; `No` means they are net and it is added on. `total()` reports the
 basis the tariff states; `gross()` reports what the driver pays.
+
+### …and "no rate" is not "no answer"
+
+A whole tariff's rate is asked wherever a gross price bound has to be stated
+before tax — OCPI's `PriceLimit`, OCPP 2.1's `Price` — and the question has
+**three** answers rather than two. `Tariff::vat_basis` gives all three:
+
+```rust
+match tariff.vat_basis() {
+    VatBasis::Rate(rate) => …,   // every component agrees on one
+    VatBasis::Unstated   => …,   // none states a rate at all
+    VatBasis::Mixed      => …,   // they disagree — no single taxable amount
+}
+```
+
+`rate()` is what arithmetic needing a divisor asks, and reads `Unstated` as zero
+per cent — exactly what `tax_summary` already does with an absent rate.
+`stated()` is what a record that has to *write* a rate down asks, and gives
+nothing for either absence. Only `Mixed` has no answer.
+
+Collapsing the first two into one `None` made an ordinary gross price list with a
+`min_price` and no VAT rate anywhere unpublishable — to a roaming partner and to
+a charge point alike — with a diagnostic about a second rate it did not have.
 
 ## The order is the regulation's, not a designer's
 
@@ -302,7 +358,11 @@ assert!(rated.lines_reconcile());   // base_quantity × unit_price / 3600 == amo
 ## Restrictions, including the two everybody gets wrong
 
 Time-of-day, date, energy, duration, power and weekday restrictions select which
-element applies.
+element applies — and each of them is also a **cut point**, so the answer never
+depends on how finely the caller sliced the session. That includes the local
+midnight a weekday restriction turns on, which is the one threshold the tariff
+never names: without it a session running Friday 23:00 to Saturday 01:00 arrives
+as one period and is priced for both hours at Friday's rate.
 
 They are read against the **UTC offset the period carries**, because an
 `OffsetDateTime` knows an offset and not a time zone. Every session
@@ -320,6 +380,24 @@ is, rather than the empty range a naïve comparison makes of it.
 cannot judge — an OCPI `reservation` condition, a partner extension. An element
 holding one **never matches**, and the rating says so in a note. Silently
 treating it as unrestricted applies a price under conditions nobody checked.
+
+## Per minute, and the hour that has no such price
+
+`[AFIR Art. 5(4)]` asks for a price per **minute**. OCPI carries time prices per
+hour. Sixty has a factor of three, so an ordinary occupancy fee of €2.50 an hour
+is €0.041666… a minute and has no exact decimal spelling at all:
+
+```rust
+assert_eq!(price_per_minute(dec("6.00")), Some(dec("0.10")));
+assert_eq!(price_per_minute(dec("2.50")), None);
+```
+
+`Option`, not a division. Rounding shows a price the tariff does not charge;
+not rounding shows twenty-eight digits. Neither is "known to end users before
+they initiate", so `check_afir` calls it a breach with the remedy in the
+message — quote an hourly rate divisible by three — and `emob-ocpp` **refuses**
+the crossing outright, because OCPP 2.1's field is per minute and there is
+nothing honest to write in it. One function answers for all three.
 
 ## A tariff with tiers cannot be described by one set of numbers
 

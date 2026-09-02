@@ -30,6 +30,20 @@
 //! protocol's numbers would bill a number nothing signed, taken from a register
 //! that is not the session's `[OCA SMV §5.2]`.
 //!
+//! # The seam runs both ways
+//!
+//! The money comes **in** across this seam, out of a signature. The **price**
+//! goes out across it: OCPP 2.1's *Tariff and Cost* block lets a CSMS install a
+//! structured tariff on an EVSE and requires the station to show its
+//! description to the driver — which is where `[AFIR Art. 5(4)]`'s "known to
+//! end users before they initiate" actually happens. [`tariff`] carries an
+//! [`emob_tariff::Tariff`] onto that object, so the price on the charge point's
+//! screen is the object that rates the CDR rather than a field somebody typed.
+//!
+//! That is why this crate depends on `emob-tariff` and the crates that decide
+//! money still do not depend on `ocpp-kit`: the seam is the only place both
+//! vocabularies are in scope, in either direction.
+//!
 //! # What it does not do
 //!
 //! It does not speak OCPP. `ocpp-kit` does that — the framing, the sans-I/O
@@ -99,9 +113,11 @@
 pub mod error;
 pub mod fixtures;
 pub mod kit;
+pub mod tariff;
 pub mod transaction;
 
 pub use error::SeamError;
+pub use tariff::{cost_updated, to_ocpp};
 pub use transaction::{
     Assembled, EventKind, SignedReading, Transaction, TransactionEvent, record_of,
 };

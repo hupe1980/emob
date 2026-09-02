@@ -63,6 +63,70 @@ fn canonicalise(raw: &str, separators: &[char]) -> String {
         .collect()
 }
 
+/// What a party does on an OCPI wire `[OCPI 2.3.0 §credentials]`.
+///
+/// # Why this is in `emob-core`
+///
+/// Two crates state rules about it, which is the same argument the settlement
+/// grid and [`Crossing`] are here for. `emob-roam` routes a record by asking
+/// whether a partner is an eMSP or a hub; `emob-service` carries the role a
+/// credentials exchange declared, because it decides which modules a peer may
+/// call at all. Two enums for one concept is a conversion table between two
+/// vocabularies that agree — and the narrower of the two silently drops the
+/// roles it never learned.
+///
+/// # It is carried, and it is not the authorisation
+///
+/// A role says what a party *does*, not what it may reach. A CPO's credential
+/// does not thereby reach another CPO's records, and
+/// `emob_service::Principal` keeps the two apart for exactly that reason.
+///
+/// [`Crossing`]: crate::Crossing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "SCREAMING_SNAKE_CASE"))]
+#[non_exhaustive]
+pub enum Role {
+    /// Charge Point Operator. Operates points and sends CDRs.
+    Cpo,
+    /// e-Mobility Service Provider. Holds driver contracts, receives CDRs and
+    /// pays against them.
+    Emsp,
+    /// A hub, which routes for others.
+    Hub,
+    /// National Access Point — the authority a country publishes through, and
+    /// a party a German CPO genuinely peers with `[AFIR Art. 20(2)]`.
+    Nap,
+    /// Navigation Service Provider.
+    Nsp,
+    /// Smart Charging Service Provider.
+    Scsp,
+    /// Something the enumeration does not name.
+    Other,
+}
+
+impl Role {
+    /// The spelling OCPI uses on the wire.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpo => "CPO",
+            Self::Emsp => "EMSP",
+            Self::Hub => "HUB",
+            Self::Nap => "NAP",
+            Self::Nsp => "NSP",
+            Self::Scsp => "SCSP",
+            Self::Other => "OTHER",
+        }
+    }
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // ── EvseId ──────────────────────────────────────────────────────────────────
 
 /// An EVSE identifier: country, operator, and the charge point within it.

@@ -9,6 +9,10 @@ the customer checks the bill with.
 cargo add emob-eichrecht
 ```
 
+📖 The reasoning behind this crate, with the regulation it cites, is in
+**[The Eichrecht chain](https://hupe1980.github.io/emob/docs/eichrecht/)**.
+The signatures are on [docs.rs](https://docs.rs/emob-eichrecht).
+
 ## The rule this crate enforces
 
 A customer may be billed for a measured value only if they can verify it, long
@@ -105,7 +109,7 @@ that every record naming a signing component names the **same** one
 
 That last one takes its reference from the first record that *names* a component,
 not from the first record: OCMF permits a station to omit `MS`, and an anchor the
-assembler chooses is an anchor they can use to switch the check off (D112).
+assembler chooses is an anchor they can use to switch the check off.
 
 **A substitute value is not a measurement.** `ST=S` means the meter produced a
 number because it could not measure one. Perfectly legitimate telemetry, and
@@ -136,6 +140,13 @@ falling through to a neighbouring one.
 The partition is **enforced**, not assumed: `insert` is fallible and refuses a
 window that overlaps one the component already holds — two unbounded keys for one
 meter being the ordinary form of the mistake.
+
+It also refuses an **empty** one. A window with `until <= from` — a transcribed
+date, two fields swapped in a provisioning run — covers no instant at all, and
+the overlap sweep cannot see it, because an empty interval overlaps nothing. It
+would register cleanly, verify nothing, and leave the component reading as
+unprovisioned at every instant — which is indistinguishable from a component
+nobody registered, in the one place an operator goes to ask.
 
 ## Four quantities, not one
 

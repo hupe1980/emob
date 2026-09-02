@@ -341,13 +341,31 @@ impl Money {
     /// The number of places comes from [`Currency::minor_unit_digits`], not
     /// from a hard-coded two, so a yen total is a whole number and a dinar
     /// total keeps its third decimal.
+    ///
+    /// # It rounds *to* the minor unit, in both directions
+    ///
+    /// `round_dp` narrows a value that is too precise and leaves one that is
+    /// not alone, so `11.90 / 1.19` comes back as `10` — scale zero — and an
+    /// invoice line beside `8.44` prints `10`. That is the same money and it is
+    /// a document that looks broken, and worse, a partner diffing two exports
+    /// sees a change where none happened.
+    ///
+    /// So the scale is **set**, not merely capped. Money is the one quantity in
+    /// this workspace where scale is a property of the *currency* rather than a
+    /// claim by the instrument that measured it — a euro has two decimal places
+    /// whatever arithmetic produced the figure, which is exactly the opposite of
+    /// the rule [`Energy`] keeps and the reason the two are separate types.
     #[must_use]
     pub fn round_to_minor_unit(self) -> Self {
+        let digits = self.currency.minor_unit_digits();
+        let mut amount = self
+            .amount
+            .round_dp_with_strategy(digits, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
+        // `rescale` only ever widens here — the rounding above already narrowed
+        // anything wider — so no digit is lost.
+        amount.rescale(digits);
         Self {
-            amount: self.amount.round_dp_with_strategy(
-                self.currency.minor_unit_digits(),
-                rust_decimal::RoundingStrategy::MidpointAwayFromZero,
-            ),
+            amount,
             currency: self.currency,
         }
     }
@@ -494,6 +512,42 @@ mod tests {
         assert_eq!(m.round_to_minor_unit().amount(), dec("1.01"));
         let n = Money::new(dec("-1.005"), Currency::EUR);
         assert_eq!(n.round_to_minor_unit().amount(), dec("-1.01"));
+    }
+
+    #[test]
+    fn rounding_sets_the_scale_rather_than_only_capping_it() {
+        // `11.90 / 1.19` is exactly 10, at scale zero — and an invoice line
+        // printing `10 EUR` beside one printing `8.44 EUR` is a document that
+        // looks broken. A euro has two decimal places whatever arithmetic
+        // produced the figure, which is the opposite of the rule `Energy` keeps.
+        let exact = Money::new(dec("11.90") / dec("1.19"), Currency::EUR);
+        assert_eq!(exact.round_to_minor_unit().to_string(), "10.00 EUR");
+        assert_eq!(
+            Money::new(dec("7"), Currency::EUR)
+                .round_to_minor_unit()
+                .to_string(),
+            "7.00 EUR"
+        );
+        assert_eq!(
+            Money::zero(Currency::EUR).round_to_minor_unit().to_string(),
+            "0.00 EUR"
+        );
+
+        // …and the currency's own unit, not a hard-coded two.
+        let jpy = Currency::new("JPY").unwrap();
+        assert_eq!(
+            Money::new(dec("1234.5"), jpy)
+                .round_to_minor_unit()
+                .to_string(),
+            "1235 JPY"
+        );
+        let kwd = Currency::new("KWD").unwrap();
+        assert_eq!(
+            Money::new(dec("1.2"), kwd)
+                .round_to_minor_unit()
+                .to_string(),
+            "1.200 KWD"
+        );
     }
 
     #[test]

@@ -23,6 +23,17 @@
 //! fact it turns on — whether the arrangement delivers what the operator needs
 //! — is a fact about the point, and because the party that has to act on the
 //! finding is the operator holding the contract. See [`Ownership`].
+//!
+//! # …and a third, because cybersecurity law binds the company
+//!
+//! `[NIS2 Anh. I]` names this industry in the Energy sector by its role —
+//! *"Betreiber von Ladepunkten, die … Endnutzern einen Aufladedienst
+//! erbringen"* — and every duty it attaches is about the **undertaking**: its
+//! size, its governance, whether it can send an early warning within
+//! twenty-four hours. None of that is a fact about a charge point, and the
+//! `[CRA Art. 13]` duties of a manufacturer are not either. So there is a
+//! third profile, [`UndertakingProfile`], and the calendar knows which of the
+//! three each duty reads.
 
 use rust_decimal::Decimal;
 use time::Date;
@@ -615,6 +626,115 @@ pub struct MeteringPosture {
     pub rectification_loss_disclosed: bool,
 }
 
+/// Whether the register entry is **public** — `[38k §6(3) Nr. 1]`.
+///
+/// The condition is a disjunction, and the two branches are different facts
+/// about the world: the regulator has published the point, *or* the third
+/// party has told the regulator it may. Modelling it as "was the commissioning
+/// notified" reads a fact from the wrong paragraph — § 4(1) of the
+/// Ladesäulenverordnung requires the *Anzeige*, and nothing in it requires or
+/// implies publication. A point can be notified, on the register, and not
+/// publishable, and its energy does not count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum RegisterPublication {
+    /// Neither published nor consented to. The default, because a point that
+    /// has said nothing has not consented to anything.
+    #[default]
+    Withheld,
+    /// Consent to publication has been given to the regulator.
+    ConsentGiven,
+    /// The regulator has published the notified point.
+    Published,
+}
+
+impl RegisterPublication {
+    /// Whether `[38k §6(3) Nr. 1]` is met.
+    #[must_use]
+    pub const fn is_public(self) -> bool {
+        matches!(self, Self::ConsentGiven | Self::Published)
+    }
+}
+
+/// Whether the further identifying features are at the point
+/// `[38k §6(3) Nr. 4]`.
+///
+/// Three states rather than a `bool`, because the duty only exists once the
+/// competent authority has announced features in the Bundesanzeiger
+/// `[38k §6(4)]`. "Nothing was announced" and "what was announced is missing"
+/// are opposite answers, and a `bool` has to pick one of them to mean both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FurtherIdentifiers {
+    /// The authority has announced none, so none are owed.
+    #[default]
+    NoneAnnounced,
+    /// The announced features are present at the point.
+    Present,
+    /// Features were announced and this point does not carry them.
+    Missing,
+}
+
+impl FurtherIdentifiers {
+    /// Whether `[38k §6(3) Nr. 4]` is met.
+    #[must_use]
+    pub const fn is_met(self) -> bool {
+        matches!(self, Self::NoneAnnounced | Self::Present)
+    }
+}
+
+/// What `[38k §6(3)]` asks about a point before its kilowatt-hours may be
+/// counted towards the greenhouse-gas quota.
+///
+/// Four cumulative conditions, one field each, in the paragraph's own order.
+/// They are separate from [`Registration`] because they are a different
+/// regulation asking different questions: the Ladesäulenverordnung wants the
+/// point *notified*, the `38. BImSchV` wants it **publishable**, **measured
+/// lawfully**, **identified**, and carrying whatever the authority has since
+/// announced.
+///
+/// Public accessibility is deliberately *not* a field here. § 2 Nummer 2 of
+/// the Ladesäulenverordnung defines it "ungeachtet der für die Nutzung des
+/// Ladepunkts geltenden Bedingungen" — regardless of the terms of use — so the
+/// terms cannot make a public point private, and the question is already asked
+/// by the obligation's applicability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct QuotaPosture {
+    /// `[38k §6(3) Nr. 1]` — published by the regulator, or consented to.
+    pub publication: RegisterPublication,
+    /// `[38k §6(3) Nr. 2]` — the energetic quantity is determined in
+    /// conformity with the measuring and calibration law, and `[38k §6(4)]`
+    /// the operator has signed the authority's declaration saying so. The
+    /// third party keeps that declaration for **three years**.
+    pub conformity_declared: bool,
+    /// `[38k §6(3) Nr. 3]` — the ID registration organisation has issued the
+    /// operator an identification code `[AFIR Art. 20(1)]`.
+    ///
+    /// Not derivable from [`ChargePointProfile::evse_id`]: a well-formed
+    /// identifier says the operator *uses* a code, not that a registered
+    /// organisation *issued* it, and only the second is what the paragraph
+    /// asks for.
+    pub operator_code_assigned: bool,
+    /// `[38k §6(3) Nr. 4]` — the further identifying features, if any have
+    /// been announced.
+    pub further_identifiers: FurtherIdentifiers,
+}
+
+impl QuotaPosture {
+    /// Whether all four of `[38k §6(3)]`'s conditions are met.
+    ///
+    /// Applicability — that the point is publicly accessible at all — is the
+    /// obligation's question, not this type's.
+    #[must_use]
+    pub const fn is_eligible(self) -> bool {
+        self.publication.is_public()
+            && self.conformity_declared
+            && self.operator_code_assigned
+            && self.further_identifiers.is_met()
+    }
+}
+
 /// Everything an obligation may ask about one charge point.
 ///
 /// Deliberately a flat bag of facts rather than a nest of sub-structures: each
@@ -734,9 +854,9 @@ pub struct ChargePointProfile {
     pub registration: Registration,
     /// Its metering posture.
     pub metering: MeteringPosture,
-    /// Whether third parties can charge here — a THG-Quote precondition
-    /// alongside the register entry `[38k §6]`.
-    pub open_to_third_parties: bool,
+    /// What `[38k §6(3)]` asks before its kilowatt-hours count towards the
+    /// greenhouse-gas quota.
+    pub quota: QuotaPosture,
 }
 
 impl ChargePointProfile {
@@ -849,7 +969,7 @@ impl ChargePointProfile {
             data: DataPublication::default(),
             registration: Registration::default(),
             metering: MeteringPosture::default(),
-            open_to_third_parties: false,
+            quota: QuotaPosture::default(),
         }
     }
 }
@@ -903,6 +1023,340 @@ impl ProviderProfile {
             surcharges_cross_border_roaming: false,
         }
     }
+}
+
+/// The ten measures `[NIS2 Art. 21(2)]` lists as the floor.
+///
+/// Not a score and not a maturity level: the article says the measures "shall
+/// include **at least** the following", so every one of the ten is a separate
+/// yes-or-no, and the aggregate answer is a conjunction. A model that averaged
+/// them would report an undertaking with nine of ten as ninety per cent
+/// compliant, which is a number the article does not recognise.
+///
+/// The names are the article's own, in its own order, so the struct can be read
+/// beside the Official Journal text rather than against somebody's framework
+/// mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one of the ten measures the article enumerates"
+)]
+pub struct RiskManagement {
+    /// (a) Policies on risk analysis and information system security.
+    pub risk_analysis_policies: bool,
+    /// (b) Incident handling.
+    pub incident_handling: bool,
+    /// (c) Business continuity — backup management, disaster recovery, crisis
+    /// management.
+    pub business_continuity: bool,
+    /// (d) Supply-chain security, including the security of the relationships
+    /// with direct suppliers and service providers.
+    pub supply_chain_security: bool,
+    /// (e) Security in acquisition, development and maintenance, including
+    /// vulnerability handling and disclosure.
+    pub secure_development: bool,
+    /// (f) Policies and procedures to assess the effectiveness of the measures.
+    pub effectiveness_assessment: bool,
+    /// (g) Basic cyber-hygiene practices and cybersecurity training.
+    pub cyber_hygiene_and_training: bool,
+    /// (h) Policies and procedures on the use of cryptography and, where
+    /// appropriate, encryption.
+    pub cryptography: bool,
+    /// (i) Human-resources security, access-control policies and asset
+    /// management.
+    pub personnel_and_access_control: bool,
+    /// (j) Multi-factor or continuous authentication, secured voice, video and
+    /// text communication, and secured emergency communication.
+    pub multi_factor_authentication: bool,
+}
+
+impl RiskManagement {
+    /// Nothing in place — the state a profile that claims nothing should be in.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            risk_analysis_policies: false,
+            incident_handling: false,
+            business_continuity: false,
+            supply_chain_security: false,
+            secure_development: false,
+            effectiveness_assessment: false,
+            cyber_hygiene_and_training: false,
+            cryptography: false,
+            personnel_and_access_control: false,
+            multi_factor_authentication: false,
+        }
+    }
+
+    /// All ten in place.
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self {
+            risk_analysis_policies: true,
+            incident_handling: true,
+            business_continuity: true,
+            supply_chain_security: true,
+            secure_development: true,
+            effectiveness_assessment: true,
+            cyber_hygiene_and_training: true,
+            cryptography: true,
+            personnel_and_access_control: true,
+            multi_factor_authentication: true,
+        }
+    }
+
+    /// The measures that are missing, named the way the article names them.
+    ///
+    /// What a finding is worth acting on: "risk management is incomplete" is a
+    /// consultant's sentence, and "supply-chain security and cryptography are
+    /// missing" is a work order.
+    #[must_use]
+    pub fn missing(self) -> Vec<&'static str> {
+        [
+            (self.risk_analysis_policies, "(a) risk analysis policies"),
+            (self.incident_handling, "(b) incident handling"),
+            (self.business_continuity, "(c) business continuity"),
+            (self.supply_chain_security, "(d) supply-chain security"),
+            (self.secure_development, "(e) secure development"),
+            (
+                self.effectiveness_assessment,
+                "(f) effectiveness assessment",
+            ),
+            (
+                self.cyber_hygiene_and_training,
+                "(g) cyber hygiene and training",
+            ),
+            (self.cryptography, "(h) cryptography"),
+            (
+                self.personnel_and_access_control,
+                "(i) personnel and access control",
+            ),
+            (
+                self.multi_factor_authentication,
+                "(j) multi-factor authentication",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(present, name)| (!present).then_some(name))
+        .collect()
+    }
+
+    /// Whether all ten are in place.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.risk_analysis_policies
+            && self.incident_handling
+            && self.business_continuity
+            && self.supply_chain_security
+            && self.secure_development
+            && self.effectiveness_assessment
+            && self.cyber_hygiene_and_training
+            && self.cryptography
+            && self.personnel_and_access_control
+            && self.multi_factor_authentication
+    }
+}
+
+/// Which NIS2 class an undertaking falls into.
+///
+/// The distinction decides the *supervision* regime rather than the duties:
+/// `[NIS2 Art. 32]` supervises an essential entity proactively and
+/// `[NIS2 Art. 33]` supervises an important one only where there is evidence of
+/// a breach — while Articles 20, 21 and 23 bind both alike. So the calendar
+/// judges both classes against the same duties and reports the class beside
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum Nis2Class {
+    /// An entity of an Annex I type that exceeds the medium-enterprise
+    /// ceilings `[NIS2 Art. 3(1)]`.
+    Essential,
+    /// One that qualifies as medium-sized `[NIS2 Art. 3(2)]`.
+    Important,
+}
+
+/// Everything a cybersecurity duty may ask about the **undertaking** — the
+/// company, rather than one of its charge points or one of the roles it plays.
+///
+/// # The third subject, and why it is not the other two
+///
+/// `[NIS2 Anh. I]` names this industry by its role, in the Energy sector, in as
+/// many words: *"Betreiber von Ladepunkten, die für die Verwaltung und den
+/// Betrieb eines Ladepunkts zuständig sind und Endnutzern einen Aufladedienst
+/// erbringen, auch im Namen und Auftrag eines Mobilitätsdienstleisters"*. That
+/// is precisely the operator [`ChargePointProfile`] describes the points of —
+/// and none of its duties are about a point. They are about the undertaking:
+/// its size, its governance, its incident-reporting capability.
+///
+/// Judging them against a charge point would be the category error
+/// [`ProviderProfile`] exists to avoid, one subject further out. So there is a
+/// third profile, and the calendar knows which of the three each duty reads.
+///
+/// # Size is the whole of the scope question, and the arithmetic is not obvious
+///
+/// `[NIS2 Art. 2(1)]` brings in entities that *qualify as* medium-sized under
+/// Article 2 of the Annex to Recommendation 2003/361/EC **or exceed** those
+/// ceilings, and `[NIS2 Art. 3(1)]` makes the ones that exceed them essential.
+/// The Recommendation defines an SME as an enterprise employing fewer than 250
+/// persons **and** having a turnover not exceeding €50 M **and/or** a balance
+/// sheet total not exceeding €43 M.
+///
+/// Negate that and the conjunctions swap: an undertaking exceeds the ceilings
+/// when it employs **250 or more** people **or** when its turnover is above
+/// €50 M **and** its balance sheet total is above €43 M. Every secondary source
+/// this was checked against writes "250 employees or €50 million turnover" and
+/// drops the balance-sheet conjunct — which pulls an asset-light operator with
+/// €60 M of revenue into the essential class it is not in.
+///
+/// [`Self::exceeds_medium_ceilings`] does the negation properly, and
+/// [`Self::qualifies_as_medium`] applies the same shape to the small-enterprise
+/// ceilings (€10 M and €10 M).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one regulatory fact"
+)]
+pub struct UndertakingProfile {
+    /// Which undertaking this is.
+    pub party: PartyId,
+    /// Headcount, as the Recommendation counts it.
+    pub employees: u32,
+    /// Annual turnover, in euro.
+    pub annual_turnover_eur: Decimal,
+    /// Annual balance-sheet total, in euro.
+    pub balance_sheet_total_eur: Decimal,
+    /// Whether the undertaking is responsible for the management and operation
+    /// of a recharging point providing a recharging service to end users — the
+    /// `[NIS2 Anh. I]` Energy entry that names this industry.
+    ///
+    /// `false` for a pure mobility service provider, which is not an Annex I
+    /// type: the entry covers operating points "in the name and on behalf of a
+    /// mobility service provider", and that describes the operator rather than
+    /// the provider.
+    pub operates_recharging_points: bool,
+    /// Whether the undertaking places a product with digital elements on the
+    /// Union market — a station firmware, a CSMS, a driver app it publishes as
+    /// its own.
+    ///
+    /// The `[CRA Art. 13]` question, and the one that has to be decided per
+    /// deployment: an operator that only *runs* somebody else's hardware and
+    /// somebody else's platform is not a manufacturer, and one that ships an
+    /// app under its own name is.
+    pub places_digital_products_on_the_market: bool,
+    /// Whether the undertaking has given the competent authority the details
+    /// `[NIS2 Art. 3(4)]` requires.
+    pub registered_with_the_authority: bool,
+    /// The ten measures `[NIS2 Art. 21(2)]` requires.
+    pub risk_management: RiskManagement,
+    /// Whether the undertaking can send an early warning within twenty-four
+    /// hours of becoming aware of a significant incident `[NIS2 Art. 23(4)]`.
+    pub can_warn_within_24_hours: bool,
+    /// Whether the management body has approved the risk-management measures
+    /// and oversees their implementation `[NIS2 Art. 20(1)]`.
+    pub management_approved_measures: bool,
+    /// Whether the members of the management body attend cybersecurity
+    /// training `[NIS2 Art. 20(2)]`.
+    pub management_trained: bool,
+    /// Whether the undertaking can report an actively exploited vulnerability
+    /// to the coordinator CSIRT and ENISA within twenty-four hours
+    /// `[CRA Art. 14]`.
+    pub can_report_exploited_vulnerabilities: bool,
+    /// Whether it operates a coordinated vulnerability disclosure policy and
+    /// the rest of the vulnerability handling `[CRA Anh. I]` Part II requires.
+    pub coordinated_vulnerability_disclosure: bool,
+    /// Whether the products it places on the market have been through a
+    /// conformity assessment and carry the CE marking `[CRA Art. 13]`.
+    pub products_conformity_assessed: bool,
+}
+
+impl UndertakingProfile {
+    /// An undertaking that has done nothing — the fixture equivalent of
+    /// [`ChargePointProfile::bare`], and non-compliant on purpose.
+    ///
+    /// The size is zero, which puts it out of scope: a profile that claims
+    /// nothing must not claim to be an essential entity either.
+    #[must_use]
+    pub const fn bare(party: PartyId) -> Self {
+        Self {
+            party,
+            employees: 0,
+            annual_turnover_eur: Decimal::ZERO,
+            balance_sheet_total_eur: Decimal::ZERO,
+            operates_recharging_points: false,
+            places_digital_products_on_the_market: false,
+            registered_with_the_authority: false,
+            risk_management: RiskManagement::none(),
+            can_warn_within_24_hours: false,
+            management_approved_measures: false,
+            management_trained: false,
+            can_report_exploited_vulnerabilities: false,
+            coordinated_vulnerability_disclosure: false,
+            products_conformity_assessed: false,
+        }
+    }
+
+    /// Whether the undertaking exceeds the ceilings for a medium-sized
+    /// enterprise — the `[NIS2 Art. 3(1)]` test for an **essential** entity.
+    ///
+    /// `employees ≥ 250 OR (turnover > €50 M AND balance sheet > €43 M)`. The
+    /// conjunction in the financial half is the negation of the
+    /// Recommendation's "and/or", and it is the half every summary drops.
+    #[must_use]
+    pub fn exceeds_medium_ceilings(&self) -> bool {
+        self.employees >= 250
+            || (self.annual_turnover_eur > millions(50)
+                && self.balance_sheet_total_eur > millions(43))
+    }
+
+    /// Whether it qualifies as medium-sized — the `[NIS2 Art. 3(2)]` test for
+    /// an **important** entity, once [`Self::exceeds_medium_ceilings`] is
+    /// false.
+    ///
+    /// The same shape at the small-enterprise ceilings: an enterprise is small
+    /// when it employs fewer than 50 people **and** has a turnover or a balance
+    /// sheet total not above €10 M, so it is *at least* medium when it employs
+    /// 50 or more **or** exceeds both.
+    #[must_use]
+    pub fn qualifies_as_medium(&self) -> bool {
+        !self.exceeds_medium_ceilings()
+            && (self.employees >= 50
+                || (self.annual_turnover_eur > millions(10)
+                    && self.balance_sheet_total_eur > millions(10)))
+    }
+
+    /// Which class the undertaking is in, if any.
+    ///
+    /// `None` for a micro or small undertaking, and for one that is not of an
+    /// Annex I type at all — `[NIS2 Art. 2(2)]` lets a Member State bring a
+    /// smaller entity in by designation, which is a fact about that decision
+    /// rather than about the undertaking's size, and is not modelled here.
+    #[must_use]
+    pub fn nis2_class(&self) -> Option<Nis2Class> {
+        if !self.operates_recharging_points {
+            return None;
+        }
+        if self.exceeds_medium_ceilings() {
+            Some(Nis2Class::Essential)
+        } else if self.qualifies_as_medium() {
+            Some(Nis2Class::Important)
+        } else {
+            None
+        }
+    }
+
+    /// Whether any NIS2 duty binds this undertaking.
+    #[must_use]
+    pub fn is_in_nis2_scope(&self) -> bool {
+        self.nis2_class().is_some()
+    }
+}
+
+/// A whole number of millions of euro, exactly.
+fn millions(n: u32) -> Decimal {
+    Decimal::from(n) * Decimal::from(1_000_000)
 }
 
 #[cfg(test)]
