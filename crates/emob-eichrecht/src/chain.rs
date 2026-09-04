@@ -277,8 +277,8 @@ impl core::fmt::Display for ChainFinding {
 /// - `T` — a tariff change.
 ///
 /// Both are exactly the intervals money turns on. `[AFIR Art. 5(4)]` prices the
-/// time a vehicle is connected and not charging per minute, and until now that
-/// interval reached a CDR only from OCPP's `chargingState` — a protocol field,
+/// time a vehicle is connected and not charging per minute, and the alternative
+/// source for that interval is OCPP's `chargingState` — a protocol field,
 /// asserted by the same party that issues the invoice. When the meter's
 /// signature component states it too, the occupancy fee has evidence behind it
 /// rather than an assertion, and the two can be compared.
@@ -738,7 +738,6 @@ fn billable_register(
     findings: &mut Vec<ChainFinding>,
 ) -> Energetics {
     let (started_at, ended_at) = session_bounds(records);
-    let loss = check_loss_compensation(records, findings);
 
     // The first energy register the sequence measured. A chain that measured
     // two — an import and an export on one meter — is one whose *caller* has to
@@ -750,7 +749,10 @@ fn billable_register(
             energy: None,
             register: None,
             direction: None,
-            compensated_loss: loss,
+            // Nothing was billed, so no register's compensation is this
+            // chain's. Reading one anyway would attach a figure to a quantity
+            // that does not exist.
+            compensated_loss: None,
             started_at,
             ended_at,
         };
@@ -783,6 +785,13 @@ fn billable_register(
     // here, once, is what keeps a `billable_energy` in kWh from sitting beside a
     // figure a thousand times too large.
     let energy = energy_in(total.delta, &total.unit);
+
+    // The compensation belongs to **this** register. A meter that reports two —
+    // a total and a transaction register, an import and an export — carries a
+    // `CL` on each, and a sweep that took the last one it saw subtracted an
+    // opening value from one register out of a closing value from another. The
+    // figure that came out was not a quantity at all (D242).
+    let loss = check_loss_compensation(records, register.as_deref(), findings);
 
     Energetics {
         energy,
@@ -818,44 +827,72 @@ fn session_bounds(
     )
 }
 
-/// The cable loss this session compensated, and the two ways it can be
-/// unreadable `[OCMF Tab. 7, CL]`.
+/// The cable loss **this chain's own register** compensated, and the two ways
+/// it can be unreadable `[OCMF Tab. 7, CL]`.
+///
+/// # Which register's, and why that had to be said
+///
+/// `CL` is a property of the register it sits beside — "given in the same unit
+/// as `RV`", accumulating across the transaction, reset at `TX=B`. A meter that
+/// reports two registers reports two `CL` series, and a sweep that kept the last
+/// value it saw took a closing value from one register against an opening value
+/// from another. The difference is not a small error, it is not a quantity: it
+/// is `CL_end(C2) − CL_begin(B2)`, and nothing in the format says those two
+/// numbers are about the same thing (D242).
+///
+/// So the readings are filtered to `billed` — the canonical spelling of the
+/// register [`billable_register`] chose — and a chain with no billable register
+/// has no compensation to report either. `None` for `billed` is a chain whose
+/// register would not parse, and there the sweep falls back to every reading,
+/// because "which register" has no answer and reporting nothing would hide a
+/// `CL` a dispute turns on.
+///
+/// # One finding per register, not one per reading
+///
+/// A session sampled every quarter hour carries ninety-six readings. Reporting
+/// the same fault ninety-six times is a queue nobody reads, and it is the same
+/// rule the rating engine keeps for an unpriced dimension: the finding is about
+/// the register, so it is raised once for it.
 fn check_loss_compensation(
     records: &[&Record<'_>],
+    billed: Option<&str>,
     findings: &mut Vec<ChainFinding>,
 ) -> Option<Energy> {
     let mut opening: Option<Decimal> = None;
     let mut closing: Option<(Decimal, String)> = None;
+    let mut not_an_accumulation: Option<String> = None;
+    let mut not_reset: Option<Decimal> = None;
 
     for record in records {
         for reading in record.payload().readings() {
             let Some(loss) = reading.cumulated_loss() else {
                 continue;
             };
+            let code = reading.obis();
+            // Only this chain's own register contributes. See above.
+            if let Some(billed) = billed
+                && code.map(ObisCode::canonical).as_deref() != Some(billed)
+            {
+                continue;
+            }
             let value = loss.value();
 
             // `CL` is a compensation applied to an accumulating energy
             // register. Reported against anything else it is a number nobody
             // can trace to a value.
-            let accumulates = reading
-                .obis()
+            let accumulates = code
                 .map(ObisCode::register)
                 .and_then(|kind| kind.is_import().map(|_| kind))
                 .is_some();
-            if !accumulates {
-                findings.push(ChainFinding::LossOnNonAccumulationRegister {
-                    register: reading
-                        .obis()
-                        .map_or_else(|| "(absent)".to_owned(), |c| c.as_str().to_owned()),
-                });
+            if !accumulates && not_an_accumulation.is_none() {
+                not_an_accumulation =
+                    Some(code.map_or_else(|| "(absent)".to_owned(), |c| c.as_str().to_owned()));
             }
 
             if reading.transaction() == Some(TransactionMarker::Begin) {
                 opening = Some(value);
-                if !value.is_zero() {
-                    findings.push(ChainFinding::LossNotResetAtBegin {
-                        cumulated: value.to_string(),
-                    });
+                if !value.is_zero() && not_reset.is_none() {
+                    not_reset = Some(value);
                 }
             }
             let unit = reading
@@ -863,6 +900,15 @@ fn check_loss_compensation(
                 .map_or_else(|| "kWh".to_owned(), |u| u.as_str().to_owned());
             closing = Some((value, unit));
         }
+    }
+
+    if let Some(register) = not_an_accumulation {
+        findings.push(ChainFinding::LossOnNonAccumulationRegister { register });
+    }
+    if let Some(cumulated) = not_reset {
+        findings.push(ChainFinding::LossNotResetAtBegin {
+            cumulated: cumulated.to_string(),
+        });
     }
 
     let (end, unit) = closing?;
@@ -879,4 +925,64 @@ fn instant_of(time: ocmf::OcmfTime) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::from_unix_timestamp(time.unix_seconds())
         .ok()
         .map(|at| at.to_offset(offset))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record with a reading on one register, carrying a cumulated loss.
+    fn record(pagination: &str, tx: &str, obis: &str, rv: &str, cl: &str) -> String {
+        format!(
+            r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:00:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"{obis}","RU":"kWh","CL":{cl},"ST":"G"}}]}}|{{"SD":"00"}}"#
+        )
+    }
+
+    /// `[OCMF Tab. 7, CL]` — a meter reporting **two** registers reports two
+    /// cumulated-loss series, and they are not one series.
+    ///
+    /// The import register's loss runs 0 → 0.4 across the transaction; the
+    /// export register's runs 0 → 9.0. Taking the last `CL` seen against the
+    /// first `TX=B` seen crosses them and reports 9.0 as the import session's
+    /// cable loss — a figure attached to the one quantity it is supposed to
+    /// explain, and more than twenty times the truth (D242).
+    #[test]
+    fn cable_loss_belongs_to_the_register_that_was_billed() {
+        let raw = [
+            record("T1", "B", "01-00:B2.08.00*FF", "10.0", "0.0"),
+            record("T2", "C", "01-00:C2.08.00*FF", "0.0", "0.0"),
+            record("T3", "E", "01-00:B2.08.00*FF", "25.0", "0.4"),
+            record("T4", "E", "01-00:C2.08.00*FF", "3.0", "9.0"),
+        ];
+        let records: Vec<Record<'_>> = raw
+            .iter()
+            .map(|r| Record::parse(r).expect("a well-formed record"))
+            .collect();
+
+        let report = validate(&records);
+
+        // The chain bills the first register the sequence measured, and the
+        // loss it reports is that register's own.
+        assert_eq!(
+            report.compensated_loss,
+            Some(
+                Energy::from_kwh(Decimal::from_str_exact("0.4").expect("a decimal")).expect("kWh")
+            ),
+            "the export register's 9.0 is not this session's cable loss"
+        );
+    }
+
+    /// A chain with nothing to bill reports no compensation either.
+    ///
+    /// A `CL` belongs to a register, and a chain that chose none has no
+    /// register to attach it to — reporting one anyway would put a figure
+    /// beside a quantity that does not exist.
+    #[test]
+    fn a_chain_with_no_billable_register_reports_no_loss() {
+        let report = validate(&[]);
+        assert_eq!(report.compensated_loss, None);
+        assert!(report.findings.iter().any(
+            |f| matches!(f, ChainFinding::Sequence(_)) || *f == ChainFinding::NoBillableEnergy
+        ));
+    }
 }

@@ -296,6 +296,8 @@ fn describe_difference(existing: &Cdr, incoming: &Cdr) -> String {
 
 #[cfg(test)]
 mod tests {
+    use emob_core::Activity;
+
     use super::*;
     use crate::cdr::{CdrBuilder, ChargingPeriod};
     use emob_core::{Direction, Energy, PartyId};
@@ -416,7 +418,7 @@ mod tests {
             start: at(45),
             end: at(60),
             energy: kwh("0"),
-            charging: true,
+            activity: Activity::Charging,
             provenance: emob_session::Provenance::Measured,
         });
 

@@ -124,9 +124,17 @@ pub struct PriceDescription {
     pub currency: Currency,
     /// Whether the prices include tax.
     pub tax_included: crate::tariff::TaxIncluded,
-    /// The minimum a session will cost, when the tariff sets one.
+    /// The minimum a session will cost, in the basis the prices are quoted in,
+    /// when the tariff sets one.
+    ///
+    /// A driver reads one figure and compares it against the number they were
+    /// shown, so this is the bound **in the tariff's own basis** rather than the
+    /// pair `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` carries — see
+    /// `PriceLimit::in_basis`. The other limb still binds; it is the rating
+    /// that enforces it, and a display that quoted both would be showing a
+    /// driver two ceilings to compare one total against.
     pub min_price: Option<Decimal>,
-    /// The maximum, when it sets one.
+    /// The maximum, in the same basis, when it sets one.
     pub max_price: Option<Decimal>,
 }
 
@@ -269,8 +277,12 @@ pub fn describe(tariff: &Tariff, at: time::OffsetDateTime) -> PriceDescription {
         tiers,
         currency: tariff.currency,
         tax_included: tariff.tax_included,
-        min_price: tariff.min_price,
-        max_price: tariff.max_price,
+        min_price: tariff
+            .min_price
+            .and_then(|p| p.in_basis(tariff.tax_included)),
+        max_price: tariff
+            .max_price
+            .and_then(|p| p.in_basis(tariff.tax_included)),
     }
 }
 
@@ -354,6 +366,7 @@ pub fn price_per_minute(per_hour: Decimal) -> Option<Decimal> {
 mod tests {
     use super::*;
     use crate::rating::{Chargeable, Period, rate};
+    use crate::tariff::PriceLimit;
     use crate::tariff::{PriceComponent, Restrictions, TariffElement, TariffKind, TaxIncluded};
     use emob_core::Energy;
     use emob_core::TimeZone;
@@ -575,8 +588,8 @@ mod tests {
     #[test]
     fn the_description_carries_the_bounds() {
         let mut t = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
-        t.min_price = Some(dec("2.00"));
-        t.max_price = Some(dec("80.00"));
+        t.min_price = Some(PriceLimit::gross(dec("2.00")));
+        t.max_price = Some(PriceLimit::gross(dec("80.00")));
         let shown = describe(&t, at());
         assert_eq!(shown.min_price, Some(dec("2.00")));
         assert_eq!(shown.max_price, Some(dec("80.00")));

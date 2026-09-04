@@ -69,7 +69,7 @@ test-crate crate:
     cargo test -p {{ crate }} --all-features
 
 # 🛡️ Workspace guards: no floats, citations, publishable manifests, wire
-# spellings, clean graphs
+# spellings, unbroken sentences, self-consistent documents, clean graphs
 guards:
     cargo run -q -p xtask -- check-all
 

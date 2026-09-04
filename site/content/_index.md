@@ -140,7 +140,7 @@ sessions unverifiable.
 Twelve domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
 `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`, `emob-poi`, `emob-roam`,
 `emob-billing`, `emob-thg`, `emob-service` and `emob-sim` — with four daemons on
-top of them and **748 tests**. The domain crates do no I/O, read no clock and
+top of them and **842 tests**. The domain crates do no I/O, read no clock and
 hold no binary floats.
 
 What that buys, concretely:
@@ -151,27 +151,34 @@ What that buys, concretely:
   is published with;
 - the same session settles at the **same money** over self-roaming, OCPI 2.3.0
   and OCPI 2.2.1, each crossing reporting what it cost, and the record a partner
-  receives is one this stack reads back into its own model;
+  receives is one this stack reads back into its own model — and it crosses
+  **Hubject** on OICP 2.3 with its energy, its evidence and its identity, where
+  the price does not cross at all and the crossing says so;
 - the tariff that priced it reaches the charge point's own screen over OCPP 2.1,
   a partner over OCPI and the national access point over DATEX II, and a test
   asserts the three read one decimal;
+- the sessions `[OCPI 2.3.0]` walks through in prose — its `step_size`
+  transitions, its price limits, its reservations — price to the totals its own
+  breakdown tables publish;
 - a month closes: the same records become an EN 16931 invoice whose subtotals
   reproduce its own lines, a SEPA collection that draws the total to the cent
   and postings that balance — with the rounding stated rather than absorbed, and
   a cross-border settlement taxed where the reseller is established rather than
   where the charge point stands;
-- the year's greenhouse-gas quota is filed from the same records, and a point
-  that fails one of the four conditions between a kilowatt-hour and the quota is
-  refused by name rather than missing from the file;
+- the year's greenhouse-gas quota is filed from the same records, by both the
+  routes the Verordnung gives — a public point's metered kilowatt-hours and a
+  depot's registered vehicles — and a point that fails one of the four conditions
+  between a kilowatt-hour and the quota is refused by name rather than missing
+  from the file;
 - a hundred-station fleet run reconciles exactly;
 - a roaming peer's credential reaches its own party's records and no others, and
   the advisory plane beside the daemons **cannot move money** — its output type
   is a leaf nothing consumes, and its principal cannot hold a capability that
   writes.
 
-Plug & Charge contracts, Hubject roaming, smart charging and the services that
-invoice are designed and not yet built. Every page here marks
-✅ built and 📐 designed, and the gap between the two is never blurred.
+Plug & Charge contracts, smart charging, and the daemons that peer and invoice
+are designed and not yet built. Every page here marks ✅ built and 📐 designed,
+and the gap between the two is never blurred.
 
 <div class="cta">
 

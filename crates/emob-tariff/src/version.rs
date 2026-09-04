@@ -239,6 +239,10 @@ fn fingerprint_restrictions(c: &mut Canonical, r: &Restrictions) {
         .optional(r.max_power_kw.map(|v| v.to_string()))
         .optional(r.min_duration_s.map(|v| v.to_string()))
         .optional(r.max_duration_s.map(|v| v.to_string()))
+        // A **declared** token, as every field here is: an element that prices
+        // a reservation and one that prices a session are two elements, and a
+        // tariff that gains or loses the restriction is a different tariff.
+        .optional(r.reservation.map(|kind| kind.as_str().to_owned()))
         .count(days.len());
     for day in &days {
         c.field(&day.to_string());
@@ -452,6 +456,7 @@ pub enum TariffHistoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tariff::PriceLimit;
     use crate::tariff::{Dimension, PriceComponent, TariffKind};
     use emob_core::Currency;
     use emob_core::TimeZone;
@@ -514,7 +519,7 @@ mod tests {
         cases.push(tax);
 
         let mut minimum = base.clone();
-        minimum.min_price = Some(dec("5.00"));
+        minimum.min_price = Some(PriceLimit::gross(dec("5.00")));
         cases.push(minimum);
 
         let mut vat = base.clone();
@@ -537,8 +542,19 @@ mod tests {
         unevaluable.elements[0]
             .restrictions
             .unevaluable
-            .push("reservation=RESERVATION".to_owned());
+            .push("min_current=5".to_owned());
         cases.push(unevaluable);
+
+        // An element that prices a reservation is not the element that prices
+        // the session, and the two outcomes are not each other either.
+        for kind in [
+            crate::tariff::ReservationRestriction::Reservation,
+            crate::tariff::ReservationRestriction::ReservationExpires,
+        ] {
+            let mut reserving = base.clone();
+            reserving.elements[0].restrictions.reservation = Some(kind);
+            cases.push(reserving);
+        }
 
         for changed in cases {
             assert_ne!(

@@ -37,7 +37,7 @@
 //! as an ordinary draw and settle backwards. That one is not a note; it is
 //! [`RoamError::ExportNotExpressible`].
 
-use emob_cdr::{Cdr, ChargingPeriod, EvidenceRef};
+use emob_cdr::{Cdr, ChargingPeriod, Cost, EvidenceRef};
 use emob_core::{Direction, Energy};
 use emob_session::{AuthPath, Provenance};
 use emob_tariff::{Dimension, Rated};
@@ -96,26 +96,7 @@ fn hours(seconds: i64) -> (Decimal, bool) {
     )
 }
 
-/// The signed records, as a partner's verifier needs them.
-///
-/// A canonical [`EvidenceRef`] names its records by digest, because a CDR
-/// travels through roaming and a full OCMF blob per reading makes it enormous.
-/// OCPI's `SignedData` wants the records themselves, so the payloads are
-/// supplied here by whoever holds the evidence store.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignedPayload {
-    /// What the record is — `Start`, `End`, or the OCMF pagination it carries.
-    pub nature: String,
-    /// The record verbatim, exactly as the meter signed it.
-    ///
-    /// Verbatim is not a nicety. The signature covers the bytes as written, so
-    /// a payload that has been re-serialised on the way through does not
-    /// verify at the far end, and the partner's only conclusion is that the
-    /// operator tampered with it.
-    pub signed_data: String,
-    /// The human-readable rendering OCPI asks to accompany it.
-    pub plain_data: String,
-}
+pub use crate::signed::SignedPayload;
 
 /// Everything the wire needs that a canonical CDR deliberately does not carry.
 #[derive(Debug, Clone)]
@@ -264,6 +245,12 @@ pub fn to_ocpi(
     // minor unit. `total_cost` is the number that settles; the breakdown is
     // what makes it checkable, and a partner comparing the two deserves to
     // know which is which before they open a dispute about a cent.
+    // Five parts, not four. `total_reservation_cost` is one of the
+    // per-dimension fields a receiver sums `[OCPI 2.3.0 §mod_cdrs_cdr_object]`,
+    // and `total_cost` is the session **and** the reservation — so leaving it
+    // out of both sides compared a four-part sum against a five-part total and
+    // reported a discrepancy of exactly the reservation on every record that
+    // carried one, quoting a `total_cost` the document does not state (D250).
     let parts: Decimal = [
         Dimension::Energy,
         Dimension::Time,
@@ -272,9 +259,10 @@ pub fn to_ocpi(
     ]
     .into_iter()
     .filter_map(|d| component_price(&cost.rated, d))
+    .chain(cost.reservation.as_ref().map(price))
     .map(|p| p.after_taxes().get())
     .sum();
-    let whole = cost.rated.gross().amount();
+    let whole = cost.gross().amount();
     if parts != whole {
         crossing.note(
             "/total_cost",
@@ -340,7 +328,7 @@ pub fn to_ocpi(
         .currency(bounded_ocpi::<3>("currency", cost.rated.currency.as_str())?)
         .charging_periods(periods)
         .maybe_signed_data(signed_data)
-        .total_cost(price(&cost.rated))
+        .total_cost(total_price(cost))
         // OCPI breaks the total out per dimension and most implementations
         // fill only `total_cost`, which leaves the receiver unable to check
         // any part of it against its own tariff. The lines are already there.
@@ -351,6 +339,12 @@ pub fn to_ocpi(
         .maybe_total_time_cost(component_price(&cost.rated, Dimension::Time))
         .total_parking_time(Number::new(total_parking_time))
         .maybe_total_parking_cost(component_price(&cost.rated, Dimension::ParkingTime))
+        // The reservation, in the field `[OCPI 2.3.0 §mod_cdrs_cdr_object]`
+        // keeps for it. It is priced over a window that ran before any energy
+        // moved, so it is its own rating and its own total — and it is inside
+        // `total_cost`, which is why the pre-flight's own sum of the parts
+        // reconciles only when this field is sent with the rest.
+        .maybe_total_reservation_cost(cost.reservation.as_ref().map(price))
         .last_updated(context.last_updated)
         .build();
 
@@ -445,7 +439,14 @@ fn charging_periods(cdr: &Cdr) -> Crossing<(Vec<ocpi_kit::v2_3_0::cdrs::Charging
                 format!("{seconds} s is {in_hours} h rounded to {HOURS_SCALE} places"),
             );
         }
-        if !period.charging {
+        // `total_parking_time` is defined on **energy transfer** — "the
+        // duration of the charging session where the EV was not charging (no
+        // energy was transferred between EVSE and EV)"
+        // `[OCPI 2.3.0 §mod_cdrs_cdr_object]` — while the priced
+        // `PARKING_TIME` *dimension* is defined on the vehicle's demand. The
+        // two are the same figure until the operator withholds power, and a
+        // stack that computes one from the other is wrong in one of them.
+        if !period.activity.transfers_energy() {
             parking_seconds += seconds;
         }
 
@@ -491,23 +492,36 @@ fn charging_periods(cdr: &Cdr) -> Crossing<(Vec<ocpi_kit::v2_3_0::cdrs::Charging
 
 /// One period, in OCPI's dimensions.
 fn period_of(period: &ChargingPeriod, in_hours: Decimal) -> ocpi_kit::v2_3_0::cdrs::ChargingPeriod {
-    // `TIME` is *"Time charging"* and `PARKING_TIME` is *"Time not charging"*,
-    // so which one a period carries is the same fact the CDR states rather
-    // than infers — a quarter hour that genuinely measured `0.000 kWh` while
-    // the session was charging is a taper, not an occupancy, and pricing it as
-    // the latter charges a driver for parking they were told was charging.
-    let time_dimension = if period.charging {
-        CdrDimensionType::Time
-    } else {
-        CdrDimensionType::ParkingTime
-    };
+    // `TIME` is *"Time charging"* and `PARKING_TIME` is *"Time in this
+    // ChargingPeriod during which the **vehicle is not requesting power**"*
+    // `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`, so which one a period
+    // carries is the same fact the CDR states rather than infers — a quarter
+    // hour that genuinely measured `0.000 kWh` while the session was charging
+    // is a taper, not an occupancy, and pricing it as the latter charges a
+    // driver for parking they were told was charging.
+    //
+    // A period the *operator* withheld power in is neither, and it crosses as
+    // neither: the specification's own erratum says a `PARKING_TIME` volume
+    // there would expose the driver to "penalizing loitering fees … when the
+    // EVSE is not offering energy to the vehicle while the vehicle is still
+    // requesting power". So the period carries its energy and no time
+    // dimension, which is a statement the partner can read, and the seconds
+    // are still inside the `total_time` the record states.
+    let mut dimensions = vec![CdrDimension::new(
+        CdrDimensionType::Energy,
+        Number::new(period.energy.kwh()),
+    )];
+    if let Some(dimension) = Dimension::pricing(period.activity) {
+        let wire = match dimension {
+            Dimension::ParkingTime => CdrDimensionType::ParkingTime,
+            _ => CdrDimensionType::Time,
+        };
+        dimensions.push(CdrDimension::new(wire, Number::new(in_hours)));
+    }
 
     ocpi_kit::v2_3_0::cdrs::ChargingPeriod::builder()
         .start_date_time(period.start)
-        .dimensions(vec![
-            CdrDimension::new(CdrDimensionType::Energy, Number::new(period.energy.kwh())),
-            CdrDimension::new(time_dimension, Number::new(in_hours)),
-        ])
+        .dimensions(dimensions)
         .build()
 }
 
@@ -644,6 +658,51 @@ fn signed_data(
             .signed_values(values)
             .build(),
     ))
+}
+
+/// What the record comes to in total — the session **and** its reservation.
+///
+/// `total_cost` is "the total sum of all the costs of this transaction"
+/// `[OCPI 2.3.0 §mod_cdrs_cdr_object]`, and the pre-flight on the other side
+/// checks it against the sum of the per-dimension fields — one of which is
+/// `total_reservation_cost`. A total taken from the session's rating alone
+/// leaves a record that fails its own receiver's arithmetic by exactly the
+/// reservation.
+///
+/// The tax amounts merge **per rate** rather than concatenating: a session fee
+/// at 20 % and a reservation at 20 % are one taxable group on the document, and
+/// two `TaxAmount` entries at one rate is a breakdown no accountant reproduces.
+fn total_price(cost: &Cost) -> Price {
+    let Some(reservation) = cost.reservation.as_ref() else {
+        return price(&cost.rated);
+    };
+
+    let net = cost.rated.net().amount() + reservation.net().amount();
+    let mut by_rate: Vec<(Decimal, Decimal)> = Vec::new();
+    for line in cost
+        .rated
+        .tax_summary()
+        .into_iter()
+        .chain(reservation.tax_summary())
+    {
+        if line.tax.is_zero() {
+            continue;
+        }
+        match by_rate.iter_mut().find(|(rate, _)| *rate == line.rate) {
+            Some((_, total)) => *total += line.tax,
+            None => by_rate.push((line.rate, line.tax)),
+        }
+    }
+    by_rate.sort_by_key(|(rate, _)| *rate);
+
+    let mut out = Price::new(Number::new(net));
+    out.taxes = by_rate
+        .into_iter()
+        .filter_map(|(rate, tax)| {
+            TaxAmount::new("VAT", Some(Number::new(rate)), Number::new(tax)).ok()
+        })
+        .collect();
+    out
 }
 
 /// A rated total as an OCPI price, with the VAT breakdown EN 16931 needs.

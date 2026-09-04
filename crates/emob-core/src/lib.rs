@@ -70,6 +70,7 @@
 #![warn(missing_docs, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod activity;
 mod check_digit;
 pub mod crossing;
 pub mod error;
@@ -82,6 +83,7 @@ pub mod station;
 pub mod wire;
 pub mod zone;
 
+pub use activity::Activity;
 pub use crossing::{Crossing, Note};
 pub use error::{CoreError, IdError, QuantityError, Result};
 pub use identification::IdentificationStrength;
@@ -90,7 +92,7 @@ pub use ids::{
     TariffId,
 };
 pub use period::{ClockResolution, ClockResolutionError, QuarterHour};
-pub use quantity::{Currency, Direction, Energy, Money};
+pub use quantity::{APPORTIONED_SCALE, Currency, Direction, Energy, Money, apportion};
 pub use station::{
     Accessibility, AdHocPayment, ChargePointProfile, ChargingMode, CurrentType, DataPublication,
     EnergyMeasurementPoint, FurtherIdentifiers, MeteringPosture, Nis2Class, Notice, OperatorChange,

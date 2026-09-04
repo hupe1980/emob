@@ -481,6 +481,20 @@ central claim is that the customer can **check** the value owes them the fact
 that part of it is loss — a number nobody can interpret is a number nobody can
 check.
 
+### …and the third condition binds two documents
+
+The sentence names both: *"Die von einem Messwert **oder einer Rechnung**
+Betroffenen"*.
+
+**The invoice** is discharged by construction. Where a record's evidence states a
+compensated loss `[OCMF Tab. 7, CL]`, `emob-billing` puts the figure and the
+sentence on the line carrying the measured value — BT-127, EN 16931's line note —
+from the signed record rather than from a field somebody sets.
+
+**The notice at the point** is a fact about the world with nothing here to
+evidence it, so it stays a field on the charge point's profile —
+`rectification_loss_disclosed`, which says which of the two halves it covers.
+
 "Placed on the market" is also not commissioning: a station sold in 2017 may
 have been commissioned in 2019, and the allowance turns on the first. Where it
 is unknown the profile falls back to commissioning, which is the later of the
@@ -556,6 +570,20 @@ width, so neither a 32-byte digest against secp384r1's 48-byte field nor the
 same digest against secp192r1's 24-byte field even compiles. Verification goes
 through the prehash path instead, which applies the X9.62 conversion in both
 directions.
+
+## A cable loss belongs to the register it was measured on
+
+`CL` is a property of the register beside it `[OCMF Tab. 7, CL]` — "given in the
+same unit as `RV`", accumulating across the transaction, reset at `TX=B`. A meter
+reporting two registers reports two `CL` series, and taking the last value seen
+against the first `TX=B` seen crosses them: `CL_end(C2) − CL_begin(B2)` is not a
+quantity, and nothing in the format says those two numbers are about the same
+thing.
+
+So the register is chosen first and the compensation read on **that** one; a
+chain with no billable register reports none rather than one belonging to
+nothing. The two `CL` findings are raised once per register, not once per
+reading — a quarter-hourly session carries ninety-six of them.
 
 ## What is not here 📐
 

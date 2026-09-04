@@ -82,7 +82,7 @@
 //! assert!(invoice.reconciles());
 //!
 //! // The document, and the verdict on it before anything is sent.
-//! let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE)?;
+//! let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core)?;
 //! assert!(crossed.value.is_valid(), "{:?}", crossed.value.reasons().collect::<Vec<_>>());
 //!
 //! // …and the books, balanced before a single account is named.
@@ -104,10 +104,11 @@ pub mod payment;
 pub mod postings;
 pub mod tax;
 
+pub use en16931::{Specification, Syntax};
 pub use error::BillingError;
 pub use invoice::{
-    Contact, Counterparty, DocumentAdjustment, DocumentAdjustmentKind, Invoice, InvoiceBuilder,
-    InvoiceLine, PaymentDetails, TaxSubtotal, unit_code,
+    Cancelled, Contact, Counterparty, DocumentAdjustment, DocumentAdjustmentKind, DocumentKind,
+    Invoice, InvoiceBuilder, InvoiceLine, PaymentDetails, TaxSubtotal, unit_code,
 };
 pub use payment::{Collection, Creditor, Mandate, PaymentError};
 pub use postings::{Posting, Postings, Role, Side};

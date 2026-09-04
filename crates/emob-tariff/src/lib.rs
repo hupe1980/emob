@@ -109,10 +109,11 @@ pub use conformance::{Conformance, Objection, check_afir};
 pub use display::{DisplayLine, PriceDescription, Tier, describe, price_per_minute};
 pub use rating::{
     Adjustment, AdjustmentKind, Chargeable, ChargeableError, Line, Period, Rated, RatingNote,
-    SessionState, TaxLine, element_matches, matching_component, rate,
+    Reservation, ReservationOutcome, SessionState, TaxLine, element_matches, matching_component,
+    rate, rate_reservation,
 };
 pub use tariff::{
-    Dimension, PriceComponent, Restrictions, Tariff, TariffElement, TariffKind, TaxIncluded,
-    VatBasis,
+    Dimension, PriceComponent, PriceLimit, ReservationRestriction, Restrictions, Tariff,
+    TariffElement, TariffKind, TaxIncluded, VatBasis,
 };
 pub use version::{TariffFingerprint, TariffHistory, TariffHistoryError};

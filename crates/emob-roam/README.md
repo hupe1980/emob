@@ -1,8 +1,13 @@
 # emob-roam
 
 **The roaming edge** — one canonical charge detail record carried onto OCPI
-2.3.0 and 2.2.1 with an explicit account of what the crossing cost, routed to
-the partner the contract identifier itself names.
+2.3.0 and 2.2.1 and onto OICP 2.3, each with an explicit account of what the
+crossing cost, routed to the partner the contract identifier itself names.
+
+The two wires do not settle the same thing. An OCPI CDR carries `total_cost`; an
+OICP one carries **no money at all**, and the price crosses separately as a
+pricing product the two parties agreed on. So the account on an OICP record opens
+by saying what the amount was and that it did not travel.
 
 Part of [emob](https://github.com/hupe1980/emob), the open-source e-mobility
 operating stack.
@@ -45,6 +50,28 @@ The account composes with `ocpi-kit`'s own: a partner on 2.2.1 gets one report
 of what reaching them cost, rather than two half-reports that only mean
 something read together. That fold is the one part of it that is OCPI's alone,
 so it is an extension trait here rather than a method on the shared type.
+
+## Two `PARKING_TIME`s, and the specification defines both
+
+`[OCPI 2.3.0]` uses the words twice with two definitions, and they are not the
+same quantity. The `ChargingPeriod` **dimension** was corrected by an erratum to
+the vehicle's own demand — "time during which the **vehicle is not requesting
+power**", because the old reading exposed drivers "to penalizing loitering fees
+… when the EVSE is not offering energy to the vehicle while the vehicle is still
+requesting power". The CDR **field** `total_parking_time` was not corrected: it
+is still "no energy was transferred between EVSE and EV".
+
+The two differ by exactly the time the point withheld power, so computing one
+from the other is wrong in whichever one you derived. The crossing takes each
+from the question that defines it: the dimension from `Dimension::pricing`, the
+field from `Activity::transfers_energy`.
+
+A withheld period therefore crosses with its energy and **no time dimension at
+all**, its seconds still inside `total_time`. Read back, a period stating neither
+`TIME` nor `PARKING_TIME` and moving no energy is read as withheld rather than as
+occupancy — OCPI's dimensions are volumes, so no time volume is no billable time.
+It costs the driver nothing on a re-rating, it is noted, and this workspace's own
+document round-trips exactly.
 
 ## A duration in hours is usually not a decimal
 
@@ -248,10 +275,19 @@ and asserts they settle at the same money: self-roaming, OCPI 2.3.0, and OCPI
 2.2.1. The signed records arrive verbatim and re-verify at the far end against
 the receiver's own registry, never against the key the document carries.
 
+`tests/the_same_session_over_oicp.rs` runs the same session out over Hubject, and
+asserts what *that* wire carries. It goes through `MockHubject` — `oicp-kit`'s
+broker in a process, which validates a record the way the live one does — so the
+sequence a real integration finds weeks later is a unit test: a CDR for a session
+the broker never opened is refused, and so is the same record submitted twice.
+
 ## Status
 
-The OCPI half of the roaming node: CDRs, tariffs and locations across 2.3.0 and
-2.2.1, outbound and inbound. OICP (Hubject) and eMIP (GIREVE legacy) are 📐.
+Both roaming wires, at the model layer. OCPI 2.3.0 and 2.2.1 in **both**
+directions — CDRs, tariffs and locations — and OICP 2.3 outbound: the charge
+detail record and the pricing product the price crosses as. eMIP (GIREVE legacy)
+is 📐, and so is `roamd`, the daemon that owns the transport, the partner
+registry and the queues.
 
 ## License
 

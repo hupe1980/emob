@@ -727,3 +727,83 @@ fn a_correction_crosses_as_a_credit_cdr_and_a_replacement_that_names_nothing() {
     let back = from_ocpi(&crossing.value, None).unwrap();
     assert_eq!(back.value.cdr.supersedes, None);
 }
+
+/// The sum a receiver checks `total_cost` against has **five** terms.
+///
+/// `total_reservation_cost` is one of the per-dimension fields OCPI's own
+/// pre-flight adds up `[OCPI 2.3.0 §mod_cdrs_cdr_object]`, and `total_cost` is
+/// the session and the reservation together. The crossing's own reconciliation
+/// summed four of the five and compared them against the **session's** total —
+/// self-consistent, and therefore silent, and therefore incapable of noticing
+/// anything about the fifth. It also meant the note it would have printed
+/// quoted a `total_cost` the document does not state (D250).
+///
+/// What is asserted here is the receiver's own arithmetic, on the wire record.
+#[test]
+fn the_five_costs_on_the_wire_sum_to_the_total_it_states() {
+    let evidence = evidence();
+    let mut cdr = cdr(&evidence);
+    let token = token();
+    let context = context(&token, payloads());
+
+    // A tariff that prices the hold as well as the session, and a half-hour
+    // reservation before the cable went in.
+    let mut priced = tariff();
+    priced.elements.push(emob_tariff::TariffElement {
+        components: vec![PriceComponent::new(Dimension::Time, dec("6.00")).with_vat(dec("19"))],
+        restrictions: emob_tariff::Restrictions {
+            reservation: Some(emob_tariff::ReservationRestriction::Reservation),
+            ..emob_tariff::Restrictions::default()
+        },
+    });
+    let held = emob_tariff::Reservation::honoured(
+        cdr.started_at - time::Duration::minutes(30),
+        cdr.started_at,
+    );
+    cdr.reservation = Some(held);
+    cdr.cost.as_mut().unwrap().reservation = Some(emob_tariff::rate_reservation(&priced, &held));
+
+    let partner = Partner::emsp(PartyId::new("NL", "TNM").unwrap()).on_signed_data();
+    let crossing = to_ocpi(&cdr, &partner, &context).expect("a rated import CDR crosses");
+    let account: Vec<String> = crossing.reasons().collect();
+    let record = crossing.into_value_discarding_notes();
+
+    // The reservation is on the wire, in the field the specification keeps.
+    let reserved = record
+        .total_reservation_cost
+        .as_ref()
+        .expect("a priced reservation crosses");
+    assert_eq!(reserved.after_taxes().get(), dec("3.00"));
+
+    // `total_cost` is both parts — what the record itself says is owed.
+    assert_eq!(
+        record.total_cost.after_taxes().get(),
+        cdr.total_cost().unwrap().amount(),
+        "the wire states what the record says is owed"
+    );
+
+    // …and the five per-dimension fields add up to it, which is the sum a
+    // receiving pre-flight performs.
+    let parts: rust_decimal::Decimal = [
+        record.total_energy_cost.as_ref(),
+        record.total_time_cost.as_ref(),
+        record.total_parking_cost.as_ref(),
+        record.total_fixed_cost.as_ref(),
+        record.total_reservation_cost.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|p| p.after_taxes().get())
+    .sum();
+    assert_eq!(
+        parts,
+        record.total_cost.after_taxes().get(),
+        "a receiver summing the parts has to reach the total"
+    );
+    assert!(
+        !account
+            .iter()
+            .any(|note| note.contains("per-dimension costs")),
+        "the document adds up and the account should say nothing: {account:#?}"
+    );
+}

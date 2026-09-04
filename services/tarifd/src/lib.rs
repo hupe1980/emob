@@ -66,7 +66,15 @@ use emob_tariff::{Tariff, TariffFingerprint, TariffHistory};
 /// Who is owed a price, and under which duty.
 ///
 /// Three, because the Regulation names three and each is a different document.
-/// A fourth would be a fourth crossing in a domain crate, not a branch here.
+///
+/// # The fourth destination is deliberately not a fourth variant
+///
+/// `emob_roam::oicp::pricing::to_oicp_product` carries a tariff onto a Hubject
+/// pricing product, and it is not on this schedule for two reasons: a product
+/// states a **`MaximumProductChargingPower`**, which is a fact about the estate
+/// rather than about the tariff, and this service holds histories rather than
+/// estates; and it is pushed **to Hubject** over mutual TLS under a contract,
+/// which is `roamd`'s transport with the rest of the OICP leg.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Audience {
     /// The driver at the point, over OCPP 2.1's *Tariff and Cost* block —
@@ -159,6 +167,29 @@ pub enum PublishError {
     /// A roaming partner cannot be given this tariff.
     #[error("a roaming partner cannot be given this version ({0}), so no audience is")]
     Partner(#[source] emob_roam::RoamError),
+
+    /// The tariff carries a known **id** and content no version of it has.
+    ///
+    /// A tariff id is a name, and names get reused — which is why a CDR records
+    /// the fingerprint of what priced it and not only the id
+    /// (`emob_cdr::Cost::tariff_fingerprint`). Checking the name and publishing
+    /// the content sends an edited object that never entered the history to all
+    /// three audiences — the driver at the point, the national access point and
+    /// every roaming partner — quoting a price no session is ever billed at,
+    /// because `TariffHistory::in_force_at` is what rates a CDR (D255).
+    ///
+    /// That is the failure the module documentation opens by naming, reached
+    /// through the *identifier* rather than through the arithmetic.
+    #[error(
+        "tariff {tariff_id} is published by this service and no version of it has the \
+         content {fingerprint}: publishing it would quote a price no session is rated at"
+    )]
+    NotAVersion {
+        /// Which tariff.
+        tariff_id: String,
+        /// The content that is not in its history.
+        fingerprint: String,
+    },
 }
 
 /// What one audience knows about one version.
@@ -299,9 +330,26 @@ impl Tarifd {
         party: &PartyId,
         at: time::OffsetDateTime,
     ) -> Result<Publication, PublishError> {
-        if !self.histories.contains_key(&tariff.id) {
+        let Some(history) = self.histories.get(&tariff.id) else {
             return Err(PublishError::UnknownTariff {
                 tariff_id: tariff.id.to_string(),
+            });
+        };
+
+        // The name is not the version. Every payload below is built from the
+        // object handed in, and `TariffHistory::in_force_at` is what a CDR is
+        // rated with — so a version that is not in the history is a price this
+        // estate publishes and never charges, which is the drift this service
+        // opens by saying it exists to prevent (D255).
+        let fingerprint = tariff.fingerprint();
+        if !history
+            .versions()
+            .iter()
+            .any(|version| version.fingerprint() == fingerprint)
+        {
+            return Err(PublishError::NotAVersion {
+                tariff_id: tariff.id.to_string(),
+                fingerprint: fingerprint.short(),
             });
         }
 

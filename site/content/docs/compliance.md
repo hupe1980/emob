@@ -265,6 +265,21 @@ A test asserts that **every duty in the calendar is answerable by exactly one of
 the three profiles**, so none can go quietly unassessable again — and so that
 adding a fourth subject cannot leave a duty behind.
 
+**And every duty is exercisable in both directions.** Answerable is not the same
+as answered: a `satisfied` closure that reads the wrong field, or the right one
+negated, judges every question about that duty confidently and wrongly, and a
+report is clean either way. So a property asks two things of the whole table at
+once — a subject that does everything the calendar asks **fails nothing**, and
+every entry is `Failing` for at least one subject in a panel: a bare point, a
+fast public DC charger doing none of what its class owes, that charger deployed
+before 13.04.2024, a private wall box installed from 2027, a provider, a provider
+that surcharges, and an undertaking in NIS2 scope doing nothing.
+
+The panel is the point. A duty phrased *do not do this* is correctly satisfied by
+a subject that has done nothing, and a duty binding a 300 kW charger does not
+bind an 11 kW wall box — so the witness a duty needs **is** a statement of what
+that duty is about.
+
 ## The two paragraphs the Regulation itself names
 
 `[AFIR Art. 5(6)]` tells Member States what to watch: "Member States shall
@@ -408,6 +423,19 @@ nach § 49 Absatz 1 des Energiewirtschaftsgesetzes".
 | Operator-change notice | § 4(1) Nr. 3 and S. 2 | "Anzeigen … durch den bisherigen **und** den neuen Betreiber" — **two** notices. An incoming operator that files its own and assumes the outgoing one did the same has a point § 5(3) may close, over a notice it never saw and did not owe |
 | Evidence on request | § 4(2) | Being compliant and being *able to prove* it are different duties, and the second is failed quietly: nothing goes wrong until the request arrives, and by then the documents either exist or they do not |
 
+### …and the notice is not only the regulator's business
+
+`[LSV26 §6]` obliges the Bundesnetzagentur to forward the § 4(1) notification
+data **monthly, electronically**, to the state authorities responsible for the
+Mess- und Eichgesetz — unless the receiving body has waived it. It is a duty on
+the regulator rather than on an operator, so it is not in the calendar; it is
+here because it changes what a § 4 notice *is*.
+
+Filing one puts the point in front of the Eichbehörde, by law and on a schedule.
+A stack that treats the Anzeige as a registry formality and the Eichrecht
+evidence chain as a separate concern has the two the wrong way round: the first
+is what tells the second's regulator the point exists.
+
 ### `Unverzüglich` has no number, so the number is a documented choice
 
 Nr. 2 and Nr. 3 say *unverzüglich* — `[BGB §121]`'s *ohne schuldhaftes Zögern* —
@@ -436,7 +464,7 @@ one — which, in a compliant estate, is every point.
 
 Nr. 2 wants the quantity determined in conformity with the measuring and
 calibration law, which is what `emob-eichrecht` decides per record — so
-`emob-thg` refuses a record with no evidence rather than summing it. Nr. 3
+`emob-thg` refuses a record with no evidence rather than summing it — and one whose evidence is *there and failed*, which is the worse of the two and the one a presence check lets through (D231). Nr. 3
 wants an identification code **issued** to the operator by an ID registration
 organisation `[AFIR Art. 20(1)]`; a well-formed `EvseId` says the operator
 *uses* a code, not that a registered organisation issued it.
@@ -446,6 +474,56 @@ solche durch Bekanntgabe im Bundesanzeiger bestimmt hat"*, and today none are
 announced. `FurtherIdentifiers` has three states for that reason: `false` would
 block every claim in the country and `true` would keep passing on the day an
 announcement lands.
+
+### …and the deadline, which none of the four is
+
+`[38k §6(3)]` decides whether a kilowatt-hour *may* be claimed. `[38k §8(1)]`
+decides whether it *was*, and it gives the two routes two dates:
+
+> … 1. nach § 6 … bis zum Ablauf des **28. Februar des Folgejahres** oder
+> 2. nach § 7 … bis zum Ablauf des **15. November des jeweiligen
+> Verpflichtungsjahres**.
+
+The `[38k §7]` deadline falls **inside** the year it is about, six weeks before
+that year ends. There is no late filing and no partial credit — an eligible year
+that misses its date is worth exactly nothing — so `Route::deadline` carries both
+before the second claim type exists. `[38k §8(1) S. 3]` allows one notification
+per point per obligation year, which is why adding a point to one twice is a
+refusal rather than a silent replacement.
+
+## Both routes, and the paragraph that makes a bus worth a third more
+
+`[38k §6]` is the route a public charge point files: metered kilowatt-hours, the
+operator as claimant. `[38k §7]` is the other one — *„in anderen Fällen"* — and
+it is not the first with a flag on it:
+
+| | `[38k §6]` | `[38k §7]` |
+|---|---|---|
+| the *Ladepunktbetreiber* | the operator of the point | the person the vehicle is registered to |
+| the quantity | a mess- und eichrechtskonform measured value | a published **Schätzwert**, once per vehicle |
+| the evidence | a signed meter record | a Zulassungsbescheinigung Teil I |
+| the deadline | 28 February of the **following** year | 15 November **inside** the obligation year |
+| the counting factor | `[38k §5(3)]` — three steps | `[38k §7(6)]` — seven, and M3/N3 reach 4 |
+
+No charge point holds a single fact in that right-hand column, which is why it is
+a second claim type.
+
+**The factor is why it is worth building.** `[38k §7(6)]` opens *"Abweichend von
+§ 5 Absatz 3 Satz 1"* and gives classes **M3 and N3** — buses and heavy goods
+vehicles — a factor of **4 from 2027**, stepping down 3.5 (2035), 3 (2036), 2.5
+(2037), 2 (2038), 1.5 (2039), 1 (2040). Against § 5(3)'s 3 that is a third more
+counted energy on the same kilowatt-hours, and it lands exactly where a depot
+operator is **both parties at once**: its posts are not publicly accessible so
+§ 6 refuses them, and its buses are registered to it so § 7 counts them.
+
+Three things fall out of the text rather than out of a summary of it. The
+deviation begins in 2027, so a bus counted in 2026 counts at § 5(3)'s factor and
+the notification **says so** rather than leaving an operator to discover it. A
+mixed fleet is counted at two factors in one notification, because the class is a
+fact about the vehicle. And a vehicle is counted once per obligation year
+`[38k §7(4) S. 2]`, which needs an identifier unique inside one filer's records
+and nothing more — never a registration plate, which is a lifelong identifier of
+a thing a person drives.
 
 ## Planning
 

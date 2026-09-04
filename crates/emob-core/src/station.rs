@@ -615,14 +615,30 @@ pub struct MeteringPosture {
     /// normal way such cabinets are built — which is what makes this the
     /// condition an operator is most likely to be quietly in breach of.
     pub rectification_attributable_to_one_session: bool,
-    /// Whether the customer is told that rectification losses are inside the
-    /// measured value.
+    /// Whether the customer is told **at the point** that rectification losses
+    /// are inside the measured value.
     ///
     /// "Die von einem Messwert oder einer Rechnung Betroffenen sind in
     /// geeigneter Weise darauf hinzuweisen, dass die … Energie für die
     /// Gleichrichtung … Bestandteil des angegebenen Messwerts ist"
     /// `[REA 6-A §3.2]`. A platform whose central claim is that the customer
     /// can check the value owes them the fact that part of it is loss.
+    ///
+    /// # The sentence names two documents, and only one of them is this flag
+    ///
+    /// *"einem Messwert **oder einer Rechnung**"*. The invoice half is no longer
+    /// an assertion: where a record's signed evidence states a compensated loss
+    /// `[OCMF Tab. 7, CL]`, `emob_billing` puts the figure and the sentence on
+    /// the line stating the measured value, in BT-127, by construction —
+    /// nothing has to be filled in and nothing can be forgotten (D253).
+    ///
+    /// What is left here is the disclosure **at the charge point**: a notice on
+    /// the screen or in the app, before a driver who may never see an invoice
+    /// starts a session. That is a fact about the world with nothing in this
+    /// workspace to evidence it, which is why it is still a field somebody sets
+    /// — and why the field now says which half it is about. A boolean that
+    /// covered both halves reported the whole duty satisfied on the strength of
+    /// the half nobody could check.
     pub rectification_loss_disclosed: bool,
 }
 

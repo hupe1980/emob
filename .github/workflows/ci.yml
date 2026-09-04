@@ -61,10 +61,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # no-floats, check-citations, check-manifests. `check-citations` skips
-      # itself here: specs/ is gitignored (the documents are third-party and
-      # copyrighted), so CI can only prove the code has no *uncited* claims,
-      # and a developer with the corpus proves the rest.
+      # All seven. Two of them have a half that cannot run on a clone and a
+      # half that must: specs/ and concepts/ are both gitignored, so
+      # `check-citations` cannot ask whether a document is *indexed* and
+      # `check-concepts` cannot read the decision log — while the citation
+      # *forms*, the test counts stated in the README and on the site, and the
+      # shape of every table in the repository are all checked here. Each says
+      # in its own output which half it skipped, because a guard that skips in
+      # silence reads exactly like one that passed (D228).
       - run: cargo run -q -p xtask -- check-all
 
   features:

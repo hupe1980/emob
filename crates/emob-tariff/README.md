@@ -109,7 +109,13 @@ So the thresholds themselves become the cut points. Every energy, duration and
 **wall-clock** restriction in the tariff is applied to every period that crosses
 one — **energy exactly at an energy threshold**, because energy is what is being
 tiered and what is being settled; **time exactly at a clock threshold**, because
-22:00 is 22:00; and the other quantity in proportion, to the second:
+22:00 is 22:00; and the other quantity in proportion, to the second. An energy
+threshold is cut even in a period with no second to hold it — a second of a
+350 kW charge is a tenth of a kilowatt-hour — and the slice it opens is then
+degenerate in time and exact in kilowatt-hours. Such a slice has no average
+power, so an element restricting on one cannot price it, and the energy is
+reported as an `Unpriced` note rather than folded into a tier it merely began
+in:
 
 ```rust
 // One period of 30 kWh, three of ten, or ninety-six quarter hours:
@@ -121,8 +127,13 @@ assert_eq!(rate(&night, &coarse).exact_total(), rate(&night, &fine).exact_total(
 ```
 
 The pieces are differences of cumulative values, so they telescope back to the
-period's own total to the last digit — the same construction the quarter-hour
-split uses.
+period's own total to the last digit — the same construction, and the same
+function (`emob_core::apportion`), the quarter-hour split uses.
+
+The claim is a **property**, not a list of examples: `tests/` generates two
+thousand tariffs and sessions, rates each at three resolutions and asserts one
+price, one accounted-for quantity per dimension, and one line that explains its
+own amount.
 
 A clock threshold is read on the wall clock of the tariff's own zone — never
 the offset the timestamps happen to carry, see below — and on every day the
@@ -134,9 +145,38 @@ dates.
 A period that moved energy is charging time. One that did not may or may not be
 occupancy, and guessing is how a **taper** gets billed at the parking rate: a
 car at 100 % state of charge can leave a quarter hour at exactly `0.000 kWh`
-while the session's own state machine says it was charging. `Period::charging`
+while the session's own state machine says it was charging. `Period::activity`
 carries the answer rather than deriving it, and the CDR takes it from the
 session history.
+
+### …and "not charging" is two facts, which is why it is not a boolean
+
+`[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]` corrected its own definition of
+`PARKING_TIME` — from "time not charging" to "time during which the **vehicle is
+not requesting power**" — and said why: under the old reading drivers "would be
+exposed to penalizing loitering fees … when the EVSE is not offering energy to
+the vehicle while the vehicle is still requesting power".
+
+So `emob_core::Activity` has three values, and only one of them owes a fee:
+
+| | priced as | energy transferred |
+|---|---|---|
+| `Charging` | `TIME` | ✅ |
+| `Parked` — the vehicle stopped asking | `PARKING_TIME` | |
+| `Withheld` — the point stopped offering | *nothing* | |
+
+`Withheld` is a charging profile at zero, a `[EnWG §14a]` dimming, a grid limit,
+a fault; OCPP names it `SuspendedEVSE`. Priced by **neither** dimension — OCPI
+has only "time charging" and "time the vehicle was not requesting power" — and
+`RatingNote::WithheldNotPriced` reports the seconds, so a session whose clock ran
+an hour and whose invoice prices forty minutes explains itself.
+
+```rust
+// Same duration, same energy, same tariff. One driver left a full car on the
+// post; the other was curtailed by the operator.
+assert_eq!(full_battery.total().to_string(), "12.00 EUR");
+assert_eq!(curtailed.total().to_string(),   "10.00 EUR");
+```
 
 ### A span the clock cannot resolve is not a line
 
@@ -158,6 +198,18 @@ assert_eq!(rated.amount_for(Dimension::ParkingTime), Some(dec("0.05")));
 
 Judged on the measurement as a whole rather than per period, because a session
 sampled every second still measured its minutes.
+
+### The specification's own answers, as a test file
+
+`tests/the_specification_states_its_own_answers.rs` holds the sessions
+`[OCPI 2.3.0]` walks through in prose, with the totals its own breakdown tables
+publish: the `step_size` transitions, the power and duration bands, the two-rate
+breakdowns, the price limits, the reservations, and the rounding at a VAT rate
+with a decimal in it.
+
+Every other test here asserts what this engine does; these assert what the
+document two companies settle against says the answer **is**. A change that keeps
+the others green and moves one of these has changed what emob charges a driver.
 
 ## A tariff has an identity over time
 
@@ -279,6 +331,104 @@ decimal spelling. Rounding it would show a price the tariff does not charge, so
 `check_afir` refuses it and names the remedy — an hourly rate divisible by three.
 €6.00 an hour is €0.10 a minute.
 
+## A price bound is two ceilings, not one ceiling in two spellings
+
+`[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` gives `min_price` and `max_price` a
+figure **before** taxes and a figure **after** them, and prints the same NOTE
+under each:
+
+> As the taxes on a Charging Session might be different for different parts of
+> the Session, there might be situations where the maximum cost after taxes is
+> reached earlier or later than the maximum price before taxes. So as a rule,
+> **they both apply**.
+
+One figure with the other derived works while the tariff has one VAT rate. A
+session fee at the standard rate beside energy at a reduced one — the shape the
+specification's own `max_price` example uses — makes the two ceilings
+non-proportional, and keeping one lets the total past the other: **€11.05 gross**
+under a published maximum of €11.00.
+
+So `PriceLimit` carries both. Both are optional here and `before_taxes` is
+mandatory on the wire, so the **crossing** derives it at the tariff's own rate,
+where the residual is a note. OCPP 2.1's `Price` carries both, in `exclTax` and
+`inclTax`.
+
+### …and the two limits bind together
+
+The same sentence is true one level up. Answering whichever limit was asked about
+first gets each right alone and the pair wrong: a minimum can lift a total
+**above** the maximum, and a maximum can cut one **below** the minimum — which is
+invisible before the cut, because a floor only shows itself once the ceiling has
+been taken.
+
+Every limb of both limits states a target for a total, and every total is the
+lines' own plus the movement times a constant, so all four are bounds on **one
+number**. The minimum's give a floor, the maximum's a ceiling, and the answer is
+the movement closest to zero inside the interval they leave. An empty interval is
+`RatingNote::LimitsContradict`, and the **maximum** is applied, because a
+published ceiling is what the driver was shown.
+
+A maximum deeper than the session's own total is held at zero — a cap below
+nothing is a payment to the driver — and an adjustment larger than everything
+charged at its own VAT rate is `RatingNote::AdjustmentExceedsCategory`, because
+EN 16931 gives an allowance one category and that category's taxable amount would
+go negative.
+
+### …and it is decided on the exact total
+
+Reaching the limb the lines are *not* quoted in needs the other basis's total,
+and the VAT breakdown is the wrong place to read it: it states one taxable amount
+per rate and **rounds each**, which is right for a document and wrong for a
+computation whose output is a term of the exact total. Half a cent of rounding
+becomes a cent of price — and, since an apportioned energy's last digits depend
+on how finely the session was sliced, a price that depends on the slicing.
+
+`Rated::exact_bases` is what the bound reads. The consequence is stated rather
+than chased: `Rated::total` rounds once and is the figure a cap is a promise
+about; `Rated::gross` rounds per category and can sit a minor unit above it, and
+is the figure a document reconciles against.
+
+## A reservation is priced, and it is not a period of the session
+
+`[OCPI 2.3.0]` prices a reservation through a **restriction** rather than a
+dimension — `TariffRestrictions.reservation`, either `RESERVATION` or
+`RESERVATION_EXPIRES` — with `FLAT` and `TIME` components, *"where `TIME` is for
+the duration of the reservation"*. Its window *"starts when the reservation is
+made, and ends when the driver starts charging on the reserved EVSE/Location, or
+when the reservation expires"*, so it has already run before the session begins.
+
+`rate_reservation` is its own entry point over that window, sharing the
+session's arithmetic. Rated as a period it would collide: a tariff whose
+unrestricted element prices `TIME` and whose reservation element prices `TIME`
+would have the two competing for one dimension, and the per-dimension rule drops
+one of them silently.
+
+Three rules come from the worked examples rather than the prose:
+
+- **An expired reservation is priced by the reservation elements and nothing
+  else** — tariff 18 bills € 9.00, not € 9.50: there is no session for the
+  session fee to be the fee of.
+- **On an expiry both kinds apply**, in list order, so `RESERVATION_EXPIRES`
+  takes a dimension it states and `RESERVATION` supplies the rest.
+- **`min_price` and `max_price` do not** — they bound *"a Charging Session"*.
+
+The cost travels in `total_reservation_cost` and inside `total_cost`, which is
+what makes a partner's own sum of the parts close, and it becomes its own group
+of lines on the EN 16931 invoice `emob-billing` builds — the seam it was missing
+from, and the one place a missing term is silent, because a document that omits
+it still adds up to itself (D250). It reaches no document that has no reservation
+in it: OCPP 2.1's *Tariff and Cost* block refuses the element by name,
+`[DATEX-II-Profil]`'s `EnergyRate` omits it with a note, the
+`[AFIR Art. 5(4)]` shape check reads only the session elements, and
+`Restrictions::describe` puts the word *reservation* first in a tier's condition
+so a driver's display cannot read a hold fee as a charging rate.
+
+A window that ends before it starts is the one input `rate_reservation` refuses,
+and it refuses it by **collapsing** rather than by returning nothing: no minutes
+are priced, a `FLAT` fee with no duration in it is still owed, and
+`RatingNote::ReservationWindowReversed` travels with the record. A silent zero on
+a visibly broken document is the answer nobody queries.
+
 ## A tariff can be unlawful on its own
 
 At 50 kW and above, `[AFIR Art. 5(4)]` says the ad-hoc price "shall be based on
@@ -374,6 +524,35 @@ whole seconds, exact, and it is the figure the amount came from:
 assert!(rated.lines_reconcile());   // base_quantity × unit_price / 3600 == amount
 ```
 
+## `step_size` is a property of the session, not of a price
+
+`step_size` is the block a dimension is billed in — 500 Wh, fifteen minutes — and
+the obvious implementation rounds each line up to its own.
+`[OCPI 2.3.0 §mod_cdrs_step_size]` says otherwise:
+
+> When calculating the cost of a charging session, `step_size` SHALL only be
+> taken into account **once per session** for the `TariffDimensionType` `ENERGY`
+> and **once for `PARKING_TIME` and `TIME` combined**.
+
+Two families. Within one, the total is rounded with the block of the **last
+relevant Price Component** and the surplus billed at that component's **price**:
+25 minutes at €1.20 and 20 at €2.40, not 30 and 30. And where both time
+dimensions are used, only the **total parking duration** is rounded — 21 minutes
+charging then 16 parked, ten-minute blocks on both, bills 21 + 20.
+
+Rounded per price instead, the specification's own tiered energy example costs
+€1.31 where it should cost €1.18: an eleven per cent over-charge, in the
+direction `[AFIR Art. 5(4)]` and `[PAngV]` exist to police.
+
+The ceiling is taken on a quantity **rounded first**, to `APPORTIONED_SCALE`. It
+is the only operation here that is not continuous: the same session summed from a
+coarser and a finer set of periods differs in `Decimal`'s twenty-seventh place,
+and 64.821 kWh is exactly 1271 blocks of 51 Wh one way and 1272 the other — 51 Wh
+the driver did not take, for a difference no meter could state. A nanowatt-hour
+is the scale at which this crate already declares two slicings of one session to
+be the same session, so the block count is computed there and the billed total is
+exactly the whole number of blocks the note names.
+
 ## …and the one restriction a period carries nothing to cut on
 
 Cutting works because a period *contains* the fact about where a threshold was
@@ -396,7 +575,7 @@ function of the session *at the resolution its periods carry* — rate the perio
 the meter produced, which is what `Session::split` hands over, and
 `RatingNote::PowerJudgedPerPeriod` says why a partner's coarser document differs.
 
-## Restrictions, including the two everybody gets wrong
+## Restrictions, including the three everybody gets wrong
 
 Time-of-day, date, energy, duration, power and weekday restrictions select which
 element applies — and each of them is also a **cut point**, so the answer never
@@ -438,12 +617,30 @@ The database is compiled in rather than read — nothing opens
 `/usr/share/zoneinfo` or looks at `TZ`, `Cargo.lock` pins its version, and a tzdb
 release moves future offsets rather than the frozen ones a settled session has.
 
+**A window that wraps midnight** — `22:00` to `06:00` — is a night tariff, not
+the empty range a naïve `start <= t && t < end` makes of it.
+
+**An `end_time` of `00:00` is the end of the day, not the start of it.**
+`end_time` is exclusive everywhere else, and the specification tells authors to
+write exactly this: "to stop at end of the day use: `00:00`". Read as an
+exclusive instant it closes the window before it opens — the element matches
+nothing, prices nothing, and the whole session comes back `Unpriced`, as a note
+rather than an error. It hides behind the common shape, because
+`{start_time: "20:00", end_time: "00:00"}` takes the wrap-around arm and comes
+out right by accident.
+
+**A restriction this crate cannot evaluate is not an absent restriction.**
+`Restrictions::unevaluable` carries what a wire adapter parsed and this crate
+cannot judge — OCPI's `reservation`, `min_current`/`max_current`, a partner
+extension. An element holding one **never matches**, and the rating says so.
+Treating it as absent applies a price under conditions nobody checked.
+
 **A window that wraps midnight** — `22:00` to `06:00` — is the night tariff it
 is, rather than the empty range a naïve comparison makes of it.
 
 **A restriction this crate cannot evaluate is not an absent restriction.**
 `Restrictions::unevaluable` carries anything a wire adapter parsed and this crate
-cannot judge — an OCPI `reservation` condition, a partner extension. An element
+cannot judge — OCPI's `min_current`/`max_current`, a partner extension. An element
 holding one **never matches**, and the rating says so in a note. Silently
 treating it as unrestricted applies a price under conditions nobody checked.
 

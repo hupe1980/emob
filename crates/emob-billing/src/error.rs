@@ -20,6 +20,81 @@ pub enum BillingError {
         cdr: String,
     },
 
+    /// A line rests on a measured value and nothing behind it can be checked —
+    /// `[MessEG §33]`.
+    ///
+    /// §33(3) Nr. 1 puts the duty on the document: invoices, insofar as they are
+    /// based on measured values, must be ones the recipient can simply follow in
+    /// order to check the values stated. With no signed record behind the line
+    /// there is nothing to check it against.
+    #[error(
+        "the record {cdr} carries a {dimension} line and no signed evidence: `[MessEG §33]` lets \
+         a measured value be used in commercial dealings only where it is traceable to the \
+         measurement, and requires an invoice resting on one to be checkable by the person it is \
+         addressed to"
+    )]
+    NotVerifiable {
+        /// Which record.
+        cdr: String,
+        /// The measured dimension the line prices.
+        dimension: String,
+    },
+
+    /// The record does not pass its own validator.
+    ///
+    /// `emob_cdr::validate` asks everything that makes a record unsettleable —
+    /// overlapping periods that bill a minute twice, a line whose numbers do not
+    /// produce its amount, a price computed for a quantity the record does not
+    /// state. `CdrBuilder` refuses to issue such a record; this is the layer
+    /// that sends the demand, and a record assembled from a partner's document
+    /// never went through the builder at all.
+    #[error(
+        "the record {cdr} does not pass its own validator, so it is not one two parties can \
+         settle against: {}",
+        reasons.join("; ")
+    )]
+    NotSettleable {
+        /// Which record.
+        cdr: String,
+        /// Every blocking finding, in the validator's own words.
+        reasons: Vec<String>,
+    },
+
+    /// The record carries energy that flowed **out** of the vehicle.
+    ///
+    /// A V2G discharge is a supply in the other direction — the driver supplies,
+    /// the operator buys — which moves the party, the place of supply and the
+    /// VAT liability, and is ordinarily settled as a self-billed *Gutschrift*
+    /// `[UStG §14]`. Invoiced as though it were a charge, it demands payment
+    /// from the person who supplied the energy, and nothing downstream objects.
+    #[error(
+        "the record {cdr} carries {energy} that flowed out of the vehicle: a discharge is a \
+         supply in the other direction — the driver supplies and the operator buys — so it is a \
+         self-billed Gutschrift [UStG §14] with the parties reversed rather than a line on this \
+         invoice, and which arrangement applies is not a fact a CDR carries"
+    )]
+    ExportNotBillable {
+        /// Which record.
+        cdr: String,
+        /// How much flowed out.
+        energy: emob_core::Energy,
+    },
+
+    /// The document offered for cancellation is already a credit note.
+    ///
+    /// A credit note that cancels a credit note is a re-issued invoice, not a
+    /// second reversal, and this crate has no way to tell which was meant. The
+    /// caller that knows states it by building the invoice it means.
+    #[error(
+        "{number} is already a credit note: cancelling a cancellation is a re-issued invoice \
+         rather than a second reversal, and which one was meant is not something this crate can \
+         read off the document"
+    )]
+    NotCancellable {
+        /// The credit note that was offered.
+        number: String,
+    },
+
     /// Two records on one invoice are in different currencies.
     ///
     /// An EN 16931 invoice has one currency (BT-5) and every amount on it is in

@@ -168,9 +168,9 @@ about the session nothing else in the evidence states:
 - `T` — a tariff change.
 
 Both are exactly the intervals money turns on. `[AFIR Art. 5(4)]` prices the time
-a vehicle is connected and *not* charging per minute, and until now that interval
-reached a CDR only from OCPP's `chargingState` — a protocol field, asserted by
-the same party that issues the invoice.
+a vehicle is connected and *not* charging per minute, and the alternative source
+for that interval is OCPP's `chargingState` — a protocol field, asserted by the
+same party that issues the invoice.
 
 ```rust
 evidence.suspended_intervals();      // what the meter signed, not what the CSMS said
@@ -209,6 +209,20 @@ is replayed exactly as it happened.
 `cargo xtask check-graph` enforces the other half of that: no clock, socket or
 database may appear in this crate's *dependency* graph either, because the purity
 guard greps this workspace's source and cannot see into a dependency.
+
+## A cable loss belongs to the register it was measured on
+
+`CL` is a property of the register beside it `[OCMF Tab. 7, CL]` — "given in the
+same unit as `RV`", accumulating across the transaction, reset at `TX=B`. A meter
+reporting two registers reports two `CL` series, and taking the last value seen
+against the first `TX=B` seen crosses them: `CL_end(C2) − CL_begin(B2)` is not a
+quantity, and nothing in the format says those two numbers are about the same
+thing.
+
+So the register is chosen first and the compensation read on **that** one; a
+chain with no billable register reports none rather than one belonging to
+nothing. The two `CL` findings are raised once per register, not once per
+reading — a quarter-hourly session carries ninety-six of them.
 
 ## License
 

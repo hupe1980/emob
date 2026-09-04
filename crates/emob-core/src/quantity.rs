@@ -196,6 +196,77 @@ impl fmt::Display for Energy {
     }
 }
 
+/// How many decimal places an **apportioned** quantity is quoted to.
+///
+/// See [`apportion`]. Twelve is a nanowatt-hour, nine orders of magnitude finer
+/// than the milli-kilowatt-hour a meter states.
+pub const APPORTIONED_SCALE: u32 = 12;
+
+/// The cumulative value `offset` units into a window of `span` units across
+/// which a register moved by `delta`, counting from `base`.
+///
+/// The one arithmetic two crates share: `emob-session` places a boundary
+/// between two meter readings, and `emob-tariff` places a tariff threshold
+/// inside a period. Both are "how far along is the register", both settle
+/// money, and two spellings of it would eventually be two answers.
+///
+/// # Multiply, then divide
+///
+/// `delta × offset / span` keeps every digit the arithmetic allows;
+/// `delta × (offset / span)` has already spent the decimal's precision on a
+/// repeating fraction before the multiplication. Seven kilowatt-hours two
+/// thirds of the way through a window is `4.666…` either way, and the first
+/// form is exact wherever the ratio terminates.
+///
+/// # …and then round, because conservation is a statement about a sum
+///
+/// Both callers build a series of boundary values and take **differences**, so
+/// that the pieces telescope back to the whole: every interior boundary appears
+/// once positive and once negative and cancels, whatever it was rounded to.
+/// That argument is arithmetic rather than floating-point folklore, and it has
+/// one precondition — the additions themselves must be exact.
+///
+/// `Decimal` carries a 96-bit mantissa, which is about twenty-nine significant
+/// digits. A ratio that does not terminate spends **all** of them on the
+/// fraction, and adding two such values needs more digits than there are: the
+/// sum is rounded, the interior boundaries no longer cancel, and a conservation
+/// check that reads `==` fails by one unit in the last place. It is a
+/// microscopic error and it is in exactly the assertion that exists to prove
+/// there is none.
+///
+/// So an apportioned value is quoted to [`APPORTIONED_SCALE`] places. Every
+/// difference then carries at most that many, every sum of them is exact up to
+/// totals no charging session reaches, and the telescoping identity holds as
+/// written rather than nearly. A nanowatt-hour is three microjoules; the meter
+/// that could measure one has not been built.
+///
+/// `base` is returned unrounded and unchanged for a window of no span, which is
+/// a window nothing can be apportioned across.
+///
+/// ```
+/// use emob_core::quantity::apportion;
+/// use rust_decimal::Decimal;
+/// use std::str::FromStr;
+///
+/// // Seven kilowatt-hours, fourteen seconds into a twenty-one second window.
+/// let at = apportion(Decimal::ZERO, Decimal::from_str("7")?, 14, 21);
+/// assert_eq!(at.to_string(), "4.666666666667");
+///
+/// // The pieces telescope back to the whole, exactly.
+/// let rest = Decimal::from_str("7")? - at;
+/// assert_eq!(at + rest, Decimal::from_str("7")?);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn apportion(base: Decimal, delta: Decimal, offset: u64, span: u64) -> Decimal {
+    if span == 0 {
+        return base;
+    }
+    // The increment is rounded and the base is not: the base is a boundary that
+    // was already quoted this way, or a reading the meter stated.
+    base + (delta * Decimal::from(offset) / Decimal::from(span)).round_dp(APPORTIONED_SCALE)
+}
+
 /// An ISO 4217 currency code.
 ///
 /// Written on the wire as the three letters — `"EUR"` — and never as the three
@@ -603,6 +674,44 @@ mod tests {
         assert!(Currency::new("EURO").is_err());
         assert!(Currency::new("E1R").is_err());
         assert_eq!(Currency::new("eur").unwrap(), Currency::EUR);
+    }
+
+    #[test]
+    fn apportioning_telescopes_however_many_pieces_there_are() {
+        // The property both callers rest on: a window cut into pieces sums back
+        // to the window. Without the scale floor the additions round — a ratio
+        // that does not terminate spends the whole 96-bit mantissa on its
+        // fraction, and two of them cannot be added exactly.
+        for span in [21_u64, 3600, 4497, 5400] {
+            for delta in ["7", "22.163", "31.077", "0.001"] {
+                let delta = dec(delta);
+                let mut carried = Decimal::ZERO;
+                let mut sum = Decimal::ZERO;
+                for piece in 1..=7_u64 {
+                    let at = apportion(Decimal::ZERO, delta, span * piece / 7, span);
+                    sum += at - carried;
+                    carried = at;
+                }
+                assert_eq!(sum, delta, "{delta} over {span}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_apportioned_value_never_exceeds_the_window_it_came_from() {
+        // Rounding is to a scale the delta itself already fits in, so the last
+        // piece cannot round past the whole — which would be a negative
+        // remainder, and `Energy` has none.
+        let delta = dec("29.500");
+        for offset in 0..=900_u64 {
+            let at = apportion(dec("100.000"), delta, offset, 900);
+            assert!(at >= dec("100.000") && at <= dec("129.500"), "{at}");
+        }
+    }
+
+    #[test]
+    fn a_window_of_no_span_apportions_nothing() {
+        assert_eq!(apportion(dec("12.5"), dec("7"), 0, 0), dec("12.5"));
     }
 
     #[test]

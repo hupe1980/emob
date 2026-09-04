@@ -521,7 +521,9 @@ rounding happens**: EN 16931 states its totals as sums of the line amounts, so i
 happens at the line — and what that costs is reported rather than absorbed.
 
 ```rust
-use emob_billing::{Counterparty, InvoiceBuilder, TaxStatus, en16931, payment, postings};
+use emob_billing::{
+    Counterparty, InvoiceBuilder, Specification, Syntax, TaxStatus, en16931, payment, postings,
+};
 
 let crossing = InvoiceBuilder::new("R-2026-0001", issued, (from, to), cpo, driver)
     .supplied_from("DE", dec("19"))   // the points' country, and its rate
@@ -537,8 +539,12 @@ for reason in crossing.reasons() { eprintln!("{reason}"); }
 //                  states 26.08 EUR: a difference of −0.0000840336…
 
 // The European document, and the verdict on it before anything is sent.
-let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE)?;
+// `Specification` is BT-24 *and* the rules the document is judged by, so it
+// cannot claim one profile having been checked against another; `Syntax` is
+// UBL or CII, the two CEN/TS 16931-2 makes mandatory. Neither has a default.
+let crossed = en16931::to_en16931(&invoice, Specification::Core)?;
 assert!(crossed.value.is_valid());
+let xml = en16931::write(&invoice, Specification::Core, Syntax::Ubl)?.value;
 
 // …and the books, balanced before an account is named.
 assert!(postings::postings_for(&invoice).balances());
@@ -567,7 +573,8 @@ See [Sessions and settlement](@/docs/settlement.md).
 ```console
 just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs
-just guards     # no-floats, check-citations, check-manifests
+just guards     # no-floats, check-citations, check-manifests, check-wire,
+                # check-prose, check-concepts, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
 ```

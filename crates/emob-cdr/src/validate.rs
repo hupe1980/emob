@@ -17,8 +17,8 @@
 //! quietly fixed to sum — that would be inventing a number, on behalf of
 //! somebody who will be invoiced for it.
 
-use emob_core::{Energy, IdentificationStrength};
-use emob_tariff::{Dimension, RatingNote};
+use emob_core::{Activity, Energy, IdentificationStrength};
+use emob_tariff::{Dimension, Rated, RatingNote};
 use rust_decimal::Decimal;
 
 use crate::cdr::Cdr;
@@ -221,14 +221,92 @@ pub enum Finding {
         /// What its own quantity and price come to.
         implied: Decimal,
     },
+    /// A session fee was charged more than once on one record.
+    ///
+    /// `[OCPI 2.3.0 §mod_tariffs_tariffdimensiontype_enum]` defines `FLAT` as
+    /// *"fixed amount for the whole charging session"* — one session, one fee.
+    /// [`emob_tariff::rate`] charges it once by construction and no `step_size`
+    /// applies to it, so any quantity but one is a partner's exporter billing a
+    /// session fee per period.
+    ///
+    /// It is the one dimension nothing else here could catch. The energy check
+    /// compares against the record's kilowatt-hours and the time checks against
+    /// its seconds; a flat fee is charged against **the session itself**, and a
+    /// line stating a quantity of ninety-six reconciles perfectly against its
+    /// own price (D251).
+    FlatChargedMoreThanOnce {
+        /// Which part of the record charged it.
+        part: CostPart,
+        /// How many times.
+        quantity: Decimal,
+    },
+    /// The record's two ratings are quoted in different currencies.
+    ///
+    /// A session priced in one and its reservation in another is a record with
+    /// no total: the two amounts cannot be added, and the sum a receiving party
+    /// computes is whichever one its own arithmetic happened not to drop
+    /// (D250). Both are produced from one [`emob_tariff::Tariff`] on this side,
+    /// so this can only reach a ledger from somebody else's exporter.
+    CostCurrencyMismatch {
+        /// What the session was priced in.
+        session: emob_core::Currency,
+        /// What the reservation was priced in.
+        reservation: emob_core::Currency,
+    },
+    /// A reservation was priced and the record does not say when it ran.
+    ///
+    /// `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]` prices a
+    /// reservation over a window that *"starts when the reservation is made,
+    /// and ends when the driver starts charging"* — a window no meter measured
+    /// and nothing else on the record implies. Without it the amount cannot be
+    /// checked against anything, cannot be re-rated, and cannot be given the
+    /// dates an invoice line states.
+    ReservationWithoutWindow,
+    /// The reservation was priced for more time than its own window ran.
+    ///
+    /// The reservation's counterpart to [`Self::CostDurationExceedsRecord`],
+    /// and one-sided for the same reason: a reservation element that only bites
+    /// after an hour prices nothing on a ten-minute hold.
+    ReservationDurationExceedsWindow {
+        /// The seconds the price charged for.
+        priced_seconds: Decimal,
+        /// The seconds the reservation window ran.
+        window_seconds: Decimal,
+    },
     /// The record has been rated, and the rating had something to report.
     ///
     /// A note is not a fault — a block rounding is lawful — but it is a term of
     /// the price that the receiving party has to see rather than discover.
     RatingNote {
+        /// Which part of the record the rating was of.
+        part: CostPart,
         /// What the rating said.
         note: String,
     },
+}
+
+/// Which of a record's two priced parts a finding is about.
+///
+/// A CDR carries two ratings — the session, and the reservation that preceded
+/// it `[OCPI 2.3.0 §mod_cdrs_cdr_object]` — and a finding that does not say
+/// which one it came from sends the reader to the wrong half of the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum CostPart {
+    /// The charging session.
+    Session,
+    /// The reservation that ran before it.
+    Reservation,
+}
+
+impl core::fmt::Display for CostPart {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Session => "the session",
+            Self::Reservation => "the reservation",
+        })
+    }
 }
 
 impl Finding {
@@ -266,7 +344,16 @@ impl Finding {
             | Self::CostDurationExceedsRecord { .. }
             // Import billed as export is the fault that reverses the sign of a
             // settlement, and `[A6 §IV.1]` will not accept either side of it.
-            | Self::DirectionMismatch { .. } => Severity::Blocking,
+            | Self::DirectionMismatch { .. }
+            // One session, one session fee. A record charging it per period
+            // reconciles line by line and bills a multiple of what was quoted.
+            | Self::FlatChargedMoreThanOnce { .. }
+            // Two currencies on one record is a record with no total.
+            | Self::CostCurrencyMismatch { .. }
+            // A priced reservation nothing places in time cannot be checked,
+            // re-rated, or given the dates an invoice line states.
+            | Self::ReservationWithoutWindow
+            | Self::ReservationDurationExceedsWindow { .. } => Severity::Blocking,
 
             // Missing evidence is blocking for a German energy invoice
             // `[MessEG §33]` and merely notable elsewhere, so the *finding* is
@@ -286,6 +373,13 @@ impl Finding {
 }
 
 impl core::fmt::Display for Finding {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per variant, and a finding's sentence is the whole of \
+                  what a partner integration is debugged from — splitting the \
+                  table by group would hide which variants have a sentence and \
+                  which do not"
+    )]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::DoesNotConserve { periods, total } => write!(
@@ -374,7 +468,31 @@ impl core::fmt::Display for Finding {
                 f,
                 "the {dimension:?} line states {base_quantity} at {unit_price} and an amount of {amount}, but its own numbers come to {implied}"
             ),
-            Self::RatingNote { note } => write!(f, "the rating reports: {note}"),
+            Self::FlatChargedMoreThanOnce { part, quantity } => write!(
+                f,
+                "{part} charges a session fee {quantity} times: `FLAT` is a fixed amount for the whole charging session [OCPI 2.3.0 §mod_tariffs_tariffdimensiontype_enum], and no step size applies to it"
+            ),
+            Self::CostCurrencyMismatch {
+                session,
+                reservation,
+            } => write!(
+                f,
+                "the session is priced in {session} and its reservation in {reservation}: the two cannot be added, so this record states no total"
+            ),
+            Self::ReservationWithoutWindow => write!(
+                f,
+                "a reservation was priced and the record does not say when it ran: the amount cannot be checked against anything [OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]"
+            ),
+            Self::ReservationDurationExceedsWindow {
+                priced_seconds,
+                window_seconds,
+            } => write!(
+                f,
+                "the reservation is priced for {priced_seconds} s and its own window ran {window_seconds} s"
+            ),
+            Self::RatingNote { part, note } => {
+                write!(f, "the rating of {part} reports: {note}")
+            }
         }
     }
 }
@@ -478,6 +596,7 @@ pub fn validate(cdr: &Cdr) -> Report {
 
     if let Some(cost) = &cdr.cost {
         check_cost(cdr, cost, &mut findings);
+        check_reservation_cost(cdr, cost, &mut findings);
     }
 
     let interpolated = cdr
@@ -576,7 +695,14 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
     // an approximate one.
     for dimension in [Dimension::Time, Dimension::ParkingTime] {
         let priced = cost.rated.base_quantity_for(dimension);
-        let accounted = seconds_of(cdr, dimension == Dimension::Time);
+        // Which activity a dimension may be charged against — and the third
+        // one, which may be charged against neither `[OCPI 2.3.0
+        // §mod_cdrs_chargingperiod_class]`. A partner pricing occupancy over
+        // the minutes its own record says *it* withheld power is over-charging,
+        // and this is where it is caught.
+        let accounted = seconds_of(cdr, |activity| {
+            Dimension::pricing(activity) == Some(dimension)
+        });
         if priced > accounted && !rounded_to_block(cost, dimension) {
             findings.push(Finding::CostDurationExceedsRecord {
                 dimension,
@@ -586,11 +712,70 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
         }
     }
 
+    check_rating(&cost.rated, CostPart::Session, findings);
+}
+
+/// The reservation half of the money, checked the way the session half is.
+///
+/// A reservation is a second [`emob_tariff::Rated`] on the same record, priced
+/// over a window that ran **before** any energy moved
+/// `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`, and stated on the wire
+/// in its own `total_reservation_cost`. Everything [`check_cost`] asks of the
+/// session applies to it — a line has to reproduce its own amount, a session fee
+/// is charged once, a note has to travel — and none of it was asked, so a
+/// partner's reservation cost was money no check in this report ever read
+/// (D250).
+///
+/// What is *not* asked of it is the energy: a reservation has no meter series,
+/// which is the whole reason `[OCPI 2.3.0]` gives it a separate field.
+fn check_reservation_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
+    let Some(rated) = &cost.reservation else {
+        return;
+    };
+
+    // Two currencies on one record is a record with no total: `Cost::gross`
+    // adds them, `total_price` on the OCPI crossing adds their nets, and an
+    // invoice states one currency per document.
+    if !cost.currencies_agree() {
+        findings.push(Finding::CostCurrencyMismatch {
+            session: cost.rated.currency,
+            reservation: rated.currency,
+        });
+    }
+
+    // The window is the only thing the amount can be checked against, and it
+    // is not derivable from anything else on the record.
+    match cdr.reservation {
+        None => findings.push(Finding::ReservationWithoutWindow),
+        Some(held) => {
+            // `rate_reservation` feeds the reservation's minutes to `TIME`, so
+            // that is the dimension the window bounds. One-sided, for the same
+            // reason `CostDurationExceedsRecord` is.
+            let priced = rated.base_quantity_for(Dimension::Time);
+            let window = Decimal::from(held.seconds());
+            if priced > window {
+                findings.push(Finding::ReservationDurationExceedsWindow {
+                    priced_seconds: priced,
+                    window_seconds: window,
+                });
+            }
+        }
+    }
+
+    check_rating(rated, CostPart::Reservation, findings);
+}
+
+/// What is asked of **any** rating on a record, whichever part it prices.
+///
+/// One function because the questions are one set of questions. Asking them of
+/// the session and not of the reservation is how a partner's `total_reservation_cost`
+/// became the one amount on a CDR that nothing in this report looked at.
+fn check_rating(rated: &Rated, part: CostPart, findings: &mut Vec<Finding>) {
     // Every line has to reproduce its own amount. Nothing else in this
     // report reads an amount at all, so without this a partner can state
     // any total it likes beside a quantity and a price that do not produce
     // it — see `Finding::LineDoesNotReconcile`.
-    for line in &cost.rated.lines {
+    for line in &rated.lines {
         if !line.reconciles() {
             let per_unit = emob_tariff::Line::base_units_per_unit(line.dimension);
             findings.push(Finding::LineDoesNotReconcile {
@@ -603,8 +788,23 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
         }
     }
 
-    for note in &cost.rated.notes {
+    // `FLAT` is *"fixed amount for the whole charging session"*
+    // `[OCPI 2.3.0 §mod_tariffs_tariffdimensiontype_enum]`, and it is the one
+    // dimension no other check here reaches: the energy check compares against
+    // the record's kilowatt-hours and the two time checks against its seconds,
+    // while a session fee is charged against the session itself. A line stating
+    // ninety-six of them reconciles against its own price exactly.
+    let flat = rated.base_quantity_for(Dimension::Flat);
+    if flat > Decimal::ONE {
+        findings.push(Finding::FlatChargedMoreThanOnce {
+            part,
+            quantity: flat,
+        });
+    }
+
+    for note in &rated.notes {
         findings.push(Finding::RatingNote {
+            part,
             note: note.to_string(),
         });
     }
@@ -625,16 +825,17 @@ fn rounded_to_block(cost: &crate::cdr::Cost, dimension: Dimension) -> bool {
     })
 }
 
-/// The whole seconds the record's own periods spend charging, or not charging.
+/// The whole seconds the record's own periods spend in activities `keep`
+/// admits.
 ///
 /// The same partition [`Cdr::chargeable`] hands the rating engine, read
 /// straight off the periods so a record whose periods are malformed still gets
 /// a number rather than an error — the malformation is already its own finding.
-fn seconds_of(cdr: &Cdr, charging: bool) -> Decimal {
+fn seconds_of(cdr: &Cdr, keep: impl Fn(Activity) -> bool) -> Decimal {
     let seconds: i64 = cdr
         .periods
         .iter()
-        .filter(|period| period.charging == charging)
+        .filter(|period| keep(period.activity))
         .map(|period| period.duration().whole_seconds().max(0))
         .sum();
     Decimal::from(seconds)
@@ -644,7 +845,7 @@ fn seconds_of(cdr: &Cdr, charging: bool) -> Decimal {
 ///
 /// A period's window is the part of its settlement slot the meter series
 /// actually covered, so it must sit inside the session window exactly — no
-/// clamping, no allowance — and it must not contradict its own `charging` flag.
+/// clamping, no allowance — and it must not contradict its own activity.
 fn check_periods(cdr: &Cdr, findings: &mut Vec<Finding>) {
     let mut previous: Option<(time::OffsetDateTime, time::OffsetDateTime)> = None;
     for period in &cdr.periods {
@@ -671,7 +872,7 @@ fn check_periods(cdr: &Cdr, findings: &mut Vec<Finding>) {
                 start: period.start,
             });
         }
-        if !period.charging && !period.energy.is_zero() {
+        if !period.activity.transfers_energy() && !period.energy.is_zero() {
             findings.push(Finding::EnergyWhileNotCharging {
                 start: period.start,
                 energy: period.energy,
@@ -687,6 +888,7 @@ mod tests {
     use crate::cdr::{CdrKey, ChargingPeriod, Cost, EvidenceRef};
     use emob_core::{Currency, Direction, IdentificationStrength, PartyId};
     use emob_session::{AuthPath, Provenance, QuarterHour};
+    use emob_tariff::PriceLimit;
     use emob_tariff::{PriceComponent, Tariff, TariffKind};
     use std::str::FromStr;
     use time::macros::datetime;
@@ -709,7 +911,7 @@ mod tests {
             start: at(from),
             end: at(to),
             energy: kwh(energy),
-            charging: true,
+            activity: Activity::Charging,
             provenance: Provenance::Measured,
         }
     }
@@ -720,6 +922,7 @@ mod tests {
                 party: PartyId::new("DE", "ABC").unwrap(),
                 id: "1".parse().unwrap(),
             },
+            reservation: None,
             session_id: "s-1".parse().unwrap(),
             evse_id: "DE*AB7*E840*6487".parse().unwrap(),
             started_at: at(0),
@@ -729,6 +932,7 @@ mod tests {
             periods: vec![period(0, 15, "10.000"), period(15, 30, "8.000")],
             total_energy: kwh("18.000"),
             direction: Direction::Import,
+            clock: emob_core::ClockResolution::conforming(),
             evidence: Some(EvidenceRef {
                 encoding_method: "OCMF".into(),
                 payload_digests: vec![[1u8; 32]],
@@ -754,6 +958,7 @@ mod tests {
             // a validator. Pricing them through the gated door would refuse
             // the fixture and test nothing.
             rated: emob_tariff::rate(tariff, &cdr.chargeable().unwrap()),
+            reservation: None,
         }
     }
 
@@ -768,6 +973,158 @@ mod tests {
                 dec(price),
             )],
         )
+    }
+
+    /// A rating a partner's exporter produced, assembled line by line rather
+    /// than computed — which is the only way these shapes exist.
+    fn partner_rating(lines: Vec<emob_tariff::Line>) -> emob_tariff::Rated {
+        emob_tariff::Rated {
+            lines,
+            currency: Currency::EUR,
+            tax_included: emob_tariff::TaxIncluded::Yes,
+            adjustment: None,
+            notes: Vec::new(),
+        }
+    }
+
+    fn flat_line(quantity: &str, unit_price: &str) -> emob_tariff::Line {
+        let quantity = dec(quantity);
+        let unit_price = dec(unit_price);
+        emob_tariff::Line {
+            dimension: Dimension::Flat,
+            quantity,
+            base_quantity: quantity,
+            unit_price,
+            amount: quantity * unit_price,
+            vat: None,
+        }
+    }
+
+    #[test]
+    fn a_session_fee_charged_once_per_period_is_blocked() {
+        // Every line reconciles: 96 × 0.50 is exactly 48.00. The energy matches
+        // the record, the minutes match the record, and the driver is billed
+        // ninety-six session fees for one session. Nothing else in this report
+        // reaches the `FLAT` dimension, so without this check it settles.
+        let mut cdr = good_cdr();
+        let tariff = energy_tariff("0.49");
+        let mut cost = rated(&cdr, &tariff);
+        cost.rated.lines.push(flat_line("96", "0.50"));
+        cdr.cost = Some(cost);
+
+        let report = validate(&cdr);
+        assert!(!report.is_settleable());
+        assert!(
+            report.blocking().any(|f| matches!(
+                f,
+                Finding::FlatChargedMoreThanOnce { part: CostPart::Session, quantity }
+                    if *quantity == dec("96")
+            )),
+            "{:?}",
+            report.findings
+        );
+
+        // …and one fee, charged once, is the ordinary record.
+        let mut ok = good_cdr();
+        let mut cost = rated(&ok, &tariff);
+        cost.rated.lines.push(flat_line("1", "0.50"));
+        ok.cost = Some(cost);
+        assert!(validate(&ok).is_settleable());
+    }
+
+    #[test]
+    fn a_reservation_cost_is_checked_the_way_the_session_cost_is() {
+        // A reservation line that does not reproduce its own amount. It rode on
+        // the record beside the session, reached `Cost::gross`, crossed OCPI as
+        // `total_reservation_cost` — and no check in this report read it.
+        let mut cdr = good_cdr();
+        cdr.reservation = Some(emob_tariff::Reservation::honoured(at(-30), at(0)));
+        let tariff = energy_tariff("0.49");
+        let mut cost = rated(&cdr, &tariff);
+        cost.reservation = Some(partner_rating(vec![emob_tariff::Line {
+            dimension: Dimension::Time,
+            quantity: dec("0.5"),
+            base_quantity: dec("1800"),
+            unit_price: dec("6.00"),
+            // 1800 s at 6.00/h is 3.00, and this says otherwise.
+            amount: dec("30.00"),
+            vat: None,
+        }]));
+        cdr.cost = Some(cost);
+
+        let report = validate(&cdr);
+        assert!(!report.is_settleable());
+        assert!(
+            report
+                .blocking()
+                .any(|f| matches!(f, Finding::LineDoesNotReconcile { .. })),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn a_reservation_priced_for_longer_than_it_ran_is_blocked() {
+        let mut cdr = good_cdr();
+        // Held for half an hour…
+        cdr.reservation = Some(emob_tariff::Reservation::honoured(at(-30), at(0)));
+        let tariff = energy_tariff("0.49");
+        let mut cost = rated(&cdr, &tariff);
+        // …and billed for two.
+        cost.reservation = Some(partner_rating(vec![emob_tariff::Line {
+            dimension: Dimension::Time,
+            quantity: dec("2"),
+            base_quantity: dec("7200"),
+            unit_price: dec("6.00"),
+            amount: dec("12.00"),
+            vat: None,
+        }]));
+        cdr.cost = Some(cost);
+
+        assert!(
+            validate(&cdr)
+                .blocking()
+                .any(|f| matches!(f, Finding::ReservationDurationExceedsWindow { .. }))
+        );
+    }
+
+    #[test]
+    fn a_priced_reservation_with_no_window_is_blocked() {
+        // The shape a partner's record takes: OCPI carries
+        // `total_reservation_cost` and nothing that says when the reservation
+        // ran. An amount nothing places in time cannot be checked or re-rated,
+        // and has no dates to state on an invoice line.
+        let mut cdr = good_cdr();
+        let tariff = energy_tariff("0.49");
+        let mut cost = rated(&cdr, &tariff);
+        cost.reservation = Some(partner_rating(vec![flat_line("1", "2.00")]));
+        cdr.cost = Some(cost);
+        assert!(
+            validate(&cdr)
+                .blocking()
+                .any(|f| matches!(f, Finding::ReservationWithoutWindow))
+        );
+    }
+
+    #[test]
+    fn two_currencies_on_one_record_is_a_record_with_no_total() {
+        let mut cdr = good_cdr();
+        cdr.reservation = Some(emob_tariff::Reservation::honoured(at(-30), at(0)));
+        let tariff = energy_tariff("0.49");
+        let mut cost = rated(&cdr, &tariff);
+        let mut reservation = partner_rating(vec![flat_line("1", "2.00")]);
+        reservation.currency = Currency::new("CHF").unwrap();
+        cost.reservation = Some(reservation);
+        cdr.cost = Some(cost);
+
+        let report = validate(&cdr);
+        assert!(
+            report
+                .blocking()
+                .any(|f| matches!(f, Finding::CostCurrencyMismatch { .. }))
+        );
+        // …and the total the record states is the one that cannot be trusted.
+        assert!(!report.is_settleable());
     }
 
     #[test]
@@ -987,7 +1344,7 @@ mod tests {
                     start: at(7),
                     end: at(15),
                     energy: kwh("4.000"),
-                    charging: true,
+                    activity: Activity::Charging,
                     provenance: Provenance::Interpolated,
                 },
                 ChargingPeriod {
@@ -995,7 +1352,7 @@ mod tests {
                     start: at(15),
                     end: at(23),
                     energy: kwh("4.000"),
-                    charging: true,
+                    activity: Activity::Charging,
                     provenance: Provenance::Interpolated,
                 },
             ],
@@ -1213,7 +1570,7 @@ mod tests {
     fn a_rating_note_travels_as_a_warning_rather_than_a_block() {
         let mut cdr = good_cdr();
         let mut tariff = energy_tariff("0.49");
-        tariff.min_price = Some(dec("50.00"));
+        tariff.min_price = Some(PriceLimit::gross(dec("50.00")));
         cdr.cost = Some(rated(&cdr, &tariff));
 
         let report = validate(&cdr);
@@ -1263,7 +1620,7 @@ mod tests {
             start: at(30),
             end: at(40),
             energy: Energy::ZERO,
-            charging: false,
+            activity: Activity::Parked,
             provenance: Provenance::Measured,
         });
         cdr.ended_at = at(40);
@@ -1307,7 +1664,7 @@ mod tests {
         // has produced a record that is billed at the wrong rate whichever
         // field the reader believes.
         let mut cdr = good_cdr();
-        cdr.periods[1].charging = false;
+        cdr.periods[1].activity = Activity::Parked;
 
         let report = validate(&cdr);
         assert!(!report.is_settleable());

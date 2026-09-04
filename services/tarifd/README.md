@@ -21,6 +21,23 @@ each payload is built by the crate that already owns the crossing — `to_ocpp`,
 CDR. There is no second computation for the three to drift from, and a test
 asserts the consequence rather than the intention.
 
+## A tariff id is a name, and this service publishes content
+
+`prepare` refuses a tariff whose **content** no version of that id has.
+`TariffHistory::in_force_at` is what rates a CDR, so an edited object that never
+entered the history is a price no session will ever be billed at — and
+publishing it would put that price in front of the driver, the national access
+point and every roaming partner (D255):
+
+```rust
+tarifd.prepare(&edited, &party, at)?;
+// Err: tariff ad-hoc is published by this service and no version of it has the
+//      content 9f2c…: publishing it would quote a price no session is rated at
+```
+
+The rule is `emob_cdr::Cost`'s, which carries a fingerprint beside the id because
+*"a tariff id is a name, and names get reused"*.
+
 ## Publishing is not what makes a version effective
 
 The version in force is decided by its own window; a CDR is priced with whichever

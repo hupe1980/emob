@@ -6,7 +6,7 @@
 //! forbids. Modelling it as mutable fields is how a session ends twice, or
 //! delivers energy after it stopped, and both of those reach an invoice.
 
-use emob_core::{Direction, Energy, EvseId, SessionId};
+use emob_core::{Activity, Direction, Energy, EvseId, SessionId};
 
 use crate::auth::Authorization;
 use crate::meter::MeterSeries;
@@ -22,11 +22,25 @@ pub enum SessionState {
     Pending,
     /// Energy is moving.
     Charging,
-    /// Plugged in and authorised, but not charging — the car is full, or a
-    /// smart-charging profile is holding it at zero. Distinct from
-    /// [`Self::Charging`] because parking time is priced differently from
-    /// energy `[AFIR Art. 5(4)]`.
-    Suspended,
+    /// Plugged in and authorised, and **the vehicle** has stopped asking for
+    /// power — the battery is full, or the car paused its own charge.
+    ///
+    /// This is the occupancy `[AFIR Art. 5(4)]` lets a fast charger price per
+    /// minute, and the only state that is.
+    SuspendedByVehicle,
+    /// Plugged in and authorised, and **the operator** has stopped offering
+    /// power while the vehicle is still asking for it — a charging profile
+    /// holding the point at zero, a `[EnWG §14a]` dimming, a grid limit, a
+    /// fault.
+    ///
+    /// Kept apart from [`Self::SuspendedByVehicle`] because the two are priced
+    /// differently and one boolean cannot say which. OCPP has said which since
+    /// 2.0.1 — `SuspendedEV` against `SuspendedEVSE` — and
+    /// `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]` corrected its own
+    /// definition of `PARKING_TIME` to the vehicle's demand precisely so that a
+    /// driver is not billed a loitering fee for the operator's own curtailment.
+    /// Collapsing them here is what puts that fee on the invoice.
+    SuspendedByOperator,
     /// Over. Nothing further may be added.
     Ended,
 }
@@ -55,12 +69,23 @@ impl SessionState {
             // Nothing follows the end.
             (Self::Ended, _) => false,
             // A session may start charging, be held at zero, or be abandoned.
-            (Self::Pending, Self::Charging | Self::Suspended | Self::Ended) => true,
-            // Charging may pause or finish; it may not go back to pending,
-            // because energy has already moved.
-            (Self::Charging, Self::Suspended | Self::Ended) => true,
-            // A suspended session may resume or finish.
-            (Self::Suspended, Self::Charging | Self::Ended) => true,
+            (
+                Self::Pending,
+                Self::Charging | Self::SuspendedByVehicle | Self::SuspendedByOperator | Self::Ended,
+            ) => true,
+            // Charging may pause — for either reason — or finish; it may not go
+            // back to pending, because energy has already moved.
+            (
+                Self::Charging,
+                Self::SuspendedByVehicle | Self::SuspendedByOperator | Self::Ended,
+            ) => true,
+            // A suspended session may resume, finish, or change *why* it is
+            // suspended: a car that fills while the point is curtailed has
+            // moved from one to the other, and both intervals are priced.
+            (
+                Self::SuspendedByVehicle | Self::SuspendedByOperator,
+                Self::Charging | Self::SuspendedByVehicle | Self::SuspendedByOperator | Self::Ended,
+            ) => true,
             _ => false,
         }
     }
@@ -189,25 +214,60 @@ impl Session {
             .map(|change| change.state)
     }
 
-    /// Whether the session was suspended for the whole of `[from, to)` — the
-    /// interval an occupancy fee may be charged for `[AFIR Art. 5(4)]`.
+    /// What the session says it was doing across the whole of `[from, to)`.
+    ///
+    /// `None` for an interval the record does not answer with one word: one
+    /// that spans a transition, one before the session started, one after it
+    /// ended, an empty one — and one in [`SessionState::Pending`], which is
+    /// authorised with no vehicle demand yet and no operator refusal either.
+    ///
+    /// This is the question `emob-cdr` asks of every period it prices, and it
+    /// is deliberately **one** question rather than two booleans. Asking
+    /// "was it charging" and "was it suspended" separately leaves the third
+    /// answer — the operator withholding power from a vehicle that is asking —
+    /// indistinguishable from the second, which is exactly the conflation
+    /// `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]` corrected its own
+    /// definition of `PARKING_TIME` to remove. See [`Activity`].
+    #[must_use]
+    pub fn activity_throughout(
+        &self,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> Option<Activity> {
+        if to <= from {
+            return None;
+        }
+        // No transition may land strictly inside the interval.
+        if self
+            .history
+            .iter()
+            .any(|change| change.at > from && change.at < to)
+        {
+            return None;
+        }
+        match self.state_at(from)? {
+            SessionState::Charging => Some(Activity::Charging),
+            SessionState::SuspendedByVehicle => Some(Activity::Parked),
+            SessionState::SuspendedByOperator => Some(Activity::Withheld),
+            SessionState::Pending | SessionState::Ended => None,
+        }
+    }
+
+    /// Whether the session was suspended for the whole of `[from, to)`, for
+    /// either reason.
+    ///
+    /// The protocol's question. **Which** reason is the one money turns on, and
+    /// that is [`Self::activity_throughout`].
     #[must_use]
     pub fn suspended_throughout(
         &self,
         from: time::OffsetDateTime,
         to: time::OffsetDateTime,
     ) -> bool {
-        if to <= from {
-            return false;
-        }
-        if self.state_at(from) != Some(SessionState::Suspended) {
-            return false;
-        }
-        // No transition may land strictly inside the interval.
-        !self
-            .history
-            .iter()
-            .any(|change| change.at > from && change.at < to)
+        matches!(
+            self.activity_throughout(from, to),
+            Some(Activity::Parked | Activity::Withheld)
+        )
     }
 
     /// Whether the session was charging for the whole of `[from, to)`.
@@ -234,16 +294,7 @@ impl Session {
         from: time::OffsetDateTime,
         to: time::OffsetDateTime,
     ) -> bool {
-        if to <= from {
-            return false;
-        }
-        if self.state_at(from) != Some(SessionState::Charging) {
-            return false;
-        }
-        !self
-            .history
-            .iter()
-            .any(|change| change.at > from && change.at < to)
+        self.activity_throughout(from, to) == Some(Activity::Charging)
     }
 
     /// Move to a new state at an instant.
@@ -528,7 +579,8 @@ mod tests {
         let mut s = session();
         assert_eq!(s.state(), SessionState::Pending);
         s.transition_to(SessionState::Charging, at(1)).unwrap();
-        s.transition_to(SessionState::Suspended, at(20)).unwrap();
+        s.transition_to(SessionState::SuspendedByVehicle, at(20))
+            .unwrap();
         s.transition_to(SessionState::Charging, at(25)).unwrap();
         s.attach_series(import_series()).unwrap();
         s.end(at(30), EndReason::Local).unwrap();
@@ -554,11 +606,12 @@ mod tests {
         // that interval.
         let mut s = session();
         s.transition_to(SessionState::Charging, at(0)).unwrap();
-        s.transition_to(SessionState::Suspended, at(40)).unwrap();
+        s.transition_to(SessionState::SuspendedByVehicle, at(40))
+            .unwrap();
         s.end(at(70), EndReason::Local).unwrap();
 
         assert_eq!(s.state_at(at(10)), Some(SessionState::Charging));
-        assert_eq!(s.state_at(at(50)), Some(SessionState::Suspended));
+        assert_eq!(s.state_at(at(50)), Some(SessionState::SuspendedByVehicle));
         assert_eq!(s.state_at(at(-1)), None, "before it started");
 
         assert!(
@@ -584,7 +637,8 @@ mod tests {
         // than "did it fail to say suspended".
         let mut s = session();
         s.transition_to(SessionState::Charging, at(20)).unwrap();
-        s.transition_to(SessionState::Suspended, at(40)).unwrap();
+        s.transition_to(SessionState::SuspendedByVehicle, at(40))
+            .unwrap();
         s.end(at(70), EndReason::Local).unwrap();
 
         // Pending: neither. Connected, authorised, no energy moving — which is
@@ -617,7 +671,7 @@ mod tests {
         let mut s = session();
         s.transition_to(SessionState::Charging, at(20)).unwrap();
         assert!(matches!(
-            s.transition_to(SessionState::Suspended, at(10)),
+            s.transition_to(SessionState::SuspendedByVehicle, at(10)),
             Err(SessionError::TimeWentBackwards { .. })
         ));
         assert_eq!(s.state(), SessionState::Charging, "and nothing moved");
@@ -725,7 +779,8 @@ mod tests {
     fn the_idle_intervals_are_every_stretch_the_session_was_not_charging() {
         let mut s = session();
         s.transition_to(SessionState::Charging, at(1)).unwrap();
-        s.transition_to(SessionState::Suspended, at(20)).unwrap();
+        s.transition_to(SessionState::SuspendedByVehicle, at(20))
+            .unwrap();
         s.transition_to(SessionState::Charging, at(25)).unwrap();
         assert_eq!(
             s.idle_intervals(),
@@ -752,7 +807,8 @@ mod tests {
         // hour. The thirty seconds carry no energy, whatever a straight line
         // between the readings would have said.
         let mut s = session();
-        s.transition_to(SessionState::Suspended, at(0)).unwrap();
+        s.transition_to(SessionState::SuspendedByVehicle, at(0))
+            .unwrap();
         let charging_from = at(0) + time::Duration::seconds(30);
         s.transition_to(SessionState::Charging, charging_from)
             .unwrap();
@@ -800,13 +856,58 @@ mod tests {
 
     #[test]
     fn the_transition_table_is_exhaustive_and_final_is_final() {
-        use SessionState::{Charging, Ended, Pending, Suspended};
-        for next in [Pending, Charging, Suspended, Ended] {
+        use SessionState::{Charging, Ended, Pending, SuspendedByOperator, SuspendedByVehicle};
+        for next in [
+            Pending,
+            Charging,
+            SuspendedByVehicle,
+            SuspendedByOperator,
+            Ended,
+        ] {
             assert!(!Ended.can_transition_to(next), "nothing follows Ended");
         }
         assert!(Pending.can_transition_to(Charging));
         assert!(Pending.can_transition_to(Ended));
         assert!(!Charging.can_transition_to(Pending));
-        assert!(Suspended.can_transition_to(Charging));
+        assert!(SuspendedByVehicle.can_transition_to(Charging));
+        assert!(SuspendedByOperator.can_transition_to(Charging));
+        // A car that fills while the point is curtailed moves from one
+        // suspension to the other, and both intervals are priced differently.
+        assert!(SuspendedByOperator.can_transition_to(SuspendedByVehicle));
+        assert!(SuspendedByVehicle.can_transition_to(SuspendedByOperator));
+        assert!(!SuspendedByVehicle.can_transition_to(Pending));
+    }
+
+    #[test]
+    fn the_two_suspensions_are_two_activities() {
+        use emob_core::Activity;
+        let mut s = session();
+        s.transition_to(SessionState::Charging, at(10)).unwrap();
+        s.transition_to(SessionState::SuspendedByOperator, at(20))
+            .unwrap();
+        s.transition_to(SessionState::SuspendedByVehicle, at(30))
+            .unwrap();
+        s.end(at(40), EndReason::Local).unwrap();
+
+        assert_eq!(
+            s.activity_throughout(at(10), at(20)),
+            Some(Activity::Charging)
+        );
+        assert_eq!(
+            s.activity_throughout(at(20), at(30)),
+            Some(Activity::Withheld),
+            "the operator withheld: no occupancy fee is owed for it"
+        );
+        assert_eq!(
+            s.activity_throughout(at(30), at(40)),
+            Some(Activity::Parked),
+            "the vehicle stopped asking: this is what [AFIR Art. 5(4)] prices"
+        );
+        // Both are "suspended" to the protocol and only one of them is an
+        // occupancy fee.
+        assert!(s.suspended_throughout(at(20), at(30)));
+        assert!(s.suspended_throughout(at(30), at(40)));
+        // An interval spanning a transition has no single answer.
+        assert_eq!(s.activity_throughout(at(15), at(35)), None);
     }
 }

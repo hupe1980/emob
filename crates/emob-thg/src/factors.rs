@@ -72,6 +72,82 @@ pub fn counting_factor(year: i32) -> Option<Decimal> {
     }
 }
 
+/// A vehicle class, for the factor `[38k §7(6)]` gives two of them.
+///
+/// The distinction exists in exactly one place in the Verordnung and it is worth
+/// a third of the revenue: a bus depot's kilowatt-hours count four times from
+/// 2027 where a car's count three, and the schedules do not converge until 2040.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+pub enum VehicleClass {
+    /// Every class `[38k §5(3)]`'s single schedule covers — a passenger car,
+    /// a van, a light truck.
+    #[default]
+    Other,
+    /// **M3 and N3** — buses and heavy goods vehicles, as
+    /// `[38k §7(6)]` names them by reference to Anlage XXIX Abschnitt 1
+    /// Nummer 1 und 2 of the Straßenverkehrs-Zulassungs-Ordnung.
+    HeavyM3OrN3,
+}
+
+impl VehicleClass {
+    /// The Verordnung's own word for it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Other => "andere Klasse",
+            Self::HeavyM3OrN3 => "Klasse M3 oder N3",
+        }
+    }
+
+    /// The factor `[38k §5(3) S. 1]` or `[38k §7(6)]` multiplies by in `year`.
+    ///
+    /// # Two schedules, and the second is a whole paragraph rather than a row
+    ///
+    /// `[38k §7(6)]` opens *"Abweichend von § 5 Absatz 3 Satz 1"* and states
+    /// **seven** steps against § 5(3)'s three:
+    ///
+    /// | from | M3 / N3 | everything else |
+    /// |---|---|---|
+    /// | 2024 | — | 3 |
+    /// | 2027 | 4 | 3 |
+    /// | 2035 | 3.5 | 2 |
+    /// | 2036 | 3 | 1 |
+    /// | 2037 | 2.5 | 1 |
+    /// | 2038 | 2 | 1 |
+    /// | 2039 | 1.5 | 1 |
+    /// | 2040 | 1 | 1 |
+    ///
+    /// Before 2027 the paragraph states nothing, so § 5(3)'s schedule is the
+    /// one that applies — the deviation begins where the deviation says it
+    /// begins, and reading `4` back into 2026 would be reading a number that is
+    /// not there.
+    ///
+    /// `None` before [`FIRST_COUNTED_YEAR`], for both classes.
+    #[must_use]
+    pub fn factor(self, year: i32) -> Option<Decimal> {
+        // A half-step, written at the scale the Verordnung prints: `3.5`, not
+        // `3.50`. Every value here is a small whole number of tenths.
+        let tenths = |value: u32| Decimal::from_parts(value, 0, 0, false, 1);
+        match self {
+            Self::Other => counting_factor(year),
+            Self::HeavyM3OrN3 => match year {
+                y if y >= 2040 => Some(Decimal::ONE),
+                2039 => Some(tenths(15)),
+                2038 => Some(Decimal::TWO),
+                2037 => Some(tenths(25)),
+                2036 => Some(Decimal::from(3)),
+                2035 => Some(tenths(35)),
+                y if y >= 2027 => Some(Decimal::from(4)),
+                // "ab dem Kalenderjahr 2027": before it, the deviation has not
+                // begun and § 5(3) is the schedule.
+                other => counting_factor(other),
+            },
+        }
+    }
+}
+
 /// The adjustment factor for drive efficiency, from Anlage 3 `[38k §5(3)]`.
 ///
 /// The whole table rather than the one row a charge point needs: the

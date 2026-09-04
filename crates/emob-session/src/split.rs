@@ -84,7 +84,7 @@
 //! 92- and 100-slot days of a clock change are simply days with fewer or more
 //! instants in them. Nothing here counts to 96, and there is no DST branch.
 
-use emob_core::{Direction, Energy, QuarterHour};
+use emob_core::{Direction, Energy, QuarterHour, apportion};
 use rust_decimal::Decimal;
 
 use crate::meter::{MeterSeries, ReadingContext};
@@ -531,15 +531,17 @@ fn cumulative_along(
                 return (before.register.kwh(), Provenance::Interpolated);
             }
             let delta = after.register.kwh() - before.register.kwh();
-            // Multiply, then divide. `delta × offset / gap` keeps every digit
-            // the arithmetic allows; `delta × (offset / gap)` has already spent
-            // the decimal's precision on a repeating fraction before the
-            // multiplication — 7 kWh two thirds of the way through a gap is
-            // 4.666… either way, but the first form is exact wherever the
-            // ratio terminates and the second is not. The same rule as the
-            // rating engine's, for the same reason.
+            // The same arithmetic the rating engine places a tariff threshold
+            // with, through the same function: multiply before dividing, and
+            // quote the result at a scale a *sum* of such values can carry, so
+            // the telescoping identity this module rests on holds as written.
             (
-                before.register.kwh() + delta * Decimal::from(offset) / Decimal::from(gap),
+                apportion(
+                    before.register.kwh(),
+                    delta,
+                    offset.unsigned_abs(),
+                    gap.unsigned_abs(),
+                ),
                 Provenance::Interpolated,
             )
         })
@@ -673,26 +675,27 @@ mod tests {
     }
 
     #[test]
-    fn interpolation_multiplies_before_it_divides() {
-        // The boundary at 10:15 falls 14/21 of the way through 10:01 → 10:22.
-        // `7 × 14 / 21` is 4.666… to the decimal's full precision; `7 × (14/21)`
-        // spends that precision on the ratio first and loses the last digits.
-        // Conservation holds either way — the sum telescopes — so the only
-        // thing that shows the difference is the slot value itself.
+    fn an_interpolation_that_does_not_terminate_still_conserves() {
+        // The boundary at 10:15 falls 840/1260 of the way through 10:01 →
+        // 10:22, and `7 × 840 / 1260` is 4.666… — a ratio no decimal states.
+        // The value is the workspace's one apportionment, quoted at the scale
+        // a *sum* of such values can carry: without that floor two of them
+        // spend the whole 96-bit mantissa on their fractions and cannot be
+        // added exactly, which is a conservation check failing in the last
+        // place of the assertion that exists to prove there is none.
         let s = series(&[
             (1, "0", ReadingContext::TransactionBegin),
             (22, "7", ReadingContext::TransactionEnd),
         ]);
         let split = into_quarter_hours(&s).unwrap();
 
-        let expected = Decimal::from(7) * Decimal::from(14) / Decimal::from(21);
-        assert_eq!(split.slots[0].energy.kwh(), expected);
-        assert_ne!(
-            expected,
-            Decimal::from(7) * (Decimal::from(14) / Decimal::from(21)),
-            "the two orders genuinely differ, which is why the order is fixed"
+        assert_eq!(
+            split.slots[0].energy.kwh(),
+            emob_core::apportion(Decimal::ZERO, Decimal::from(7), 840, 1260)
         );
-        assert!(split.conserves());
+        assert_eq!(split.slots[0].energy.kwh().to_string(), "4.666666666667");
+        assert!(split.conserves(), "and the pieces still telescope exactly");
+        assert!(!split.fully_measured());
     }
 
     #[test]

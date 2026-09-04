@@ -112,7 +112,8 @@ pub enum CdrError {
     /// when the session started `[AFIR Art. 5(4)]`. The two cannot both be
     /// right about one session.
     #[error(
-        "the signed records mark a tariff change at {at} [OCMF Tab. 7, TX=T], inside this          session, and a record is priced by the one version in force when it started          [AFIR Art. 5(4)]: the station says two prices applied and this record states one.          Split the session at the change, or price it with the version history{}",
+        "the signed records mark a tariff change at {at} [OCMF Tab. 7, TX=T], inside this \
+         session, and a record is priced by the one version in force when it started          [AFIR Art. 5(4)]: the station says two prices applied and this record states one.          Split the session at the change, or price it with the version history{}",
         if *on_settlement_boundary {
             ""
         } else {

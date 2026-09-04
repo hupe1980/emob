@@ -363,6 +363,66 @@ fn energy_no_meter_signed_cannot_enter_a_notification() {
 }
 
 #[test]
+fn evidence_that_is_present_and_failed_cannot_enter_a_notification_either() {
+    // The half the presence check missed, and the worse of the two. A record
+    // whose chain did not hold up *has* an `EvidenceRef` — that is what
+    // `EvidenceRef::from_evidence` produces for a failed chain — so a gate
+    // asking only whether one exists lets it through, and the kilowatt-hours of
+    // a session nothing verified reach a file whose whole claim is that only
+    // signed ones do `[38k §6(3) Nr. 2]`.
+    //
+    // The rest of the workspace has known this since D70: evidence that is
+    // present and failed is worse than evidence that is absent, because it
+    // looks checked. This was the third place that had to learn it (D231).
+    let mut ledger = CdrLedger::new();
+    let (session, evidence) = session(0, "s-forged", "100.000", "129.500");
+    let mut reference = EvidenceRef::from_evidence(&evidence, "OCMF");
+    assert!(
+        reference.energy_billable,
+        "the fixture verifies, so the flag is the only thing this test changes"
+    );
+    reference.energy_billable = false;
+
+    let cdr = CdrBuilder::from_session(&session, Direction::Import)
+        .unwrap()
+        .key(
+            PartyId::new("DE", "ABC").unwrap(),
+            "cdr-forged".parse().unwrap(),
+        )
+        .evidence(reference)
+        .build()
+        .unwrap_err();
+    // The CPO side refuses to issue it at all…
+    assert!(
+        matches!(cdr, emob_cdr::CdrError::EnergyNotBillable),
+        "{cdr}"
+    );
+
+    // …and a record that reached the ledger another way — a partner's document,
+    // which `from_ocpi` assembles directly — is refused by the file rather than
+    // counted.
+    let (second, evidence) = self::session(1, "s-forged-2", "100.000", "129.500");
+    let mut record = CdrBuilder::from_session(&second, Direction::Import)
+        .unwrap()
+        .key(
+            PartyId::new("DE", "ABC").unwrap(),
+            "cdr-forged-2".parse().unwrap(),
+        )
+        .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
+        .build()
+        .unwrap();
+    record.evidence.as_mut().unwrap().energy_billable = false;
+    assert!(ledger.accept(record).is_stored());
+
+    assert!(matches!(
+        builder()
+            .point(&eligible_point(), "Musterstraße 1", &ledger)
+            .unwrap_err(),
+        ThgError::Unmeasured { .. }
+    ));
+}
+
+#[test]
 fn a_claim_on_a_source_that_does_not_count_yet_is_refused() {
     let biomass = EmissionsBasis::renewable(
         RenewableSource::Biomass,
@@ -549,5 +609,43 @@ fn a_session_across_the_turn_of_the_year_is_filed_in_both() {
             .any(|r| r.contains("spans the turn of the obligation year")),
         "{:?}",
         old_year.reasons().collect::<Vec<_>>()
+    );
+}
+
+/// `[38k §8(1) S. 1]` gives the two routes two deadlines, and one of them falls
+/// **inside** the obligation year.
+///
+/// > … 1. nach § 6 … bis zum Ablauf des 28. Februar des Folgejahres oder
+/// > 2. nach § 7 … bis zum Ablauf des 15. November des jeweiligen
+/// > Verpflichtungsjahres.
+///
+/// There is no late filing and no partial credit: a year of a fleet's public
+/// kilowatt-hours is worth a five- or six-figure sum and it is worth nothing on
+/// 1 March.
+#[test]
+fn the_two_routes_have_two_deadlines_and_one_is_inside_its_own_year() {
+    use emob_thg::Route;
+    use time::macros::date;
+
+    assert_eq!(
+        Route::PublicChargePoints.deadline(2026),
+        date!(2027 - 02 - 28)
+    );
+    assert!(Route::PublicChargePoints.in_time(2026, date!(2027 - 02 - 28)));
+    assert!(!Route::PublicChargePoints.in_time(2026, date!(2027 - 03 - 01)));
+
+    // The § 7 notification is due six weeks before the year it is about ends.
+    assert_eq!(
+        Route::EstimatedPerVehicle.deadline(2026),
+        date!(2026 - 11 - 15)
+    );
+    assert!(Route::EstimatedPerVehicle.in_time(2026, date!(2026 - 11 - 15)));
+    assert!(!Route::EstimatedPerVehicle.in_time(2026, date!(2026 - 11 - 16)));
+
+    // 28 February is a day the Verordnung names, not "the end of February": the
+    // 2027 obligation year is due in a leap year and still gets the 28th.
+    assert_eq!(
+        Route::PublicChargePoints.deadline(2027),
+        date!(2028 - 02 - 28)
     );
 }

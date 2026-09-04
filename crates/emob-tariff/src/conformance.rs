@@ -247,6 +247,30 @@ impl Conformance {
     }
 }
 
+/// A minimum above the maximum, compared **limb by limb**.
+///
+/// Bounding a session into an empty range is a tariff nobody can charge under,
+/// and `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` gives each bound two
+/// figures that bind separately — so a tariff with two VAT rates can do it
+/// before taxes and not after, or the other way round. Comparing one derived
+/// figure against another would miss whichever of the two the author actually
+/// wrote down.
+fn incoherent_bounds(tariff: &Tariff) -> Option<Objection> {
+    let (minimum, maximum) = (tariff.min_price?, tariff.max_price?);
+    [
+        (minimum.before_taxes, maximum.before_taxes),
+        (minimum.after_taxes, maximum.after_taxes),
+    ]
+    .into_iter()
+    .find_map(|(min, max)| match (min, max) {
+        (Some(min), Some(max)) if min > max => Some(Objection::MinimumAboveMaximum {
+            minimum: min,
+            maximum: max,
+        }),
+        _ => None,
+    })
+}
+
 /// Check a tariff against `[AFIR Art. 5(4)]` at the power it will be charged at.
 ///
 /// ```
@@ -278,11 +302,7 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
     if tariff.elements.is_empty() {
         objections.push(Objection::NoElements);
     }
-    if let (Some(minimum), Some(maximum)) = (tariff.min_price, tariff.max_price)
-        && minimum > maximum
-    {
-        objections.push(Objection::MinimumAboveMaximum { minimum, maximum });
-    }
+    objections.extend(incoherent_bounds(tariff));
 
     // Which dimensions an earlier unrestricted element already prices, and
     // which element did it. Shadowing is **per dimension** because selection
@@ -301,6 +321,16 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
                 index,
                 restrictions: element.restrictions.unevaluable.clone(),
             });
+        }
+
+        // Shadowing is per **population**. An element that prices a
+        // reservation and one that prices a session are never alternatives to
+        // each other — `matches_restrictions` refuses to cross them — so
+        // neither can make the other unreachable, and a reservation element
+        // sitting behind an unrestricted `{TIME}` session element is not a
+        // dead element (D243).
+        if element.restrictions.reservation.is_some() {
+            continue;
         }
 
         let mut shadowed: Vec<(Dimension, usize)> = Vec::new();
@@ -338,18 +368,33 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
     // provider and its own customer is governed by Art. 5(5) instead, which is
     // a disclosure duty rather than a shape duty.
     let is_fast = rated_power_kw >= Decimal::from(50);
+
+    // The article regulates "the ad hoc price … for the electricity delivered".
+    // A reservation is a different service, priced over a window that has
+    // already run before any electricity moves, and `[OCPI 2.3.0]` gives it its
+    // own restriction and its own CDR field. Judging the ad-hoc *shape* against
+    // it reports a fast charger that offers reservations as charging per
+    // session and per minute, which the article does not say (D243).
+    let session_dimensions: Vec<Dimension> = tariff
+        .elements
+        .iter()
+        .filter(|element| element.restrictions.reservation.is_none())
+        .flat_map(|element| element.components.iter().map(|c| c.dimension))
+        .collect();
+    let session_prices_energy = session_dimensions.contains(&Dimension::Energy);
+
     if tariff.kind == TariffKind::AdHoc && is_fast && !tariff.elements.is_empty() {
-        if !tariff.prices_energy() {
+        if !session_prices_energy {
             objections.push(Objection::NotEnergyBased);
         }
         // The article grants exactly one addition to the kWh price — "an
         // occupancy fee as a price per minute" — and the display duty beside
         // it names exactly two components. Everything else is a charge the
         // driver could not have been shown before starting.
-        if tariff.dimensions().contains(&Dimension::Time) {
+        if session_dimensions.contains(&Dimension::Time) {
             objections.push(Objection::ChargesForChargingTime);
         }
-        if tariff.dimensions().contains(&Dimension::Flat) {
+        if session_dimensions.contains(&Dimension::Flat) {
             objections.push(Objection::ChargesPerSession);
         }
     }
@@ -396,6 +441,7 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tariff::PriceLimit;
     use crate::tariff::{PriceComponent, TariffElement, TaxIncluded};
     use emob_core::Currency;
     use emob_core::TimeZone;
@@ -633,8 +679,8 @@ mod tests {
     #[test]
     fn a_minimum_above_the_maximum_is_incoherent() {
         let mut t = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
-        t.min_price = Some(dec("10.00"));
-        t.max_price = Some(dec("5.00"));
+        t.min_price = Some(PriceLimit::gross(dec("10.00")));
+        t.max_price = Some(PriceLimit::gross(dec("5.00")));
         let c = check_afir(&t, dec("22"));
         assert!(!c.is_lawful());
         assert!(

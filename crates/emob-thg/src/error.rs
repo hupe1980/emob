@@ -72,13 +72,22 @@ pub enum ThgError {
         evse_id: String,
     },
 
-    /// A record carries energy no meter signed.
+    /// A record carries energy no meter signed, **or signed and did not verify**.
     ///
     /// `[38k §6(3) Nr. 2]` requires the energetic quantity to be determined in
     /// conformity with the measuring and calibration law. A record with no
     /// evidence behind it cannot show that, and a claim that included it would
     /// be one the third party's own declaration `[38k §6(4)]` contradicts.
-    #[error("{cdr} carries no signed evidence: `[38k §6(3) Nr. 2]` cannot be shown for it")]
+    ///
+    /// The two cases are one refusal because they fail the same paragraph — and
+    /// the second is the worse of them. A record whose chain did not hold up
+    /// *has* an `EvidenceRef`, so a check that asks only whether one exists
+    /// passes it, and the kilowatt-hours of a session nothing verified reach a
+    /// file whose whole claim is that only signed ones do.
+    #[error(
+        "{cdr} carries no energy a meter signed and this side verified: `[38k §6(3) Nr. 2]` \
+         cannot be shown for it"
+    )]
     Unmeasured {
         /// The record.
         cdr: String,
@@ -121,4 +130,58 @@ pub enum ThgError {
     /// A notification with nothing in it.
     #[error("`[38k §8(1)]` has nothing to report: no point contributed countable energy")]
     NothingToReport,
+
+    /// A vehicle `[38k §7]` will not count.
+    #[error("{reference} cannot be counted under `[38k §7]`: {missing}")]
+    RegistrationNotEvidenced {
+        /// The filer's own reference for the vehicle.
+        reference: String,
+        /// Which condition is not met.
+        missing: String,
+    },
+
+    /// The estimate was published for a different vehicle class.
+    ///
+    /// `[38k §7(3)]` publishes a *Schätzwert* per class, and counting a bus at
+    /// a car's estimate is inventing a quantity nobody announced.
+    #[error(
+        "{reference} is a {expected} and the estimate offered was announced for a {announced_for} `[38k §7(3)]`"
+    )]
+    NoEstimateForClass {
+        /// The filer's own reference for the vehicle.
+        reference: String,
+        /// The class the vehicle is.
+        expected: &'static str,
+        /// The class the estimate was published for.
+        announced_for: &'static str,
+    },
+
+    /// The same vehicle was counted twice in one obligation year.
+    ///
+    /// `[38k §7(4) S. 2]`: *"Die Anrechnung der dem jeweiligen Schätzwert
+    /// entsprechenden Strommenge kann pro reinem Batterieelektrofahrzeug und
+    /// pro Verpflichtungsjahr nur einmal erfolgen."*
+    #[error(
+        "{reference} is already in this notification: `[38k §7(4) S. 2]` counts a vehicle once per obligation year"
+    )]
+    VehicleAlreadyCounted {
+        /// The filer's own reference for the vehicle.
+        reference: String,
+    },
+
+    /// The same charge point was added to one notification twice.
+    ///
+    /// `[38k §8(1) S. 3]`: *"Mitteilungen nach Satz 1 Nummer 1 können für den
+    /// jeweiligen Ladepunkt für das jeweilige Verpflichtungsjahr nur einmal
+    /// erfolgen."* One notification per point per obligation year — so two
+    /// lines for one point inside one notification is the same fault arriving a
+    /// level down, and the second line silently replacing the first is how a
+    /// year's energy goes missing without anything failing.
+    #[error(
+        "{evse_id} is already in this notification: `[38k §8(1) S. 3]` allows one notification per point per obligation year"
+    )]
+    PointAlreadyReported {
+        /// The point, canonically spelled.
+        evse_id: String,
+    },
 }

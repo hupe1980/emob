@@ -22,7 +22,7 @@
 use emob_billing::invoice::{Counterparty, InvoiceBuilder};
 use emob_billing::tax::TaxStatus;
 use emob_cdr::{CdrBuilder, EvidenceRef};
-use emob_core::{ClockResolution, Currency, Direction, Energy, PartyId};
+use emob_core::{Currency, Direction, Energy, PartyId};
 use emob_eichrecht::registry::{ComponentRef, RegisteredKey};
 use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_poi::site::{
@@ -293,7 +293,7 @@ fn a_partners_record_becomes_this_sides_invoice() {
     let retail = retail();
     let mine = inbound
         .cdr
-        .rerated_with(&retail, ClockResolution::conforming())
+        .rerated_with(&retail)
         .expect("this side's own tariff prices the record");
 
     // The two numbers are about the same session by construction: same periods,
@@ -357,8 +357,9 @@ fn a_partners_record_becomes_this_sides_invoice() {
     assert_eq!(books.debits().to_string(), "17.41 EUR");
 
     // The document validates as the European e-invoice it claims to be.
-    let crossed = emob_billing::en16931::to_en16931(&invoice, emob_billing::en16931::CEN_CORE)
-        .expect("the crossing");
+    let crossed =
+        emob_billing::en16931::to_en16931(&invoice, emob_billing::en16931::Specification::Core)
+            .expect("the crossing");
     assert!(
         crossed.value.is_valid(),
         "{:?}",
@@ -393,7 +394,7 @@ fn re_rating_a_partners_record_applies_the_gates_the_issuer_applied() {
     // it, whatever its numbers say `[AFIR Art. 5(4)]`.
     let future = retail().valid_between(Some(at(45)), None);
     assert!(matches!(
-        issued.rerated_with(&future, ClockResolution::conforming()),
+        issued.rerated_with(&future),
         Err(emob_cdr::CdrError::TariffNotInForce { .. })
     ));
 
@@ -409,7 +410,7 @@ fn re_rating_a_partners_record_applies_the_gates_the_issuer_applied() {
         vec![PriceComponent::new(Dimension::Time, dec("6.00")).with_vat(dec("19"))],
     );
     assert!(matches!(
-        undefendable.rerated_with(&by_the_minute, ClockResolution::conforming()),
+        undefendable.rerated_with(&by_the_minute),
         Err(emob_cdr::CdrError::DurationNotBillable { .. })
     ));
 
@@ -418,7 +419,7 @@ fn re_rating_a_partners_record_applies_the_gates_the_issuer_applied() {
     let mut changed = issued.clone();
     changed.evidence.as_mut().unwrap().tariff_changes = vec![at(15)];
     assert!(matches!(
-        changed.rerated_with(&retail(), ClockResolution::conforming()),
+        changed.rerated_with(&retail()),
         Err(emob_cdr::CdrError::SignedTariffChangeInsideSession { .. })
     ));
 }

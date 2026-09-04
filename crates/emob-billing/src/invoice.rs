@@ -82,8 +82,8 @@
 //! the session, the point and the window it came from. A driver looking for the
 //! charge they remember finds it; a partner disputing one finds the same row.
 
-use emob_cdr::{Cdr, CdrKey, CdrLedger};
-use emob_core::{Crossing, Currency, Money};
+use emob_cdr::{Cdr, CdrKey, CdrLedger, Cost};
+use emob_core::{Crossing, Currency, Energy, Money};
 use emob_tariff::{Dimension, Rated};
 use rust_decimal::Decimal;
 
@@ -330,6 +330,27 @@ pub struct InvoiceLine {
     /// residual whose two terms are not both on the document is a number nobody
     /// can check.
     pub exact_net: Decimal,
+    /// Energy inside this line's measured value that the meter **compensated** —
+    /// cable resistance, or the rectification a DC station metered on the AC
+    /// side of `[OCMF Tab. 7, CL]`.
+    ///
+    /// **Nothing is subtracted.** The compensation is already inside the
+    /// register the session billed; what this carries is the duty to say so.
+    /// `[REA 6-A §3.2]`:
+    ///
+    /// > Die von einem Messwert **oder einer Rechnung** Betroffenen sind in
+    /// > geeigneter Weise darauf hinzuweisen, dass die … Energie für die
+    /// > Gleichrichtung … Bestandteil des angegebenen Messwerts ist.
+    ///
+    /// The paragraph names the invoice in as many words, so the figure goes on
+    /// the document rather than only to a roaming partner — and it comes from
+    /// the signed record rather than from a flag somebody sets, which would be
+    /// a check fed by a caller (D253). It becomes part of BT-127, this line's
+    /// own free-text note.
+    ///
+    /// Only ever set on an energy line: the compensation is inside a register in
+    /// kilowatt-hours, and a duration does not contain it.
+    pub compensated_loss: Option<Energy>,
 }
 
 impl InvoiceLine {
@@ -457,10 +478,103 @@ pub struct TaxSubtotal {
     pub tax: Decimal,
 }
 
-/// An invoice for a period.
+/// What a billing document is — BT-3, and the UBL root element.
+///
+/// # Why this is a kind rather than a sign
+///
+/// EN 16931 states a credit note's amounts as **positive** figures and carries
+/// the direction in the document type. Negating them instead produces a document
+/// that fails `BR-S-08` against its own lines and says the wrong thing twice —
+/// and, one layer on, a `BR-27` violation for the negative BT-146 a reversed
+/// line would carry. The same argument that makes a tariff's cap a document
+/// level allowance rather than a negative line ([`DocumentAdjustment`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum DocumentKind {
+    /// A commercial invoice — UNCL 1001 code `380`. The default, because every
+    /// document [`InvoiceBuilder`] assembles from rated records is one.
+    #[default]
+    Invoice,
+    /// A credit note — UNCL 1001 code `381`, a German *Stornorechnung*.
+    CreditNote,
+}
+
+impl DocumentKind {
+    /// Whether this document reverses another.
+    #[must_use]
+    pub const fn is_credit_note(self) -> bool {
+        matches!(self, Self::CreditNote)
+    }
+}
+
+impl core::fmt::Display for DocumentKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Invoice => "invoice",
+            Self::CreditNote => "credit note",
+        })
+    }
+}
+
+/// The document a credit note cancels — BG-3.
+///
+/// Its number is BT-25 and its issue date BT-26. `BR-55` requires BT-25 to have
+/// content, which is why this is a struct rather than two optional fields: a
+/// reference with no number is a reference nobody can follow, and inventing a
+/// blank one turns a missing number into a second, more confusing finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Cancelled {
+    /// BT-25 — the cancelled document's own number.
+    pub number: String,
+    /// BT-26 — the day it was issued.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::date"))]
+    pub issued_on: time::Date,
+}
+/// Something the rating had to report that **the payer is entitled to read**.
+///
+/// `emob-tariff` produces a note for everything it had to assume or refuse, and
+/// [`emob_tariff::RatingNote::concerns_the_payer`] is the half of them that say a
+/// quantity was billed differently from how it was measured — which is what
+/// `[AFIR Art. 5(4)]` and `[PAngV]` entitle a driver to reconcile, and what a
+/// roaming partner disputes.
+///
+/// It names its record, because a month's invoice carries many and a note that
+/// does not say which session it is about is one nobody can act on. It becomes a
+/// BG-1 invoice note (BT-22) under the UNCL 4451 subject code for general
+/// information, so a receiving system routes it rather than reading it.
+///
+/// The other half stay on the [`Crossing`] the build returns: a rate no split
+/// can be computed from, two bounds that contradict, a restriction this build
+/// cannot evaluate. Those are faults in a document the payer did not write, and
+/// an operator queue is where they are answerable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DocumentNote {
+    /// Which record it is about.
+    pub cdr: CdrKey,
+    /// What the rating said.
+    pub text: String,
+}
+
+/// An invoice for a period, or the credit note that cancels one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Invoice {
+    /// What this document is — a demand, or the credit note that cancels one.
+    ///
+    /// EN 16931 carries the direction in the **document type** rather than in
+    /// the sign of its amounts, so a credit note states positive figures like
+    /// any other document and BT-3 says what they mean. See
+    /// [`Invoice::cancellation`].
+    pub kind: DocumentKind,
+    /// BG-3 — the document this one cancels, when it is a credit note.
+    ///
+    /// `None` on an invoice. Always `Some` on a credit note this crate built,
+    /// because a `Stornorechnung` that does not name what it reverses is one an
+    /// auditor cannot pair.
+    pub cancels: Option<Cancelled>,
     /// The invoice number — BT-1.
     pub number: String,
     /// The day it is issued — BT-2.
@@ -473,6 +587,14 @@ pub struct Invoice {
     ///
     /// A German public buyer's Leitweg-ID, which `BR-DE-15` makes mandatory.
     pub buyer_reference: Option<String>,
+    /// What the ratings behind this document had to report to **the payer** —
+    /// BG-1, one note apiece.
+    ///
+    /// See [`DocumentNote`]. Empty on the ordinary invoice, because the ordinary
+    /// rating has nothing to assume: a note here means a quantity was billed
+    /// differently from how it was measured, and that is a sentence the person
+    /// paying is entitled to find on the document rather than to discover.
+    pub notes: Vec<DocumentNote>,
     /// How the invoice will be paid — BG-16.
     pub payment: Option<PaymentDetails>,
     /// The payment terms in words — BT-20.
@@ -622,6 +744,63 @@ impl Invoice {
             && by_category == self.taxable_total().amount()
             && self.gross_total().amount()
                 == self.taxable_total().amount() + self.tax_total().amount()
+    }
+
+    /// The credit note that cancels this document — a German
+    /// *Stornorechnung*.
+    ///
+    /// # What it changes, and what it deliberately does not
+    ///
+    /// Everything is copied. Four things change: the [`kind`](Self::kind), which
+    /// is BT-3 and the UBL root element; the number and the issue date, because
+    /// a credit note is its own document with its own identity; and
+    /// [`cancels`](Self::cancels), which becomes BG-3 naming what is being
+    /// reversed.
+    ///
+    /// **The amounts are not negated.** EN 16931 carries the direction in the
+    /// document type and states what is being credited as a positive figure. A
+    /// reversed line would be a negative BT-146, which `BR-27` refuses outright,
+    /// so a "negated" credit note is not a document at all — the same argument
+    /// that makes a tariff's cap a document level allowance rather than a line
+    /// (D201).
+    ///
+    /// **The records travel with it.** [`Self::records`] answers the same on the
+    /// credit note as on the invoice, which is what lets a ledger pair the two
+    /// and see that the sessions have been reversed rather than re-billed.
+    ///
+    /// # What the rest of this crate then does differently
+    ///
+    /// [`crate::postings::postings_for`] reverses every side, because a
+    /// cancellation reverses the entry — and [`crate::payment::instruct`]
+    /// **refuses** it, because a `Stornorechnung` is not collected by direct
+    /// debit. A platform that let one through would draw the money a second
+    /// time from the driver it was owed back to.
+    ///
+    /// # Errors
+    ///
+    /// [`BillingError::NotCancellable`] when this document is already a credit
+    /// note. Cancelling a cancellation is a re-issued invoice rather than a
+    /// second reversal, and this crate has no way to tell which was meant.
+    pub fn cancellation(
+        &self,
+        number: impl Into<String>,
+        issued_on: time::Date,
+    ) -> Result<Self, BillingError> {
+        if self.kind.is_credit_note() {
+            return Err(BillingError::NotCancellable {
+                number: self.number.clone(),
+            });
+        }
+        Ok(Self {
+            kind: DocumentKind::CreditNote,
+            cancels: Some(Cancelled {
+                number: self.number.clone(),
+                issued_on: self.issued_on,
+            }),
+            number: number.into(),
+            issued_on,
+            ..self.clone()
+        })
     }
 
     /// The records this invoice bills, in line order and without repeats.
@@ -798,6 +977,9 @@ impl<'a> InvoiceBuilder<'a> {
         }
 
         refuse_superseded(&self.records)?;
+        refuse_export(&self.records)?;
+        refuse_unsettleable(&self.records)?;
+        refuse_unverifiable(&self.records, &self.point_country)?;
 
         let currency = first_currency(&self.records)?;
         let treatment = match self.treatment {
@@ -811,33 +993,18 @@ impl<'a> InvoiceBuilder<'a> {
         };
 
         let mut crossing = Crossing::lossless(());
-        let mut lines: Vec<InvoiceLine> = Vec::new();
-        let mut adjustments: Vec<DocumentAdjustment> = Vec::new();
-
-        for (index, cdr) in self.records.iter().enumerate() {
-            let cost = cdr.cost.as_ref().ok_or_else(|| BillingError::NotRated {
-                cdr: cdr.key.to_string(),
-            })?;
-            if cost.rated.currency != currency {
-                return Err(BillingError::CurrencyMismatch {
-                    invoice: currency,
-                    cdr: cdr.key.to_string(),
-                    found: cost.rated.currency,
-                });
-            }
-
-            let before = lines.len();
-            record_lines(
-                cdr,
-                &cost.rated,
-                index + 1,
-                &treatment,
+        let Assembled {
+            lines,
+            adjustments,
+            notes,
+        } = assemble(
+            &self.records,
+            &Basis {
+                treatment: &treatment,
                 currency,
-                &mut lines,
-                &mut adjustments,
-            );
-            note_rounding(cdr, &lines[before..], before, &mut crossing);
-        }
+            },
+            &mut crossing,
+        )?;
 
         if lines.is_empty() {
             return Err(BillingError::NoLines);
@@ -852,6 +1019,11 @@ impl<'a> InvoiceBuilder<'a> {
                 .map(|a| a.kind.sign() * a.exact_amount)
                 .sum::<Decimal>();
         let invoice = Invoice {
+            // Everything this builder assembles is a demand. A credit note is
+            // made from one, by `Invoice::cancellation`, so that its lines are
+            // the lines that were billed rather than lines somebody re-derived.
+            kind: DocumentKind::Invoice,
+            cancels: None,
             number: self.number,
             issued_on: self.issued_on,
             due_on: self.due_on,
@@ -867,6 +1039,7 @@ impl<'a> InvoiceBuilder<'a> {
             exact_taxable,
             payment_terms: self.payment_terms,
             buyer_reference: self.buyer_reference,
+            notes,
             payment: self.payment,
         };
 
@@ -904,6 +1077,152 @@ impl<'a> InvoiceBuilder<'a> {
 
         Ok(crossing.map(|()| invoice))
     }
+}
+
+/// The market whose metrology law this crate carries.
+///
+/// `[MessEG §33]` binds the use of measured values in **German** commercial
+/// dealings. Other member states have their own transposition of the Measuring
+/// Instruments Directive, and asserting this rule over all of them would refuse
+/// lawful invoices elsewhere — the same reason the obligation calendar dates
+/// NIS2 from the German transposition rather than from the Directive.
+const METROLOGY_REGIME: &str = "DE";
+
+/// Whether a dimension is a measured quantity — a *Messgröße*.
+///
+/// Energy and the two time dimensions are measured; a per-session fee is a
+/// price for an occurrence and rests on no measurement at all, which is why an
+/// invoice carrying only one needs nothing behind it.
+const fn is_measured(dimension: Dimension) -> bool {
+    match dimension {
+        Dimension::Energy | Dimension::Time | Dimension::ParkingTime => true,
+        Dimension::Flat => false,
+    }
+}
+
+/// Refuse an invoice based on measured values that the recipient cannot check
+/// — `[MessEG §33]`.
+///
+/// # The paragraph names invoices, in as many words
+///
+/// §33(1) permits values for measured quantities to be *stated or used* in
+/// commercial dealings only where a measuring instrument was used as intended
+/// and the values are traceable to the measurement result. §33(3) Nr. 1 then
+/// puts the duty on the document:
+///
+/// > Wer Messwerte verwendet, hat dafür zu sorgen, dass **Rechnungen, soweit sie
+/// > auf Messwerten beruhen**, von demjenigen, für den die Rechnungen bestimmt
+/// > sind, in einfacher Weise zur Überprüfung angegebener Messwerte nachvollzogen
+/// > werden können.
+///
+/// A line priced per kilowatt-hour or per minute rests on a measured value. With
+/// no signed record behind it there is nothing for the recipient to check it
+/// *against* — `emob-eichrecht` produces the transparency file from exactly that
+/// evidence — so the invoice cannot be made verifiable at all.
+///
+/// # Why the decision is here rather than in the validator
+///
+/// `emob_cdr::validate` grades a missing signature as a **warning** on purpose,
+/// and says why in its own source: it is blocking for a German energy invoice
+/// and merely notable elsewhere, so the decision belongs to the layer that knows
+/// which regime applies. This is that layer: it holds the place the electricity
+/// was drawn (D232).
+///
+/// Judged on `point_country`, which is where the *measurement* happened, and not
+/// on the place of supply. A German operator settling with a French reseller has
+/// moved the place of supply `[UStG §3g]` and has not moved its meters.
+fn refuse_unverifiable(records: &[&Cdr], point_country: &str) -> Result<(), BillingError> {
+    if !point_country.eq_ignore_ascii_case(METROLOGY_REGIME) {
+        return Ok(());
+    }
+    for cdr in records {
+        if cdr.evidence.is_some() {
+            continue;
+        }
+        let Some(cost) = &cdr.cost else {
+            // An unrated record has no line to be based on a measured value,
+            // and `NotRated` is the finding it already has.
+            continue;
+        };
+        if let Some(line) = cost
+            .rated
+            .lines
+            .iter()
+            .find(|line| is_measured(line.dimension))
+        {
+            return Err(BillingError::NotVerifiable {
+                cdr: cdr.key.to_string(),
+                dimension: dimension_name(Part::Session, line.dimension).to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a record its own validator blocks.
+///
+/// # The composition, rather than fifteen conditions
+///
+/// `emob_cdr::validate` already asks everything that makes a record unsettleable
+/// — periods that overlap and bill a minute twice, a line whose own numbers do
+/// not produce its own amount, a price computed for a different quantity than
+/// the record states, an authorisation stronger than the signed record supports,
+/// a direction the evidence contradicts. `CdrBuilder` refuses to *issue* such a
+/// record, and this is the layer that *sends the demand* — and it was accepting
+/// any `Cdr` that happened to carry a `Cost`.
+///
+/// A record built by this workspace passes its own validator by construction, so
+/// this changes nothing about the ordinary path. It is about the other two: a
+/// record assembled from a partner's document (`emob_roam::ocpi::from_ocpi`
+/// never goes through the builder) and one deserialised from wherever a service
+/// kept it. Rule 5 in one line rather than in fifteen (D232).
+///
+/// Warnings pass. `Severity::Warning` is deliberately where `validate` puts the
+/// findings whose consequence is a **regime** question rather than an arithmetic
+/// one — missing evidence above all, which is blocking for a German energy
+/// invoice `[MessEG §33]` and merely notable elsewhere. That decision is made
+/// below, where the place of supply is known.
+fn refuse_unsettleable(records: &[&Cdr]) -> Result<(), BillingError> {
+    for cdr in records {
+        let report = emob_cdr::validate(cdr);
+        if !report.is_settleable() {
+            return Err(BillingError::NotSettleable {
+                cdr: cdr.key.to_string(),
+                reasons: report.blocking().map(ToString::to_string).collect(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a record of energy that flowed **out** of the vehicle.
+///
+/// # Why this is a refusal rather than a sign
+///
+/// A V2G discharge is not a smaller sale or a negative one. It is a supply in the
+/// **other direction**: the driver is the supplier and the operator the customer,
+/// which moves the party, the place of supply and the VAT liability all at once,
+/// and in Germany it is ordinarily settled as a self-billed *Gutschrift*
+/// `[UStG §14]` — a document with the parties the other way round. Every one of
+/// those is a fact about an arrangement this crate cannot read off a CDR.
+///
+/// Priced through the same tariff and put on an invoice unchanged, it becomes a
+/// **demand** addressed to the person who supplied the energy, and nothing
+/// downstream objects: the document is valid EN 16931, the postings balance, and
+/// the direct debit collects. `emob_roam::ocpi::to_ocpi` already refuses the same
+/// record by name — OCPI cannot express it either — so the exception was carried
+/// by one layer of the chain and dropped by the one that sends the document
+/// (D230).
+fn refuse_export(records: &[&Cdr]) -> Result<(), BillingError> {
+    for cdr in records {
+        if cdr.direction == emob_core::Direction::Export {
+            return Err(BillingError::ExportNotBillable {
+                cdr: cdr.key.to_string(),
+                energy: cdr.total_energy,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a set of records that holds both a session and its correction.
@@ -975,26 +1294,203 @@ fn first_currency(records: &[&Cdr]) -> Result<Currency, BillingError> {
         })
 }
 
-/// One record's lines, and what it said it came to in the invoice's basis.
+/// Every record's lines and document-level adjustments, in the order the records
+/// were added.
+///
+/// Split out of [`InvoiceBuilder::build`] because it is the one loop in that
+/// function: `build` decides *what document this is* — the parties, the tax
+/// treatment, the currency, the terms — and this turns the records into the
+/// lines it states.
+///
+/// # One currency, asked of both of a record's ratings
+///
+/// A document states one currency, and a record carries **two** ratings. Asking
+/// it only of the session let a reservation priced in another currency reach a
+/// document that cannot express it; `emob_cdr::validate()` blocks the record
+/// before this layer sees it, and this is the same question asked where the
+/// document's own currency is known (D250).
+fn assemble(
+    records: &[&Cdr],
+    basis: &Basis<'_>,
+    crossing: &mut Crossing<()>,
+) -> Result<Assembled, BillingError> {
+    let mut lines: Vec<InvoiceLine> = Vec::new();
+    let mut adjustments: Vec<DocumentAdjustment> = Vec::new();
+    let mut notes: Vec<DocumentNote> = Vec::new();
+
+    for (index, cdr) in records.iter().enumerate() {
+        let cost = cdr.cost.as_ref().ok_or_else(|| BillingError::NotRated {
+            cdr: cdr.key.to_string(),
+        })?;
+        for rated in core::iter::once(&cost.rated).chain(cost.reservation.as_ref()) {
+            if rated.currency != basis.currency {
+                return Err(BillingError::CurrencyMismatch {
+                    invoice: basis.currency,
+                    cdr: cdr.key.to_string(),
+                    found: rated.currency,
+                });
+            }
+        }
+
+        // A reservation is priced against its own window by its own elements,
+        // and `[OCPI 2.3.0]` gives it its own `total_reservation_cost` — but it
+        // is money the same driver owes on the same record, and an invoice that
+        // omits it bills less than the record says (D250). Both parts are
+        // stripped, numbered and taxed by one function, because two spellings of
+        // "turn a rating into lines" is the drift this crate exists to prevent.
+        let before = lines.len();
+        let mut position = 0usize;
+        for supply in Supply::of(cdr, cost) {
+            record_lines(
+                &supply,
+                index + 1,
+                &mut position,
+                basis,
+                &mut lines,
+                &mut adjustments,
+            );
+        }
+        note_rounding(cdr, &lines[before..], before, crossing);
+
+        // What the rating had to report, split by who can act on it. A quantity
+        // billed differently from how it was measured is a sentence the payer
+        // is entitled to find on the document; a fault in the tariff or the
+        // record is one only the operator can answer, and it goes to the queue
+        // that reads the crossing (D253).
+        for rated in core::iter::once(&cost.rated).chain(cost.reservation.as_ref()) {
+            for note in &rated.notes {
+                if note.concerns_the_payer() {
+                    notes.push(DocumentNote {
+                        cdr: cdr.key.clone(),
+                        text: note.to_string(),
+                    });
+                } else {
+                    crossing.note(
+                        format!("/lines/{before}"),
+                        format!("record {}: {note}", cdr.key),
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(Assembled {
+        lines,
+        adjustments,
+        notes,
+    })
+}
+
+/// What [`assemble`] produces: the document's lines, the bounds that became
+/// allowances or charges, and the notes the payer is owed.
+struct Assembled {
+    lines: Vec<InvoiceLine>,
+    adjustments: Vec<DocumentAdjustment>,
+    notes: Vec<DocumentNote>,
+}
+
+/// What every line of one document shares: the tax treatment the parties settled
+/// on, and the currency its amounts are stated in.
+///
+/// Together rather than apart because they are decided together — the treatment
+/// names a place of supply and the currency is that document's, and a function
+/// that took one without the other could be handed a mismatched pair.
+struct Basis<'a> {
+    treatment: &'a TaxTreatment,
+    currency: Currency,
+}
+
+/// One priced part of a record: the session, or the reservation that preceded it.
+///
+/// `[OCPI 2.3.0 §mod_cdrs_cdr_object]` prices the two separately and states them
+/// in two fields, because the reservation's clock ran **before** the cable went
+/// in — so the two parts do not share a window, and the same `TIME` dimension
+/// means "minutes charging" in one and "minutes held" in the other. What they do
+/// share is the driver, the record and the document, which is why both reach the
+/// invoice through one function rather than two (D250).
+struct Supply<'a> {
+    /// The record both parts belong to.
+    cdr: &'a Cdr,
+    rated: &'a Rated,
+    part: Part,
+    from: time::OffsetDateTime,
+    to: time::OffsetDateTime,
+}
+
+/// Which of a record's two priced parts a [`Supply`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    /// The charging session — the energy, its minutes and its fees.
+    Session,
+    /// The reservation that ran before it.
+    Reservation,
+}
+
+impl<'a> Supply<'a> {
+    /// A record's parts, in the order they are billed: the reservation ran
+    /// first, and it is stated first.
+    ///
+    /// A reservation that came to **nothing** is left out rather than adding an
+    /// empty group — `BR-16` counts lines, not intentions. "Nothing" is asked of
+    /// the lines *and* the adjustment, because those are the two terms of a
+    /// total `emob-tariff` produces and skipping on the lines alone would be a
+    /// second place assuming that `rate_reservation` never sets a bound.
+    ///
+    /// A priced reservation the record does not place in time never reaches
+    /// here: it is a blocking finding, and `refuse_unsettleable` has already
+    /// turned every one of those away.
+    fn of(cdr: &'a Cdr, cost: &'a Cost) -> Vec<Self> {
+        let mut out = Vec::with_capacity(2);
+        if let Some(rated) = &cost.reservation
+            && let Some(held) = cdr.reservation
+            && !(rated.lines.is_empty() && rated.adjustment.is_none())
+        {
+            out.push(Self {
+                cdr,
+                rated,
+                part: Part::Reservation,
+                from: held.from,
+                to: held.to,
+            });
+        }
+        out.push(Self {
+            cdr,
+            rated: &cost.rated,
+            part: Part::Session,
+            from: cdr.started_at,
+            to: cdr.ended_at,
+        });
+        out
+    }
+}
+
+/// One priced part's lines, and what it said it came to in the invoice's basis.
 ///
 /// The basis is **net**, because BT-131 is. A gross tariff's net comes from
 /// [`Rated::tax_summary`], which `emob-tariff` computed once per VAT category —
 /// so the split is not performed a second time here, only apportioned to the
 /// lines it was computed from.
+///
+/// `position` is carried across a record's parts rather than restarting, so a
+/// record's line identifiers are `1.1`, `1.2`, `1.3` in one sequence whether or
+/// not a reservation preceded it. Two lines numbered `1.1` on one document is a
+/// document `BR-21` refuses.
 fn record_lines(
-    cdr: &Cdr,
-    rated: &Rated,
+    supply: &Supply<'_>,
     ordinal: usize,
-    treatment: &TaxTreatment,
-    currency: Currency,
+    position: &mut usize,
+    basis: &Basis<'_>,
     into: &mut Vec<InvoiceLine>,
     adjustments: &mut Vec<DocumentAdjustment>,
 ) {
+    let (cdr, rated) = (supply.cdr, supply.rated);
+    let (treatment, currency) = (basis.treatment, basis.currency);
     let round = |amount: Decimal| Money::new(amount, currency).round_to_minor_unit().amount();
     let description = describe(cdr);
     let first = into.len();
 
-    for (position, line) in rated.lines.iter().enumerate() {
+    for line in &rated.lines {
+        *position += 1;
         // The rate the gross is *stripped at* and the rate the line is *taxed
         // at* are the same number, which is what keeps the gross the driver was
         // quoted intact through the document — and it strips the **unit price**
@@ -1011,12 +1507,19 @@ fn record_lines(
 
         into.push(InvoiceLine {
             vat_rate: stated_rate(rate, treatment),
-            id: format!("{ordinal}.{}", position + 1),
+            id: format!("{ordinal}.{position}"),
             cdr: cdr.key.clone(),
             dimension: line.dimension,
-            description: format!("{description} — {}", dimension_name(line.dimension)),
-            started_at: cdr.started_at,
-            ended_at: cdr.ended_at,
+            description: format!(
+                "{description} — {}",
+                dimension_name(supply.part, line.dimension)
+            ),
+            // The window this part was priced over. A reservation ran before
+            // the session started, so BT-134/BT-135 on its line state the
+            // reservation's own dates — not the session's, which would put a
+            // supply on a document outside the period it happened in.
+            started_at: supply.from,
+            ended_at: supply.to,
             // The base quantity — whole seconds for time — rather than the
             // hours a driver reads, because it is the figure the amount was
             // computed from and the only one that reproduces it.
@@ -1025,6 +1528,13 @@ fn record_lines(
             base_quantity,
             net: round(exact_net),
             exact_net,
+            // The compensation is inside a register in kilowatt-hours, so it is
+            // a statement about the energy line and about no other. A duration
+            // does not contain it, and a session fee rests on no measurement at
+            // all.
+            compensated_loss: (line.dimension == Dimension::Energy)
+                .then(|| cdr.evidence.as_ref().and_then(|e| e.compensated_loss))
+                .flatten(),
         });
     }
 
@@ -1037,14 +1547,26 @@ fn record_lines(
         // What this record's lines state on the document, and what the bound
         // says the record comes to. Both rounded, so the document reaches the
         // tariff's own figure exactly rather than a cent past it.
+        //
+        // # Every term is stripped at its own rate, including this one
+        //
+        // The target used to be the record's whole total put through `net_of`
+        // once, at the **adjustment's** rate. That is right on the one shape
+        // every fixture had — a tariff whose components sit in one VAT
+        // category — and wrong on any other: a session priced at 19 % beside a
+        // fee at 7 % had its 7 % half divided by 1.19 as well, and the document
+        // came out €1.20 under a €100.00 session (D248). The lines a few lines
+        // above already strip **per line**; the bound is one further amount in
+        // one further category, so it is stripped on its own and added, and the
+        // two halves of this function now read the same rule.
         let stated: Decimal = into[first..].iter().map(|line| line.net).sum();
-        let exact_target = net_of(rated.exact_total().amount(), rate, rated.tax_included);
+        let exact_lines: Decimal = into[first..].iter().map(|line| line.exact_net).sum();
+        let adjustment_net = net_of(adjustment.amount, rate, rated.tax_included);
+        let exact_target = exact_lines + adjustment_net;
         let signed = stated - round(exact_target);
-        let exact_signed: Decimal = into[first..]
-            .iter()
-            .map(|line| line.exact_net)
-            .sum::<Decimal>()
-            - exact_target;
+        // Which is `-adjustment_net`, written as the difference so that the
+        // rounded and the exact figure are visibly the same subtraction.
+        let exact_signed: Decimal = exact_lines - exact_target;
 
         // A bound with nothing to adjust **is** the line. A driver who plugged
         // in, drew nothing and owes the minimum has no priced dimension, and
@@ -1053,25 +1575,48 @@ fn record_lines(
         // charge *on*. The mirror case cannot arise: a maximum only moves a
         // total the lines already exceeded, so lines exist by construction.
         if into.len() == first {
+            *position += 1;
             into.push(InvoiceLine {
                 vat_rate: stated_rate(rate, treatment),
-                id: format!("{ordinal}.1"),
+                id: format!("{ordinal}.{position}"),
                 cdr: cdr.key.clone(),
                 dimension: Dimension::Flat,
                 description: format!("{description} — {}", adjustment_name(adjustment.kind)),
-                started_at: cdr.started_at,
-                ended_at: cdr.ended_at,
+                started_at: supply.from,
+                ended_at: supply.to,
                 quantity: Decimal::ONE,
                 unit_price: exact_target,
                 base_quantity: Decimal::ONE,
                 net: round(exact_target),
                 exact_net: exact_target,
+                // A minimum charge on a session that delivered nothing rests on
+                // no measured value, so there is none to disclose the contents
+                // of.
+                compensated_loss: None,
             });
             return;
         }
 
         if !signed.is_zero() || !exact_signed.is_zero() {
-            let kind = if signed.is_sign_negative() {
+            // Which side of the totals chain this sits on, from the figure that
+            // has a side. The rounded difference is the document's, so it
+            // decides — but it can be zero while the exact one is not, because
+            // both ends round to the same minor unit, and then `is_sign_negative`
+            // on a zero says "Allowance" about a bound that moved the total *up*.
+            //
+            // The document is unharmed either way — the amount is 0.00 — but
+            // `exact_amount` is signed by `kind`, so the wrong side subtracts a
+            // residual it should add and `rounding_residual` reports twice the
+            // difference against a document that is exactly right. Rounding is
+            // monotonic, so the two figures can only disagree through zero:
+            // where the rounded one has no side, the exact one is the only one
+            // left to ask.
+            let direction = if signed.is_zero() {
+                exact_signed
+            } else {
+                signed
+            };
+            let kind = if direction.is_sign_negative() {
                 DocumentAdjustmentKind::Charge
             } else {
                 DocumentAdjustmentKind::Allowance
@@ -1231,12 +1776,28 @@ fn describe(cdr: &Cdr) -> String {
     )
 }
 
-const fn dimension_name(dimension: Dimension) -> &'static str {
-    match dimension {
-        Dimension::Energy => "energy",
-        Dimension::Time => "charging time",
-        Dimension::ParkingTime => "occupancy",
-        Dimension::Flat => "session fee",
+/// What a dimension is called on a line, in the part that priced it.
+///
+/// The same `TIME` dimension is two supplies: minutes the vehicle was charging,
+/// and minutes a point was held for a driver who had not arrived. A document
+/// that calls both "charging time" is one the driver cannot check against what
+/// they were quoted, which is the whole of `[AFIR Art. 5(4)]`'s point.
+const fn dimension_name(part: Part, dimension: Dimension) -> &'static str {
+    match (part, dimension) {
+        (Part::Session, Dimension::Energy) => "energy",
+        (Part::Session, Dimension::Time) => "charging time",
+        (Part::Session, Dimension::ParkingTime) => "occupancy",
+        (Part::Session, Dimension::Flat) => "session fee",
+        (Part::Reservation, Dimension::Time) => "reservation",
+        (Part::Reservation, Dimension::Flat) => "reservation fee",
+        // `[OCPI 2.3.0 §mod_tariffs_tariffdimensiontype_enum]` lets only `FLAT`
+        // and `TIME` price a reservation, and `rate_reservation` hands over a
+        // window with no energy in it — so neither of these can be reached from
+        // a rating this workspace produced. Named rather than folded into the
+        // session's spelling, because a line that arrived here anyway is one a
+        // reader has to be able to tell apart.
+        (Part::Reservation, Dimension::Energy) => "reservation energy",
+        (Part::Reservation, Dimension::ParkingTime) => "reservation occupancy",
     }
 }
 
@@ -1249,6 +1810,9 @@ const fn adjustment_name(kind: emob_tariff::AdjustmentKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use emob_core::Activity;
+    use emob_tariff::PriceLimit;
+
     use super::*;
     use crate::tax::TaxStatus;
     use emob_cdr::{ChargingPeriod, Cost};
@@ -1275,27 +1839,45 @@ mod tests {
                 party: PartyId::new("DE", "ABC").unwrap(),
                 id: id.parse().unwrap(),
             },
+            reservation: None,
             session_id: "s-1".parse().unwrap(),
             evse_id: "DE*AB7*E840*6487".parse().unwrap(),
             started_at: at(0),
             ended_at: at(30),
             auth_path: AuthPath::AdHoc,
             authorization_reference: None,
+            clock: emob_core::ClockResolution::conforming(),
             periods: vec![ChargingPeriod {
                 quarter_hour: QuarterHour::containing(at(0)),
                 start: at(0),
                 end: at(30),
                 energy: kwh,
-                charging: true,
+                activity: Activity::Charging,
                 provenance: Provenance::Measured,
             }],
             total_energy: kwh,
             direction: Direction::Import,
-            evidence: None,
+            // Signed, because `[MessEG §33]` lets a measured value be used in
+            // German commercial dealings only where it is traceable to the
+            // measurement, and requires an invoice resting on one to be
+            // checkable by the person it is addressed to. Every fixture here
+            // bills German kilowatt-hours, so every one of them needs a record
+            // behind it (D232).
+            evidence: Some(emob_cdr::EvidenceRef {
+                encoding_method: "OCMF".into(),
+                payload_digests: vec![[1u8; 32]],
+                identification_strength: emob_core::IdentificationStrength::Trusted,
+                energy_billable: true,
+                duration_billable: true,
+                direction: Some(Direction::Import),
+                compensated_loss: None,
+                tariff_changes: Vec::new(),
+            }),
             cost: Some(Cost {
                 tariff_id: tariff.id.clone(),
                 tariff_fingerprint: tariff.fingerprint(),
                 rated: rate(tariff, &chargeable),
+                reservation: None,
             }),
             supersedes: None,
         }
@@ -1341,6 +1923,259 @@ mod tests {
             builder = builder.record(cdr);
         }
         builder
+    }
+
+    /// A tariff that prices a reservation beside the session it precedes.
+    fn tariff_with_reservation() -> Tariff {
+        Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            tax_included: emob_tariff::TaxIncluded::Yes,
+            elements: vec![
+                emob_tariff::TariffElement {
+                    components: vec![
+                        PriceComponent::new(Dimension::Time, dec("6.00")).with_vat(dec("19")),
+                    ],
+                    restrictions: emob_tariff::Restrictions {
+                        reservation: Some(emob_tariff::ReservationRestriction::Reservation),
+                        ..emob_tariff::Restrictions::default()
+                    },
+                },
+                emob_tariff::TariffElement::unrestricted(vec![
+                    PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+                ]),
+            ],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        }
+    }
+
+    #[test]
+    fn the_rectification_loss_inside_a_measured_value_reaches_the_document() {
+        // `[REA 6-A §3.2]` lets a DC station meter on the AC side, before the
+        // rectifier, and then obliges the operator to tell "die von einem
+        // Messwert **oder einer Rechnung** Betroffenen" that the losses are
+        // inside the number they are billed for. The chain computes it, the CDR
+        // carries it, the OCPI crossing tells the roaming partner — and the
+        // document addressed to the person the sentence names said nothing,
+        // while a boolean on the charge point's profile asserted the disclosure
+        // had been made (D253).
+        let tariff = gross_tariff();
+        let mut cdr = record("c-1", "10.000", &tariff);
+        cdr.evidence.as_mut().unwrap().compensated_loss =
+            Some(Energy::from_kwh(dec("0.150")).unwrap());
+
+        let invoice = builder(&[&cdr])
+            .build()
+            .unwrap()
+            .into_value_discarding_notes();
+        let energy = invoice
+            .lines
+            .iter()
+            .find(|l| l.dimension == Dimension::Energy)
+            .expect("the record was priced per kWh");
+        assert_eq!(
+            energy.compensated_loss,
+            Some(Energy::from_kwh(dec("0.150")).unwrap())
+        );
+
+        // …and it is on the EN 16931 document, in BT-127, which is the line
+        // stating the measured value.
+        let crossed = crate::en16931::to_en16931(&invoice, crate::en16931::Specification::Core)
+            .unwrap()
+            .into_value_discarding_notes();
+        let note = crossed
+            .invoice
+            .lines
+            .iter()
+            .find_map(|l| l.note.as_ref())
+            .expect("BT-127 is set");
+        assert!(note.contains("REA 6-A"), "got {note}");
+        assert!(
+            note.contains("0.150"),
+            "the figure itself is stated: {note}"
+        );
+        assert!(
+            crossed.is_valid(),
+            "{:?}",
+            crossed.reasons().collect::<Vec<_>>()
+        );
+
+        // A line that rests on no such value says nothing extra.
+        let plain = record("c-2", "10.000", &tariff);
+        let plain_invoice = builder(&[&plain])
+            .build()
+            .unwrap()
+            .into_value_discarding_notes();
+        assert!(
+            plain_invoice
+                .lines
+                .iter()
+                .all(|l| l.compensated_loss.is_none())
+        );
+    }
+
+    #[test]
+    fn a_note_the_payer_is_owed_is_on_the_document_and_the_rest_is_not() {
+        // A block size bills up to one block more than was delivered. That is
+        // lawful and it is also the payer's business — they are being charged
+        // for kilowatt-hours nobody delivered — so it belongs on the document.
+        // A power restriction the tariff carries is a fact about the operator's
+        // own document and belongs in their queue.
+        let mut tariff = gross_tariff();
+        tariff.elements[0].components[0].step_size = 3_000; // whole 3 kWh blocks
+        tariff.elements.push(emob_tariff::TariffElement {
+            components: vec![
+                PriceComponent::new(Dimension::ParkingTime, dec("1.00")).with_vat(dec("19")),
+            ],
+            restrictions: emob_tariff::Restrictions {
+                min_power_kw: Some(dec("50")),
+                ..emob_tariff::Restrictions::default()
+            },
+        });
+        let cdr = record("c-1", "10.000", &tariff);
+
+        let crossing = builder(&[&cdr]).build().unwrap();
+        let operator_saw: Vec<String> = crossing.reasons().collect();
+        let invoice = crossing.into_value_discarding_notes();
+
+        assert!(
+            invoice.notes.iter().any(|n| n.text.contains("rounded up")),
+            "the block rounding is on the document: {:?}",
+            invoice.notes
+        );
+        assert!(
+            invoice
+                .notes
+                .iter()
+                .all(|n| !n.text.contains("average power")),
+            "a fault in the operator's own tariff is not: {:?}",
+            invoice.notes
+        );
+        assert!(
+            operator_saw.iter().any(|r| r.contains("average power")),
+            "…and it reached the queue that can act on it: {operator_saw:?}"
+        );
+
+        // Every note names its record, because a month carries many.
+        assert!(invoice.notes.iter().all(|n| n.cdr == cdr.key));
+
+        // And the standard accepts the document with BG-1 on it, in both
+        // syntaxes CEN/TS 16931-2 makes mandatory.
+        let crossed = crate::en16931::to_en16931(&invoice, crate::en16931::Specification::Core)
+            .unwrap()
+            .into_value_discarding_notes();
+        assert!(
+            crossed.is_valid(),
+            "{:?}",
+            crossed.reasons().collect::<Vec<_>>()
+        );
+        assert!(
+            crossed.invoice.notes.iter().any(|n| n
+                .note
+                .as_deref()
+                .is_some_and(|text| text.contains("rounded up"))),
+            "BT-22 carries it"
+        );
+    }
+
+    #[test]
+    fn a_reservation_the_driver_paid_for_reaches_the_invoice() {
+        let tariff = tariff_with_reservation();
+        let mut cdr = record("c-1", "10.000", &tariff);
+        // Reserved at 09:30, plugged in at 10:00: half an hour at 6.00/h.
+        let held = emob_tariff::Reservation::honoured(at(-30), at(0));
+        cdr.reservation = Some(held);
+        let cost = cdr.cost.as_mut().unwrap();
+        cost.reservation = Some(emob_tariff::rate_reservation(&tariff, &held));
+
+        let reserved = cost.reservation.as_ref().unwrap().gross();
+        assert_eq!(
+            reserved.to_string(),
+            "3.00 EUR",
+            "the reservation was priced"
+        );
+
+        let record_total = cost.gross();
+        let invoice = builder(&[&cdr])
+            .build()
+            .unwrap()
+            .into_value_discarding_notes();
+
+        assert_eq!(
+            invoice.gross_total(),
+            record_total,
+            "the invoice has to bill what the record says the driver owes"
+        );
+
+        // The reservation is stated first, over its own window, under its own
+        // name — and the two parts share one line sequence.
+        let ids: Vec<&str> = invoice.lines.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["1.1", "1.2"], "one sequence across both parts");
+        assert!(
+            invoice.lines[0].description.ends_with("reservation"),
+            "got {}",
+            invoice.lines[0].description
+        );
+        assert_eq!(
+            (invoice.lines[0].started_at, invoice.lines[0].ended_at),
+            (at(-30), at(0)),
+            "a reservation's line states the window the reservation ran in"
+        );
+        assert_eq!(invoice.lines[1].dimension, Dimension::Energy);
+
+        assert!(invoice.reconciles(), "the document adds up");
+        let postings = crate::postings::postings_for(&invoice);
+        assert!(postings.balances(), "and the books balance on it");
+    }
+
+    #[test]
+    fn a_cap_over_two_vat_rates_bills_what_the_tariff_priced() {
+        // Energy at 19 %, a session fee at 7 %, gross prices, and a maximum
+        // that takes € 10.70 off a € 110.70 session. Two rates is what makes
+        // this a different question from the fixture below: a document-level
+        // allowance carries **one** VAT rate — BT-95 and BT-96 — so the amount
+        // it states has to be that category's own net, and the record's total
+        // put through one factor is not it (D248).
+        //
+        // 100.00 gross = 84.03 (19 %) + 10.00 (7 %) − 8.99 allowance, taxed at
+        // 14.26 + 0.70. Any other split bills a sum the driver was not quoted.
+        let tariff = Tariff {
+            id: "t".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            time_zone: emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            tax_included: emob_tariff::TaxIncluded::Yes,
+            elements: vec![emob_tariff::TariffElement::unrestricted(vec![
+                PriceComponent::new(Dimension::Energy, dec("10.00")).with_vat(dec("19")),
+                PriceComponent::new(Dimension::Flat, dec("10.70")).with_vat(dec("7")),
+            ])],
+            min_price: None,
+            max_price: Some(emob_tariff::PriceLimit::gross(dec("100.00"))),
+            valid_from: None,
+            valid_until: None,
+        };
+        let cdr = record("c-1", "10.000", &tariff);
+        let rated = &cdr.cost.as_ref().unwrap().rated;
+        assert_eq!(rated.gross().to_string(), "100.00 EUR");
+
+        let invoice = builder(&[&cdr]).build().unwrap().value;
+        assert_eq!(invoice.adjustments.len(), 1);
+        assert_eq!(
+            invoice.adjustments[0].kind,
+            DocumentAdjustmentKind::Allowance
+        );
+        assert_eq!(invoice.adjustments[0].amount, dec("8.99"));
+        assert_eq!(invoice.adjustments[0].vat_rate, Some(dec("19")));
+        assert_eq!(invoice.taxable_total().to_string(), "85.04 EUR");
+        assert_eq!(invoice.tax_total().to_string(), "14.96 EUR");
+        // The whole point: the document bills the money the tariff priced.
+        assert_eq!(invoice.gross_total(), rated.gross());
+        assert!(invoice.reconciles());
     }
 
     #[test]
@@ -1418,7 +2253,7 @@ mod tests {
         // for it: BG-21, added to the taxable amount by `BR-CO-13`.
         let mut tariff = gross_tariff();
         tariff.tax_included = TaxIncluded::No;
-        tariff.min_price = Some(dec("20.00"));
+        tariff.min_price = Some(PriceLimit::net(dec("20.00")));
         let cdr = record("c-1", "10", &tariff);
         let invoice = builder(&[&cdr]).build().unwrap().value;
 
@@ -1443,6 +2278,361 @@ mod tests {
     }
 
     #[test]
+    fn a_record_its_own_validator_blocks_is_not_a_record_this_layer_sends() {
+        // Rule 5, at the seam where the money leaves. A record built by this
+        // workspace passes its own validator by construction — a property test
+        // asserts it over a thousand generated sessions — so this is about the
+        // other two doors: a record assembled from a partner's document, which
+        // never goes through `CdrBuilder`, and one deserialised from wherever a
+        // service kept it (D232).
+        let tariff = gross_tariff();
+        let good = record("c-1", "29.500", &tariff);
+        assert!(builder(&[&good]).build().is_ok());
+
+        // The same minute in two periods is the same minute billed twice, and
+        // it is the fault this layer must not pass on.
+        let mut overlapping = good.clone();
+        let extra = overlapping.periods[0].clone();
+        overlapping.periods.push(extra);
+        overlapping.total_energy =
+            Energy::from_kwh(overlapping.total_energy.kwh() * Decimal::TWO).unwrap();
+
+        let err = builder(&[&overlapping]).build().unwrap_err();
+        let BillingError::NotSettleable { reasons, .. } = &err else {
+            panic!("{err}");
+        };
+        assert!(
+            reasons.iter().any(|r| r.contains("outside the session")
+                || r.contains("periods")
+                || r.contains("overlap")),
+            "{reasons:?}"
+        );
+
+        // …and a warning is not a block. Missing evidence is where `validate`
+        // deliberately stops and hands the decision on, because it is a regime
+        // question rather than an arithmetic one — see the test below, which is
+        // where that decision is made.
+        let mut unsigned = good;
+        unsigned.evidence = None;
+        let report = emob_cdr::validate(&unsigned);
+        assert!(
+            report.is_settleable(),
+            "a missing signature does not block here"
+        );
+        assert!(
+            report.warnings().next().is_some(),
+            "…and it is still reported"
+        );
+    }
+
+    #[test]
+    fn a_german_kilowatt_hour_with_nothing_behind_it_is_not_an_invoice_line() {
+        // The decision `emob_cdr::validate` grades as a warning **on purpose**,
+        // and says in its own source belongs "to the billing layer that knows
+        // which regime applies". This is that layer, and until now the sentence
+        // described a decision nothing made (D232).
+        //
+        // `[MessEG §33(3) Nr. 1]` names invoices in as many words: those resting
+        // on measured values have to be ones the recipient can follow in order
+        // to check the values stated. A line per kilowatt-hour rests on one, and
+        // with no signed record behind it there is nothing to check it against.
+        let tariff = gross_tariff();
+        let mut unsigned = record("c-1", "29.500", &tariff);
+        unsigned.evidence = None;
+
+        let err = builder(&[&unsigned]).build().unwrap_err();
+        assert!(matches!(err, BillingError::NotVerifiable { .. }), "{err}");
+        assert!(err.to_string().contains("MessEG"), "{err}");
+
+        // The regime is where the **measurement** happened, not where the supply
+        // is taxed. The same record drawn at a Dutch point is an ordinary Dutch
+        // invoice, because §33 binds German commercial dealings and asserting it
+        // over every member state would refuse lawful documents elsewhere.
+        let dutch = InvoiceBuilder::new(
+            "R-1",
+            date!(2026 - 07 - 01),
+            (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),
+            Counterparty::new(
+                "CPO",
+                "Amsterdam",
+                TaxStatus::business("NL", "NL123456789B01"),
+            ),
+            Counterparty::new("Driver", "Amsterdam", TaxStatus::consumer("NL")),
+        )
+        .supplied_from("NL", dec("21"))
+        .due_on(date!(2026 - 07 - 15))
+        .record(&unsigned)
+        .build();
+        assert!(dutch.is_ok(), "{:?}", dutch.err());
+
+        // …and a session fee rests on no measurement at all, so a document
+        // carrying only one needs nothing behind it even here.
+        let flat = Tariff::simple(
+            "t".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            vec![PriceComponent::new(Dimension::Flat, dec("1.19"))],
+        );
+        let mut fee_only = record("c-2", "0", &flat);
+        fee_only.evidence = None;
+        assert!(builder(&[&fee_only]).build().is_ok());
+    }
+
+    #[test]
+    fn energy_that_flowed_out_of_the_vehicle_is_not_a_line_on_the_drivers_invoice() {
+        // The one exception the chain carried everywhere except at the end. A
+        // V2G discharge is a supply in the **other** direction: the driver
+        // supplies and the operator buys, which moves the party, the place of
+        // supply and the VAT liability, and in Germany is ordinarily a
+        // self-billed Gutschrift with the parties reversed `[UStG §14]`.
+        //
+        // Priced through the same tariff and put on an invoice unchanged it
+        // demands €14.46 from the person who *supplied* the energy — and
+        // nothing downstream objects, because the document is valid EN 16931,
+        // the postings balance and the direct debit collects. `to_ocpi` already
+        // refuses the same record by name; this is the layer that sends the
+        // document (D230).
+        let tariff = gross_tariff();
+        let mut discharge = record("c-1", "29.500", &tariff);
+        discharge.direction = Direction::Export;
+
+        let err = builder(&[&discharge]).build().unwrap_err();
+        assert!(
+            matches!(err, BillingError::ExportNotBillable { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("Gutschrift"), "{err}");
+
+        // …and one export among many imports takes the whole document with it,
+        // rather than being the line nobody reads.
+        let import = record("c-2", "10.000", &tariff);
+        assert!(matches!(
+            builder(&[&import, &discharge]).build(),
+            Err(BillingError::ExportNotBillable { .. })
+        ));
+        // The same records without it are an ordinary invoice.
+        assert!(builder(&[&import]).build().is_ok());
+    }
+
+    #[test]
+    fn a_cancellation_is_the_same_document_with_a_direction_and_a_reference_back() {
+        // A Stornorechnung reverses an invoice without re-billing it, and every
+        // figure on it stays **positive**: EN 16931 carries the direction in
+        // BT-3 and the UBL root element. Negating the lines would produce a
+        // negative BT-146, which `BR-27` refuses outright — the same argument
+        // that makes a tariff's cap a document level allowance (D201).
+        let tariff = gross_tariff();
+        let cdr = record("c-1", "29.500", &tariff);
+        let invoice = builder(&[&cdr]).build().unwrap().value;
+        let storno = invoice
+            .cancellation("R-1-STORNO", date!(2026 - 08 - 15))
+            .unwrap();
+
+        assert_eq!(storno.kind, DocumentKind::CreditNote);
+        assert_eq!(storno.number, "R-1-STORNO");
+        assert_eq!(storno.issued_on, date!(2026 - 08 - 15));
+        assert_eq!(
+            storno.cancels,
+            Some(Cancelled {
+                number: "R-1".to_owned(),
+                issued_on: date!(2026 - 07 - 01),
+            })
+        );
+
+        // Same money, same lines, same records — which is what lets a ledger
+        // pair the two and see a reversal rather than a second sale.
+        assert_eq!(storno.lines, invoice.lines);
+        assert_eq!(storno.gross_total(), invoice.gross_total());
+        assert_eq!(storno.records(), invoice.records());
+        assert!(storno.lines.iter().all(|line| line.net > Decimal::ZERO));
+        assert!(storno.reconciles());
+
+        // …and cancelling a cancellation is a re-issued invoice rather than a
+        // second reversal, which this crate cannot tell apart.
+        assert!(matches!(
+            storno.cancellation("R-1-STORNO-2", date!(2026 - 08 - 16)),
+            Err(BillingError::NotCancellable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_cancellation_is_a_credit_note_the_standard_accepts_and_a_direct_debit_refuses() {
+        let tariff = gross_tariff();
+        let cdr = record("c-1", "29.500", &tariff);
+        let invoice = builder(&[&cdr]).build().unwrap().value;
+        let storno = invoice
+            .cancellation("R-1-STORNO", date!(2026 - 08 - 15))
+            .unwrap();
+
+        // BT-3 is 381 and BG-3 names the document being reversed — `BR-55`
+        // wants BT-25 to have content, and the reference is the whole point of
+        // a Stornorechnung.
+        let crossed =
+            crate::en16931::to_en16931(&storno, crate::en16931::Specification::Core).unwrap();
+        assert_eq!(
+            crossed
+                .value
+                .invoice
+                .type_code
+                .as_ref()
+                .map(en16931::invoice::Code::as_str),
+            Some("381")
+        );
+        assert_eq!(crossed.value.invoice.number.as_deref(), Some("R-1-STORNO"));
+        assert_eq!(crossed.value.invoice.preceding_invoices.len(), 1);
+        assert_eq!(
+            crossed.value.invoice.preceding_invoices[0]
+                .reference
+                .as_str(),
+            "R-1"
+        );
+        assert!(
+            crossed.value.is_valid(),
+            "{:?}",
+            crossed.value.reasons().collect::<Vec<_>>()
+        );
+
+        // …and it serialises as a credit note in both mandatory syntaxes. UBL
+        // spells the two documents with different root elements, in different
+        // namespaces, with different names for the type code and the line — so
+        // a `kind` that did not reach the writer would produce an `<Invoice>`
+        // claiming BT-3 = 381, which is a document `BR-CL-01` refuses on the
+        // way in and no schema catches on the way out.
+        for syntax in [crate::en16931::Syntax::Ubl, crate::en16931::Syntax::Cii] {
+            let xml = crate::en16931::write(&storno, crate::en16931::Specification::Core, syntax)
+                .unwrap()
+                .value;
+            assert!(xml.contains("381"), "{syntax}: {xml}");
+            assert!(xml.contains("R-1"), "{syntax}: BG-3 is missing");
+        }
+        let ubl = crate::en16931::write(
+            &storno,
+            crate::en16931::Specification::Core,
+            crate::en16931::Syntax::Ubl,
+        )
+        .unwrap()
+        .value;
+        assert!(ubl.contains("<CreditNote "), "{ubl}");
+
+        // …and the one thing a platform must never do with it. Every figure on
+        // a credit note is positive, so nothing else in `instruct` would have
+        // objected and the driver would have been debited twice.
+        let err = crate::payment::instruct(
+            &storno,
+            &crate::payment::Creditor {
+                name: "CPO".to_owned(),
+                iban: sepa::validate_iban("DE89370400440532013000").unwrap(),
+                bic: None,
+                creditor_id: sepa::validate_creditor_id("DE98ZZZ09999999999").unwrap(),
+            },
+            &crate::payment::Mandate {
+                reference: "M-1".to_owned(),
+                signed_on: sepa::IsoDate::new(2026, 1, 1).unwrap(),
+                debtor_name: "Driver".to_owned(),
+                debtor_iban: sepa::validate_iban("DE89370400440532013000").unwrap(),
+            },
+            sepa::IsoDate::new(2026, 8, 25).unwrap(),
+            sepa::IsoDateTime::new(sepa::IsoDate::new(2026, 8, 15).unwrap(), 0, 0, 0).unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, crate::payment::PaymentError::NotAnInvoice { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_cancellation_reverses_the_books_rather_than_repeating_them() {
+        // The half a platform gets wrong silently. A credit note booked like the
+        // invoice it cancels doubles the revenue and the VAT liability, and the
+        // books then disagree with the two documents that were sent — at year
+        // end, in a reconciliation nobody runs until then.
+        let tariff = gross_tariff();
+        let cdr = record("c-1", "29.500", &tariff);
+        let invoice = builder(&[&cdr]).build().unwrap().value;
+        let storno = invoice
+            .cancellation("R-1-STORNO", date!(2026 - 08 - 15))
+            .unwrap();
+
+        let billed = crate::postings::postings_for(&invoice);
+        let reversed = crate::postings::postings_for(&storno);
+
+        assert!(billed.balances() && reversed.balances());
+        assert_eq!(billed.debits(), reversed.credits());
+        assert_eq!(billed.credits(), reversed.debits());
+        assert_eq!(
+            billed.roles(),
+            reversed.roles(),
+            "the same accounts move, the other way"
+        );
+        for (one, other) in billed.postings.iter().zip(&reversed.postings) {
+            assert_eq!(one.amount, other.amount);
+            assert_ne!(one.side, other.side);
+        }
+        // …and the reversal is booked on its own issue date, not the invoice's.
+        assert_eq!(reversed.booked_on, date!(2026 - 08 - 15));
+        assert_eq!(reversed.reference, "R-1-STORNO");
+    }
+
+    #[test]
+    fn a_bound_the_document_already_reaches_is_still_on_the_side_it_moved_the_total() {
+        // 24.99 kWh at 0.40 net is 9.996 exactly, and the tariff's minimum is
+        // 10.00 — so the line *rounds to* the minimum and the charge carrying
+        // the difference is 0.00. It still has a side. `exact_amount` is signed
+        // by `kind`, and reading the side off a rounded difference of zero made
+        // this an allowance: the 0.004 the minimum **added** was subtracted
+        // instead, `exact_taxable` came out at 9.992, and the document reported
+        // 0.008 of approximation against a figure it reaches exactly.
+        //
+        // Rounding is monotonic, so the rounded difference and the exact one can
+        // only disagree through zero — which is precisely where the rounded one
+        // has no side to read.
+        let mut tariff = Tariff::simple(
+            "t".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            vec![PriceComponent::new(Dimension::Energy, dec("0.40"))],
+        );
+        tariff.tax_included = TaxIncluded::No;
+        tariff.min_price = Some(PriceLimit::net(dec("10.00")));
+        let cdr = record("c-1", "24.990", &tariff);
+        let invoice = builder(&[&cdr]).build().unwrap().value;
+
+        assert_eq!(invoice.lines.len(), 1, "{:?}", invoice.lines);
+        assert_eq!(invoice.lines[0].exact_net, dec("9.996"));
+        assert_eq!(invoice.lines[0].net, dec("10.00"));
+
+        assert_eq!(invoice.adjustments.len(), 1);
+        let adjustment = &invoice.adjustments[0];
+        assert_eq!(
+            adjustment.kind,
+            DocumentAdjustmentKind::Charge,
+            "a minimum moves the total up, whatever the rounded difference came to"
+        );
+        assert_eq!(
+            adjustment.amount,
+            Decimal::ZERO,
+            "the document's own lines already state the minimum"
+        );
+        assert_eq!(adjustment.exact_amount, dec("0.004"));
+
+        assert_eq!(invoice.taxable_total().to_string(), "10.00 EUR");
+        assert_eq!(
+            invoice.exact_taxable_total().amount(),
+            dec("10.000"),
+            "the lines plus what the bound added is the tariff's own minimum"
+        );
+        assert!(
+            invoice.rounding_residual().is_zero(),
+            "the document reaches the minimum exactly, so it approximates nothing: {}",
+            invoice.rounding_residual()
+        );
+        assert!(invoice.reconciles());
+    }
+
+    #[test]
     fn a_capped_session_is_an_allowance_and_the_document_reaches_the_cap_exactly() {
         // A maximum moves the total **down**, and as a line that is a negative
         // BT-146 — which `BR-27` refuses outright, so the whole invoice is
@@ -1451,7 +2641,9 @@ mod tests {
         // rounding the line and the difference independently lands a cent past
         // the cap, and the cap is the one number the driver was promised.
         let mut tariff = gross_tariff(); // 0.49 per kWh, gross, 19 %
-        tariff.max_price = Some(dec("10.00"));
+        // The bound is stated in the basis the prices are quoted in: this
+        // tariff's are gross, so this is a gross ceiling.
+        tariff.max_price = Some(PriceLimit::gross(dec("10.00")));
         let cdr = record("c-1", "29.500", &tariff); // 14.455 gross, capped to 10.00
         let invoice = builder(&[&cdr]).build().unwrap().value;
 
@@ -1474,13 +2666,15 @@ mod tests {
         // …and the document the standard judges is valid, which a negative
         // line amount is not — at the CEN core a partner settles against and
         // under the German profile a Rechnungseingangsplattform validates.
-        let crossed = crate::en16931::to_en16931(&invoice, crate::en16931::CEN_CORE).unwrap();
+        let crossed =
+            crate::en16931::to_en16931(&invoice, crate::en16931::Specification::Core).unwrap();
         assert!(
             crossed.value.is_valid(),
             "{:?}",
             crossed.value.reasons().collect::<Vec<_>>()
         );
-        let german = crate::en16931::to_en16931(&invoice, crate::en16931::XRECHNUNG_3).unwrap();
+        let german =
+            crate::en16931::to_en16931(&invoice, crate::en16931::Specification::XRechnung).unwrap();
         assert!(
             german
                 .value

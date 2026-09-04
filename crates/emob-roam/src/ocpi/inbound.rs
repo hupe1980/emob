@@ -40,7 +40,7 @@
 //! costs, for exactly that comparison.
 
 use emob_cdr::{Cdr, ChargingPeriod, EvidenceRef};
-use emob_core::{Currency, Direction, Energy, Money, QuarterHour};
+use emob_core::{Activity, Currency, Direction, Energy, Money, QuarterHour};
 use emob_session::{AuthPath, Provenance};
 use ocpi_kit::v2_3_0::cdrs::{AuthMethod, CdrDimensionType};
 use ocpi_kit::v2_3_0::tokens::TokenType;
@@ -127,6 +127,25 @@ pub fn from_ocpi(
         crossing.note("/auth_method", reason);
     }
 
+    // `total_reservation_cost` is an amount with no window: OCPI states what a
+    // reservation cost and never states when it ran, so this side cannot place
+    // it in time, re-rate it, or give an invoice line the dates BT-134 asks
+    // for. It is named rather than restored — the rule the whole of this
+    // read-back keeps — because the figure is inside the partner's own
+    // `total_cost`, which does cross, and a reader comparing the two totals has
+    // to know where the difference went (D250).
+    if let Some(reserved) = cdr.total_reservation_cost.as_ref() {
+        crossing.note(
+            "/total_reservation_cost",
+            format!(
+                "the partner charged {} for a reservation and OCPI carries no window for it, so \
+                 this side holds the amount as part of the stated total and prices no reservation \
+                 of its own: a re-rating covers the session only",
+                reserved.after_taxes().get()
+            ),
+        );
+    }
+
     // Nothing states a provenance, so nothing may claim one — and a settlement
     // process that treats an interpolated slot as authoritative is the reason
     // the field exists. Said once here rather than once per period.
@@ -145,6 +164,12 @@ pub fn from_ocpi(
 
     let inbound = Inbound {
         cdr: Cdr {
+            // OCPI carries `total_reservation_cost` and nothing that says when
+            // the reservation ran, so a partner's record cannot be read back
+            // into a window this side could re-rate. The cost that crossed is
+            // reported rather than reconstructed — the same rule the rest of
+            // this read-back keeps, which leaves a partner's record unpriced.
+            reservation: None,
             key: key.clone(),
             session_id: session_id_of(cdr, &key_hint(cdr))?,
             evse_id: emob_core::EvseId::parse(cdr.cdr_location.evse_id.as_str()).map_err(
@@ -169,6 +194,12 @@ pub fn from_ocpi(
             // a record that reports an export volume anyway, rather than this
             // silently reading it as one.
             direction: Direction::Import,
+            // No roaming wire carries the station's type approval, so the
+            // resolution a duration is judged against is the worst case the
+            // regulation permits `[REA 6-A §3.1]` rather than a figure this
+            // side made up. A bilateral agreement that states a better one
+            // states it on the record.
+            clock: emob_core::ClockResolution::conforming(),
             evidence,
             cost: None,
             // OCPI's replacement record carries no link to what it replaces:
@@ -218,14 +249,15 @@ fn session_id_of(
         })
 }
 
-/// The periods, with the ends OCPI does not carry and the charging flag it
-/// states in its dimensions.
+/// The periods, with the ends OCPI does not carry and the activity it states
+/// in its dimensions.
 fn periods_of(
     cdr: &ocpi_kit::v2_3_0::Cdr,
     crossing: &mut Crossing<()>,
 ) -> Result<Vec<ChargingPeriod>, RoamError> {
     let mut periods = Vec::with_capacity(cdr.charging_periods.len());
-    let mut silent = 0_usize;
+    let mut contradictory = 0_usize;
+    let mut withheld = 0_usize;
 
     for (index, span) in cdr.period_spans().enumerate() {
         let kwh = span
@@ -237,24 +269,44 @@ fn periods_of(
             detail: error.to_string(),
         })?;
 
-        // `charging` is **read**, not inferred from `energy == 0`: a car at 100 %
-        // state of charge draws a rounding error, and a period that genuinely
-        // measured nothing while still charging is a taper. OCPI states the
-        // answer in the dimensions — `TIME` is time charging, `PARKING_TIME` is
-        // time not charging `[OCPI 2.3.0 §mod_cdrs_cdrdimensiontype_enum]`.
-        let charging = match (
+        // The activity is **read**, not inferred from `energy == 0`: a car at
+        // 100 % state of charge draws a rounding error, and a period that
+        // genuinely measured nothing while still charging is a taper. OCPI
+        // states the answer in the dimensions — `TIME` is time charging,
+        // `PARKING_TIME` is "time during which the vehicle is not requesting
+        // power" `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`.
+        //
+        // A period stating **neither** and moving no energy is not a period
+        // that says nothing: OCPI's dimensions are volumes, so a period with no
+        // time volume is a period with no billable time, and the specification's
+        // own erratum names the case it is for — the point withholding power
+        // from a vehicle that is asking for it, which owes neither a charging
+        // rate nor a loitering fee. Read as [`Activity::Withheld`] it costs the
+        // driver nothing and round-trips this workspace's own outbound exactly.
+        let activity = match (
             span.volume(CdrDimensionType::Time),
             span.volume(CdrDimensionType::ParkingTime),
         ) {
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            // Both, or neither. Both is a period the sender says was two things
-            // at once; neither is a period that says nothing. Energy is the
-            // only remaining evidence and it is weak — see the comment above —
-            // so the count is reported rather than each occurrence.
-            _ => {
-                silent += 1;
-                !energy.is_zero()
+            (Some(_), None) => Activity::Charging,
+            (None, Some(_)) => Activity::Parked,
+            // The sender says the period was two things at once. Energy is the
+            // only remaining evidence and it is weak — see above — so the count
+            // is reported rather than each occurrence.
+            (Some(_), Some(_)) => {
+                contradictory += 1;
+                if energy.is_zero() {
+                    Activity::Parked
+                } else {
+                    Activity::Charging
+                }
+            }
+            (None, None) => {
+                if energy.is_zero() {
+                    withheld += 1;
+                    Activity::Withheld
+                } else {
+                    Activity::Charging
+                }
             }
         };
 
@@ -263,19 +315,31 @@ fn periods_of(
             start: span.start.into(),
             end: span.end.into(),
             energy,
-            charging,
+            activity,
             provenance: Provenance::Interpolated,
         });
     }
 
-    if silent > 0 {
+    if contradictory > 0 {
         crossing.note(
             "/charging_periods",
             format!(
-                "{silent} of {} periods state neither a TIME nor a PARKING_TIME volume, so \
-                 whether the vehicle was charging was taken from whether energy moved. That \
-                 reads a taper — a full battery drawing a rounding error — as occupancy, and \
+                "{contradictory} of {} periods state a TIME **and** a PARKING_TIME volume, so \
+                 what the vehicle was doing was taken from whether energy moved. That reads a \
+                 taper — a full battery drawing a rounding error — as occupancy, and \
                  `[AFIR Art. 5(4)]` prices the two differently",
+                cdr.charging_periods.len()
+            ),
+        );
+    }
+    if withheld > 0 {
+        crossing.note(
+            "/charging_periods",
+            format!(
+                "{withheld} of {} periods state no time volume at all and moved no energy, so \
+                 they are read as time the point withheld power rather than as occupancy \
+                 `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`: a re-rating prices them at \
+                 nothing rather than at this side's parking rate",
                 cdr.charging_periods.len()
             ),
         );

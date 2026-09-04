@@ -47,11 +47,13 @@
 //! operator has the value to check their Locations against and a partner
 //! settling a disputed session has it in the account of the crossing.
 
-use emob_tariff::{Dimension, Restrictions, Tariff, TariffKind, TaxIncluded};
+use emob_tariff::{
+    Dimension, ReservationRestriction, Restrictions, Tariff, TariffKind, TaxIncluded,
+};
 use ocpi_kit::types::{LocalDate, LocalTime, Number};
 use ocpi_kit::v2_3_0::tariffs::{
-    DayOfWeek, PriceComponent, PriceLimit, TariffDimensionType, TariffElement, TariffRestrictions,
-    TariffType, TaxIncluded as OcpiTaxIncluded,
+    DayOfWeek, PriceComponent, PriceLimit, ReservationRestrictionType, TariffDimensionType,
+    TariffElement, TariffRestrictions, TariffType, TaxIncluded as OcpiTaxIncluded,
 };
 
 use crate::crossing::Crossing;
@@ -194,12 +196,33 @@ pub fn to_ocpi(
 /// its components carry more than one VAT rate, so no single taxable amount
 /// corresponds to the bound.
 fn limit(
-    amount: rust_decimal::Decimal,
+    bound: emob_tariff::PriceLimit,
     tariff: &Tariff,
     pointer: &str,
     crossing: &mut Crossing<()>,
 ) -> Result<PriceLimit, RoamError> {
-    match tariff.tax_included {
+    // Both limbs stated: nothing to derive, and they bind separately, so both
+    // travel `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]`.
+    if let (Some(net), Some(gross)) = (bound.before_taxes, bound.after_taxes) {
+        return Ok(PriceLimit {
+            before_taxes: Number::new(net),
+            after_taxes: Some(Number::new(gross)),
+            extensions: ocpi_kit::types::Extensions::new(),
+        });
+    }
+    let Some(amount) = bound.in_basis(tariff.tax_included) else {
+        return Ok(PriceLimit::before_taxes(Number::new(
+            rust_decimal::Decimal::ZERO,
+        )));
+    };
+    // A bound stated only after taxes needs the mandatory `before_taxes`
+    // derived, whichever basis the *prices* are in.
+    let derive = tariff.tax_included == TaxIncluded::Yes || bound.before_taxes.is_none();
+    match if derive {
+        TaxIncluded::Yes
+    } else {
+        TaxIncluded::No
+    } {
         TaxIncluded::Yes => {
             let rate = tariff
                 .vat_basis()
@@ -309,6 +332,7 @@ fn restrictions(
         min_duration: restrictions.min_duration_s,
         max_duration: restrictions.max_duration_s,
         day_of_week: restrictions.days_of_week.iter().copied().map(day).collect(),
+        reservation: restrictions.reservation.map(reservation),
         ..TariffRestrictions::default()
     };
 
@@ -363,18 +387,48 @@ pub const fn day(day: time::Weekday) -> DayOfWeek {
     }
 }
 
+/// A reservation restriction, in OCPI's spelling. Both vocabularies name the
+/// same two outcomes.
+#[must_use]
+pub const fn reservation(kind: ReservationRestriction) -> ReservationRestrictionType {
+    match kind {
+        ReservationRestriction::Reservation => ReservationRestrictionType::Reservation,
+        ReservationRestriction::ReservationExpires => {
+            ReservationRestrictionType::ReservationExpires
+        }
+    }
+}
+
+/// The same, read back off a partner's document.
+///
+/// A `match` with no catch-all, deliberately. An outcome a later revision of
+/// OCPI adds is one this build cannot price, and a `_ => Reservation` arm would
+/// price it as an ordinary one — so the arm does not exist and the upgrade is a
+/// compile error here rather than a silent reading.
+#[must_use]
+pub const fn reservation_from_ocpi(kind: &ReservationRestrictionType) -> ReservationRestriction {
+    match kind {
+        ReservationRestrictionType::Reservation => ReservationRestriction::Reservation,
+        ReservationRestrictionType::ReservationExpires => {
+            ReservationRestriction::ReservationExpires
+        }
+    }
+}
+
 /// Read a partner's tariff into the canonical model.
 ///
 /// Every restriction OCPI carries that this build cannot evaluate is named in
 /// [`Restrictions::unevaluable`], which is what makes
 /// [`emob_tariff::rate`] decline to match the element rather than silently
 /// treat the condition as absent.
+///
+/// `reservation` is **not** on that list any more: it is evaluated, by
+/// [`emob_tariff::rate_reservation`], against a window the session does not
+/// have. What is left is the pair OCPI states in amperes, which needs a current
+/// series no CDR carries.
 #[must_use]
 pub fn unevaluable_of(restrictions: &TariffRestrictions) -> Vec<String> {
     let mut out = Vec::new();
-    if restrictions.reservation.is_some() {
-        out.push("reservation".to_owned());
-    }
     if restrictions.min_current.is_some() {
         out.push("min_current".to_owned());
     }
@@ -448,7 +502,7 @@ mod tests {
         // partner enforces nineteen per cent too high, against the driver,
         // from a document this operator published.
         let mut tariff = simple();
-        tariff.min_price = Some(dec("5.95"));
+        tariff.min_price = Some(emob_tariff::PriceLimit::gross(dec("5.95")));
 
         let crossing = to_ocpi(&tariff, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
         let min = crossing.value.min_price.as_ref().unwrap();
@@ -463,7 +517,7 @@ mod tests {
         // …and where the minor unit cannot hold the conversion exactly, the
         // partner is told by how much their copy fails to round-trip.
         let mut awkward = simple();
-        awkward.min_price = Some(dec("5.00"));
+        awkward.min_price = Some(emob_tariff::PriceLimit::gross(dec("5.00")));
         let crossing = to_ocpi(&awkward, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
         assert_eq!(
             crossing
@@ -493,7 +547,7 @@ mod tests {
         mixed.elements[0]
             .components
             .push(Component::new(Dimension::Flat, dec("0.50")).with_vat(dec("7")));
-        mixed.max_price = Some(dec("40.00"));
+        mixed.max_price = Some(emob_tariff::PriceLimit::gross(dec("40.00")));
 
         let err = to_ocpi(&mixed, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap_err();
         assert!(
@@ -519,7 +573,7 @@ mod tests {
             emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![Component::new(Dimension::Energy, dec("0.49"))],
         );
-        unstated.min_price = Some(dec("5.00"));
+        unstated.min_price = Some(emob_tariff::PriceLimit::gross(dec("5.00")));
 
         let crossing = to_ocpi(&unstated, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
         let min = crossing.value.min_price.as_ref().unwrap();
@@ -544,7 +598,7 @@ mod tests {
             emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![Component::new(Dimension::Energy, dec("0.49")).with_vat(dec("-100"))],
         );
-        impossible.max_price = Some(dec("40.00"));
+        impossible.max_price = Some(emob_tariff::PriceLimit::gross(dec("40.00")));
 
         let err = to_ocpi(&impossible, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap_err();
         assert!(
@@ -561,7 +615,7 @@ mod tests {
     fn a_net_tariffs_bound_is_the_figure_it_already_states() {
         let mut net = simple();
         net.tax_included = TaxIncluded::No;
-        net.min_price = Some(dec("5.00"));
+        net.min_price = Some(emob_tariff::PriceLimit::net(dec("5.00")));
 
         let crossing = to_ocpi(&net, &party(), datetime!(2026-01-02 10:00 UTC)).unwrap();
         let min = crossing.value.min_price.as_ref().unwrap();
@@ -610,6 +664,7 @@ mod tests {
             min_duration_s: Some(600),
             max_duration_s: Some(7200),
             days_of_week: vec![time::Weekday::Saturday, time::Weekday::Sunday],
+            reservation: Some(ReservationRestriction::ReservationExpires),
             unevaluable: Vec::new(),
         };
 
@@ -627,16 +682,51 @@ mod tests {
         assert_eq!(r.min_duration, Some(600));
         assert_eq!(r.max_duration, Some(7200));
         assert_eq!(r.day_of_week, vec![DayOfWeek::Saturday, DayOfWeek::Sunday]);
+        assert_eq!(
+            r.reservation,
+            Some(ReservationRestrictionType::ReservationExpires)
+        );
         // …and the one thing the crossing genuinely cannot carry is said.
         assert!(crossing.reasons().any(|reason| reason.contains("zone")));
     }
 
     #[test]
     fn an_unevaluable_restriction_arriving_is_recorded_so_the_rating_declines_it() {
+        // Amperes: OCPI states a current band and no CDR carries the series to
+        // judge it against, so the element matches nothing rather than being
+        // widened into one that always applies.
         let inbound = TariffRestrictions {
-            reservation: Some(ocpi_kit::v2_3_0::tariffs::ReservationRestrictionType::Reservation),
+            min_current: Some(Number::new(dec("5"))),
             ..TariffRestrictions::default()
         };
-        assert_eq!(unevaluable_of(&inbound), vec!["reservation".to_owned()]);
+        assert_eq!(unevaluable_of(&inbound), vec!["min_current".to_owned()]);
+    }
+
+    #[test]
+    fn a_reservation_restriction_is_evaluated_rather_than_refused() {
+        // It used to be on the unevaluable list, which made a whole class of
+        // tariff `[OCPI 2.3.0]` defines unpublishable and unpriceable. It is
+        // now `emob_tariff::rate_reservation`'s, and both spellings are one
+        // spelling.
+        for (ours, theirs) in [
+            (
+                ReservationRestriction::Reservation,
+                ReservationRestrictionType::Reservation,
+            ),
+            (
+                ReservationRestriction::ReservationExpires,
+                ReservationRestrictionType::ReservationExpires,
+            ),
+        ] {
+            assert_eq!(reservation(ours), theirs);
+            assert_eq!(reservation_from_ocpi(&theirs), ours);
+            assert!(
+                unevaluable_of(&TariffRestrictions {
+                    reservation: Some(theirs),
+                    ..TariffRestrictions::default()
+                })
+                .is_empty()
+            );
+        }
     }
 }

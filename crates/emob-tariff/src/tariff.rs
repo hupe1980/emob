@@ -99,6 +99,22 @@ impl Dimension {
         }
     }
 
+    /// Which dimension prices a slice of a session, if any.
+    ///
+    /// The one mapping from what a period *was* to what may charge for it, and
+    /// the reason it returns an `Option`: `[OCPI 2.3.0
+    /// §mod_cdrs_chargingperiod_class]` prices "time charging" and "time the
+    /// vehicle was not requesting power", and a minute the *operator* withheld
+    /// is neither. See [`emob_core::Activity`].
+    #[must_use]
+    pub const fn pricing(activity: emob_core::Activity) -> Option<Self> {
+        match activity {
+            emob_core::Activity::Charging => Some(Self::Time),
+            emob_core::Activity::Parked => Some(Self::ParkingTime),
+            emob_core::Activity::Withheld => None,
+        }
+    }
+
     /// Whether this dimension prices energy.
     ///
     /// The question `[AFIR Art. 5(4)]` turns on at 50 kW and above: the ad-hoc
@@ -168,6 +184,52 @@ impl PriceComponent {
     }
 }
 
+/// Whether an element prices a **reservation** rather than a charging session
+/// `[OCPI 2.3.0 §mod_tariffs_reservation_restriction_type]`.
+///
+/// A reservation is not a session and is not priced like one: it starts when the
+/// reservation is *made* and ends when the driver plugs in on the reserved point
+/// or when it expires, so its clock has already run before any session begins.
+/// The specification keeps it apart with a restriction rather than a dimension —
+/// *"When this field is present, the Tariff Element describes reservation
+/// costs"* — and narrows what may price it: *"A reservation can only have `FLAT`
+/// and `TIME` `TariffDimensions`, where `TIME` is for the duration of the
+/// reservation."*
+///
+/// An element carrying one therefore never prices a session, and an element
+/// carrying none never prices a reservation. That is what
+/// [`crate::rate_reservation`] is a separate entry point for: a tariff whose
+/// unrestricted element prices `TIME` would otherwise have the reservation's
+/// minutes and the session's charging minutes compete for one dimension, and
+/// `[OCPI 2.3.0 §Tariff]`'s per-dimension rule would silently drop one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "SCREAMING_SNAKE_CASE"))]
+pub enum ReservationRestriction {
+    /// Costs for a reservation.
+    Reservation,
+    /// Costs for a reservation that **expired** — the driver never started a
+    /// session before the reservation ran out.
+    ReservationExpires,
+}
+
+impl ReservationRestriction {
+    /// The stable token `[OCPI 2.3.0]` writes it as, and the fingerprint uses.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reservation => "RESERVATION",
+            Self::ReservationExpires => "RESERVATION_EXPIRES",
+        }
+    }
+}
+
+impl core::fmt::Display for ReservationRestriction {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// When an element applies.
 ///
 /// # The restrictions are cumulative, and that is what makes tiers work
@@ -215,6 +277,13 @@ pub struct Restrictions {
     pub min_duration_s: Option<u64>,
     /// Applies only below this duration, in seconds.
     pub max_duration_s: Option<u64>,
+    /// Applies only to a **reservation**, and to which kind of outcome
+    /// `[OCPI 2.3.0 §mod_tariffs_tariffrestrictions_class]`.
+    ///
+    /// `None` is an ordinary session element. `Some(_)` never prices a session,
+    /// and an element without one never prices a reservation. See
+    /// [`ReservationRestriction`] and [`crate::rate_reservation`].
+    pub reservation: Option<ReservationRestriction>,
     /// Applies only on these weekdays. Empty means every day.
     #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::weekday"))]
     pub days_of_week: Vec<time::Weekday>,
@@ -262,6 +331,15 @@ impl Restrictions {
     #[must_use]
     pub fn describe(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
+        // Said first, because it changes what the rest of the sentence is
+        // about: these are the costs of holding the point, not of using it.
+        match self.reservation {
+            Some(ReservationRestriction::Reservation) => parts.push("reservation".to_owned()),
+            Some(ReservationRestriction::ReservationExpires) => {
+                parts.push("expired reservation".to_owned());
+            }
+            None => {}
+        }
         // `time::Time`'s own `Display` writes seconds and sub-seconds; a price
         // display wants `22:00`.
         let hhmm = |t: time::Time| format!("{:02}:{:02}", t.hour(), t.minute());
@@ -404,6 +482,110 @@ impl core::fmt::Display for TariffKind {
     }
 }
 
+/// A bound on what a session costs — **in both bases, because they bind
+/// separately** `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]`.
+///
+/// # Why this is not one number
+///
+/// A bound in the basis the tariff quotes in, with the other derived at its VAT
+/// rate, works exactly while the tariff has **one** rate — and a charging tariff
+/// routinely does not. Where the rates differ the two ceilings stop being
+/// proportional, so which of them binds first depends on the session:
+///
+/// > … there might be situations where the maximum cost after taxes is reached
+/// > earlier or later than the maximum price before taxes. So as a rule, **they
+/// > both apply**.
+///
+/// Modelled as one figure, the specification's own example — a €10 net / €11
+/// gross cap over a 20 % session fee and 10 % energy — settles at €11.05 gross:
+/// five cents above a maximum the operator published to the driver, out of a
+/// tariff the operator wrote correctly.
+///
+/// # Both are optional here, and one is mandatory on the wire
+///
+/// OCPI requires `before_taxes`. A gross price list whose author knows only the
+/// gross ceiling would otherwise have to invent the net one at construction,
+/// which is the derivation this type exists to stop being implicit — so both are
+/// optional here, at least one is required, and the *crossing* derives the
+/// mandatory field at the tariff's own rate, where the residual is a note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PriceLimit {
+    /// The bound on the total **before** taxes.
+    pub before_taxes: Option<Decimal>,
+    /// The bound on the total **after** taxes.
+    pub after_taxes: Option<Decimal>,
+}
+
+impl core::fmt::Display for PriceLimit {
+    /// `"<net>/<gross>"`, with an empty half for a bound that states one only.
+    ///
+    /// A **declared** spelling rather than a derived `Debug`, for the reason
+    /// [`crate::TariffFingerprint`] exists: a fingerprint built from a variant
+    /// name splits one tariff into two the day somebody renames a field.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match (self.before_taxes, self.after_taxes) {
+            (Some(net), Some(gross)) => write!(f, "{net}/{gross}"),
+            (Some(net), None) => write!(f, "{net}/"),
+            (None, Some(gross)) => write!(f, "/{gross}"),
+            (None, None) => f.write_str("/"),
+        }
+    }
+}
+
+impl PriceLimit {
+    /// A bound on the net total only.
+    #[must_use]
+    pub const fn net(amount: Decimal) -> Self {
+        Self {
+            before_taxes: Some(amount),
+            after_taxes: None,
+        }
+    }
+
+    /// A bound on the gross total only.
+    #[must_use]
+    pub const fn gross(amount: Decimal) -> Self {
+        Self {
+            before_taxes: None,
+            after_taxes: Some(amount),
+        }
+    }
+
+    /// Both bounds, which bind independently.
+    #[must_use]
+    pub const fn net_and_gross(before_taxes: Decimal, after_taxes: Decimal) -> Self {
+        Self {
+            before_taxes: Some(before_taxes),
+            after_taxes: Some(after_taxes),
+        }
+    }
+
+    /// Whether this bounds anything at all.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.before_taxes.is_none() && self.after_taxes.is_none()
+    }
+
+    /// The bound in the basis a tariff quotes its prices in, when it states one.
+    ///
+    /// What a display, a conformance check or a wire with only one field reads:
+    /// the figure a driver would compare the total against.
+    #[must_use]
+    pub const fn in_basis(self, tax_included: TaxIncluded) -> Option<Decimal> {
+        match tax_included {
+            TaxIncluded::Yes => match self.after_taxes {
+                Some(gross) => Some(gross),
+                None => self.before_taxes,
+            },
+            TaxIncluded::No | TaxIncluded::NotApplicable => match self.before_taxes {
+                Some(net) => Some(net),
+                None => self.after_taxes,
+            },
+        }
+    }
+}
+
 /// A tariff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -438,19 +620,10 @@ pub struct Tariff {
     /// `[OCPI 2.3.0 §Tariff]`, so an element pricing only a session fee does
     /// not end the search for a price per kWh. Cardinality `+`.
     pub elements: Vec<TariffElement>,
-    /// A session under this tariff costs at least this much, in the basis
-    /// [`Self::tax_included`] states — gross under [`TaxIncluded::Yes`], net
-    /// under [`TaxIncluded::No`].
-    ///
-    /// One figure rather than OCPI's pair of a before-tax and an after-tax
-    /// bound, because a tariff whose components carry one VAT rate has one
-    /// answer and a tariff whose components carry several has no single
-    /// taxable amount to bound. The rate the adjustment lands in is a field on
-    /// [`crate::Adjustment`] rather than an assumption inside a sum.
-    pub min_price: Option<Decimal>,
-    /// A session under this tariff costs at most this much, in the same basis
-    /// as [`Self::min_price`].
-    pub max_price: Option<Decimal>,
+    /// A session under this tariff costs at least this much.
+    pub min_price: Option<PriceLimit>,
+    /// A session under this tariff costs at most this much.
+    pub max_price: Option<PriceLimit>,
     /// The first instant this version of the tariff is in force, **inclusive**.
     ///
     /// `None` for a tariff that has always been in force.

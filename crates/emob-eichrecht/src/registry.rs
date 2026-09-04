@@ -415,7 +415,8 @@ pub enum RegistryError {
     /// the component would simply have no key at every instant, which reads
     /// exactly like a component nobody registered.
     #[error(
-        "the key offered for {component} is valid over {window}, which is no instant at all:          a half-open window ending at or before it begins can never be the key a record          verifies against, and the component would read as unprovisioned"
+        "the key offered for {component} is valid over {window}, which is no instant at all: \
+         a half-open window ending at or before it begins can never be the key a record          verifies against, and the component would read as unprovisioned"
     )]
     EmptyWindow {
         /// Which signing component.

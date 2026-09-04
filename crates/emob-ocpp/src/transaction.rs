@@ -48,7 +48,7 @@
 //! that reused a counter for different content is exactly the fault the chain
 //! is there to find.
 
-use emob_core::{Direction, Energy, EvseId, SessionId};
+use emob_core::{Activity, Direction, Energy, EvseId, SessionId};
 use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
@@ -128,14 +128,15 @@ pub struct TransactionEvent {
     pub at: time::OffsetDateTime,
     /// The signed values it carried, if any.
     pub signed: Vec<SignedReading>,
-    /// Whether the station reports energy flowing at this point.
+    /// What the station reports the session was doing at this point.
     ///
     /// OCPP 2.x states it directly as `chargingState`; 1.6 says it through
     /// `SuspendedEV` / `SuspendedEVSE` status notifications. It is a fact about
     /// the *session*, and the meter cannot supply it — which is why
     /// `[AFIR Art. 5(4)]`'s occupancy fee needs the protocol and not only the
-    /// register.
-    pub charging: bool,
+    /// register, and why the protocol has to say **which** suspension it was.
+    /// See [`crate::kit::activity_from`].
+    pub activity: Activity,
     /// Why the transaction stopped, on an [`EventKind::Ended`] event.
     pub stopped_because: Option<EndReason>,
 }
@@ -148,7 +149,7 @@ impl TransactionEvent {
             kind: EventKind::Started,
             at,
             signed,
-            charging: true,
+            activity: Activity::Charging,
             stopped_because: None,
         }
     }
@@ -160,7 +161,7 @@ impl TransactionEvent {
             kind: EventKind::Updated,
             at,
             signed,
-            charging: true,
+            activity: Activity::Charging,
             stopped_because: None,
         }
     }
@@ -172,16 +173,26 @@ impl TransactionEvent {
             kind: EventKind::Ended,
             at,
             signed,
-            charging: false,
+            activity: Activity::Parked,
             stopped_because: Some(reason),
         }
     }
 
-    /// The same event, with the station reporting the vehicle connected and not
-    /// charging.
+    /// The same event, with the station reporting the **vehicle** connected and
+    /// no longer asking for power — the occupancy `[AFIR Art. 5(4)]` prices.
     #[must_use]
     pub const fn suspended(mut self) -> Self {
-        self.charging = false;
+        self.activity = Activity::Parked;
+        self
+    }
+
+    /// The same event, with the station reporting that **it** stopped offering
+    /// power while the vehicle was still asking — `SuspendedEVSE`.
+    ///
+    /// Priced by neither time dimension: see [`emob_core::Activity::Withheld`].
+    #[must_use]
+    pub const fn withheld(mut self) -> Self {
+        self.activity = Activity::Withheld;
         self
     }
 }
@@ -394,10 +405,10 @@ impl Transaction {
             if event.kind == EventKind::Ended {
                 break;
             }
-            let next = if event.charging {
-                SessionState::Charging
-            } else {
-                SessionState::Suspended
+            let next = match event.activity {
+                Activity::Charging => SessionState::Charging,
+                Activity::Parked => SessionState::SuspendedByVehicle,
+                Activity::Withheld => SessionState::SuspendedByOperator,
             };
             if next != state {
                 session.transition_to(next, event.at)?;

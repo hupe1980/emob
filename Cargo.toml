@@ -76,6 +76,20 @@ ocpp-kit = { version = "0.2", default-features = false }
 # downgrade cost is reported rather than decided silently.
 ocpi-kit = { version = "0.2", default-features = false, features = ["v2_3_0", "v2_2_1", "convert"] }
 
+# ── The OICP wire ───────────────────────────────────────────────────────────
+# Also only `emob-roam`. OICP is hub-and-spoke where OCPI is peer-to-peer —
+# every partner talks to Hubject and Hubject calls back — so the crossing is the
+# same shape and the transport is not, which is why `transport`, `client` and
+# `server` stay off: those are `roamd`'s and they carry `reqwest`, `axum` and
+# `tokio` behind them. A domain crate takes `cpo` and `emp`, which are the wire
+# *model*, and `eichrecht`, which is the CDR pre-flight Hubject and an EMP each
+# run against a record before it is billed.
+#
+# Every OICP `number` is an exact decimal in this kit, which is what lets
+# `ConsumedEnergy` be the difference between the two register readings rather
+# than nearly it — the same promise `no-floats` makes on this side of the seam.
+oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp", "eichrecht"] }
+
 # ── The vehicle wire ────────────────────────────────────────────────────────
 # A **dev**-dependency of `emob-core`, and only that, until `emob-pnc` is built.
 # `emob-core` decides money and carries no protocol implementation in its tree,
@@ -99,10 +113,13 @@ iso15118 = { version = "0.3", default-features = false }
 # instant here is a `time::OffsetDateTime`.
 en16931 = { version = "0.6", default-features = false, features = ["time"] }
 
-# The syntax half, `ubl` only. `cii` and `zugferd` are the other two mandatory
-# formats and nothing in this workspace asks for them yet; `roxmltree` and
-# `lopdf` come with *reading* a document, and emob writes.
-en16931-formats = { version = "0.6", default-features = false, features = ["ubl"] }
+# The syntax half: **both** the formats CEN/TS 16931-2 makes mandatory. UBL is
+# what the German platforms take by default and CII is what a partner may
+# require instead — and every ZUGFeRD payload is a CII document, so the one
+# binding serves the next consumer too. `zugferd` itself is the hybrid PDF and
+# stays off: `en16931-formats` reads those and does not write them, and `lopdf`
+# takes the graph from thirteen crates to fifty-seven.
+en16931-formats = { version = "0.6", default-features = false, features = ["ubl", "cii"] }
 
 # pain.008 for the collection, and the IBAN/BIC/Creditor-Id validation that
 # stops an unpayable instruction being written in the first place. Its `time`

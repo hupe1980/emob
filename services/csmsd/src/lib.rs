@@ -200,18 +200,29 @@ impl Csmsd {
         };
         let closing = event.kind == emob_ocpp::EventKind::Ended;
 
+        // A transaction the station did not name. The record it would settle is
+        // one nothing can be traced back to, and a substitute id would put
+        // every such transaction on this station under one key — so it is
+        // refused here, where the identity and the raw id are still in hand
+        // (D249).
+        let Ok(id) = transaction_id.parse::<emob_core::SessionId>() else {
+            lock(&self.outcomes).push(Outcome::Refused {
+                identity: identity.to_string(),
+                transaction: transaction_id.to_owned(),
+                reasons: vec![
+                    "the station sent a transaction event with no transaction id: a record \
+                     settled under a substitute id could not be traced back to the session \
+                     it billed"
+                        .to_owned(),
+                ],
+            });
+            return;
+        };
+
         let mut inflight = lock(&self.inflight);
         let key = (identity.clone(), transaction_id.to_owned());
         let transaction = inflight.entry(key.clone()).or_insert_with(|| {
-            Transaction::new(
-                transaction_id.parse().unwrap_or_else(|_| {
-                    // A station id this build cannot parse still has to reach a
-                    // named refusal rather than a panic.
-                    "unparseable-transaction".parse().expect("a literal id")
-                }),
-                point.evse_id.clone(),
-                Authorization::ad_hoc(),
-            )
+            Transaction::new(id, point.evse_id.clone(), Authorization::ad_hoc())
         });
         transaction.events.push(event);
 
@@ -270,15 +281,23 @@ impl Csmsd {
             .collect();
         let evidence = Evidence::assemble(&borrowed, &self.registry, assembled.session.started_at);
 
+        // The record's identity is the station's and the transaction's, and it
+        // has to stay **unique**: `CdrLedger` is keyed by it, so two records
+        // sharing one id are one record, and the second is a restatement that
+        // leaves the first standing. A fallback id would make every record it
+        // caught collide with every other, which is the one failure a ledger
+        // cannot report (D249).
+        let Ok(id) = format!("{identity}-{transaction_id}").parse() else {
+            return refuse(vec![
+                "neither the station identity nor the transaction id names anything, so this \
+                 record has no id that would be unique in the ledger"
+                    .to_owned(),
+            ]);
+        };
         let cdr =
             CdrBuilder::from_session(&assembled.session, Direction::Import).and_then(|builder| {
                 builder
-                    .key(
-                        self.party.clone(),
-                        format!("{identity}-{transaction_id}")
-                            .parse()
-                            .unwrap_or_else(|_| "cdr".parse().expect("a literal id")),
-                    )
+                    .key(self.party.clone(), id)
                     .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
                     .rated_with(&self.tariff)
                     .build()
@@ -444,13 +463,6 @@ impl Csmsd {
     }
 }
 
-/// Lock a mutex, recovering from poisoning.
-///
-/// Every mutex here guards a plain collection — the in-flight transactions, the
-/// two ledgers, the outcome list, the 1.6 counter. The poison flag says a thread
-/// died holding the lock and nothing about whether a `Vec<Outcome>` still makes
-/// sense, so bailing out on it would answer a panic elsewhere by dropping the
-/// record of what was billed, which is the worse failure of the two.
 /// Everything an accepted record was identified by, for [`outcome_of`].
 struct Accepted<'a> {
     key: &'a str,
@@ -501,6 +513,13 @@ fn outcome_of(acceptance: &Acceptance, record: Accepted<'_>) -> Outcome {
     }
 }
 
+/// Lock a mutex, recovering from poisoning.
+///
+/// Every mutex here guards a plain collection — the in-flight transactions, the
+/// two ledgers, the outcome list, the 1.6 counter. The poison flag says a thread
+/// died holding the lock and nothing about whether a `Vec<Outcome>` still makes
+/// sense, so bailing out on it would answer a panic elsewhere by dropping the
+/// record of what was billed, which is the worse failure of the two.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

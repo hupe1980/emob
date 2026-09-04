@@ -223,8 +223,8 @@ for the time a vehicle is connected and not charging, so the question is *for
 how long*, and a state field without a timestamp cannot answer it.
 
 ```rust
-assert_eq!(session.state_at(at(50)), Some(SessionState::Suspended));
-assert!(session.suspended_throughout(at(45), at(60)));   // half an hour to price
+assert_eq!(session.state_at(at(50)), Some(SessionState::SuspendedByVehicle));
+assert_eq!(session.activity_throughout(at(45), at(60)), Some(Activity::Parked));
 ```
 
 The CDR builder uses the same history the other way round: energy across a
@@ -347,8 +347,32 @@ A period that moved no energy is **not** therefore occupancy. A car at 100 %
 state of charge can leave a quarter hour at exactly `0.000 kWh` while the
 session's own state machine says `Charging`, and pricing that quarter hour at
 the occupancy fee charges a driver for parking they were told was charging. So
-`ChargingPeriod::charging` is a stated fact taken from the session history, and
+`ChargingPeriod::activity` is a stated fact taken from the session history, and
 `validate` blocks a partner's record whose two halves contradict each other.
+
+### …and "not charging" is two facts, not one
+
+`[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]` corrected its own definition of
+`PARKING_TIME` — from "time not charging" to "time during which the **vehicle is
+not requesting power**" — and said why: under the old reading drivers "would be
+exposed to penalizing loitering fees … when the EVSE is not offering energy to
+the vehicle while the vehicle is still requesting power".
+
+That second case is a charging profile at zero, a `[EnWG §14a]` dimming, a grid
+limit, a fault — the operator declining to deliver, not the driver loitering. So
+the record carries three activities and not a boolean:
+
+| | priced as | energy transferred |
+|---|---|---|
+| `Charging` | `TIME` | ✅ |
+| `Parked` — the vehicle stopped asking | `PARKING_TIME` | |
+| `Withheld` — the point stopped offering | *nothing* | |
+
+OCPP has distinguished the two since 2.0.1 (`SuspendedEV` against
+`SuspendedEVSE`) and the seam was discarding it. A withheld minute is still
+inside the record's `total_time`, and inside its `total_parking_time` — that
+field is defined on energy *transfer* rather than on demand, so the two figures
+differ by exactly the withheld time and neither is derived from the other.
 
 ### …and occupancy is time nobody metered
 
@@ -363,7 +387,7 @@ gap with periods carrying **no energy**, marked `Interpolated` because the zero
 is an assumption rather than a measurement, split on the same quarter-hour grid
 as everything else, and the total is untouched.
 
-**And their `charging` flag is read, not assumed.** It is tempting to call
+**And their activity is read, not assumed.** It is tempting to call
 unmetered time occupancy by definition — no readings, no energy, so the car was
 sitting there — but "the meter said nothing" and "the vehicle was not charging"
 are different claims, and only the second is one the operator's own records make.
@@ -373,13 +397,62 @@ the car was taking energy, on the strength of an absence.
 
 So the fill is built where the session history is still in scope, cuts at the
 session's state changes as well as at the grid, and asks
-`Session::charging_throughout` — the **one** question every period on the
-record is asked, metered or not. It is not the negation of
-`suspended_throughout`: there are four states and two of them are neither.
+`Session::activity_throughout` — the **one** question every period on the
+record is asked, metered or not. One question rather than two booleans: asking
+"was it charging" and "was it suspended" separately leaves the third answer
+indistinguishable from the second. And it can answer *neither*, because there
+are five states and two of them are.
 `Pending` is authorised with nothing flowing and `Ended` is over, and both are
 "connected and not charging", which is exactly what the fee prices — and asking
 "not suspended" of a metered period billed the minute a car sat `EVConnected`
 before its charge began as charging time.
+
+## A reservation is on the record, and it is not a period of the session
+
+`[OCPI 2.3.0]` prices a reservation over a window that *"starts when the
+reservation is made, and ends when the driver starts charging … or when the
+reservation expires"* — before the cable went in, so no meter measured it and the
+session's own history says nothing about it. `Cdr::reservation` carries the
+window, `Cost::reservation` carries its rating, and the two cross in the
+`total_reservation_cost` the specification keeps for exactly this.
+
+It is a second `Rated` rather than lines inside the first for the reason the
+specification uses a restriction rather than a dimension: a tariff whose
+unrestricted element prices `TIME` and whose reservation element also prices
+`TIME` would have the reservation's minutes and the charging minutes competing
+for one dimension, and the per-dimension rule would drop one of them.
+
+`Cdr::total_cost` is both, which is what makes a partner's own sum of the
+per-dimension fields close.
+
+### …and on the invoice, as its own supply
+
+A record's two ratings are two **supplies** on one document, numbered in one
+sequence and stripped, rounded and taxed by one function. The reservation is
+stated first, because it ran first; its lines carry the reservation's own dates
+in BT-134/BT-135 rather than the session's, because a supply dated outside the
+period it happened in is a document a tax office reads differently; and its
+`TIME` is called *reservation* rather than *charging time*, since the same
+dimension means two things in the two parts.
+
+`validate` asks of the reservation's rating everything it asks of the session's,
+through one function that records which part a finding came from. Three shapes
+are blocking: two currencies on one record, a priced reservation the record does
+not place in time, and a reservation billed for longer than its own window ran.
+
+### What the document tells the payer
+
+`[REA 6-A §3.2]` names *"einem Messwert **oder einer Rechnung**"*, so compensated
+cable or rectification loss is stated on the invoice line carrying the measured
+value — BT-127, built from the station's own signed record rather than from a
+flag somebody sets.
+
+The rating's notes split by audience. A note that says a quantity was billed
+differently from how it was measured — a block rounding, an unpriced dimension, a
+line the clock could not resolve — is a term of the price the payer is entitled
+to reconcile `[AFIR Art. 5(4)]`, and crosses as a BG-1 note. A fault in a
+document the payer did not write — a VAT rate with no split, two bounds that
+contradict — goes to the operator queue.
 
 ## Tokens are never stored raw
 
@@ -605,6 +678,16 @@ a cent past the cap, and the cap is the one number the driver was promised. A
 bound with no lines to adjust is the line, because `BR-16` requires an invoice to
 have one.
 
+The target is built the way the lines are: **every amount stripped at its own
+rate**. An allowance carries one VAT rate — BT-95 and BT-96 — so the bound is
+converted on its own and added to the lines' own nets, rather than the record's
+whole total being divided by one factor. On a €100.00 session made of energy at
+19 % beside a session fee at 7 %, the single-factor reading divided the 7 % half
+by 1.19 as well and billed €98.80. An adjustment larger than everything charged
+at its rate is named by the rating before the document is built, because a
+negative taxable amount under a positive invoice is not a document anybody
+accepts.
+
 BT-146 is likewise the item price **excluding VAT**, so a gross tariff's own
 figure does not belong there: `29.500 × 0.49` is `14.455` where the line says
 `12.15`. Both are stripped at the same rate, and `Invoice::reconciles` asks every
@@ -631,22 +714,104 @@ is a perfectly valid `BT-2`, so nothing objects and the document is sendable.
 An invoice that serialises and does not validate is an invoice that comes back.
 
 ```rust
-let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE)?;
+let crossed = en16931::to_en16931(&invoice, Specification::Core)?;
 assert!(crossed.value.is_valid());
 
 // The German public buyer's document, or the terms it is missing.
-match en16931::xrechnung(&invoice) {
+match en16931::write(&invoice, Specification::XRechnung, Syntax::Ubl) {
     Ok(xml) => submit(&xml.value),
     Err(BillingError::NotCollectable { reason }) => eprintln!("{reason}"),
     Err(other) => return Err(other.into()),
 }
 ```
 
+The specification and the syntax are two arguments and neither has a default.
+`Specification` is BT-24 *and* the rule set the document is judged by, in one
+decision, so a document cannot claim one profile and have been checked against
+another. `[UStG §14]` asks for conformity with Directive 2014/55/EU — which is
+EN 16931 itself, not `XRechnung`, whose `BR-DE-*` rules are a public-sector usage
+specification wanting a Leitweg-ID an ordinary business customer does not issue.
+`Syntax` is UBL or CII, the two CEN/TS 16931-2 makes mandatory: one semantic
+invoice, two spellings, and which one an access point takes is a fact about the
+recipient.
+
 `Validated<XRechnung>` is a type that cannot be constructed from an invalid
 invoice — the same discipline `Evidence::billable_energy` applies to a
 kilowatt-hour one layer down. And `BR-CO-25`, which says an invoice with
 something owing has to state when, is asked at **construction**: the answer is a
 commercial term the caller holds, and this crate reads no clock to invent one.
+
+### The document layer asks the validator
+
+`emob_cdr::validate` asks everything that makes a record unsettleable, and
+`CdrBuilder` refuses to issue one that fails. The layer that *sends the demand*
+accepts only a record its own validator settles:
+
+```rust
+let err = InvoiceBuilder::new(…).record(&overlapping).build().unwrap_err();
+assert!(matches!(err, BillingError::NotSettleable { .. }));
+```
+
+A record built here passes its own validator by construction, so the ordinary
+path is unaffected; the doors this covers are the ones that skip the builder — a
+partner's document, and anything a service read back from storage.
+
+And the half only this layer can decide. `validate` grades a missing signature as
+a **warning** on purpose, because it is blocking for a
+German energy invoice and merely notable elsewhere — "the decision belongs to the
+billing layer that knows which regime applies". `[MessEG §33(3) Nr. 1]` names
+invoices in as many words: those resting on measured values must be ones their
+recipient can follow in order to check the values stated. So a line per
+kilowatt-hour or per minute needs a signed record behind it, a per-session fee
+does not, and the regime is where the *measurement* happened rather than where
+the supply is taxed.
+
+### A discharge is refused rather than billed
+
+`Direction` is a field rather than a sign everywhere here, so a V2G discharge can
+never net against a draw. Every layer honoured that — the signed OBIS register,
+the CDR builder, `to_ocpi` (which refuses an export by name, OCPI having no way
+to express one) and `emob-thg` (which skips it, `[38k §5(1)]` counting
+electricity *withdrawn*). The document layer did not:
+
+```rust
+let err = InvoiceBuilder::new(…).record(&discharge).build().unwrap_err();
+assert!(matches!(err, BillingError::ExportNotBillable { .. }));
+```
+
+Without that, 29.5 kWh that flowed **out** of a vehicle became a valid EN 16931
+invoice demanding €14.46 from the person who supplied it, with balanced postings
+and a collectible direct debit — nothing objecting anywhere, because the
+arithmetic is identical and only the direction differs. A discharge is a supply
+the other way round, ordinarily a self-billed *Gutschrift* `[UStG §14]` with the
+parties reversed, and which arrangement applies is not a fact a CDR carries.
+
+### A cancellation is a kind, not a minus sign
+
+An invoice that was wrong is not edited and not deleted. It is reversed by a
+second document — a German *Stornorechnung*:
+
+```rust
+let storno = invoice.cancellation("R-2026-0001-S", date!(2026 - 08 - 15))?;
+
+assert_eq!(storno.kind, DocumentKind::CreditNote);          // BT-3 = 381
+assert_eq!(storno.cancels.unwrap().number, "R-2026-0001");  // BG-3
+assert_eq!(storno.gross_total(), invoice.gross_total());    // the same money
+```
+
+**Nothing is negated.** EN 16931 carries the direction in the document *type* and
+states the credited figures as positive ones; a reversed line would be a negative
+BT-146, which `BR-27` refuses outright. UBL spells the two documents with
+different root elements, in different namespaces, with different names for the
+type code and the line — so a kind that did not reach the writer produces an
+`<Invoice>` claiming BT-3 = 381, which no schema catches on the way out.
+
+Two consumers behave differently, and both are the half that fails silently.
+`postings_for` **reverses every side** — booking a Storno like the invoice it
+cancels doubles the revenue and the VAT liability. And `payment::instruct`
+**refuses** it: a direct debit draws money in, a credit note is money owed back,
+and every figure on it is positive, so nothing else would have objected before
+the driver was debited a second time.
 
 ### A roaming settlement is not taxed where the charge point stands
 
@@ -772,6 +937,7 @@ fields is an argument, and a test asserts the same inputs produce the same bytes
 ## What is not here 📐
 
 Deciding *when* a month closes, holding the contracts an invoice is addressed to
-and submitting the document belong to `billd` and `empd`. CII and ZUGFeRD are a
-second syntax for the same semantic document; UBL is the one the German
-platforms accept.
+and submitting the document belong to `billd` and `empd`. ZUGFeRD — the hybrid
+PDF carrying a CII payload — is a reader in `en16931-formats` and not yet a
+writer, and its `lopdf` dependency takes the graph from thirteen crates to
+fifty-seven, so the payload is produced here and the envelope is not.

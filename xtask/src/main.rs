@@ -17,12 +17,14 @@ fn main() -> Result<()> {
         Some("check-manifests") => check_manifests(&root),
         Some("check-graph") => check_graph(&root),
         Some("check-wire") => check_wire(&root),
+        Some("check-prose") => check_prose(&root),
         Some("check-concepts") => check_concepts(&root),
         Some("check-all") => {
             no_floats(&root)?;
             check_citations(&root)?;
             check_manifests(&root)?;
             check_wire(&root)?;
+            check_prose(&root)?;
             check_concepts(&root)?;
             check_graph(&root)
         }
@@ -56,9 +58,19 @@ cargo xtask <task>
   check-wire        every date, time and instant in a serialisable type names
                     the spelling it crosses the wire in: `time`'s own derived
                     form is a nine-element array a partner cannot read
-  check-concepts    every count concepts/ states about itself is the count it
-                    holds: the decision log's own total, and the numbered list
-                    of rules its README says how many of there are
+  check-prose       no string a user reads carries a lost line continuation:
+                    a run of spaces inside a literal is a `\\` somebody
+                    dropped, and the sentence reaches an operator with a hole
+                    in it
+  check-concepts    every count the documentation states about itself is the
+                    count something holds: the decision log's own total, the
+                    numbered list of rules concepts/README.md says how many of
+                    there are, the size of the test suite four documents open
+                    by quoting, and the per-crate column beside that total —
+                    because a guard on a sum is not a guard on its terms. Also
+                    that every Markdown table row has its header's columns:
+                    a surplus cell is dropped and a missing one is blanked,
+                    silently, so a sentence moves rows and disappears
   check-all         all of the above
 "
     );
@@ -82,109 +94,545 @@ cargo xtask <task>
 /// link broke, no reference dangled, and nothing anywhere disagreed — because
 /// nothing anywhere was looking.
 ///
-/// So the two claims are checked, and the numbering is checked with them: a
+/// So those claims are checked, and the numbering is checked with them: a
 /// stable identifier that skips or repeats is a citation from code that quietly
 /// means something else.
+///
+/// # …and a fourth, which is why a guard on a total is not enough
+///
+/// The size of the test suite joined them (D213), and being derived from
+/// `cargo test -- --list` it has been right ever since. The **per-crate column**
+/// stating the same suite row by row was not derived from anything, drifted into
+/// three counting conventions with two wrong figures in them, and sat on the same
+/// page as the guarded figure — where it read as guarded (D225). It is checked
+/// now, and so is the completeness of the table, because a crate with no row is a
+/// crate no reviewer is looking at. See [`check_test_count`].
+///
+/// # What runs without `concepts/`, and why it has to
+///
+/// `concepts/` is **gitignored** — internal design notes, not part of the
+/// published repository — so a fresh clone does not have it, and CI runs on a
+/// fresh clone. A guard that returns at its first line when the directory is
+/// missing is inert in the only place it was ever going to catch anything
+/// (D228). The counts it holds are not all in `concepts/`: the test total is
+/// stated in the root `README.md` and on two site pages, all three of them
+/// tracked, and the table-shape check reads every prose file in the workspace.
+///
+/// So the checks are split by what they read. The decision log, the rule list
+/// and the per-crate column are `concepts/`' own and skip with it, **named** in
+/// the summary line rather than in silence; the test counts across the tracked
+/// documents and the shape of every table run always. A guard that skips has to
+/// say which half it skipped, or it reads exactly like a guard that passed.
 fn check_concepts(root: &Path) -> Result<()> {
     let concepts = root.join("concepts");
-    if !concepts.is_dir() {
-        println!("check-concepts: concepts/ is absent; skipping");
-        return Ok(());
-    }
+    let internal = concepts.is_dir();
 
     let mut problems: Vec<String> = Vec::new();
+    let mut decisions_held = 0;
+    let mut rules_held = 0;
 
-    // ── The decision log ────────────────────────────────────────────────────
-    let decisions = std::fs::read_to_string(concepts.join("DECISIONS.md"))
-        .context("reading concepts/DECISIONS.md")?;
-    let numbers = decision_numbers(&decisions);
-    if numbers.is_empty() {
-        bail!("concepts/DECISIONS.md holds no `**D<n> — …**` entries at all");
-    }
-    let held = numbers.len();
-    match stated_count(&decisions) {
-        Some(stated) if stated == held => {}
-        Some(stated) => problems.push(format!(
-            "concepts/DECISIONS.md opens by claiming {stated} entries and holds {held}"
-        )),
-        None => problems.push(
-            "concepts/DECISIONS.md does not open with a spelled-out count of its entries"
-                .to_owned(),
-        ),
-    }
-    // `D` numbers are cited from code comments and from the other documents, so
-    // a repeat is two entries answering to one citation and a gap is a citation
-    // with nothing behind it.
-    //
-    // **Not** file order. The log is grouped by topic — "Exactness and
-    // representation", "Cryptography and identifiers" — so D3 sits after D27
-    // and always has. What has to hold is that the identifiers are unique and
-    // the range is dense, which is a property of the set rather than of the
-    // sequence; checking the sequence instead reports twelve findings about the
-    // document's shape and none about its content.
-    let mut sorted = numbers.clone();
-    sorted.sort_unstable();
-    for pair in sorted.windows(2) {
-        if pair[1] == pair[0] {
-            problems.push(format!(
-                "concepts/DECISIONS.md records D{} twice: two entries answer to one citation",
-                pair[0]
-            ));
-        } else if pair[1] != pair[0] + 1 {
-            problems.push(format!(
-                "concepts/DECISIONS.md has no D{}..=D{}: a `D` number is a stable identifier \
+    if internal {
+        // ── The decision log ────────────────────────────────────────────────────
+        let decisions = std::fs::read_to_string(concepts.join("DECISIONS.md"))
+            .context("reading concepts/DECISIONS.md")?;
+        let numbers = decision_numbers(&decisions);
+        if numbers.is_empty() {
+            bail!("concepts/DECISIONS.md holds no `**D<n> — …**` entries at all");
+        }
+        let held = numbers.len();
+        match stated_count(&decisions) {
+            Some(stated) if stated == held => {}
+            Some(stated) => problems.push(format!(
+                "concepts/DECISIONS.md opens by claiming {stated} entries and holds {held}"
+            )),
+            None => problems.push(
+                "concepts/DECISIONS.md does not open with a spelled-out count of its entries"
+                    .to_owned(),
+            ),
+        }
+        // `D` numbers are cited from code comments and from the other documents, so
+        // a repeat is two entries answering to one citation and a gap is a citation
+        // with nothing behind it.
+        //
+        // **Not** file order. The log is grouped by topic — "Exactness and
+        // representation", "Cryptography and identifiers" — so D3 sits after D27
+        // and always has. What has to hold is that the identifiers are unique and
+        // the range is dense, which is a property of the set rather than of the
+        // sequence; checking the sequence instead reports twelve findings about the
+        // document's shape and none about its content.
+        let mut sorted = numbers.clone();
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            if pair[1] == pair[0] {
+                problems.push(format!(
+                    "concepts/DECISIONS.md records D{} twice: two entries answer to one citation",
+                    pair[0]
+                ));
+            } else if pair[1] != pair[0] + 1 {
+                problems.push(format!(
+                    "concepts/DECISIONS.md has no D{}..=D{}: a `D` number is a stable identifier \
                  and a gap is a citation with nothing behind it",
-                pair[0] + 1,
-                pair[1] - 1
+                    pair[0] + 1,
+                    pair[1] - 1
+                ));
+            }
+        }
+        if sorted.first() != Some(&1) {
+            problems.push(format!(
+                "concepts/DECISIONS.md starts at D{:?} rather than D1",
+                sorted.first()
             ));
         }
-    }
-    if sorted.first() != Some(&1) {
-        problems.push(format!(
-            "concepts/DECISIONS.md starts at D{:?} rather than D1",
-            sorted.first()
-        ));
+
+        // ── The rules the design keeps re-learning ──────────────────────────────
+        let readme = std::fs::read_to_string(concepts.join("README.md"))
+            .context("reading concepts/README.md")?;
+        let (heading, items) = numbered_rules(&readme);
+        match (heading, items.len()) {
+            (Some(stated), held) if stated == held => {}
+            (Some(stated), held) => problems.push(format!(
+                "concepts/README.md heads {stated} rules and lists {held}"
+            )),
+            (None, _) => problems
+                .push("concepts/README.md has no '## <spelled-out> rules …' heading".to_owned()),
+        }
+        for (index, number) in items.iter().enumerate() {
+            let expected = index + 1;
+            if *number != expected {
+                problems.push(format!(
+                    "concepts/README.md's rule list reaches {number} where {expected} was due: a \
+                 reader counting down the list finds a different rule than a reference to it does"
+                ));
+            }
+        }
+        decisions_held = held;
+        rules_held = items.len();
     }
 
-    // ── The rules the design keeps re-learning ──────────────────────────────
-    let readme = std::fs::read_to_string(concepts.join("README.md"))
-        .context("reading concepts/README.md")?;
-    let (heading, items) = numbered_rules(&readme);
-    match (heading, items.len()) {
-        (Some(stated), held) if stated == held => {}
-        (Some(stated), held) => problems.push(format!(
-            "concepts/README.md heads {stated} rules and lists {held}"
-        )),
-        (None, _) => {
-            problems.push("concepts/README.md has no '## <spelled-out> rules …' heading".to_owned())
-        }
-    }
-    for (index, number) in items.iter().enumerate() {
-        let expected = index + 1;
-        if *number != expected {
-            problems.push(format!(
-                "concepts/README.md's rule list reaches {number} where {expected} was due: a \
-                 reader counting down the list finds a different rule than a reference to it does"
-            ));
-        }
-    }
+    // ── The tables, which lose content without failing anything ─────────────
+    let tables = check_table_shapes(root, &mut problems)?;
+
+    // ── The suite every document opens by counting ──────────────────────────
+    let suite = check_test_count(root, &mut problems, internal)?;
 
     if !problems.is_empty() {
         for problem in &problems {
             eprintln!("❌ {problem}");
         }
         bail!(
-            "{} claim{} in concepts/ that the documents do not hold",
+            "{} claim{} the documents do not hold",
             problems.len(),
             if problems.len() == 1 { "" } else { "s" }
         );
     }
 
-    println!(
-        "✅ check-concepts: {held} decisions, {} rules, each the number stated",
-        items.len()
-    );
+    if internal {
+        println!(
+            "✅ check-concepts: {decisions_held} decisions, {rules_held} rules, {suite} tests, \
+             {tables} tables, each the number stated"
+        );
+    } else {
+        // Named rather than silent: this is the shape the whole guard had, and
+        // it read as a pass (D228).
+        println!(
+            "✅ check-concepts: {suite} tests, {tables} tables, each the number stated \
+             (concepts/ is absent, so the decision log, the rule list and the per-crate column \
+             were not read)"
+        );
+    }
     Ok(())
+}
+
+/// Every row of every Markdown table has the columns its header does.
+///
+/// # Why a shape is worth a guard
+///
+/// A row with one cell too many does not fail: Markdown renders the header's
+/// number of columns and **drops the rest**, silently. A row with one too few
+/// renders a blank. So a cell can move from the row it belongs to into its
+/// neighbour and the document still builds, still validates, still looks like a
+/// table — and the sentence is gone.
+///
+/// That is what happened to `DECISIONS.md`'s own summary of passes: the "shape
+/// of the error" for D211–D220, a paragraph naming seven separate defects, sat
+/// as a fourth cell on the D221–D224 row. The row above it rendered empty and
+/// the row below it rendered short. Nothing anywhere disagreed, which is the
+/// same sentence [`check_concepts`] opens with.
+///
+/// A table is a run of lines opening with `|` whose second line is the delimiter
+/// row; anything else is prose that happens to start with a pipe. Cells are split
+/// on pipes outside code spans and outside `\|`, because a table cell in this
+/// workspace routinely carries `` `a|b` ``.
+fn check_table_shapes(root: &Path, problems: &mut Vec<String>) -> Result<usize> {
+    let mut tables = 0;
+    for file in prose_sources(root)? {
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("reading {}", file.display()))?;
+        let shown = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+
+        let lines: Vec<&str> = text.lines().collect();
+        let mut fenced = false;
+        let mut index = 0;
+        while index < lines.len() {
+            if lines[index].trim_start().starts_with("```") {
+                fenced = !fenced;
+                index += 1;
+                continue;
+            }
+            if fenced || !lines[index].trim_start().starts_with('|') {
+                index += 1;
+                continue;
+            }
+            // A header, then a delimiter row, then the body.
+            let width = table_cells(lines[index]).len();
+            let is_delimiter = lines.get(index + 1).is_some_and(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with('|')
+                    && trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+            });
+            if !is_delimiter {
+                index += 1;
+                continue;
+            }
+            tables += 1;
+            let mut row = index + 2;
+            while row < lines.len() && lines[row].trim_start().starts_with('|') {
+                let held = table_cells(lines[row]).len();
+                if held != width {
+                    problems.push(format!(
+                        "{shown}:{}: this table row has {held} cell(s) and its header has \
+                         {width}: Markdown drops the surplus and blanks the shortfall, so the \
+                         difference is a sentence nobody will see",
+                        row + 1
+                    ));
+                }
+                row += 1;
+            }
+            index = row;
+        }
+    }
+    Ok(tables)
+}
+
+/// One table row's cells.
+///
+/// The outer pipes delimit rather than separate, so they contribute no cell. A
+/// pipe inside a code span or escaped as `\|` is content.
+fn table_cells(line: &str) -> Vec<&str> {
+    let line = line.trim();
+    let mut cells = Vec::new();
+    let mut start = 0;
+    let mut in_code = false;
+    let mut escaped = false;
+    for (at, ch) in line.char_indices() {
+        match ch {
+            _ if escaped => escaped = false,
+            // A backslash escapes the next character — but **not** inside a code
+            // span, where Markdown takes it literally. Honouring it there
+            // swallows the closing backtick of `` `\` ``, leaves the parser
+            // inside a code span for the rest of the line, and reports the row
+            // as short: a guard finding its own false positive on the first row
+            // that mentioned an escape.
+            '\\' if !in_code => escaped = true,
+            '`' => in_code = !in_code,
+            '|' if !in_code => {
+                cells.push(&line[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    cells.push(&line[start..]);
+    if cells.first().is_some_and(|c| c.trim().is_empty()) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(|c| c.trim().is_empty()) {
+        cells.pop();
+    }
+    cells
+}
+
+/// Every count a prose file in this workspace states about the test suite is a
+/// count the suite holds — the workspace total, and the per-package column
+/// beside it.
+///
+/// The total appears in four documents — the root README, `concepts/OVERVIEW.md`
+/// and two site pages — and it is the first figure a reader checks, because it
+/// is the one that says whether any of the rest is real.
+///
+/// # The total was guarded and the terms were not
+///
+/// D213 put this guard on `**N tests**` and it has been green ever since. The
+/// column beside it in `OVERVIEW.md` states the same suite crate by crate, was
+/// governed by nothing, and had drifted in two directions at once: three
+/// counting conventions, and two figures simply wrong. The total stayed right
+/// through all of it, because a total that comes from `cargo test -- --list` is
+/// not the sum of anything a human typed. **A guard on the sum is not a guard on
+/// the terms** (D225).
+///
+/// So the column is checked too, one convention: the tests in a package's own
+/// targets, doc tests excluded — those are in the total and in no row, because a
+/// row is about a crate and a doc test is about a sentence. Every workspace
+/// member has to have a row, so a new crate cannot arrive unstated.
+///
+/// # One invocation
+///
+/// `cargo test -- --list` enumerates without running. `just ci` runs `test`
+/// before `guards`, so the binaries this asks are already built and the guard
+/// costs a few hundred milliseconds; on its own it pays for a compile, which is
+/// the honest price of a claim about a test suite.
+///
+/// Attributing a test to a package needs the `Running …` lines, and those go to
+/// **stderr** while the test names go to stdout. Captured as two pipes they
+/// cannot be interleaved, so the command is run through a shell that merges them
+/// into one: `cargo` prints `Running X`, waits for `X` to exit, then prints the
+/// next, so a single stream is in order by construction. Running `cargo test -p`
+/// per package instead would be seventeen invocations *and* seventeen different
+/// feature unifications, which is a slower way to answer a different question.
+fn check_test_count(root: &Path, problems: &mut Vec<String>, internal: bool) -> Result<usize> {
+    let suite = enumerate_suite(root)?;
+
+    for file in prose_sources(root)? {
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("reading {}", file.display()))?;
+        for stated in stated_test_counts(&text) {
+            if stated != suite.total {
+                problems.push(format!(
+                    "{} states **{stated} tests** and the workspace holds {}",
+                    file.strip_prefix(root).unwrap_or(&file).display(),
+                    suite.total
+                ));
+            }
+        }
+    }
+
+    // The per-crate column lives in `concepts/OVERVIEW.md`, which a clone does
+    // not have. The total above does not: it is stated in tracked documents and
+    // is checked either way.
+    if internal {
+        check_package_counts(root, &suite, problems)?;
+    }
+    Ok(suite.total)
+}
+
+/// The workspace's tests, as the total four documents quote and as the figure
+/// each package's row in `concepts/OVERVIEW.md` states.
+struct Suite {
+    /// Every listed test, doc tests included.
+    total: usize,
+    /// One entry per workspace member, in manifest order, doc tests excluded.
+    per_package: Vec<(String, usize)>,
+}
+
+/// Enumerate the suite once and attribute every test to the package that owns
+/// it.
+fn enumerate_suite(root: &Path) -> Result<Suite> {
+    let members = workspace_members(root)?;
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = std::process::Command::new("sh")
+        .current_dir(root)
+        .arg("-c")
+        // The merge is the point — see the function documentation above.
+        .arg(format!(
+            "{cargo} test --workspace --all-features -- --list 2>&1"
+        ))
+        .output()
+        .context("running `cargo test -- --list`")?;
+    let listing = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() {
+        bail!("`cargo test -- --list` failed:\n{listing}");
+    }
+
+    let mut per_package: Vec<(String, usize)> =
+        members.iter().map(|m| (m.name.clone(), 0)).collect();
+    let mut total = 0;
+    // `None` while the listing is inside a doc-test section, which belongs to no
+    // row, or before the first `Running` line.
+    let mut current: Option<usize> = None;
+
+    for line in listing.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("Running ") {
+            let target = running_target(rest).with_context(|| {
+                format!("reading the test binary out of `cargo test`'s line: {line}")
+            })?;
+            current = Some(owner_of(&target, &members).with_context(|| {
+                format!("attributing the test target `{target}` to a workspace member")
+            })?);
+        } else if trimmed.starts_with("Doc-tests ") {
+            current = None;
+        } else if line.ends_with(": test") {
+            // One line per test. Benchmarks end in `: bench`.
+            total += 1;
+            if let Some(index) = current {
+                per_package[index].1 += 1;
+            }
+        }
+    }
+
+    Ok(Suite { total, per_package })
+}
+
+/// The test target's name, out of `unittests src/lib.rs (target/…/name-hash)`.
+fn running_target(rest: &str) -> Option<String> {
+    let path = rest.rsplit_once('(')?.1.trim_end_matches(')');
+    let file = path.rsplit('/').next()?;
+    // `<target>-<hash>`, and a target name may itself contain `-`.
+    Some(file.rsplit_once('-')?.0.to_owned())
+}
+
+/// The workspace member a test target belongs to, as an index into `members`.
+///
+/// A `lib`/`bin` target is named for its package, with `-` spelled `_`; an
+/// integration target is named for its file under the package's `tests/`. A
+/// target neither rule places is an error rather than a silent zero, because a
+/// guard that undercounts reports every row as wrong or none.
+fn owner_of(target: &str, members: &[Member]) -> Option<usize> {
+    let as_package = target.replace('_', "-");
+    members
+        .iter()
+        .position(|m| m.name == as_package)
+        .or_else(|| {
+            members
+                .iter()
+                .position(|m| m.dir.join("tests").join(format!("{target}.rs")).exists())
+        })
+}
+
+/// A workspace member: the name `cargo` knows it by, and where its manifest is.
+struct Member {
+    name: String,
+    dir: PathBuf,
+}
+
+/// The `[workspace] members` list, in the order the manifest states it.
+///
+/// The directory's last segment is the package name throughout this workspace,
+/// and `check-manifests` is what would notice if that stopped being true.
+fn workspace_members(root: &Path) -> Result<Vec<Member>> {
+    let manifest =
+        std::fs::read_to_string(root.join("Cargo.toml")).context("reading Cargo.toml")?;
+    let list = manifest
+        .split_once("members")
+        .and_then(|(_, rest)| rest.split_once('['))
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(list, _)| list)
+        .context("Cargo.toml has no `[workspace] members` list")?;
+
+    let members: Vec<Member> = list
+        .split(',')
+        .filter_map(|entry| {
+            let path = entry.trim().trim_matches('"');
+            if path.is_empty() {
+                return None;
+            }
+            Some(Member {
+                name: path.rsplit('/').next()?.to_owned(),
+                dir: root.join(path),
+            })
+        })
+        .collect();
+    if members.is_empty() {
+        bail!("Cargo.toml's `members` list is empty");
+    }
+    Ok(members)
+}
+
+/// Every workspace member has a row in `concepts/OVERVIEW.md`, and the row opens
+/// with the number of tests that member holds.
+///
+/// The row's verdict cell reads `✅ <n> tests …`, and only that leading figure is
+/// checked: the prose after it says how the tests divide, which is worth reading
+/// and is not a claim a guard can hold.
+fn check_package_counts(root: &Path, suite: &Suite, problems: &mut Vec<String>) -> Result<()> {
+    let path = root.join("concepts/OVERVIEW.md");
+    let text = std::fs::read_to_string(&path).context("reading concepts/OVERVIEW.md")?;
+
+    let mut seen: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        if !line.starts_with("| ") {
+            continue;
+        }
+        let cells: Vec<&str> = line.trim_matches('|').split('|').collect();
+        if cells.len() < 3 {
+            continue;
+        }
+        let Some(name) = backticked(cells[0]) else {
+            continue;
+        };
+        let Some((_, held)) = suite.per_package.iter().find(|(pkg, _)| pkg == name) else {
+            continue;
+        };
+        seen.push(name);
+
+        let verdict = cells[cells.len() - 1].trim();
+        match verdict.strip_prefix("✅ ").and_then(stated_row_count) {
+            Some(stated) if stated == *held => {}
+            Some(stated) => problems.push(format!(
+                "concepts/OVERVIEW.md gives `{name}` {stated} tests and it holds {held}"
+            )),
+            None => problems.push(format!(
+                "concepts/OVERVIEW.md's row for `{name}` does not open `✅ <n> tests`, so the \
+                 figure beside the guarded total is a claim nothing holds"
+            )),
+        }
+    }
+
+    for (name, held) in &suite.per_package {
+        if !seen.contains(&name.as_str()) {
+            problems.push(format!(
+                "concepts/OVERVIEW.md has no row for `{name}`, which holds {held} tests: a crate \
+                 the map does not carry is one nobody reviews"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The first backticked token in a table cell — the crate a row is about.
+fn backticked(cell: &str) -> Option<&str> {
+    let (_, rest) = cell.split_once('`')?;
+    rest.split_once('`').map(|(name, _)| name)
+}
+
+/// `123 tests …` as `123`, and anything else as `None`.
+fn stated_row_count(verdict: &str) -> Option<usize> {
+    let digits: String = verdict.chars().take_while(char::is_ascii_digit).collect();
+    verdict[digits.len()..]
+        .starts_with(" tests")
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// Every `**N tests**` a document states, in digits.
+fn stated_test_counts(text: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(index) = rest.find("**") {
+        rest = &rest[index + 2..];
+        let digits: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == ' ' || *c == '\u{202f}')
+            .filter(char::is_ascii_digit)
+            .collect();
+        if digits.is_empty() {
+            continue;
+        }
+        let after = rest
+            .char_indices()
+            .find(|(_, c)| !(c.is_ascii_digit() || *c == ' ' || *c == '\u{202f}'))
+            .map_or("", |(i, _)| &rest[i..]);
+        if after.starts_with("tests**")
+            && let Ok(count) = digits.parse()
+        {
+            out.push(count);
+        }
+    }
+    out
 }
 
 /// The `D` numbers of the log's entries, in the order they appear.
@@ -717,8 +1165,18 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
     // The protocol corpora live in the sibling kits, which specs/README.md
     // points at rather than duplicating.
     ("[OCPI ", "the OCPI specifications", "ocpi-kit/specs"),
+    ("[OICP ", "the OICP specifications", "oicp-kit/specs"),
     ("[OCPP ", "the OCPP specifications", "ocpp-kit/specs"),
     ("[BGB ", "Bürgerliches Gesetzbuch", "bgb.pdf"),
+    // § 14a's dimmable consumer devices are the reason a charge point can be
+    // held at zero by its operator, which is a fact about *money* here and a
+    // fact about the grid there. The statute lives in the sibling `hems`
+    // workspace, which specs/README.md points at rather than duplicating.
+    (
+        "[EnWG ",
+        "Energiewirtschaftsgesetz",
+        "hems/specs/law/enwg.pdf",
+    ),
 ];
 
 /// The markers that make a bracketed phrase a citation rather than a doc link,
@@ -739,12 +1197,23 @@ const CITATION_MARKERS: &[&str] = &["§", "Art. ", "Tab. ", "Anh. "];
 /// The failure it prevents: a rule that cites a Verordnung nobody can produce,
 /// which is indistinguishable from a rule somebody invented.
 fn check_citations(root: &Path) -> Result<()> {
+    // `specs/` is gitignored — the documents are third-party and copyrighted —
+    // so a clone has no index, and CI builds a clone. Returning here was the
+    // whole guard skipping in the one environment that gates a merge (D228).
+    //
+    // Only *half* of it needs the index. "Does `specs/README.md` list this
+    // document" cannot be asked without the file; "is this citation a form this
+    // workspace recognises at all" is asked of `CITATION_SOURCES`, a table
+    // compiled into this binary — and that is the half D65 added, because a
+    // citation whose prefix is unknown used to be checked by nothing and report
+    // success. So the second half runs everywhere and the first says when it did
+    // not run.
     let index_path = root.join("specs/README.md");
-    if !index_path.exists() {
-        println!("check-citations: specs/README.md is absent (it is gitignored); skipping");
-        return Ok(());
-    }
-    let index = std::fs::read_to_string(&index_path)?;
+    let index = match std::fs::read_to_string(&index_path) {
+        Ok(index) => Some(index),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("reading specs/README.md"),
+    };
 
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
     let mut missing = Vec::new();
@@ -767,7 +1236,7 @@ fn check_citations(root: &Path) -> Result<()> {
             for (prefix, document, needle) in CITATION_SOURCES {
                 if line.contains(prefix) {
                     seen.insert(needle);
-                    if !index.contains(needle) {
+                    if index.as_ref().is_some_and(|index| !index.contains(needle)) {
                         missing.push(format!(
                             "{}:{} cites {document}, which specs/README.md does not index (looking for {needle:?})",
                             file.strip_prefix(root).unwrap_or(&file).display(),
@@ -811,14 +1280,26 @@ fn check_citations(root: &Path) -> Result<()> {
             eprintln!("   {u}");
         }
         eprintln!(
-            "   add the document to specs/README.md and its prefix to CITATION_SOURCES, \n                or the citation is a claim nobody can follow"
+            "   add the document to specs/README.md and its prefix to CITATION_SOURCES, or the \
+             citation is a claim nobody can follow"
         );
         bail!("{} unrecognised citation(s)", unknown.len());
     }
-    println!(
-        "📚 check-citations: {} document families cited across {scanned} files, every one indexed in specs/README.md",
-        seen.len()
-    );
+    match index {
+        Some(_) => println!(
+            "📚 check-citations: {} document families cited across {scanned} files, every one \
+             recognised and indexed in specs/README.md",
+            seen.len()
+        ),
+        // Named rather than silent, for the reason `check_concepts` says at
+        // length: a guard that skips without saying so reads as one that passed.
+        None => println!(
+            "📚 check-citations: {} document families cited across {scanned} files, every one a \
+             form this guard recognises (specs/README.md is absent, so whether each is *indexed* \
+             was not asked)",
+            seen.len()
+        ),
+    }
     Ok(())
 }
 
@@ -926,6 +1407,130 @@ const AMBIENT: [(&str, &str); 16] = [
 ///
 /// Run with `--all-features`, because a feature is exactly how such a
 /// dependency comes back.
+/// No string a user reads carries a lost line continuation.
+///
+/// # The defect this is named after
+///
+/// Rust joins a `\`-continued string literal with no separator, so a long
+/// diagnostic is written as
+///
+/// ```text
+/// "the record is refused because \
+///  the evidence does not verify"
+/// ```
+///
+/// and the indentation of the second line is *outside* the literal. Delete the
+/// backslash — or let an editor reflow the line — and the indentation moves
+/// **inside** it: the message still compiles, still passes every test that
+/// checks it `contains` a phrase, and reaches an operator as "because
+/// ⟨eleven spaces⟩ the evidence".
+///
+/// Nothing catches it. `clippy` has no lint, `rustfmt` does not touch literal
+/// contents, and the tests that read these strings all match on substrings that
+/// do not span the join. Six of them had accumulated across five crates before
+/// anything looked, in exactly the places a defect hurts most: the text of a
+/// refusal, which is the only thing a person sees when the platform says no
+/// (D234).
+///
+/// # The rule, and why it has no false positives
+///
+/// A run of **three or more** spaces, **interior** to a string literal — between
+/// two non-space characters — in a line that is not a comment. Interior is what
+/// makes it precise: a literal that *starts* with spaces is testing
+/// indentation, and there is one of those in this file. Comments are excluded
+/// because a doc example's alignment is code formatting rather than prose.
+fn check_prose(root: &Path) -> Result<()> {
+    let mut problems = Vec::new();
+    let mut scanned = 0;
+
+    for file in rust_sources(root)? {
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("reading {}", file.display()))?;
+        scanned += 1;
+        for (number, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for literal in string_literals(line) {
+                if let Some(run) = lost_continuation(literal) {
+                    problems.push(format!(
+                        "{}:{}: a string literal reads {run:?} — {} spaces inside a sentence is a \
+                         `\\` line continuation somebody dropped, and the message reaches a \
+                         reader with a hole in it",
+                        file.strip_prefix(root).unwrap_or(&file).display(),
+                        number + 1,
+                        run.len(),
+                    ));
+                    break;
+                }
+            }
+        }
+    }
+
+    if !problems.is_empty() {
+        eprintln!("❌ strings with a lost line continuation:");
+        for problem in &problems {
+            eprintln!("   {problem}");
+        }
+        bail!("{} broken string(s)", problems.len());
+    }
+    println!("✍️  check-prose: {scanned} files, every sentence in one piece");
+    Ok(())
+}
+
+/// The contents of each double-quoted literal on a line.
+///
+/// Deliberately not a Rust lexer: it handles the escape that matters (`\"`) and
+/// treats anything else as content, which is enough to find a run of spaces and
+/// cannot produce a false positive on its own — the worst it does on an oddity
+/// like a raw string is split one literal into two, and a run of spaces is still
+/// a run of spaces in whichever half it lands.
+fn string_literals(line: &str) -> Vec<&str> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < bytes.len() && bytes[j] != b'"' {
+            j += if bytes[j] == b'\\' { 2 } else { 1 };
+        }
+        if j > bytes.len() {
+            break;
+        }
+        out.push(&line[start..j.min(line.len())]);
+        i = j + 1;
+    }
+    out
+}
+
+/// The run of spaces a dropped continuation left, if there is one.
+fn lost_continuation(literal: &str) -> Option<&str> {
+    let bytes = literal.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b' ' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        // Interior: something before it and something after it. A leading run is
+        // a literal that is *about* indentation, and a trailing one is a
+        // deliberate separator.
+        if i - start >= 3 && start > 0 && i < bytes.len() {
+            return Some(&literal[start..i]);
+        }
+    }
+    None
+}
+
 fn check_graph(root: &Path) -> Result<()> {
     let mut problems = Vec::new();
     let mut checked = 0;
@@ -965,7 +1570,8 @@ fn check_graph(root: &Path) -> Result<()> {
         for (dependency, why) in AMBIENT {
             if names.contains(dependency) {
                 problems.push(format!(
-                    "{crate_name} depends on `{dependency}` — {why}. A crate that promises to be                      replayable cannot carry one, whatever it happens to call: see D181"
+                    "{crate_name} depends on `{dependency}` — {why}. A crate that promises to be \
+                     replayable cannot carry one, whatever it happens to call: see D181"
                 ));
             }
         }
@@ -1220,5 +1826,72 @@ Some prose.
         assert_eq!(code_part("    /// f64 is forbidden"), "");
         assert_eq!(code_part("let x = 1; // f64"), "let x = 1; ");
         assert_eq!(code_part("let x: u8 = 1;"), "let x: u8 = 1;");
+    }
+
+    #[test]
+    fn a_test_binary_names_the_target_it_was_built_from() {
+        // The hash is the last `-` segment and a target name may hold its own,
+        // which is why this splits from the right rather than the left.
+        assert_eq!(
+            running_target("unittests src/lib.rs (target/debug/deps/emob_core-7edb93fa697813a7)")
+                .as_deref(),
+            Some("emob_core")
+        );
+        assert_eq!(
+            running_target("tests/the_other_hat.rs (target/debug/deps/the_other_hat-cc9b7c27c3e4)")
+                .as_deref(),
+            Some("the_other_hat")
+        );
+        // A doc-test section carries no parenthesised path, and belongs to no
+        // row: `enumerate_suite` recognises it by its own prefix and this by
+        // returning nothing rather than a wrong owner.
+        assert_eq!(running_target("Doc-tests emob_core"), None);
+    }
+
+    #[test]
+    fn a_rows_verdict_is_read_only_where_it_opens_with_a_count() {
+        // The prose after the figure says how the tests divide, which is worth
+        // reading and is not a claim a guard can hold — so only the leading
+        // count is taken, and a row that does not state one is a finding rather
+        // than a silent pass.
+        assert_eq!(
+            stated_row_count("127 tests — 124 in the crate, 3 more"),
+            Some(127)
+        );
+        assert_eq!(stated_row_count("20 tests over 2,594 lines"), Some(20));
+        assert_eq!(stated_row_count("39 tests"), Some(39));
+        assert_eq!(stated_row_count("124 + 3 agreeing with the kit"), None);
+        assert_eq!(stated_row_count("published"), None);
+    }
+
+    #[test]
+    fn a_table_row_is_split_on_the_pipes_that_separate_it() {
+        // The outer pipes delimit rather than separate, so a three-column row
+        // is three cells and not five.
+        assert_eq!(table_cells("| a | b | c |").len(), 3);
+        assert_eq!(table_cells("|---|---|---|").len(), 3);
+        // A cell in this workspace routinely carries a pipe inside a code span
+        // — `f32`/`f64`, `a|b` — and one escaped in prose.
+        assert_eq!(table_cells("| `a|b` | c |").len(), 2);
+        assert_eq!(table_cells(r"| a \| b | c |").len(), 2);
+        // …and a backslash **inside** a code span is content rather than an
+        // escape: Markdown does not process escapes there, so honouring one
+        // swallows the closing backtick, leaves the parser inside a code span
+        // for the rest of the line and reports the row as short. The guard
+        // found that on itself, on the first table row that mentioned an
+        // escape.
+        assert_eq!(table_cells(r"| `\` | the escape | a cell |").len(), 3);
+        // And the shape the guard exists for: a cell that belongs to the row
+        // above, which Markdown renders by dropping it.
+        assert_eq!(table_cells("| a | b | c | d |").len(), 4);
+    }
+
+    #[test]
+    fn a_rows_subject_is_the_first_crate_it_names() {
+        // The service rows carry their state marker in the same cell — `` `csmsd`
+        // ✅ `` — so the name is the backticked token and not the whole cell.
+        assert_eq!(backticked(" `emob-core` "), Some("emob-core"));
+        assert_eq!(backticked(" `csmsd` ✅ "), Some("csmsd"));
+        assert_eq!(backticked(" Crate "), None);
     }
 }

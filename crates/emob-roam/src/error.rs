@@ -28,6 +28,67 @@ pub enum RoamError {
     )]
     NotRated,
 
+    /// The session was recognised by its MAC address, and OICP's only
+    /// vehicle-borne identification names ISO 15118.
+    ///
+    /// `PlugAndChargeIdentification` is defined as Plug & Charge — a contract
+    /// certificate the vehicle presented and the SECC verified. `AutoCharge` is
+    /// a MAC address off the wire: not a standard, not authenticated, and
+    /// trivially spoofable. The two are conflated everywhere in the market and
+    /// this workspace keeps them apart precisely for that reason, so writing
+    /// one into the other's field would be this crate performing the conflation
+    /// at the last possible moment.
+    ///
+    /// OCPI collapses them into one `auth_method` and the crossing there
+    /// reports it, because OCPI's `AUTH_REQUEST` names neither. OICP's variant
+    /// **names** the standard, so the same value would be a false statement
+    /// rather than a lost distinction — and a note attached to a false
+    /// statement is not something a partner can act on (D233).
+    #[error(
+        "this session was recognised by MAC address (AutoCharge) and OICP's only vehicle-borne \
+         identification is `PlugAndChargeIdentification`, which names ISO 15118: sending it there \
+         would assert a contract certificate that was never presented. Settle it as the RFID or \
+         remote session it actually was, or not over OICP"
+    )]
+    AutoChargeNotExpressible,
+
+    /// A signed meter record does not fit the field OICP gives it.
+    ///
+    /// OICP 2.3 bounds `SignedMeteringValue` at 3000 characters, which an OCMF
+    /// record from a point that signs a reading every two minutes exceeds. The
+    /// one repair that must not happen is truncation: a signature covers the
+    /// bytes as written, so a shortened payload verifies as **tampered** and
+    /// takes the driver's right to check the bill with it.
+    #[error(
+        "a signed meter record is {length} characters and OICP 2.3 bounds `SignedMeteringValue` \
+         at {limit}: send it whole or not at all, because a truncated signature verifies as \
+         tampered and `[MessEG §33]` is what it was carried for"
+    )]
+    SignedValueTooLong {
+        /// How long the record is.
+        length: usize,
+        /// What the wire allows.
+        limit: usize,
+    },
+
+    /// The register readings and the record's own total disagree.
+    ///
+    /// OICP *defines* `ConsumedEnergy` as `MeterValueEnd − MeterValueStart`, and
+    /// Hubject validates it. A record whose difference is not its own total is
+    /// one the broker rejects after the driver has gone — so the disagreement is
+    /// found here, where it can still be explained.
+    #[error(
+        "the register moved {metered} and the record claims {total}: OICP defines \
+         `ConsumedEnergy` as `MeterValueEnd - MeterValueStart`, so a record where the two differ \
+         is one the broker refuses"
+    )]
+    RegisterDisagrees {
+        /// What the two readings imply.
+        metered: String,
+        /// What the record states.
+        total: String,
+    },
+
     /// The energy went the other way, and an OCPI CDR cannot say so.
     ///
     /// `ENERGY_EXPORT` exists in `CdrDimensionType` and the specification
@@ -145,7 +206,8 @@ pub enum RoamError {
     /// partner, or replaced with a default, which moves it. A `start_time` that
     /// fell back to midnight would publish a night tariff as an all-day one.
     #[error(
-        "tariff element {element} restricts on `{field}`, which OCPI cannot carry as written          ({detail}) — dropping it widens the element at the partner and defaulting it moves it,          so neither is a translation of this tariff"
+        "tariff element {element} restricts on `{field}`, which OCPI cannot carry as written \
+         ({detail}) — dropping it widens the element at the partner and defaulting it moves it,          so neither is a translation of this tariff"
     )]
     RestrictionNotExpressible {
         /// Which element, by index.
@@ -243,6 +305,33 @@ pub enum RoamError {
         /// What the kit said about it.
         #[source]
         source: ocpi_kit::types::InvalidString,
+    },
+
+    /// A canonical value does not fit the shape a wire bounds it to.
+    ///
+    /// A refusal rather than a repair, in the direction that leaves: every
+    /// repair here is this side deciding, silently, that a partner may have a
+    /// value that is not the one the record holds.
+    #[error("`{field}` cannot be carried onto the wire: {detail} ({value:?})")]
+    NotOnTheWire {
+        /// Which member.
+        field: &'static str,
+        /// The value that did not fit.
+        value: String,
+        /// What the wire said about it.
+        detail: String,
+    },
+
+    /// The finished document does not satisfy the wire's own schema.
+    ///
+    /// Asked **before** anything is sent, against the kit that owns the model,
+    /// for the reason `emob-ocpp` asks it of a tariff before a station sees
+    /// one: a document rejected by the broker is rejected after the driver has
+    /// gone, and a written-off sale is not a diagnostic.
+    #[error("the finished document does not satisfy OICP 2.3: {violations}")]
+    NotConformant {
+        /// Every violation, by JSON Pointer into the document.
+        violations: String,
     },
 
     /// The document is a Credit CDR — a reversal, not a session.

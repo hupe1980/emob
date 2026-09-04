@@ -1,7 +1,7 @@
 [package]
 name        = "emob-roam"
-description = "The roaming edge: one canonical charge detail record carried onto OCPI 2.3.0 and 2.2.1 with an explicit account of what the crossing cost, routed to the partner the contract identifier itself names"
-keywords    = ["ev-charging", "ocpi", "roaming", "emsp", "cdr"]
+description = "The roaming edge: one canonical charge detail record carried onto OCPI 2.3.0/2.2.1 and OICP 2.3, each with an explicit account of what the crossing cost, routed to the partner the contract identifier itself names"
+keywords    = ["ev-charging", "ocpi", "oicp", "roaming", "cdr"]
 categories  = ["api-bindings", "data-structures"]
 readme      = "README.md"
 
@@ -37,6 +37,12 @@ emob-session = { workspace = true }
 emob-tariff  = { workspace = true }
 
 ocpi-kit = { workspace = true }
+# The other wire, and the reason the module beside `ocpi` exists rather than a
+# generic one: OICP is hub-and-spoke, its CDR carries **no money at all**, and
+# the price crosses separately as a pricing *product* the two parties agreed on.
+# A translation layer that abstracted over the two would have to invent a total
+# for one of them.
+oicp-kit = { workspace = true }
 
 rust_decimal = { workspace = true }
 thiserror    = { workspace = true }
@@ -45,6 +51,12 @@ time         = { workspace = true }
 [dev-dependencies]
 ocmf           = { workspace = true }
 emob-eichrecht = { workspace = true }
+# Dev only, and only for `tests/the_same_session_over_oicp.rs`: `MockHubject` is
+# the broker in a process, so the sequence a real integration would find weeks
+# later — a CDR for a session the broker never opened — is a unit test. It is a
+# dev-dependency because a domain crate has no business holding a broker, and
+# `testkit` reaches `transport`, which is `http`'s types and no socket.
+oicp-kit       = { workspace = true, features = ["testkit"] }
 # Dev only, and only for `tests/one_price_three_audiences.rs`: the claim that
 # one tariff reaches the driver, the partner and the national access point as
 # one number cannot be checked from inside any one of the three crates that

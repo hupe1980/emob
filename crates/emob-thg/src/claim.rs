@@ -130,7 +130,100 @@ pub struct Claim {
     pub efficiency: DriveEfficiency,
 }
 
+/// Which route of the Verordnung a notification is filed under.
+///
+/// The two are not a flag on one claim: `[38k §6]` counts metered kilowatt-hours
+/// at a **public** point and is filed by its operator or their designated third
+/// party; `[38k §7]` counts a published *Schätzwert* per registered battery-
+/// electric vehicle and is filed against a Zulassungsbescheinigung. This crate
+/// builds the first. The enum exists because the *deadlines* differ, and a
+/// deadline is the one fact about the second that is worth stating before the
+/// claim type exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum Route {
+    /// `[38k §6]` — metered energy from publicly accessible charge points.
+    PublicChargePoints,
+    /// `[38k §7]` — the estimate route, *„in anderen Fällen"*.
+    EstimatedPerVehicle,
+}
+
+impl Route {
+    /// The last day a notification for `year` may be filed under this route
+    /// `[38k §8(1) S. 1]`.
+    ///
+    /// > Der Dritte teilt der zuständigen Stelle … die energetischen Mengen des
+    /// > elektrischen Stroms mit, die 1. nach § 6 … entnommen wurde, **bis zum
+    /// > Ablauf des 28. Februar des Folgejahres** oder 2. nach § 7 … **bis zum
+    /// > Ablauf des 15. November des jeweiligen Verpflichtungsjahres**.
+    ///
+    /// The two dates are not variations of one rule and one of them is not even
+    /// in the following year: a `[38k §7]` claim is due **inside** the year it
+    /// is about, six weeks before that year ends. An operator that files both
+    /// routes on one calendar has to hold two dates, and this is them.
+    ///
+    /// The February date is a fixed day and not the end of the month, so a leap
+    /// year does **not** move it: 2028's notification is due 28 February 2029
+    /// and 2027's is due 28 February 2028, which is a leap year and has a 29th
+    /// the Verordnung does not give you.
+    ///
+    /// # Panics
+    ///
+    /// Only for a `year` at the edge of `time::Date`'s own supported range, at
+    /// which point the obligation year is not one anybody is filing for.
+    #[must_use]
+    pub fn deadline(self, year: i32) -> Date {
+        match self {
+            Self::PublicChargePoints => Date::from_calendar_date(year + 1, Month::February, 28)
+                .expect("28 February is a date in every year"),
+            Self::EstimatedPerVehicle => Date::from_calendar_date(year, Month::November, 15)
+                .expect("15 November is a date in every year"),
+        }
+    }
+
+    /// Whether a notification for `year` filed on `on` is still in time.
+    ///
+    /// Inclusive of the deadline itself — *„bis zum Ablauf des"* is the end of
+    /// that day, not its start.
+    #[must_use]
+    pub fn in_time(self, year: i32, on: Date) -> bool {
+        on <= self.deadline(year)
+    }
+}
+
 impl Claim {
+    /// The route this claim is filed under — always `[38k §6]`, because that is
+    /// the claim this crate builds.
+    ///
+    /// Stated rather than assumed so that [`Self::deadline`] reads it from the
+    /// document instead of from the reader's memory, and so that a `[38k §7]`
+    /// claim can be added beside it without changing what this one means.
+    pub const ROUTE: Route = Route::PublicChargePoints;
+
+    /// The last day this notification may be filed `[38k §8(1) S. 1 Nr. 1]`.
+    ///
+    /// A date rather than a check, because a domain crate reads no clock: the
+    /// service that files compares it against today, and a replay two years
+    /// later gets the same answer it got then.
+    #[must_use]
+    pub fn deadline(&self) -> Date {
+        Self::ROUTE.deadline(self.year)
+    }
+
+    /// Whether filing on `on` is in time.
+    ///
+    /// The whole of what a missed deadline costs is the claim: there is no late
+    /// filing and no partial credit, and a year of a fleet's public
+    /// kilowatt-hours is a five- or six-figure sum. `[38k §8(5)]` adds the other
+    /// way it is lost — *„Mitteilungen … die unvollständig sind, werden von der
+    /// zuständigen Stelle abgelehnt"* — which is what every refusal in
+    /// [`ClaimBuilder`] is for.
+    #[must_use]
+    pub fn in_time(&self, on: Date) -> bool {
+        Self::ROUTE.in_time(self.year, on)
+    }
+
     /// The energetic quantity across every point, in megawatt-hours
     /// `[38k §6(1) S. 2 Nr. 4]`.
     #[must_use]
@@ -143,7 +236,12 @@ impl Claim {
     ///
     /// # Panics
     ///
-    /// Never: the year is checked when the claim is built.
+    /// If [`Self::year`] states a year `[38k §5(3)]` counts nothing in — before
+    /// [`crate::factors::FIRST_COUNTED_YEAR`]. [`ClaimBuilder`] refuses one, so
+    /// no claim this crate assembles can reach it; the fields are public, so a
+    /// claim deserialised from a store or written by hand can. That is a
+    /// document nobody may file, and it is better to say so than to return a
+    /// number for a year the Verordnung has none for.
     #[must_use]
     pub fn counted_megawatt_hours(&self) -> Decimal {
         let factor = counting_factor(self.year).expect("the year was checked at construction");
@@ -303,6 +401,13 @@ impl ClaimBuilder {
             _ => None,
         };
 
+        // `[38k §8(1) S. 3]`: one notification per point per obligation year.
+        // A second line for a point already in this notification is the same
+        // rule one level down, and letting it overwrite loses the first
+        // window's energy without failing anything.
+        if self.records.contains_key(&id) {
+            return Err(ThgError::PointAlreadyReported { evse_id: id });
+        }
         self.records.insert(
             id,
             PointRecord {
@@ -358,7 +463,22 @@ impl ClaimBuilder {
 
             // Asked only of a record that contributes. A record from another
             // year is not this notification's to vouch for.
-            if cdr.evidence.is_none() {
+            //
+            // **Present is not verified.** `[38k §6(3) Nr. 2]` wants the energy
+            // determined in conformity with metrology law, which is exactly the
+            // question `emob-eichrecht` already answered — and asking only
+            // whether an `EvidenceRef` exists asks the weaker half of it. A
+            // record whose chain did not hold up carries one, says
+            // `energy_billable: false`, and is refused for money by the CDR
+            // builder and by `priced` — and used to be counted here, in a file
+            // whose whole claim is that only signed kilowatt-hours reach it.
+            // Evidence that is present and failed is worse than evidence that is
+            // absent, and this is the third place that had to learn it (D231).
+            let signed = cdr
+                .evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.energy_billable);
+            if !signed {
                 return Err(ThgError::Unmeasured {
                     cdr: cdr.key.id.to_string(),
                 });

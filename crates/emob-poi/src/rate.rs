@@ -309,6 +309,21 @@ pub enum RateNote {
         /// The upper bound, in the same unit.
         to: Decimal,
     },
+    /// An element that prices a **reservation** was left out of the feed.
+    ///
+    /// `[DATEX-II-Profil]`'s `EnergyRate` states what recharging costs. It has
+    /// no reservation in it — the profile is about the delivery of energy, and a
+    /// reservation runs before any is delivered — so publishing the element's
+    /// price would put a reservation's rate per hour into the national access
+    /// point as the price of charging. It is omitted, and named here, because a
+    /// price the public reads as one thing and the invoice charges for another
+    /// is the drift this whole crate exists to prevent (D243).
+    ReservationPriceNotPublished {
+        /// Which outcome the element priced, in `[OCPI 2.3.0]`'s own token.
+        outcome: &'static str,
+        /// How many price components went with it.
+        components: usize,
+    },
     /// A price applies only under conditions the published rate omits.
     ///
     /// A tariff tier restricted by *power* or by *weekday* has no equivalent in
@@ -397,6 +412,13 @@ impl core::fmt::Display for RateNote {
                 f,
                 "the band {from}–{to} is narrower than one whole unit, so {applicability} is omitted and the price reads as unconditional"
             ),
+            Self::ReservationPriceNotPublished {
+                outcome,
+                components,
+            } => write!(
+                f,
+                "{components} price component(s) price a {outcome} and are not published: [DATEX-II-Profil]'s EnergyRate states what recharging costs, and a reservation runs before any energy is delivered"
+            ),
             Self::RestrictionNotPublished { restriction } => write!(
                 f,
                 "this price applies only under a {restriction} condition, which [DATEX-II-Profil] cannot state: the published price reads as unconditional"
@@ -449,6 +471,15 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
     };
 
     for element in &tariff.elements {
+        // A reservation is not recharging, and the profile states what
+        // recharging costs. See `RateNote::ReservationPriceNotPublished`.
+        if let Some(outcome) = element.restrictions.reservation {
+            notes.push(RateNote::ReservationPriceNotPublished {
+                outcome: outcome.as_str(),
+                components: element.components.len(),
+            });
+            continue;
+        }
         let period = period_of(tariff, element, &mut notes);
         let energy = energy_applicability_of(&element.restrictions, &mut notes);
         let time = time_applicability_of(&element.restrictions, &mut notes);
@@ -473,8 +504,18 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
     // figure on the rate that is a session *total* is the one it cannot qualify.
     if let Some(included) = tax_included {
         for (field, bound) in [
-            ("minimumDeliveryFee", tariff.min_price),
-            ("maximumDeliveryFee", tariff.max_price),
+            (
+                "minimumDeliveryFee",
+                tariff
+                    .min_price
+                    .and_then(|p| p.in_basis(tariff.tax_included)),
+            ),
+            (
+                "maximumDeliveryFee",
+                tariff
+                    .max_price
+                    .and_then(|p| p.in_basis(tariff.tax_included)),
+            ),
         ] {
             if let Some(amount) = bound {
                 notes.push(RateNote::DeliveryFeeHasNoTaxBasis {
@@ -496,8 +537,17 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
         currency: tariff.currency,
         name: None,
         prices,
-        minimum_delivery_fee: tariff.min_price,
-        maximum_delivery_fee: tariff.max_price,
+        // The feed has one field per bound and `[OCPI 2.3.0
+        // §mod_tariffs_pricelimit_class]` has two figures, so what the public
+        // reads is the bound in the tariff's own basis — the figure a driver
+        // compares the price they were shown against. The other limb still
+        // binds; it is the rating that enforces it.
+        minimum_delivery_fee: tariff
+            .min_price
+            .and_then(|p| p.in_basis(tariff.tax_included)),
+        maximum_delivery_fee: tariff
+            .max_price
+            .and_then(|p| p.in_basis(tariff.tax_included)),
         combination_with_parking_fee: prices_parking.then_some(false),
     };
     (rate, notes)
@@ -713,6 +763,7 @@ fn period_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emob_tariff::PriceLimit;
     use emob_tariff::{TariffElement, TariffKind};
 
     fn dec(s: &str) -> Decimal {
@@ -891,7 +942,7 @@ mod tests {
         // gross is out by the whole VAT rate.
         let mut tariff = tariff_of(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
         tariff.tax_included = TaxIncluded::No;
-        tariff.min_price = Some(dec("5.00"));
+        tariff.min_price = Some(PriceLimit::net(dec("5.00")));
 
         let (rate, notes) = publish(&tariff, "r");
         assert_eq!(rate.minimum_delivery_fee, Some(dec("5.00")));
@@ -917,7 +968,7 @@ mod tests {
 
         let mut outside = tariff_of(vec![]);
         outside.tax_included = TaxIncluded::NotApplicable;
-        outside.max_price = Some(dec("40.00"));
+        outside.max_price = Some(PriceLimit::net(dec("40.00")));
         let (_, none) = publish(&outside, "r");
         assert!(none.is_empty(), "{none:?}");
     }

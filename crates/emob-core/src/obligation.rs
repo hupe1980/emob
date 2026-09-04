@@ -1121,10 +1121,17 @@ pub const CALENDAR: &[Obligation] = &[
         },
         remedy: "a shared rectifier cannot be attributed to one session: meter after it, per outlet",
     },
+    // The paragraph names *"einem Messwert oder einer Rechnung"*, and the
+    // invoice half is discharged by construction: `emob_billing` puts the
+    // compensated loss and the sentence on the line stating the measured value,
+    // from the station's own signed record (D253). This is the other half — the
+    // notice at the point, before a driver who may never see an invoice starts
+    // — which nothing in this workspace can evidence and which therefore stays
+    // a fact somebody states.
     Obligation {
         id: ObligationId::ReaRectificationLossDisclosed,
         consequence: Consequence::Breach,
-        title: "The customer must be told that rectification losses are part of the measured value",
+        title: "The customer must be told at the point that rectification losses are part of the measured value",
         citation: "[REA 6-A]",
         applies_from: REA_6A_PUBLISHED,
         applies_until: None,
@@ -1565,6 +1572,195 @@ mod tests {
                 .breaches()
                 .any(|f| f.obligation.id == ObligationId::AfirDigitallyConnected)
         );
+    }
+
+    /// A date after every `applies_from` in the calendar, so nothing is judged
+    /// `NotYetInForce`.
+    fn after_everything() -> Date {
+        CALENDAR
+            .iter()
+            .map(|obligation| obligation.applies_from)
+            .max()
+            .expect("the calendar is not empty")
+    }
+
+    /// An undertaking large enough to be in NIS2 scope, doing everything asked.
+    fn compliant_undertaking() -> UndertakingProfile {
+        let mut u = UndertakingProfile::bare(PartyId::new("DE", "CPO").unwrap());
+        u.operates_recharging_points = true;
+        u.places_digital_products_on_the_market = true;
+        u.employees = 400;
+        u.annual_turnover_eur = Decimal::from(60_000_000);
+        u.balance_sheet_total_eur = Decimal::from(50_000_000);
+        u.registered_with_the_authority = true;
+        u.risk_management = RiskManagement::complete();
+        u.can_warn_within_24_hours = true;
+        u.management_approved_measures = true;
+        u.management_trained = true;
+        u.can_report_exploited_vulnerabilities = true;
+        u.coordinated_vulnerability_disclosure = true;
+        u.products_conformity_assessed = true;
+        u
+    }
+
+    /// A provider disclosing everything and surcharging nothing.
+    fn compliant_provider() -> ProviderProfile {
+        let mut p = ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap());
+        p.discloses_all_price_components = true;
+        p.discloses_e_roaming_costs = true;
+        p.discloses_electronically = true;
+        p.surcharges_cross_border_roaming = false;
+        p
+    }
+
+    /// **No duty in this calendar is decoration, and none of them is inverted.**
+    ///
+    /// Thirty-four of the forty entries were asserted somewhere in this module,
+    /// each by the example that motivated it. Six were not — and an entry
+    /// nothing exercises is one whose `satisfied` closure could read a field
+    /// that is always true, or the wrong field, or the right one negated, and
+    /// the calendar would report a clean estate either way. Rule 1, pointed at
+    /// the table rather than at a `match` arm (D256).
+    ///
+    /// Two statements, and each catches a different way of being wrong:
+    ///
+    /// 1. **A subject that does everything fails nothing.** An inverted
+    ///    `satisfied`, or one reading a field the compliant fixture cannot set,
+    ///    shows up here for every duty at once.
+    /// 2. **A subject that does nothing fails every duty that binds it.** A
+    ///    `satisfied` that is trivially true — a duty nobody can breach — shows
+    ///    up here, and that is the shape a decorative entry takes.
+    ///
+    /// Judged on a date after the last `applies_from`, so the answer is about
+    /// the rule rather than about the calendar.
+    #[test]
+    fn every_duty_can_be_failed_and_every_duty_can_be_met() {
+        let on = after_everything();
+
+        // ── 1. Doing everything fails nothing ──────────────────────────────
+        for (scope, failing) in [
+            (
+                "charge point",
+                assess(&compliant_point(date!(2027 - 06 - 01)), on)
+                    .failing()
+                    .map(|f| f.obligation.id)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "provider",
+                assess_provider(&compliant_provider(), on)
+                    .failing()
+                    .map(|f| f.obligation.id)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "undertaking",
+                assess_undertaking(&compliant_undertaking(), on)
+                    .failing()
+                    .map(|f| f.obligation.id)
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            assert!(
+                failing.is_empty(),
+                "a {scope} that does everything the calendar asks still fails {failing:?}"
+            );
+        }
+
+        // ── 2. Every duty can be breached by somebody ──────────────────────
+        //
+        // A bare subject is the obvious witness for a duty phrased as *do this*,
+        // and it is the wrong one for a duty phrased as *do not do this*: a
+        // point that has not discriminated on price and a provider that has not
+        // surcharged a cross-border session both satisfy their duty by doing
+        // nothing at all, correctly. So the panel carries a subject that does
+        // the forbidden thing as well as ones that omit the required thing, and
+        // the statement is about the calendar rather than about any one row:
+        // **for every entry, some subject here fails it.**
+        //
+        // An entry no subject can fail judges nothing, whatever it says.
+        // A fast public DC charger on the TEN-T, billing by the kilowatt-hour
+        // and metering before its own rectifier — every condition in the
+        // calendar met, and none of the duties they turn on done. A bare
+        // profile is an 11 kW AC point, so most of AFIR simply does not bind it
+        // and "it fails nothing" would be an answer about applicability rather
+        // than about the rules.
+        let mut fast = ChargePointProfile::bare(evse(), date!(2027 - 06 - 01));
+        fast.current_type = CurrentType::Dc;
+        fast.rated_power_kw = Decimal::from(300);
+        fast.on_ten_t = true;
+        fast.on_safe_secure_parking = true;
+        fast.offers_automatic_authentication = true;
+        fast.ownership = Ownership::ThirdPartyWithholding;
+        fast.metering = MeteringPosture {
+            bills_by_energy: true,
+            measurement_point: EnergyMeasurementPoint::AcBeforeRectifier,
+            ..MeteringPosture::default()
+        };
+        fast.registration = Registration {
+            decommissioning: Some(Notice::unreported(date!(2027 - 05 - 01))),
+            operator_change: Some(OperatorChange {
+                happened_on: date!(2027 - 04 - 01),
+                notified_by_previous_operator_on: None,
+                notified_by_new_operator_on: None,
+            }),
+            ..Registration::default()
+        };
+        fast.price_conduct = crate::station::PriceConduct {
+            differentiates_between_providers: true,
+            differentiation_is_justified: false,
+        };
+        // The same, deployed **before** 13.04.2024 — the population the retrofit
+        // limb binds and the first subparagraph does not.
+        let mut legacy = fast.clone();
+        legacy.commissioned_on = date!(2023 - 01 - 01);
+
+        // …and a private wall box installed from 2027, which is the whole
+        // subject of the DA-656 duty that reaches behind the fence.
+        let mut private = ChargePointProfile::bare(evse(), date!(2027 - 06 - 01));
+        private.accessibility = Accessibility::Private;
+
+        let mut surcharging = ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap());
+        surcharging.surcharges_cross_border_roaming = true;
+
+        let panel = [
+            assess(&ChargePointProfile::bare(evse(), date!(2027 - 06 - 01)), on),
+            assess(&fast, on),
+            assess(&legacy, on),
+            assess(&private, on),
+            assess_provider(
+                &ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap()),
+                on,
+            ),
+            assess_provider(&surcharging, on),
+            assess_undertaking(&undertaking_doing_nothing(), on),
+        ];
+        let breachable: std::collections::BTreeSet<ObligationId> = panel
+            .iter()
+            .flat_map(Assessment::failing)
+            .map(|finding| finding.obligation.id)
+            .collect();
+
+        let missing: Vec<ObligationId> = CALENDAR
+            .iter()
+            .map(|obligation| obligation.id)
+            .filter(|id| !breachable.contains(id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "no subject in this panel can fail {missing:?}, so those entries judge nothing"
+        );
+    }
+
+    /// In NIS2 scope by size, and doing none of what the Directive asks.
+    fn undertaking_doing_nothing() -> UndertakingProfile {
+        let mut u = UndertakingProfile::bare(PartyId::new("DE", "CPO").unwrap());
+        u.operates_recharging_points = true;
+        u.places_digital_products_on_the_market = true;
+        u.employees = 400;
+        u.annual_turnover_eur = Decimal::from(60_000_000);
+        u.balance_sheet_total_eur = Decimal::from(50_000_000);
+        u
     }
 
     #[test]

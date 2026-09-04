@@ -303,3 +303,40 @@ fn a_tariff_this_service_does_not_publish_is_refused() {
         .expect_err("a service publishes what it was given and nothing else");
     assert!(matches!(err, PublishError::UnknownTariff { .. }), "{err}");
 }
+
+/// A tariff id is a **name**, and this service publishes **content**.
+///
+/// The whole record of what priced a session is a fingerprint rather than an id,
+/// because ids get reused (`emob_cdr::Cost::tariff_fingerprint`). `prepare`
+/// checked the id and built all three payloads from the object it was handed, so
+/// an edited tariff that never entered the history reached the driver at the
+/// point, the national access point and every roaming partner — quoting a price
+/// no session is rated at, because `TariffHistory::in_force_at` had never heard
+/// of it (D255).
+#[test]
+fn a_version_the_history_does_not_hold_is_not_published_under_its_id() {
+    let tarifd = service();
+
+    // The same id, the same shape, one edited price. `in_force_at` will never
+    // return it, so nothing is ever billed at 0.69.
+    let edited = Tariff::simple(
+        "ad-hoc".parse().unwrap(),
+        Currency::EUR,
+        TariffKind::AdHoc,
+        TimeZone::new("Europe/Berlin").unwrap(),
+        vec![PriceComponent::new(Dimension::Energy, dec("0.69")).with_vat(dec("19"))],
+    )
+    .valid_between(Some(at(600)), None);
+
+    let err = tarifd
+        .prepare(&edited, &party(), at(0))
+        .expect_err("a price no session is rated at may not be published under a known id");
+    assert!(matches!(err, PublishError::NotAVersion { .. }), "{err}");
+
+    // …and the versions the history does hold still publish.
+    for version in [version(None, Some(at(600))), successor()] {
+        tarifd
+            .prepare(&version, &party(), at(0))
+            .expect("a version in the history publishes");
+    }
+}

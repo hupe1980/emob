@@ -58,6 +58,14 @@ delta × (offset / gap)   ❌ precision spent on the ratio first
 The same rule the rating engine follows, for the same reason — and the invariant
 this module is proudest of is exactly what would hide the difference.
 
+Both crates now do it through **one** function, `emob_core::apportion`, which
+also quotes the result to a fixed scale. `Decimal` carries ninety-six bits, and a
+boundary two thirds of the way through a gap spends all of them on its fraction:
+adding two of those needs more digits than there are, the interior boundaries
+stop cancelling, and `conserves()` fails by one unit in the last place — in the
+assertion that exists to prove there is none. Twelve places is a nanowatt-hour,
+and it is the difference between exactly and nearly.
+
 ## A slot carries the window it measured, beside the one it settles in
 
 A session whose readings begin at 10:07 has its first slot reported under the
@@ -243,7 +251,7 @@ platform needs, so the type refuses anything that is not a 256-bit digest.
 ## Sessions are state machines, and the history is timestamped
 
 ```rust
-session.transition_to(SessionState::Suspended, at(40))?;
+session.transition_to(SessionState::SuspendedByVehicle, at(40))?;
 session.end(at(70), EndReason::Local)?;
 session.attach_series(more)?;   // Err: AlreadyEnded
 ```
@@ -260,22 +268,33 @@ minute** for the time a vehicle is connected and not charging, so the question
 is *for how long*, and a state field without a timestamp cannot answer it.
 
 ```rust
-assert_eq!(session.state_at(at(50)), Some(SessionState::Suspended));
-assert!(session.suspended_throughout(at(45), at(60)));   // half an hour to price
+assert_eq!(session.state_at(at(50)), Some(SessionState::SuspendedByVehicle));
+assert_eq!(session.activity_throughout(at(45), at(60)), Some(Activity::Parked));
 ```
 
 `emob-cdr` uses the same history the other way round: energy across a period
 the session says it was not charging in means the meter and the state machine
 disagree, and it refuses the record rather than picking one.
 
-**And there are four states, so the question is asked as "was it charging".**
-`charging_throughout` is not the negation of `suspended_throughout`: `Pending` is
+**And the question is asked once, as "what was it doing".**
+`activity_throughout` returns an `Activity` and may return `None`: `Pending` is
 authorised with nothing flowing and `Ended` is over, and both are "connected and
 not charging" — which is exactly what the fee prices. Every period a CDR carries
-is asked the first question, metered or not; asking `!suspended_throughout`
+is asked that one question, metered or not; asking `!suspended_throughout`
 instead reads "the record never said suspended" as "the vehicle was charging",
 and bills the minute a car sat `EVConnected` before its charge began as charging
 time.
+
+**There are two suspensions, because "no energy is flowing" has two causes and
+only one of them owes a fee.** `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`
+corrected its own definition of `PARKING_TIME` to the **vehicle's** demand, and
+said why: under the old reading drivers "would be exposed to penalizing loitering
+fees … when the EVSE is not offering energy to the vehicle while the vehicle is
+still requesting power". So `SuspendedByVehicle` — the battery is full — is
+`Activity::Parked` and prices as occupancy, while `SuspendedByOperator` — a
+charging profile at zero, a `[EnWG §14a]` dimming, a grid limit, a fault — is
+`Activity::Withheld` and prices as nothing. OCPP has distinguished them since
+2.0.1, as `SuspendedEV` against `SuspendedEVSE`.
 
 Import and export are separate registers counting separate quantities, and one
 session can hold both. They never net: 18 kWh drawn and 5 kWh returned is 18 and

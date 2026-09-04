@@ -677,6 +677,7 @@ dependencies = [
  "hex",
  "ocmf",
  "ocpi-kit",
+ "oicp-kit",
  "p256",
  "rust_decimal",
  "serde_json",
@@ -1558,6 +1559,21 @@ dependencies = [
  "tokio",
  "tokio-util",
  "zeroize",
+]
+
+[[package]]
+name = "oicp-kit"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dcd16a92310a0d449b26b1bbd36f352c0d225e4afc5476c68affd8d7b6709b3"
+dependencies = [
+ "bon",
+ "http",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
 ]
 
 [[package]]

@@ -68,8 +68,12 @@ the measuring and calibration law. This workspace already knows which
 kilowatt-hours those are: `emob-eichrecht` decided it per record and
 `emob-cdr` carries the answer.
 
-So a record with no evidence behind it is **refused** rather than summed. A
-notification that included it would be one the third party's own declaration
+So a record with no evidence behind it is **refused** rather than summed — and so
+is one whose evidence is *there and failed*, which is the worse of the two and the
+one a presence check lets through. A chain that did not hold up still produces an
+`EvidenceRef`; it carries `energy_billable: false` inside it, and asking only
+whether the reference exists asked the weaker half of the question. A
+notification that included either would be one the third party's own declaration
 `[38k §6(4)]` contradicts — and that declaration is kept for three years.
 
 The ledger is read through `CdrLedger::live`, so a corrected record contributes
@@ -160,6 +164,67 @@ the constructor returns the missing condition **by name** and the caller reaches
 for `grid_average`. The fallback is stated rather than performed silently: a
 notification calculated on the wrong basis is one the authority recalculates,
 and the operator learns about it from the difference.
+
+## The deadline is the whole claim
+
+`[38k §8(1) S. 1]` gives the two routes two dates, and one of them falls
+**inside** the obligation year:
+
+> … 1. nach § 6 … bis zum Ablauf des **28. Februar des Folgejahres** oder
+> 2. nach § 7 … bis zum Ablauf des **15. November des jeweiligen
+> Verpflichtungsjahres**.
+
+```rust
+Route::PublicChargePoints.deadline(2026)   // 2027-02-28
+Route::EstimatedPerVehicle.deadline(2026)  // 2026-11-15
+```
+
+There is no late filing and no partial credit. A year of a fleet's public
+kilowatt-hours is a five- or six-figure sum and it is worth nothing on 1 March,
+so a `[38k §7]` filer holding the § 6 date in their head misses by four and a
+half months in the direction that cannot be recovered. It is a `Date` rather than
+a check, because this crate reads no clock: the service that files compares it
+against today.
+
+`[38k §8(1) S. 3]` is the other half — *"Mitteilungen … können für den jeweiligen
+Ladepunkt für das jeweilige Verpflichtungsjahr nur einmal erfolgen"* — so adding
+a point to a notification twice is a refusal rather than a silent replacement of
+the first line, which is how a filer assembling a claim from two overlapping
+inventories loses a window's energy without anything failing.
+
+## Both routes, and the paragraph that makes a bus worth a third more
+
+`[38k §6]` is the route a public charge point files: metered kilowatt-hours, the
+operator as claimant. `[38k §7]` is the other one — *„in anderen Fällen"* — and
+it is not the first with a flag on it:
+
+| | `[38k §6]` | `[38k §7]` |
+|---|---|---|
+| the *Ladepunktbetreiber* | the operator of the point | the person the vehicle is registered to |
+| the quantity | a mess- und eichrechtskonform measured value | a published **Schätzwert**, once per vehicle |
+| the evidence | a signed meter record | a Zulassungsbescheinigung Teil I |
+| the deadline | 28 February of the **following** year | 15 November **inside** the obligation year |
+| the counting factor | `[38k §5(3)]` — three steps | `[38k §7(6)]` — seven, and M3/N3 reach 4 |
+
+No charge point holds a single fact in that right-hand column, which is why it is
+a second claim type.
+
+**The factor is why it is worth building.** `[38k §7(6)]` opens *"Abweichend von
+§ 5 Absatz 3 Satz 1"* and gives classes **M3 and N3** — buses and heavy goods
+vehicles — a factor of **4 from 2027**, stepping down 3.5 (2035), 3 (2036), 2.5
+(2037), 2 (2038), 1.5 (2039), 1 (2040). Against § 5(3)'s 3 that is a third more
+counted energy on the same kilowatt-hours, and it lands exactly where a depot
+operator is **both parties at once**: its posts are not publicly accessible so
+§ 6 refuses them, and its buses are registered to it so § 7 counts them.
+
+Three things fall out of the text rather than out of a summary of it. The
+deviation begins in 2027, so a bus counted in 2026 counts at § 5(3)'s factor and
+the notification **says so** rather than leaving an operator to discover it. A
+mixed fleet is counted at two factors in one notification, because the class is a
+fact about the vehicle. And a vehicle is counted once per obligation year
+`[38k §7(4) S. 2]`, which needs an identifier unique inside one filer's records
+and nothing more — never a registration plate, which is a lifelong identifier of
+a thing a person drives.
 
 ## Where it stops
 

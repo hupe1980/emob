@@ -26,6 +26,7 @@
 //! - a stop reason it does not know becomes [`EndReason::Other`], because how a
 //!   session ended shapes a dispute and never the arithmetic.
 
+use emob_core::Activity;
 use emob_session::{EndReason, ReadingContext};
 use ocpp_kit::csms::events::DomainEvent;
 use ocpp_kit::types::DateTime;
@@ -88,24 +89,39 @@ pub fn end_reason(wire: Option<&str>) -> EndReason {
     }
 }
 
-/// Whether a `chargingState` means energy is flowing.
+/// What a `chargingState` says the session was doing.
 ///
-/// Only `Charging` does. `EVConnected`, `SuspendedEV`, `SuspendedEVSE` and
-/// `Idle` are all a vehicle plugged in and not charging — precisely what an
-/// occupancy fee prices `[AFIR Art. 5(4)]`, and precisely what a meter reading
-/// cannot tell you.
+/// # Three answers, because OCPP gives three and money needs all of them
+///
+/// `[OCPP 2.1 ChargingStateEnumType]` distinguishes the two ways a plugged-in
+/// vehicle can be drawing nothing, and they are not the same fact:
+///
+/// | `chargingState` | | |
+/// |---|---|---|
+/// | `Charging` | energy is flowing | [`Activity::Charging`] |
+/// | `SuspendedEV` | the **vehicle** is not asking | [`Activity::Parked`] |
+/// | `SuspendedEVSE` | the **point** is not offering | [`Activity::Withheld`] |
+/// | `EVConnected`, `Idle` | plugged in, nothing yet | [`Activity::Parked`] |
+///
+/// Reading all four of the non-charging states as occupancy is the reading
+/// `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]` corrected out of its own
+/// specification: a driver whose charge is being held at zero by the operator's
+/// own charging profile — a `[EnWG §14a]` dimming, a load-management ceiling, a
+/// grid limit — would be billed a loitering fee for it. `SuspendedEVSE` is the
+/// state that says so, and it is the one this function keeps apart.
 ///
 /// A station that sends no `chargingState` is reporting a transaction in
-/// progress, so the answer is `true`: the alternative would price a whole
-/// session as occupancy on a missing optional field. OCPP 1.6 never sends one —
-/// it says the same thing through `StatusNotification` — so a 1.6 fleet needs
-/// that event to reach the same conclusion.
+/// progress, so the answer is [`Activity::Charging`]: the alternative would
+/// price a whole session as occupancy on a missing optional field. OCPP 1.6
+/// never sends one — it says the same thing through `StatusNotification` — so a
+/// 1.6 fleet needs that event to reach the same conclusion.
 #[must_use]
-pub fn charging_from(wire: Option<&str>) -> bool {
-    !matches!(
-        wire,
-        Some("EVConnected" | "SuspendedEV" | "SuspendedEVSE" | "Idle")
-    )
+pub fn activity_from(wire: Option<&str>) -> Activity {
+    match wire {
+        Some("SuspendedEVSE") => Activity::Withheld,
+        Some("EVConnected" | "SuspendedEV" | "Idle") => Activity::Parked,
+        _ => Activity::Charging,
+    }
 }
 
 /// The transaction event a [`DomainEvent`] describes, if it describes one.
@@ -133,7 +149,7 @@ pub fn event_from(event: &DomainEvent) -> Option<TransactionEvent> {
             timestamp,
             ..
         } => Some(TransactionEvent {
-            charging: charging_from(charging_state.as_deref()),
+            activity: activity_from(charging_state.as_deref()),
             ..TransactionEvent::updated(instant(*timestamp), readings(signed))
         }),
         DomainEvent::TransactionEnded {
@@ -273,14 +289,28 @@ mod tests {
 
     #[test]
     fn a_charging_state_says_what_a_meter_cannot() {
-        assert!(charging_from(Some("Charging")));
-        assert!(
-            charging_from(None),
+        assert_eq!(activity_from(Some("Charging")), Activity::Charging);
+        assert_eq!(
+            activity_from(None),
+            Activity::Charging,
             "a missing optional field is not occupancy"
         );
-        for parked in ["EVConnected", "SuspendedEV", "SuspendedEVSE", "Idle"] {
-            assert!(!charging_from(Some(parked)), "{parked}");
+        for parked in ["EVConnected", "SuspendedEV", "Idle"] {
+            assert_eq!(activity_from(Some(parked)), Activity::Parked, "{parked}");
         }
+    }
+
+    #[test]
+    fn the_point_withholding_power_is_not_the_driver_loitering() {
+        // The distinction [OCPI 2.3.0 §mod_cdrs_chargingperiod_class] corrected
+        // its own definition of PARKING_TIME to make: a charging profile
+        // holding the point at zero is not a driver leaving a full car on it.
+        assert_eq!(activity_from(Some("SuspendedEVSE")), Activity::Withheld);
+        assert_ne!(
+            activity_from(Some("SuspendedEVSE")),
+            activity_from(Some("SuspendedEV")),
+            "one of these owes an occupancy fee and the other does not"
+        );
     }
 
     #[test]

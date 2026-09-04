@@ -16,7 +16,9 @@ use emob_eichrecht::{Evidence, KeyRegistry, transparency};
 use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
-use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, check_afir, describe};
+use emob_tariff::{
+    Dimension, PriceComponent, PriceLimit, Tariff, TariffKind, check_afir, describe,
+};
 use ocmf::Curve;
 use ocmf::PublicKey;
 use p256::ecdsa::signature::hazmat::PrehashSigner;
@@ -194,7 +196,7 @@ fn occupied_session() -> Session {
         )
         .unwrap();
     session
-        .transition_to(SessionState::Suspended, at(30))
+        .transition_to(SessionState::SuspendedByVehicle, at(30))
         .unwrap();
     session.end(at(60), EndReason::Local).unwrap();
     session
@@ -796,7 +798,7 @@ fn a_priced_record_survives_the_wire_with_its_reasons_intact() {
     // survive serialisation.
     let evidence = evidence_of(&raw_records());
     let mut tariff = fast_charger_tariff();
-    tariff.min_price = Some(dec("15.00"));
+    tariff.min_price = Some(PriceLimit::gross(dec("15.00")));
 
     let cdr = CdrBuilder::from_session(&session(), Direction::Import)
         .unwrap()
@@ -1096,7 +1098,7 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
         )
         .unwrap();
     brief
-        .transition_to(SessionState::Suspended, at(30))
+        .transition_to(SessionState::SuspendedByVehicle, at(30))
         .unwrap();
     brief
         .end(at(30) + time::Duration::seconds(30), EndReason::Local)
@@ -1119,5 +1121,68 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
             .iter()
             .any(|n| n.contains("REA 6-A") && n.contains("30 s")),
         "{notes:?}"
+    );
+}
+
+/// A reservation reaches the record, and the record's own total is the two
+/// ratings together.
+///
+/// `[OCPI 2.3.0]` keeps a reservation apart from the session at every level: a
+/// restriction rather than a dimension, a rating over a window that ran before
+/// any energy moved, and a `total_reservation_cost` of its own. The record has
+/// to hold both or the partner's arithmetic does not close.
+#[test]
+fn a_reserved_session_carries_the_reservation_it_was_started_under() {
+    use emob_tariff::{Reservation, ReservationRestriction, Restrictions, TariffElement};
+
+    let evidence = evidence_of(&raw_records());
+    let mut tariff = fast_charger_tariff();
+    // € 5.00 an hour to hold the point, in ten-minute blocks.
+    tariff.elements.push(TariffElement {
+        components: vec![
+            PriceComponent::new(Dimension::Time, dec("5.00"))
+                .with_vat(dec("19"))
+                .with_step_size(600),
+        ],
+        restrictions: Restrictions {
+            reservation: Some(ReservationRestriction::Reservation),
+            ..Restrictions::default()
+        },
+    });
+
+    let session = session();
+    let cdr = CdrBuilder::from_session(&session, Direction::Import)
+        .unwrap()
+        .key(PartyId::new("DE", "ABC").unwrap(), "cdr-1".parse().unwrap())
+        .evidence(evidence_ref(&evidence))
+        // Reserved twenty minutes before the cable went in.
+        .reserved(Reservation::honoured(
+            session.started_at - time::Duration::minutes(20),
+            session.started_at,
+        ))
+        .rated_with(&tariff)
+        .build()
+        .unwrap();
+
+    let cost = cdr.cost.as_ref().unwrap();
+    let reservation = cost.reservation.as_ref().expect("a reservation was rated");
+
+    // Twenty minutes in a ten-minute block is twenty, at € 5.00 an hour.
+    assert_eq!(reservation.total().to_string(), "1.67 EUR");
+    assert_eq!(
+        reservation.amount_for(Dimension::ParkingTime),
+        None,
+        "the reservation's minutes are not an occupancy fee: nobody was parked"
+    );
+
+    // The session's own rating never sees them, and the record's total is both.
+    assert_eq!(
+        cost.rated.amount_for(Dimension::Time),
+        None,
+        "the reservation element does not price the session"
+    );
+    assert_eq!(
+        cdr.total_cost().unwrap(),
+        cost.rated.gross().checked_add(reservation.gross()).unwrap()
     );
 }

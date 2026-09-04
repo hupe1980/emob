@@ -266,7 +266,7 @@ fn a_driver_month_closes_from_the_meter_to_the_books() {
     assert_eq!(invoice.records().len(), 3);
 
     // ── The European e-invoice, and the verdict on it ───────────────────────
-    let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE).unwrap();
+    let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core).unwrap();
     assert!(
         crossed.value.is_valid(),
         "{:?}",
@@ -370,7 +370,7 @@ fn a_roaming_settlement_is_a_reverse_charge_and_the_books_show_no_vat() {
     assert_eq!(invoice.taxable_total().to_string(), "26.08 EUR");
     assert_eq!(invoice.gross_total().to_string(), "26.08 EUR");
 
-    let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE).unwrap();
+    let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core).unwrap();
     assert!(
         crossed.value.is_valid(),
         "{:?}",
@@ -604,7 +604,11 @@ fn the_german_public_buyers_document_is_produced_or_refused_with_its_reasons() {
     .unwrap()
     .value;
 
-    match en16931::xrechnung(&bare) {
+    match en16931::write(
+        &bare,
+        en16931::Specification::XRechnung,
+        en16931::Syntax::Ubl,
+    ) {
         Err(emob_billing::BillingError::NotCollectable { reason }) => {
             assert!(reason.contains("XRechnung 3.0"), "{reason}");
             assert!(reason.contains("BR-DE-"), "{reason}");
@@ -614,7 +618,7 @@ fn the_german_public_buyers_document_is_produced_or_refused_with_its_reasons() {
     }
 
     // The CEN core is what a roaming partner asks for, and that one is valid.
-    let crossed = en16931::to_en16931(&bare, en16931::CEN_CORE).unwrap();
+    let crossed = en16931::to_en16931(&bare, en16931::Specification::Core).unwrap();
     assert!(
         crossed.value.is_valid(),
         "{:?}",
@@ -648,7 +652,12 @@ fn the_german_public_buyers_document_is_produced_or_refused_with_its_reasons() {
     .unwrap()
     .value;
 
-    let xml = en16931::xrechnung(&complete).unwrap();
+    let xml = en16931::write(
+        &complete,
+        en16931::Specification::XRechnung,
+        en16931::Syntax::Ubl,
+    )
+    .unwrap();
     assert!(xml.value.contains("xrechnung_3.0"), "the profile it claims");
     assert!(xml.value.contains("04011000-12345-67"), "the Leitweg-ID");
     assert!(
@@ -658,6 +667,47 @@ fn the_german_public_buyers_document_is_produced_or_refused_with_its_reasons() {
     assert!(
         xml.value.contains("DE89370400440532013000"),
         "and how to pay it"
+    );
+
+    // …and the same invoice in the other syntax CEN/TS 16931-2 makes
+    // mandatory. One semantic document, two spellings: a recipient's access
+    // point takes one, the other or either, and which is a fact about the
+    // recipient. Every ZUGFeRD payload is one of these.
+    let cii = en16931::write(
+        &complete,
+        en16931::Specification::XRechnung,
+        en16931::Syntax::Cii,
+    )
+    .unwrap();
+    assert!(
+        cii.value.contains("CrossIndustryInvoice"),
+        "the CII root element"
+    );
+    assert!(cii.value.contains("xrechnung_3.0"), "the profile it claims");
+    assert!(cii.value.contains("04011000-12345-67"), "the Leitweg-ID");
+    assert!(cii.value.contains("31.04"), "and the same total");
+    assert_ne!(
+        cii.value, xml.value,
+        "two syntaxes are two documents, not one"
+    );
+
+    // The `[UStG §14]` case the German profile would refuse: an ordinary
+    // business customer with no Leitweg-ID, on the specification the Directive
+    // actually names. `XRechnung`'s `BR-DE-*` are a **public-sector** usage
+    // specification, and writing every invoice against them would refuse lawful
+    // B2B documents for want of a routing identifier the recipient does not
+    // issue.
+    let b2b = en16931::write(&bare, en16931::Specification::Core, en16931::Syntax::Cii).unwrap();
+    assert!(b2b.value.contains("CrossIndustryInvoice"));
+    assert!(
+        b2b.value.contains("urn:cen.eu:en16931:2017<"),
+        "BT-24 is the core, not a CIUS: {}",
+        &b2b.value[..400.min(b2b.value.len())]
+    );
+    assert!(
+        b2b.reasons().any(|note| note.contains("CII")),
+        "the crossing names the syntax the caller chose: {:?}",
+        b2b.reasons().collect::<Vec<_>>()
     );
 }
 
@@ -726,7 +776,7 @@ fn a_two_rate_invoice_states_both_taxable_amounts_and_the_standard_accepts_it() 
     // …and the standard accepts it, which is the check that matters: the
     // per-category arithmetic rules are exactly the ones a single-rate invoice
     // would have failed.
-    let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE).unwrap();
+    let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core).unwrap();
     assert!(
         crossed.value.is_valid(),
         "{:?}",
@@ -797,7 +847,7 @@ fn a_settlement_outside_the_union_is_outside_the_scope_and_states_neither_a_rate
     assert!(invoice.lines.iter().all(|line| line.vat_rate.is_none()));
     assert!(invoice.tax.iter().all(|subtotal| subtotal.rate.is_none()));
 
-    let crossed = en16931::to_en16931(&invoice, en16931::CEN_CORE).unwrap();
+    let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core).unwrap();
     assert!(
         crossed.value.is_valid(),
         "{:?}",

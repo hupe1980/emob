@@ -258,6 +258,21 @@ pub fn postings_for(invoice: &Invoice) -> Postings {
         }
     }
 
+    // A credit note reverses the entry. Every side flips and no amount changes,
+    // which is the same arithmetic an accountant writes and the reason EN 16931
+    // states a credit note's figures as positive: the direction is the document
+    // type, here and there (D229). Booking a `Stornorechnung` the same way as
+    // the invoice it cancels doubles the revenue and the VAT liability, and the
+    // books then disagree with the two documents that were sent.
+    if invoice.kind.is_credit_note() {
+        for posting in &mut postings {
+            posting.side = match posting.side {
+                Side::Debit => Side::Credit,
+                Side::Credit => Side::Debit,
+            };
+        }
+    }
+
     let out = Postings {
         reference: invoice.number.clone(),
         booked_on: invoice.issued_on,
@@ -306,6 +321,9 @@ fn dominant_is_energy(invoice: &Invoice, cdr: &emob_cdr::CdrKey) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use emob_core::Activity;
+    use emob_tariff::PriceLimit;
+
     use super::*;
     use crate::invoice::{Counterparty, DocumentAdjustmentKind, InvoiceBuilder};
     use crate::tax::TaxStatus;
@@ -350,27 +368,60 @@ mod tests {
                 party: PartyId::new("DE", "ABC").unwrap(),
                 id: "c-1".parse().unwrap(),
             },
+            reservation: None,
             session_id: "s-1".parse().unwrap(),
             evse_id: "DE*AB7*E840*6487".parse().unwrap(),
             started_at: at(0),
             ended_at: at(60),
             auth_path: AuthPath::AdHoc,
             authorization_reference: None,
-            periods: vec![ChargingPeriod {
-                quarter_hour: QuarterHour::containing(at(0)),
-                start: at(0),
-                end: at(60),
-                energy: Energy::from_kwh(dec("29.500")).unwrap(),
-                charging: true,
-                provenance: Provenance::Measured,
-            }],
+            clock: emob_core::ClockResolution::conforming(),
+            // The record's own periods are the ones the price was rated from.
+            // They used to be a single charging period covering the whole hour
+            // while the cost charged half an hour of *occupancy* — which the
+            // record accounted none of, and which `emob_cdr::validate` blocks
+            // and `InvoiceBuilder` now refuses (D232).
+            periods: vec![
+                ChargingPeriod {
+                    quarter_hour: QuarterHour::containing(at(0)),
+                    start: at(0),
+                    end: at(30),
+                    energy: Energy::from_kwh(dec("29.500")).unwrap(),
+                    activity: Activity::Charging,
+                    provenance: Provenance::Measured,
+                },
+                ChargingPeriod {
+                    quarter_hour: QuarterHour::containing(at(30)),
+                    start: at(30),
+                    end: at(60),
+                    energy: Energy::ZERO,
+                    activity: Activity::Parked,
+                    provenance: Provenance::Measured,
+                },
+            ],
             total_energy: Energy::from_kwh(dec("29.500")).unwrap(),
             direction: Direction::Import,
-            evidence: None,
+            // Signed, because `[MessEG §33]` lets a measured value be used in
+            // German commercial dealings only where it is traceable to the
+            // measurement, and requires an invoice resting on one to be
+            // checkable by the person it is addressed to. Every fixture here
+            // bills German kilowatt-hours, so every one of them needs a record
+            // behind it (D232).
+            evidence: Some(emob_cdr::EvidenceRef {
+                encoding_method: "OCMF".into(),
+                payload_digests: vec![[1u8; 32]],
+                identification_strength: emob_core::IdentificationStrength::Trusted,
+                energy_billable: true,
+                duration_billable: true,
+                direction: Some(Direction::Import),
+                compensated_loss: None,
+                tariff_changes: Vec::new(),
+            }),
             cost: Some(Cost {
                 tariff_id: "t".parse().unwrap(),
                 tariff_fingerprint: tariff.fingerprint(),
                 rated,
+                reservation: None,
             }),
             supersedes: None,
         };
@@ -417,8 +468,9 @@ mod tests {
             emob_core::TimeZone::new("Europe/Berlin").unwrap(),
             vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
         );
-        tariff.min_price = min;
-        tariff.max_price = max;
+        // `Tariff::simple` quotes gross prices, so the bounds are gross.
+        tariff.min_price = min.map(PriceLimit::gross);
+        tariff.max_price = max.map(PriceLimit::gross);
 
         let energy = Energy::from_kwh(dec(kwh)).unwrap();
         let rated = rate(
@@ -430,27 +482,45 @@ mod tests {
                 party: PartyId::new("DE", "ABC").unwrap(),
                 id: "c-b".parse().unwrap(),
             },
+            reservation: None,
             session_id: "s-b".parse().unwrap(),
             evse_id: "DE*AB7*E840*6487".parse().unwrap(),
             started_at: at(0),
             ended_at: at(30),
             auth_path: AuthPath::AdHoc,
             authorization_reference: None,
+            clock: emob_core::ClockResolution::conforming(),
             periods: vec![ChargingPeriod {
                 quarter_hour: QuarterHour::containing(at(0)),
                 start: at(0),
                 end: at(30),
                 energy,
-                charging: true,
+                activity: Activity::Charging,
                 provenance: Provenance::Measured,
             }],
             total_energy: energy,
             direction: Direction::Import,
-            evidence: None,
+            // Signed, because `[MessEG §33]` lets a measured value be used in
+            // German commercial dealings only where it is traceable to the
+            // measurement, and requires an invoice resting on one to be
+            // checkable by the person it is addressed to. Every fixture here
+            // bills German kilowatt-hours, so every one of them needs a record
+            // behind it (D232).
+            evidence: Some(emob_cdr::EvidenceRef {
+                encoding_method: "OCMF".into(),
+                payload_digests: vec![[1u8; 32]],
+                identification_strength: emob_core::IdentificationStrength::Trusted,
+                energy_billable: true,
+                duration_billable: true,
+                direction: Some(Direction::Import),
+                compensated_loss: None,
+                tariff_changes: Vec::new(),
+            }),
             cost: Some(Cost {
                 tariff_id: "t".parse().unwrap(),
                 tariff_fingerprint: tariff.fingerprint(),
                 rated,
+                reservation: None,
             }),
             supersedes: None,
         };
@@ -536,7 +606,8 @@ mod tests {
 
         // …and the document the standard judges is valid, which one with no
         // lines at all is not.
-        let crossed = crate::en16931::to_en16931(&invoice, crate::en16931::CEN_CORE).unwrap();
+        let crossed =
+            crate::en16931::to_en16931(&invoice, crate::en16931::Specification::Core).unwrap();
         assert!(
             crossed.value.is_valid(),
             "{:?}",
@@ -573,8 +644,9 @@ mod tests {
                 PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_vat(dec("19")),
             ],
         );
-        tariff.min_price = min;
-        tariff.max_price = max;
+        // `Tariff::simple` quotes gross prices, so the bounds are gross.
+        tariff.min_price = min.map(PriceLimit::gross);
+        tariff.max_price = max.map(PriceLimit::gross);
 
         let energy = Energy::from_kwh(dec(kwh)).unwrap();
         let mut periods = Vec::new();
@@ -587,7 +659,7 @@ mod tests {
                 start: at(0),
                 end: at(charging_minutes),
                 energy,
-                charging: true,
+                activity: Activity::Charging,
                 provenance: Provenance::Measured,
             });
         }
@@ -600,7 +672,7 @@ mod tests {
                 start: from,
                 end: to,
                 energy: Energy::ZERO,
-                charging: false,
+                activity: Activity::Parked,
                 provenance: Provenance::Measured,
             });
             cursor += parked_minutes;
@@ -612,20 +684,38 @@ mod tests {
                 party: PartyId::new("DE", "ABC").unwrap(),
                 id: id.parse().unwrap(),
             },
+            reservation: None,
             session_id: format!("s-{id}").parse().unwrap(),
             evse_id: "DE*AB7*E840*6487".parse().unwrap(),
             started_at: at(0),
             ended_at: at(cursor),
             auth_path: AuthPath::AdHoc,
             authorization_reference: None,
+            clock: emob_core::ClockResolution::conforming(),
             periods: cdr_periods,
             total_energy: energy,
             direction: Direction::Import,
-            evidence: None,
+            // Signed, because `[MessEG §33]` lets a measured value be used in
+            // German commercial dealings only where it is traceable to the
+            // measurement, and requires an invoice resting on one to be
+            // checkable by the person it is addressed to. Every fixture here
+            // bills German kilowatt-hours, so every one of them needs a record
+            // behind it (D232).
+            evidence: Some(emob_cdr::EvidenceRef {
+                encoding_method: "OCMF".into(),
+                payload_digests: vec![[1u8; 32]],
+                identification_strength: emob_core::IdentificationStrength::Trusted,
+                energy_billable: true,
+                duration_billable: true,
+                direction: Some(Direction::Import),
+                compensated_loss: None,
+                tariff_changes: Vec::new(),
+            }),
             cost: Some(Cost {
                 tariff_id: "t".parse().unwrap(),
                 tariff_fingerprint: tariff.fingerprint(),
                 rated,
+                reservation: None,
             }),
             supersedes: None,
         }

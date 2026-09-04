@@ -121,6 +121,54 @@ scale is a property of the *currency* rather than a claim by the instrument that
 measured it, which is the exact opposite of the rule `Energy` keeps and the
 reason the two are separate types.
 
+## An activity is three values, because "not charging" is two facts
+
+A plugged-in vehicle draws nothing for two quite different reasons, and only one
+of them owes an occupancy fee. `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`
+corrected its own definition of `PARKING_TIME` — from "time not charging" to
+"time during which the **vehicle is not requesting power**" — and said why: under
+the old reading drivers "would be exposed to penalizing loitering fees … when the
+EVSE is not offering energy to the vehicle while the vehicle is still requesting
+power".
+
+| `Activity` | priced as | energy transferred |
+|---|---|---|
+| `Charging` | `TIME` | ✅ |
+| `Parked` — the vehicle stopped asking | `PARKING_TIME` | |
+| `Withheld` — the point stopped offering | *nothing* | |
+
+`Withheld` is a charging profile at zero, a `[EnWG §14a]` dimming, a grid limit,
+a fault. It lives here rather than in the tariff crate for the same reason
+`Direction` does: five crates need the distinction, and the crate that decides
+money must not learn it from the crate that speaks OCPP. Which dimension prices
+which is `emob_tariff::Dimension::pricing`, beside the dimensions.
+
+## One apportionment, because two spellings of it are two answers
+
+`apportion(base, delta, offset, span)` is how far along a register is: the
+cumulative value `offset` units into a window of `span` across which the register
+moved by `delta`. Two crates ask it — `emob-session` places a quarter-hour
+boundary between two meter readings, `emob-tariff` places a tariff threshold
+inside a period — both settle money, and a second implementation would eventually
+be a second answer.
+
+It **multiplies before it divides**. `delta × offset / span` keeps every digit the
+arithmetic allows; `delta × (offset / span)` has already spent the decimal's
+precision on a repeating fraction before the multiplication.
+
+And then it **rounds**, to `APPORTIONED_SCALE` — twelve places, a nanowatt-hour.
+Both callers build a series of boundary values and take differences, so the pieces
+telescope back to the whole: every interior boundary appears once positive and
+once negative and cancels. That argument is arithmetic rather than folklore, and
+it has one precondition — the additions must be exact. `Decimal` carries a 96-bit
+mantissa, a ratio that does not terminate spends all of it on the fraction, and
+two of *those* cannot be added exactly: the interior boundaries stop cancelling
+and a conservation check reading `==` fails by one unit in the last place, in
+exactly the assertion that exists to prove there is none. Quoted to a fixed scale,
+every difference carries at most that many places and the identity holds as
+written. A nanowatt-hour is three microjoules; the meter that could measure one
+has not been built.
+
 ## One scale, two claims about it
 
 `IdentificationStrength` lives here rather than in either crate that reads it,
@@ -303,6 +351,29 @@ Two things in that regime are easy to get wrong, and both are tested:
 A test asserts that every duty in the calendar is answerable by **exactly one**
 of the three profiles, so none can go quietly unassessable — and so that adding
 a fourth subject cannot leave a duty behind.
+
+### Every entry is exercisable in both directions
+
+Forty duties, each a pair of closures. A `satisfied` that reads the wrong field —
+or the right one negated — answers every question about that duty confidently and
+wrongly, and a report is clean either way: nothing fails, and there is no
+arithmetic to disagree. One property covers all of them (D256):
+
+```rust
+// 1. A subject that does everything the calendar asks fails nothing.
+assert!(assess(&compliant_point(commissioned), late).failing().next().is_none());
+
+// 2. …and every entry is `Failing` for somebody in the panel.
+//    A bare point, a fast public DC charger on the TEN-T doing none of what
+//    its class owes, that charger deployed before 13.04.2024, a private wall
+//    box installed from 2027, a provider, a provider that surcharges, and an
+//    undertaking in NIS2 scope doing nothing.
+```
+
+The panel is the point. A duty phrased *do not do this* is correctly satisfied by
+a subject that has done nothing, and a duty binding a 300 kW charger does not
+bind an 11 kW wall box — so the witness a duty needs is a statement of what the
+duty is about.
 
 ## The dates the text actually gives
 

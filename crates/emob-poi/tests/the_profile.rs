@@ -53,7 +53,7 @@ use emob_poi::site::{
     Address, ChargingPoint, Connector, ConnectorType, Coordinates, Facility, Site, Station,
 };
 use emob_poi::status::PointStatus;
-use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, TaxIncluded};
+use emob_tariff::{Dimension, PriceComponent, PriceLimit, Tariff, TariffKind, TaxIncluded};
 use rust_decimal::Decimal;
 
 include!("profile/reference_paths.rs");
@@ -165,7 +165,7 @@ fn tariff() -> Tariff {
             PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
         ])],
         min_price: None,
-        max_price: Some(dec("100.00")),
+        max_price: Some(PriceLimit::gross(dec("100.00"))),
         valid_from: Some(time::macros::datetime!(2026-01-01 00:00 UTC)),
         valid_until: None,
     }

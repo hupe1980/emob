@@ -226,3 +226,240 @@ fn the_station_selects_the_tier_the_invoice_will_be_built_from() {
         "and OCPI in kilowatt-hours"
     );
 }
+
+/// SplitMix64 — the workspace takes no `rand`, and a seeded sequence is what a
+/// replayable property test wants anyway.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn between(&mut self, low: u64, high: u64) -> u64 {
+        low + self.next() % (high - low + 1)
+    }
+
+    fn chance(&mut self, percent: u64) -> bool {
+        self.between(1, 100) <= percent
+    }
+}
+
+/// A lawful German fast-charger ad-hoc tariff, generated: a price per kWh under
+/// up to two energy tiers, sometimes an occupancy fee at an hourly rate that has
+/// an exact price per minute, sometimes a VAT rate, in either tax basis.
+fn generated(rng: &mut Rng) -> Tariff {
+    let vat = rng.chance(70).then(|| dec("19"));
+    let priced = |dimension: Dimension, price: Decimal| {
+        let component = PriceComponent::new(dimension, price);
+        match vat {
+            Some(rate) => component.with_vat(rate),
+            None => component,
+        }
+    };
+    let cents = |rng: &mut Rng| Decimal::new(i64::try_from(rng.between(20, 99)).unwrap_or(59), 2);
+
+    let mut elements: Vec<emob_tariff::TariffElement> = Vec::new();
+    if rng.chance(50) {
+        let price = cents(rng);
+        let boundary = Decimal::from(rng.between(5, 40));
+        elements.push(emob_tariff::TariffElement {
+            components: vec![priced(Dimension::Energy, price)],
+            restrictions: emob_tariff::Restrictions {
+                max_kwh: Some(boundary),
+                ..emob_tariff::Restrictions::default()
+            },
+        });
+    }
+
+    let price = cents(rng);
+    let mut last = vec![priced(Dimension::Energy, price)];
+    if rng.chance(60) {
+        // An hourly rate divisible by three, so it has an exact price per
+        // minute — the shape `[AFIR Art. 5(4)]` asks for and OCPP 2.1 can state.
+        let per_hour = Decimal::new(i64::try_from(rng.between(1, 12) * 30).unwrap_or(600), 2);
+        last.push(priced(Dimension::ParkingTime, per_hour));
+    }
+    elements.push(emob_tariff::TariffElement::unrestricted(last));
+
+    Tariff {
+        elements,
+        tax_included: if rng.chance(50) {
+            TaxIncluded::No
+        } else {
+            TaxIncluded::Yes
+        },
+        ..ad_hoc()
+    }
+}
+
+/// Every energy price in a tariff, in element order — what each of the three
+/// wires has to carry, in the order it has to carry them.
+fn energy_prices(tariff: &Tariff) -> Vec<Decimal> {
+    tariff
+        .elements
+        .iter()
+        .filter_map(|element| element.component(Dimension::Energy))
+        .map(|component| component.price)
+        .collect()
+}
+
+#[test]
+fn every_lawful_ad_hoc_tariff_reads_one_price_on_all_three_wires() {
+    // The claim above, over five hundred generated tariffs rather than one. A
+    // crossing that rounds, reorders or drops a tier is a station quoting a
+    // price the invoice does not charge — `[PAngV]` and `[AFIR Art. 5(2)]` are
+    // about exactly that, and it is the failure no single example finds because
+    // every example is the shape somebody already thought of.
+    //
+    // **One price, not one decimal**, and the difference is the tax basis. OCPI
+    // 2.3.0 carries the figure verbatim and states the basis on the Tariff
+    // object beside it; the DATEX II profile carries it with its own tax flag;
+    // OCPP 2.1 quotes **net** with a `taxRates` list. So the invariant is that
+    // each wire states the price in the basis it declares, and the station's net
+    // figure grosses back up to the number the other two publish — or the
+    // crossing says by how much it could not.
+    let mut rng = Rng(0x0FE_0000_0000_0001);
+    let party = emob_core::PartyId::new("DE", "ABC").unwrap();
+    let mut gross_tariffs = 0usize;
+    let (mut exact, mut noted) = (0usize, 0usize);
+
+    for case in 0..500 {
+        let tariff = generated(&mut rng);
+        let quoted = energy_prices(&tariff);
+        let rate = tariff.elements[0].components[0].vat;
+
+        // The generator only builds shapes the article permits at 150 kW, and
+        // the conformance check is what says so rather than the generator.
+        assert!(
+            emob_tariff::check_afir(&tariff, dec("150")).is_lawful(),
+            "case {case}: the generator built an unlawful tariff: {:?}",
+            emob_tariff::check_afir(&tariff, dec("150"))
+                .reasons()
+                .collect::<Vec<_>>()
+        );
+
+        // 1 — the roaming partner, over OCPI 2.3.0: the figure verbatim, with
+        //     the basis stated on the Tariff object.
+        let ocpi = to_ocpi(&tariff, &party, at()).expect("a lawful tariff crosses onto OCPI");
+        let at_the_partner: Vec<Decimal> = ocpi
+            .value
+            .elements
+            .iter()
+            .flat_map(|element| &element.price_components)
+            .filter(|component| {
+                component.component_type == ocpi_kit::v2_3_0::tariffs::TariffDimensionType::Energy
+            })
+            .map(|component| component.price.get())
+            .collect();
+        assert_eq!(at_the_partner, quoted, "case {case}: OCPI 2.3.0");
+        assert_eq!(
+            ocpi.value.tax_included,
+            emob_roam::ocpi::tariff::tax_included(tariff.tax_included),
+            "case {case}: the basis the figure is stated in"
+        );
+
+        // 2 — the national access point, over DATEX II: the same figure, with
+        //     the profile's own tax flag.
+        let (published, _) = rate::publish(&tariff, "rate-1");
+        let in_the_feed: Vec<Decimal> = published
+            .prices
+            .iter()
+            .filter(|price| price.price_type == rate::PriceType::PricePerKwh)
+            .map(|price| price.value)
+            .collect();
+        assert_eq!(in_the_feed, quoted, "case {case}: DATEX II");
+
+        // 3 — the driver at the point, over OCPP 2.1: **net**, and the gross it
+        //     grosses back up to is the number the other two publish.
+        let ocpp = emob_ocpp::to_ocpp(&tariff, at())
+            .unwrap_or_else(|error| panic!("case {case}: a lawful tariff was refused: {error}"));
+        let on_the_station: Vec<Decimal> = ocpp
+            .value
+            .energy
+            .as_ref()
+            .expect("every generated tariff prices energy")
+            .prices
+            .iter()
+            // `ocpp-kit` carries its own exact decimal, so the comparison goes
+            // through the digits both types agree on rather than through a
+            // conversion either could round.
+            .map(|price| dec(&price.price_kwh.to_string()))
+            .collect();
+
+        let factor = match (tariff.tax_included, rate) {
+            (TaxIncluded::Yes, Some(rate)) => Decimal::ONE + rate / Decimal::from(100),
+            _ => Decimal::ONE,
+        };
+        if factor != Decimal::ONE {
+            gross_tariffs += 1;
+        }
+        for (net, gross) in on_the_station.iter().zip(&quoted) {
+            let regrossed = net * factor;
+            if regrossed != *gross {
+                noted += 1;
+            } else {
+                exact += 1;
+            }
+            assert!(
+                regrossed == *gross || !ocpp.is_lossless(),
+                "case {case}: the station quotes {net} net, which grosses to {regrossed} \
+                 against the {gross} the feed publishes, and nothing said so"
+            );
+        }
+
+        // …and the driver's own screen reads the tariff's own figure.
+        assert_eq!(
+            describe(&tariff, at()).per_kwh(),
+            Some(quoted[0]),
+            "case {case}: the price the driver reads first is the first tier"
+        );
+
+        // The occupancy fee, where there is one: per minute at the station, per
+        // hour at the partner, and sixty of the first is the second — in the
+        // station's own basis, so the conversion is the only difference.
+        if let Some(per_hour) = tariff
+            .elements
+            .iter()
+            .filter_map(|element| element.component(Dimension::ParkingTime))
+            .map(|component| component.price)
+            .next()
+        {
+            let per_minute = dec(&ocpp
+                .value
+                .idle_time
+                .as_ref()
+                .expect("an occupancy fee crosses onto OCPP 2.1")
+                .prices[0]
+                .price_minute
+                .to_string());
+            let regrossed = per_minute * Decimal::from(60) * factor;
+            assert!(
+                regrossed == per_hour || !ocpp.is_lossless(),
+                "case {case}: the minute and the hour disagree ({regrossed} against {per_hour})"
+            );
+            assert_eq!(
+                describe(&tariff, at()).occupancy_per_minute(),
+                Some(per_hour / Decimal::from(60)),
+                "case {case}: the screen quotes the tariff's own basis"
+            );
+        }
+    }
+
+    assert!(
+        gross_tariffs > 100,
+        "only {gross_tariffs} of 500 tariffs were quoted gross, and that is the case the \
+         station's net figure exists for"
+    );
+    // Both halves of the invariant are exercised, and the second is not rare:
+    // an ordinary €0.57 at 19 % has **no** exact net, so a third of the prices
+    // here cannot be stated on the wire to the last digit. The residual is a
+    // tenth of an attoeuro per kilowatt-hour and it is reported by JSON Pointer
+    // rather than absorbed, which is the whole difference between this and a
+    // station quietly quoting a price the feed does not publish.
+    assert!(exact > 0 && noted > 0, "exact {exact}, noted {noted}");
+}

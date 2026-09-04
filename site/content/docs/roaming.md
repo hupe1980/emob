@@ -34,7 +34,7 @@ flowchart LR
     CDR --> X23["OCPI 2.3.0"]
     CDR --> X22["OCPI 2.2.1"]
     CDR --> SELF["self-roaming<br/>own EMP"]
-    CDR -.-> OICP["OICP · Hubject"]
+    CDR --> OICP["OICP 2.3 · Hubject"]
     CDR -.-> EMIP["eMIP · GIREVE"]
 
     X23 --> ACC["Crossing&lt;T&gt;<br/>the value and the account,<br/>by JSON Pointer"]
@@ -124,6 +124,29 @@ document does not show is a refusal.** Three seams now return the same
 access point feed — and the type lives in the shared vocabulary crate for that
 reason rather than in whichever one needed it first.
 
+
+## Two `PARKING_TIME`s, and the specification defines both
+
+`[OCPI 2.3.0]` uses the words twice with two definitions, and they are not the
+same quantity. The `ChargingPeriod` **dimension** was corrected by an erratum to
+the vehicle's own demand — "time during which the **vehicle is not requesting
+power**", because the old reading exposed drivers "to penalizing loitering fees
+… when the EVSE is not offering energy to the vehicle while the vehicle is still
+requesting power". The CDR **field** `total_parking_time` was not corrected: it
+is still "no energy was transferred between EVSE and EV".
+
+The two differ by exactly the time the point withheld power, so computing one
+from the other is wrong in whichever one you derived. The crossing takes each
+from the question that defines it: the dimension from `Dimension::pricing`, the
+field from `Activity::transfers_energy`.
+
+A withheld period therefore crosses with its energy and **no time dimension at
+all**, its seconds still inside `total_time`. Read back, a period stating neither
+`TIME` nor `PARKING_TIME` and moving no energy is read as withheld rather than as
+occupancy — OCPI's dimensions are volumes, so no time volume is no billable time.
+It costs the driver nothing on a re-rating, it is noted, and this workspace's own
+document round-trips exactly.
+
 ## …and the record comes back
 
 `from_ocpi` reads a partner's CDR into the canonical model, and the test that
@@ -136,7 +159,7 @@ The two directions are not mirror images:
 | Canonical | OCPI | Coming back |
 |---|---|---|
 | a period's `end` | a start and no end | the next period's start, and the last from `end_date_time` |
-| `charging` | the period's dimensions | `TIME` says charging, `PARKING_TIME` says not. A period stating neither is **reported** — the fallback reads a taper as occupancy, and `[AFIR Art. 5(4)]` prices the two differently |
+| `activity` | the period's dimensions | `TIME` says charging and `PARKING_TIME` says the vehicle was not asking `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`. A period stating **both** is reported, because the fallback — energy moved — reads a taper as occupancy. A period stating **neither** and moving no energy is read as time the point *withheld*, which is what this side writes for one and costs the driver nothing on a re-rating |
 | `provenance` | nothing at all | interpolated, for every period: a number whose provenance nobody stated is not one this side may call measured |
 | `auth_path` | three values for six paths | narrowed by the token type, and noted where it cannot be |
 | `cost` | totals, no unit prices | **not** rebuilt |
@@ -158,11 +181,21 @@ argument to the conversion rather than something it produces.
 
 `Cdr::rerated_with` prices a partner's record with this side's own tariff, and
 applies every gate the issuing side applies. That matters because the obvious
-composition — `rate(&retail, &cdr.chargeable()?)` — skips all four: a tariff not
-in force when the session ran, a version the meter says was superseded
-mid-session, a duration the signed records do not vouch for, and the clock
-resolution under a per-minute fee. The periods, the energy and the evidence stay
-the record's own, so the two prices are about the same session by construction.
+composition — `rate(&retail, &cdr.chargeable()?)` — skips all five: a chain that
+did not verify against **this** side's registry, a tariff not in force when the
+session ran, a version the meter says was superseded mid-session, a duration the
+signed records do not vouch for, and the clock resolution under a per-minute fee
+— which the record carries, so a replay cannot be told a different one. The
+periods, the energy and the evidence stay the record's own, so the two prices are
+about the same session by construction.
+
+The first of those gates is the newest and it is the reason this door matters. A
+partner's record is **assembled** into the canonical model rather than built from
+a session, so it never passes `CdrBuilder`, and the gate lives at the door a
+`Cost` is made through instead.
+Re-rating a record whose payloads failed verification therefore priced a forged
+session at this side's retail tariff and invoiced it to a driver, which is the
+one outcome the EMP path exists to prevent.
 
 `tests/the_other_hat.rs` runs the whole EMP half: a partner's OCPI document,
 verified against **this** side's registry, re-rated at this side's retail price,
@@ -239,10 +272,65 @@ One genuinely signed session settles at the **same money** over three paths —
 self-roaming, OCPI 2.3.0 and OCPI 2.2.1 — with the signed records arriving
 verbatim and re-verifying at the far end against the receiver's own registry.
 
+The same session also goes out over **Hubject**, through `MockHubject` — the
+broker in a process, which validates a record the way the live one does — and
+comes back with its energy and its evidence intact. That property is a different
+sentence, because the wire is: see below.
+
 The tariff crosses too, and the same session's price reads identically to the
 partner, to the driver at the point and to the national access point — see
 [Tariffs](@/docs/pricing.md#one-price-three-audiences).
 
-OICP (Hubject) and eMIP (GIREVE legacy) are 📐: designed, not written. So are
-OCPI's Sessions and Tokens modules, which are a service's publishing surface
-rather than a settlement question.
+eMIP (GIREVE legacy) is 📐: designed, not written. So are OCPI's Sessions and
+Tokens modules, which are a service's publishing surface rather than a settlement
+question, and `roamd` — the daemon that owns the transport for both wires.
+
+## The second wire settles a different thing
+
+OICP is hub-and-spoke where OCPI is peer-to-peer: every partner talks only to
+Hubject, over mutual TLS, and Hubject calls back. That changes the transport and
+almost nothing about the translation — except for one fact, which is large enough
+that the crossing is built around it.
+
+**An OICP charge detail record carries no money.** No `total_cost`, no price, no
+per-dimension breakdown: the members are the session's four timestamps, the
+register readings, `ConsumedEnergy`, the identification, the signed meter values
+and a `PartnerProductID`. The amount is settled out of band, against a pricing
+product the two parties agreed on.
+
+```rust
+let crossing = oicp::cdr::to_oicp(&cdr, &partner, &context)?;
+
+// The energy, the evidence and the identity crossed…
+assert_eq!(check_conserves(&crossing.value)?, kwh("18.000"));
+// …and the €8.82 did not, which the account says on every record:
+// "/PartnerProductID: this record priced at 8.82 EUR on the issuing side and
+//  OICP carries no cost field of any kind…"
+```
+
+So the price reaches the partner separately, as a `PricingProductDataRecord` —
+which has **one** base price per reference unit, a short list of named extras, no
+tiers and no tax. An energy price beside a charging-time price has nowhere to put
+the second; a kilowatt-hour tier has no spelling at all. Both are refusals by
+name, because a product that prices a session differently from the tariff that
+rates it is exactly the drift one canonical model exists to prevent.
+
+### The same fact, a note on one wire and a refusal on the other
+
+A **discharge** is refused on both: `ConsumedEnergy` has no sign, exactly as
+`total_energy` has none.
+
+**AutoCharge** differs, and the difference is the interesting one. OCPI collapses
+Plug & Charge and AutoCharge into a single `AUTH_REQUEST` that names neither, so
+the crossing there reports a lost distinction. OICP's
+`PlugAndChargeIdentification` *names* ISO 15118 — so the same value would assert a
+contract certificate that was never presented, and a note attached to a false
+statement is not something a partner can act on. Which of the two it is depends
+on how specific the field is, not on how important the fact is.
+
+### …and one place a crossing gains
+
+OICP has four timestamps where OCPI has two. The five minutes a car sits
+connected before its charge begins — which an OCPI reader attributes to whichever
+measured period precedes it — is a fact on this document rather than an
+inference, and the account says so in the same voice it uses for what was lost.

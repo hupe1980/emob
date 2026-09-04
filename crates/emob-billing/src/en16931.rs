@@ -20,19 +20,34 @@
 //!
 //! An invoice that serialises and does not validate is an invoice that will come
 //! back. So [`to_en16931`] returns the semantic invoice and its
-//! [`ValidationReport`] together, and [`xrechnung`] refuses to produce a
-//! document that its profile rejects: `Validated<XRechnung>` is a type that
-//! cannot be constructed from an invalid invoice, which is the same discipline
+//! [`ValidationReport`] together, and [`write()`] refuses to produce a
+//! document that its profile rejects: `Validated<P>` is a type that cannot be
+//! constructed from an invalid invoice, which is the same discipline
 //! `Evidence::billable_energy` applies to a kilowatt-hour one layer down.
+//!
+//! # Two questions, and neither has a default
+//!
+//! [`Specification`] is BT-24 **and** the rules the document is judged by, in
+//! one argument, so nothing can claim one profile having been checked against
+//! another. [`Syntax`] is UBL or CII, the two CEN/TS 16931-2 makes mandatory:
+//! one semantic invoice, two spellings, and which one an access point takes is a
+//! fact about the recipient.
 //!
 //! # What EN 16931 cannot carry, and is told
 //!
-//! | Fact | Why it does not cross |
+//! | Fact | Where it goes |
 //! |---|---|
-//! | the signed meter records | there is no business term for evidence. `BT-18` carries *an* object identifier and the digests are many |
-//! | the quarter-hour periods | a line is a quantity and a price; the settlement grid is not an invoice concept |
-//! | which tariff version priced it | `BT-127`, the free-text line note, is the only place it fits, and it goes there |
-//! | a rating note | the same — and a note that stayed behind is a note nobody can invoke |
+//! | the signed meter records | **nowhere**: there is no business term for evidence. `BT-18` carries *an* object identifier and the digests are many. The record is named instead, so a holder of the invoice can ask for it |
+//! | the quarter-hour periods | **nowhere**: a line is a quantity and a price, and the settlement grid is not an invoice concept |
+//! | which record a line came from | `BT-127`, the line's own free text — where a dispute starts |
+//! | compensated cable or rectification loss | the same note, because `[REA 6-A §3.2]` names *"einem Messwert **oder einer Rechnung**"* and this is the line stating the measured value |
+//! | a rating note the **payer** is owed | `BG-1` (BT-22), coded `AAI`, one per note. A quantity billed differently from how it was measured is a sentence the person paying finds on the document rather than discovers |
+//! | a rating note only the **operator** can act on | the [`Crossing`] this returns. A rate no split can be computed from is a fault in a document the payer did not write |
+//!
+//! The first two rows are losses and say so. The tariff version is not among
+//! them and is deliberately absent: a line names its record, and the record
+//! names the tariff by content, so a second identifier here would be a name the
+//! recipient cannot resolve without the record anyway (D253).
 
 use emob_core::Crossing;
 use en16931::invoice::{
@@ -43,15 +58,101 @@ use en16931::validation::ValidationReport;
 use en16931::{Date, Identifier, InvoiceAmount, Percentage, Quantity};
 use rust_decimal::Decimal;
 
+/// UNCL 4451 — *general information*, the subject code BT-21 takes for a note
+/// that is neither a payment term nor a tax statement.
+const GENERAL_INFORMATION: &str = "AAI";
+
 use crate::error::BillingError;
 use crate::invoice::{Counterparty, DocumentAdjustmentKind, Invoice, InvoiceLine, PaymentDetails};
 use crate::tax::VatCategory;
 
-/// The CEN core specification identifier — BT-24.
-pub const CEN_CORE: &str = "urn:cen.eu:en16931:2017";
-/// `XRechnung` 3.0's, which a German public buyer requires.
-pub const XRECHNUNG_3: &str =
-    "urn:cen.eu:en16931:2017#compliant#urn:xoev-de:kosit:standard:xrechnung_3.0";
+/// The specification a document is written against — BT-24, **and** the rule
+/// set it is judged by.
+///
+/// # Why the two are one argument
+///
+/// They are the same decision, and separating them is how a document comes to
+/// claim one thing and have been checked against another. That is the single
+/// most common way an invoice passes local validation and is rejected on
+/// receipt, and it is the reason `en16931` carries a typed proof at all: a
+/// `Validated<XRechnung>` cannot be constructed from an invoice the `XRechnung`
+/// rules reject, and the writer stamps BT-24 from the profile that proved it.
+/// Taking BT-24 as a string here would put the mismatch back one layer up.
+///
+/// # Which one an invoice needs
+///
+/// `[UStG §14]` requires a B2B invoice to conform to Directive 2014/55/EU —
+/// which is EN 16931 itself, [`Self::Core`]. `XRechnung`'s `BR-DE-*` rules are a
+/// German **public-sector** usage specification: they demand a Leitweg-ID, a
+/// seller contact and payment instructions that a private company neither has
+/// nor needs. Writing every invoice as `XRechnung` would refuse lawful B2B
+/// documents for want of a routing identifier the recipient does not issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum Specification {
+    /// EN 16931 itself — the core the Directive names, and what a partner
+    /// settlement and an ordinary B2B invoice are judged against.
+    Core,
+    /// `XRechnung` 3.0, the German public-sector CIUS.
+    XRechnung,
+    /// Peppol BIS Billing 3.0, for a document that crosses the Peppol network.
+    PeppolBis3,
+}
+
+impl Specification {
+    /// The identifier BT-24 states.
+    #[must_use]
+    pub const fn identifier(self) -> &'static str {
+        match self {
+            Self::Core => "urn:cen.eu:en16931:2017",
+            Self::XRechnung => {
+                "urn:cen.eu:en16931:2017#compliant#urn:xoev-de:kosit:standard:xrechnung_3.0"
+            }
+            Self::PeppolBis3 => {
+                "urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0"
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for Specification {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Core => "EN 16931",
+            Self::XRechnung => "XRechnung 3.0",
+            Self::PeppolBis3 => "Peppol BIS Billing 3.0",
+        })
+    }
+}
+
+/// Which of the two syntaxes CEN/TS 16931-2 makes mandatory.
+///
+/// Both are the same semantic invoice; a recipient's access point accepts one,
+/// the other or either, and it is a fact about the recipient rather than about
+/// the document. Neither is a default here for the reason a time zone is not:
+/// a syntax nobody chose is a document somebody returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum Syntax {
+    /// OASIS UBL 2.1, which the German platforms take by default.
+    Ubl,
+    /// UN/CEFACT CII D16B — the other mandatory one, and the payload every
+    /// `ZUGFeRD` hybrid PDF carries.
+    Cii,
+}
+
+impl core::fmt::Display for Syntax {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Ubl => "UBL",
+            Self::Cii => "CII",
+        })
+    }
+}
+
 /// UNCL 1001 code 380 — a commercial invoice.
 const COMMERCIAL_INVOICE: &str = "380";
 /// The business process BT-23 states.
@@ -91,9 +192,10 @@ impl Crossed {
 /// Carry an invoice onto EN 16931's semantic model, and validate it.
 ///
 /// `specification` is BT-24 and it selects the rule set the document will be
-/// judged by — [`CEN_CORE`] for a partner settlement, [`XRECHNUNG_3`] for a
-/// German public buyer. It is an argument because it is a fact about the
-/// *recipient*, and this crate has no way to know one.
+/// judged by — [`Specification::Core`] for a partner settlement or an ordinary
+/// B2B invoice under `[UStG §14]`, [`Specification::XRechnung`] for a German
+/// public buyer. It is an argument because it is a fact about the *recipient*,
+/// and this crate has no way to know one.
 ///
 /// # Errors
 ///
@@ -102,14 +204,26 @@ impl Crossed {
 /// can for one that arrived over a wire.
 pub fn to_en16931(
     invoice: &Invoice,
-    specification: &str,
+    specification: Specification,
 ) -> Result<Crossing<Crossed>, BillingError> {
     let mut crossing = Crossing::lossless(());
 
+    // A credit note is built as the document it reverses and then turned into
+    // one, because `en16931::Invoice::to_credit_note` is what knows the four
+    // changes — BT-3, the UBL root element, the new identity, and the BG-3
+    // reference back — and a second spelling of them here would be a second
+    // answer. So BT-1 and BT-2 start as the *cancelled* document's, and the
+    // conversion below moves them into BG-3 and puts this document's own in
+    // their place (D229).
+    let (number, issued_on) = invoice.cancels.as_ref().map_or_else(
+        || (invoice.number.clone(), invoice.issued_on),
+        |cancelled| (cancelled.number.clone(), cancelled.issued_on),
+    );
+
     let mut builder = en16931::Invoice::builder(
-        specification,
-        invoice.number.clone(),
-        date_of(invoice.issued_on, "issue date (BT-2)")?,
+        specification.identifier(),
+        number,
+        date_of(issued_on, "issue date (BT-2)")?,
         COMMERCIAL_INVOICE,
         invoice.currency.as_str(),
     )
@@ -123,6 +237,8 @@ pub fn to_en16931(
     if let Some(reference) = &invoice.buyer_reference {
         builder = builder.buyer_reference(reference.clone());
     }
+
+    builder = payer_notes(invoice, builder);
 
     for line in &invoice.lines {
         builder = builder.line(invoice_line(invoice, line)?);
@@ -170,6 +286,19 @@ pub fn to_en16931(
     }
     built.payment = invoice.payment.as_ref().map(payment_instructions);
 
+    // …and now it becomes the credit note, through the upstream function whose
+    // documentation is the specification for what a `Stornorechnung` changes.
+    // A `kind` of `CreditNote` with no `cancels` cannot be built by this crate,
+    // and one that arrived over a wire gets a document with no BG-3 rather than
+    // an invented reference: `BR-55` wants BT-25 to have content, and a blank
+    // one turns a missing number into a second, more confusing finding.
+    if invoice.kind.is_credit_note() {
+        built = built.to_credit_note(
+            invoice.number.clone(),
+            date_of(invoice.issued_on, "credit note issue date (BT-2)")?,
+        );
+    }
+
     // The three facts this workspace holds and the standard has no term for.
     // Said once per document rather than once per line: ninety-six identical
     // notes are the same fact reported ninety-six times.
@@ -216,7 +345,29 @@ pub fn to_en16931(
     }))
 }
 
-/// The invoice as an `XRechnung` 3.0 UBL document.
+/// The invoice as an EN 16931 document, in a named specification and one of the
+/// two mandatory syntaxes.
+///
+/// # The verdict comes first, and it is the profile's own
+///
+/// A document that serialises and does not validate is a document that will come
+/// back, so this refuses rather than warns: the writers here take a
+/// `Validated<P>`, a type that cannot be constructed from an invoice the profile
+/// rejects, and they stamp BT-24 from the profile that proved it. A document
+/// claiming `XRechnung` because somebody typed the string, having been checked
+/// against the bare core, is unrepresentable rather than discouraged.
+///
+/// ```no_run
+/// # use emob_billing::en16931::{Specification, Syntax, write};
+/// # fn demo(invoice: &emob_billing::Invoice) -> Result<(), emob_billing::BillingError> {
+/// // A German public buyer.
+/// let xml = write(invoice, Specification::XRechnung, Syntax::Ubl)?.value;
+/// // A private company under `[UStG §14]`, whose access point wants CII.
+/// let cii = write(invoice, Specification::Core, Syntax::Cii)?.value;
+/// # let _ = (xml, cii);
+/// # Ok(())
+/// # }
+/// ```
 ///
 /// # Errors
 ///
@@ -225,32 +376,69 @@ pub fn to_en16931(
 /// which is a refusal rather than a warning for the reason the whole workspace
 /// draws that line: a document that will come back is not a document, and the
 /// findings name the term to fix.
-pub fn xrechnung(invoice: &Invoice) -> Result<Crossing<String>, BillingError> {
-    let crossed = to_en16931(invoice, XRECHNUNG_3)?;
+pub fn write(
+    invoice: &Invoice,
+    specification: Specification,
+    syntax: Syntax,
+) -> Result<Crossing<String>, BillingError> {
+    let crossed = to_en16931(invoice, specification)?;
     let (mut crossing, crossed) = split(crossed);
 
-    let validated = en16931::validation::profile::Validated::<en16931::profiles::XRechnung>::new(
-        crossed.invoice,
-    )
-    .map_err(|rejected| BillingError::NotCollectable {
-        reason: format!(
-            "this invoice does not satisfy XRechnung 3.0: {}",
-            rejected
-                .1
-                .fatal()
-                .map(|finding| format!("{} {}", finding.path, finding.rule))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    })?;
+    let written = match specification {
+        Specification::Core => {
+            serialise::<en16931::profiles::En16931>(crossed.invoice, specification, syntax)
+        }
+        Specification::XRechnung => {
+            serialise::<en16931::profiles::XRechnung>(crossed.invoice, specification, syntax)
+        }
+        Specification::PeppolBis3 => {
+            serialise::<en16931::profiles::PeppolBis3>(crossed.invoice, specification, syntax)
+        }
+    }?;
 
-    let written = en16931_formats::ubl::write_validated(&validated);
     crossing.note(
         "/Invoice",
-        "this document is UBL. CII is the other syntax CEN/TS 16931-2 makes mandatory and a \
-         recipient may require it instead",
+        format!(
+            "this document is {specification} in {syntax}. The other syntax CEN/TS 16931-2 makes \
+             mandatory carries the same semantic invoice, and which one a recipient's access \
+             point takes is a fact about the recipient"
+        ),
     );
-    Ok(crossing.map(|()| written.xml))
+    Ok(crossing.map(|()| written))
+}
+
+/// Prove the invoice against one profile and write it in one syntax.
+///
+/// Generic over the profile marker so the proof and the stamped BT-24 are the
+/// same decision — `write_validated` takes `P::PROFILE.specification_id` — and
+/// so a specification added to [`Specification`] is a `match` arm rather than a
+/// second validation path.
+fn serialise<P>(
+    invoice: en16931::Invoice,
+    specification: Specification,
+    syntax: Syntax,
+) -> Result<String, BillingError>
+where
+    P: en16931::validation::profile::ProfileMarker,
+{
+    let validated =
+        en16931::validation::profile::Validated::<P>::new(invoice).map_err(|rejected| {
+            BillingError::NotCollectable {
+                reason: format!(
+                    "this invoice does not satisfy {specification}: {}",
+                    rejected
+                        .1
+                        .fatal()
+                        .map(|finding| format!("{} {}", finding.path, finding.rule))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        })?;
+    Ok(match syntax {
+        Syntax::Ubl => en16931_formats::ubl::write_validated(&validated).xml,
+        Syntax::Cii => en16931_formats::cii::write_validated(&validated).xml,
+    })
 }
 
 /// BG-22 — the totals chain, in the order `BR-CO-10` … `BR-CO-16` states it.
@@ -368,11 +556,52 @@ fn invoice_line(
             attributes: Vec::new(),
         },
     };
-    // BT-127. The one place the record this line came from fits, and it is
-    // where a dispute starts: a partner holding the invoice can ask for that
-    // CDR by name.
-    built.note = Some(format!("CDR {}", line.cdr));
+    // BT-127, the line's own free text — 0..1, so everything this line has to
+    // say has to fit in one sentence.
+    //
+    // The record it came from is where a dispute starts: a partner holding the
+    // invoice can ask for that CDR by name. Beside it, when the register this
+    // line was billed from contains compensated loss, the sentence
+    // `[REA 6-A §3.2]` requires — and it is required **here**, because the
+    // paragraph names *"einem Messwert oder einer Rechnung"* and this is the
+    // line stating the measured value (D253).
+    built.note = Some(line.compensated_loss.map_or_else(
+        || format!("CDR {}", line.cdr),
+        |loss| {
+            format!(
+                "CDR {} — {loss} of this measured value is compensated cable or rectification \
+                 loss and is part of the stated value [REA 6-A §3.2]",
+                line.cdr
+            )
+        },
+    ));
     Ok(built)
+}
+
+/// BG-1, one entry per note the rating owed the **payer**.
+///
+/// A quantity billed differently from how it was measured — a block rounding
+/// that charges for kilowatt-hours nobody delivered, a dimension nothing priced,
+/// a line the station's clock could not resolve. Coded `AAI`, UNCL 4451's
+/// general information, because BT-21 is what a receiving system routes on and
+/// an uncoded note is one it can only display (D253).
+///
+/// The other half of what the rating had to say never reaches a document: a
+/// tariff whose two bounds contradict is a fault the payer did not cause and
+/// cannot act on, and it goes to the operator queue instead. The split is
+/// `emob_tariff::RatingNote::concerns_the_payer`, asked once where the lines are
+/// assembled.
+fn payer_notes(
+    invoice: &Invoice,
+    mut builder: en16931::invoice::InvoiceBuilder,
+) -> en16931::invoice::InvoiceBuilder {
+    for note in &invoice.notes {
+        builder = builder.coded_note(
+            en16931::invoice::InvoiceNote::new(format!("{}: {}", note.cdr, note.text))
+                .with_subject(GENERAL_INFORMATION),
+        );
+    }
+    builder
 }
 
 /// BG-16, from the invoice's own statement of how it will be paid.

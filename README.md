@@ -20,7 +20,7 @@ value survives in, and the driver contract all of it turns into an invoice.
 > [`emob-billing`](crates/emob-billing), [`emob-thg`](crates/emob-thg),
 > [`emob-service`](crates/emob-service)
 > and [`emob-sim`](crates/emob-sim) — with four daemons on top of them and
-> **748 tests**, an end-to-end test that drives the Open Charge Alliance's own
+> **842 tests**, an end-to-end test that drives the Open Charge Alliance's own
 > OCPP example message from the wire to a taxable amount and back out again as a
 > file the driver's verifier reads, records from **five** real meters this
 > workspace did not write, one session that settles at the same money over three
@@ -28,8 +28,12 @@ value survives in, and the driver contract all of it turns into an invoice.
 > roaming partner and the national access point, a month that closes from the
 > meter to a validated e-invoice, a SEPA collection and a balanced set of
 > postings, a year that files its THG-Quote notification with every ineligible
-> point refused by name, and a **hundred-station fleet run** that reconciles
-> exactly.
+> point refused by name, a **hundred-station fleet run** that reconciles
+> exactly, and five **properties over generated inputs** — one price however
+> finely a session is sliced, every quantity priced or named, a record its own
+> validator accepts, a month that adds up under the standard's own 317 rules,
+> and one price on all three wires — and the sessions `[OCPI 2.3.0]` itself
+> walks through in prose, priced to the totals its own breakdown tables publish.
 > Everything else is designed and not yet built, and this README marks which is
 > which rather than blurring the two.
 
@@ -422,8 +426,16 @@ Conservation is not the whole of it, and its strength is also its hiding place:
 the sum telescopes whatever each boundary was rounded to, so an imprecise
 boundary is invisible in the total and lands entirely on the supplier who held
 that quarter hour. Each boundary therefore multiplies before it divides —
-`delta × offset / gap`, never `delta × (offset / gap)` — which is the same rule
-the rating engine follows for the same reason.
+`delta × offset / gap`, never `delta × (offset / gap)` — through the same
+function the rating engine places its tariff thresholds with.
+
+That function also **quotes the result to a fixed scale**, and the reason is the
+telescoping argument's own precondition: the additions have to be exact.
+`Decimal` carries ninety-six bits, a boundary two thirds of the way through a gap
+spends all of them on its fraction, and adding two of those rounds — the interior
+boundaries stop cancelling and `conserves()` fails in the last place, inside the
+assertion that exists to prove it cannot. A nanowatt-hour is the resolution given
+up for it.
 
 ### …and the grid that settles the energy does not price the minutes
 
@@ -510,7 +522,13 @@ granularities comes to one total:
 assert_eq!(rate(&tiered, &session).exact_total().amount(), dec("15.70"));
 ```
 
-A price that depends on how finely the session was sliced is not a price.
+A price that depends on how finely the session was sliced is not a price. The
+cut is placed on the **register** even where the period has no second to hold
+it: a second of a 350 kW charge is a tenth of a kilowatt-hour, and a threshold
+dropped for want of a whole second reprices the whole slice in the tier it began
+in. Fifteen unit tests said the property held; the property test that generates
+two thousand tariffs and sessions and rates each at three resolutions found the
+three cents it did not (D221).
 
 And which price applies is asked **per dimension**, not per period. `[OCPI 2.3.0
 §Tariff]` says so in one sentence — "the first Tariff Element with a Price
@@ -573,6 +591,61 @@ display-versus-bill drift this crate exists to make unrepresentable; not
 rounding it shows a driver twenty-eight digits. Neither is a price "known to end
 users before they initiate a recharging session", so the tariff is refused and
 the remedy is in the message. €6.00 an hour is €0.10 a minute and passes.
+
+### A reservation is priced, and it is not a period of the session
+
+`[OCPI 2.3.0]` prices a reservation through a **restriction** rather than a
+dimension, over a window that *"starts when the reservation is made, and ends
+when the driver starts charging … or when the reservation expires"* — before the
+cable went in, so no meter measured it.
+
+```rust
+let held = Reservation::honoured(reserved_at, plugged_in_at);
+rate_reservation(&tariff, &held)     // its own rating, its own total
+```
+
+Rated as a period of the session it would collide with it: a tariff whose
+unrestricted element prices `TIME` and whose reservation element prices `TIME`
+would have the reservation's minutes and the charging minutes competing for one
+dimension, and the per-dimension rule would drop one of them silently. So it is
+a second entry point over the same arithmetic, and the cost travels in the
+`total_reservation_cost` the specification keeps for it.
+
+Three rules come out of the worked examples rather than the prose: an **expired**
+reservation is priced by the reservation elements and nothing else (tariff 18
+bills €9.00, not €9.50 — there is no session for the session fee to be the fee
+of); on an expiry **both** kinds of element apply in list order; and `min_price`
+and `max_price` do not, because they bound *"a Charging Session"* and this is not
+one.
+
+Making it evaluable made three other things unsafe, and each is a refusal now:
+OCPP 2.1 has no reservation in its *Tariff and Cost* block, `[DATEX-II-Profil]`'s
+`EnergyRate` states what recharging costs, and `[AFIR Art. 5(4)]`'s shape check
+reads only the session elements.
+
+### A price bound is two ceilings, not one
+
+`[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` gives `min_price` and `max_price` a
+figure before taxes and a figure after them, and says "as a rule, **they both
+apply**". One figure with the other derived works while the tariff has one VAT
+rate; a session fee at the standard rate beside energy at a reduced one makes
+the two ceilings non-proportional, and then keeping one lets the total past the
+other. On the specification's own example that is €11.05 gross under a €11.00
+maximum the operator published. `PriceLimit` carries both, and each binds.
+
+### …and `step_size` is a property of the session, not of a price
+
+`step_size` is the block a dimension is billed in, and the obvious
+implementation rounds each line up to its own. `[OCPI 2.3.0
+§mod_cdrs_step_size]` says it "SHALL only be taken into account **once per
+session** for … `ENERGY` and **once for `PARKING_TIME` and `TIME` combined**" —
+with the block of the *last* relevant component, the surplus billed at that
+component's *price*, and, when both time dimensions are used, only the total
+parking duration rounded at all.
+
+Rounded per price instead, the specification's own tiered energy example costs
+€1.31 where it should cost €1.18: an **eleven per cent over-charge**, on the
+shape every German CPO ships.
 
 ### One price, three audiences, and the screen the article regulates
 
@@ -680,9 +753,9 @@ made. `Money` and `Energy` are separate types for exactly that reason.
 
 ### What cannot be evaluated is not assumed open
 
-A tariff element carrying a restriction this build does not understand — an OCPI
-`reservation` condition, a partner extension — **never matches**, and the rating
-says so in a note that travels with the record:
+A tariff element carrying a restriction this build does not understand — OCPI's
+`min_current`/`max_current`, a partner extension — **never matches**, and the
+rating says so in a note that travels with the record:
 
 ```rust
 assert!(rated.reasons().any(|r| r.contains("cannot evaluate")));
@@ -702,11 +775,22 @@ told was charging. So the CDR **states** it, from the session history:
 
 ```rust
 assert!(cdr.periods[1].energy.is_zero());
-assert!(cdr.periods[1].charging);        // a taper, not an occupancy
+assert_eq!(cdr.periods[1].activity, Activity::Charging); // a taper
 ```
 
 …and the inbound pre-flight refuses a partner's record whose two halves
-contradict each other. The same reasoning fixed the window: a period's start
+contradict each other.
+
+**And "not charging" is two facts.** `[OCPI 2.3.0
+§mod_cdrs_chargingperiod_class]` corrected its own definition of `PARKING_TIME`
+to the **vehicle's** demand, and said why: under the old reading drivers "would
+be exposed to penalizing loitering fees … when the EVSE is not offering energy
+to the vehicle while the vehicle is still requesting power". A charging profile
+at zero, a `[EnWG §14a]` dimming, a grid limit and a fault are all the operator
+declining to deliver, and none of them is loitering. So an activity has three
+values — `Charging`, `Parked`, `Withheld` — and the third is priced by neither
+time dimension. OCPP has distinguished it since 2.0.1, as `SuspendedEV` against
+`SuspendedEVSE`, and a boolean cannot carry it. The same reasoning fixed the window: a period's start
 comes from the slot's own readings, not from the quarter hour clamped to the
 session, so a station that authorises at 10:00 and sends its first meter value
 at 10:20 does not produce a record claiming twenty minutes of measurement that
@@ -1133,8 +1217,8 @@ amount; EN 16931's BT-149 — the item price base quantity — is the field for
 exactly that, and `1500 SEC × 6.00 ÷ 3600` is `2.50` to the last digit.
 
 And the verdict is the deliverable, not the XML. `to_en16931` returns the
-semantic document **and** its report; `xrechnung` will not hand back a document
-its profile rejects, because `Validated<XRechnung>` cannot be constructed from an
+semantic document **and** its report; `write` will not hand back a document its
+profile rejects, because `Validated<P>` cannot be constructed from an
 invalid invoice — the same discipline `Evidence::billable_energy` applies to a
 kilowatt-hour one layer down. `BR-CO-25` — something is owed, so say when — is
 asked at construction instead, because the answer is a commercial term the caller
@@ -1337,12 +1421,42 @@ publication, sign the conformity declaration the authority provides, and obtain
 an operator identification code — or forgo the quota
 ```
 
-Only energy a meter signed reaches the notification, because Nr. 2 asks for
-exactly what `emob-eichrecht` already decided. And none of `[38k §5(3)]`'s three
+Only energy a meter signed **and this side verified** reaches the notification,
+because Nr. 2 asks for exactly what `emob-eichrecht` already decided. Asking only
+whether an `EvidenceRef` **exists** admits a chain that *failed*, which produces
+one too — the worse of the two cases, walking straight through (D231). And none
+of `[38k §5(3)]`'s three
 factors is a constant: the counting factor steps down in 2035 and 2036, Anlage 3
 is a three-row table, and the average emissions value is **announced in the
 Bundesanzeiger by 31 October for the following obligation year** — so it is an
 argument, carried with the notice it came from.
+
+### …and the other route, where a bus is worth a third more
+
+`[38k §6]` is the route a public point files. `[38k §7]` is the one beside it —
+*„in anderen Fällen"* — and every load-bearing fact differs: the
+*Ladepunktbetreiber* is the person the vehicle is registered to, the quantity is
+a **Schätzwert** the BMUV publishes per vehicle class, the evidence is a
+Zulassungsbescheinigung Teil I, and the deadline is 15 November **inside** the
+obligation year rather than 28 February after it.
+
+The factor is why it matters. `[38k §7(6)]` opens *"Abweichend von § 5 Absatz 3
+Satz 1"* and gives classes **M3 and N3** — buses and heavy goods vehicles — a
+factor of **4 from 2027** against § 5(3)'s 3, converging only in 2040. That lands
+exactly where a depot operator is both parties at once: its posts are not
+publicly accessible so § 6 refuses them, and its buses are registered to it so
+§ 7 counts them.
+
+```rust
+VehicleClass::HeavyM3OrN3.factor(2026)   // Some(3) — the deviation has not begun
+VehicleClass::HeavyM3OrN3.factor(2027)   // Some(4)
+VehicleClass::Other.factor(2027)         // Some(3)
+```
+
+A mixed fleet is counted at two factors in one notification, a vehicle is counted
+once per obligation year `[38k §7(4) S. 2]`, and the reference that enforces that
+is never a registration plate — a lifelong identifier of a thing a person drives
+does not belong in a file that leaves the building.
 
 ## Layout
 
@@ -1355,7 +1469,7 @@ argument, carried with the notice it came from.
 | [`emob-tariff`](crates/emob-tariff) | Period-based rating with tiers and VAT, the display derived from it, the AFIR shape check, validity windows and a content fingerprint — one object, read by the invoice, the driver's screen, the roaming partner and the national access point | ✅ |
 | [`emob-ocpp`](crates/emob-ocpp) | The OCPP seam, both ways: signed meter values lifted out of transaction events with no field a float could arrive in, and the tariff carried onto OCPP 2.1's *Tariff and Cost* block so the price on the station's screen is the object that rates the CDR | ✅ |
 | [`emob-poi`](crates/emob-poi) | The register and the national access point feed: DATEX II AFIR Recharging, with the published price carried from the tariff that rates the session | ✅ |
-| [`emob-roam`](crates/emob-roam) | The roaming edge: the canonical record onto OCPI 2.3.0 and 2.2.1 with the crossing's cost by JSON Pointer, and routing read out of the contract identifier itself. OICP and eMIP are still 📐 | ✅ |
+| [`emob-roam`](crates/emob-roam) | The roaming edge, on both wires: the canonical record onto OCPI 2.3.0 and 2.2.1 in both directions, and onto **OICP 2.3** through Hubject — where the record carries no money at all, so the price crosses separately as a pricing product and the account says the amount did not. Routing read out of the contract identifier itself. eMIP and `roamd` are still 📐 | ✅ |
 | [`emob-sim`](crates/emob-sim) | A deterministic fleet: virtual stations that sign genuine OCMF, eight seeded faults, and a day that reconciles exactly — assembled from OCPP events | ✅ |
 | `emob-pnc` | Plug & Charge contracts, OPCP pools, multi-PKI | 📐 |
 | `emob-smart` | Load management, OCPP charging profiles, DER control, § 14a guard, V2G | 📐 |
@@ -1390,7 +1504,8 @@ because CI does not run it.
 just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs
 just test       # cargo test --workspace --all-features
-just guards     # no-floats, check-citations, check-manifests, check-wire, check-concepts, check-graph
+just guards     # no-floats, check-citations, check-manifests, check-wire,
+                # check-prose, check-concepts, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
 ```

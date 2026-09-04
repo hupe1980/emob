@@ -82,6 +82,17 @@ pub fn instruct(
     collect_on: IsoDate,
     created_at: sepa::IsoDateTime,
 ) -> Result<Collection, PaymentError> {
+    // A `Stornorechnung` is money owed **back**, and a direct debit draws money
+    // in. Collecting one would take the amount a second time from the party it
+    // was owed to — silently, because the figures on a credit note are positive
+    // and every arithmetic check below would pass. Refused by name, so a
+    // service that hands over the wrong document is told which (D229).
+    if invoice.kind.is_credit_note() {
+        return Err(PaymentError::NotAnInvoice {
+            number: invoice.number.clone(),
+        });
+    }
+
     let total = invoice.gross_total().amount();
     let amount_minor = minor_units(total, invoice.currency.minor_unit_digits())?;
     if amount_minor <= 0 {
@@ -144,6 +155,20 @@ fn minor_units(amount: Decimal, digits: u32) -> Result<i64, PaymentError> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PaymentError {
+    /// The document is a credit note, which is not collected.
+    ///
+    /// Its amounts are positive — EN 16931 carries the direction in the document
+    /// type — so nothing else here would have objected, and the collection would
+    /// have drawn the money a second time from the party it is owed back to.
+    #[error(
+        "{number} is a credit note: a direct debit draws money in and a Stornorechnung is money \
+         owed back, so this is a refund or an offset rather than a collection"
+    )]
+    NotAnInvoice {
+        /// Which document.
+        number: String,
+    },
+
     /// The total is not a whole number of minor units.
     #[error(
         "{amount} is not a whole number of minor units: SEPA counts in cents and every figure on \

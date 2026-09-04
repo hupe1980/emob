@@ -43,6 +43,7 @@
 //! | `step_size` | no field at all | noted: the station bills the quantity it measured |
 //! | `valid_until` | no field at all | noted: a version that ends has to be cleared by the CSMS |
 //! | an unevaluable restriction | — | **refused**, the same rule as the OCPI crossing: publishing it stripped widens the element at the receiver |
+//! | a reservation element | — | **refused**: OCPP 2.1 prices a transaction and has no reservation in it, so the price would reach the driver's screen as the price of charging |
 //!
 //! A refusal rather than a note wherever the loss would be **in the driver's
 //! disfavour and invisible**, which is the rule `emob-roam` states and the same
@@ -89,6 +90,21 @@ pub fn to_ocpp(
     let mut crossing = Crossing::lossless(());
 
     for (index, element) in tariff.elements.iter().enumerate() {
+        // OCPP 2.1's *Tariff and Cost* block prices a **transaction** and has no
+        // reservation in it: a reservation is `ReserveNow`'s and runs before the
+        // transaction exists. Stripped of its restriction the element would put
+        // the reservation's price per hour on the screen as the *charging*
+        // price — the same inversion the unevaluable case below refuses (D243).
+        if let Some(kind) = element.restrictions.reservation {
+            return Err(SeamError::TariffNotCarriedByOcpp {
+                pointer: format!("/elements/{index}"),
+                reason: format!(
+                    "this element prices a {kind} and OCPP 2.1 has no reservation in its \
+                     Tariff and Cost block. Publishing it stripped would show the \
+                     reservation's price to a driver as the price of charging"
+                ),
+            });
+        }
         if let Some(restriction) = element.restrictions.unevaluable.first() {
             return Err(SeamError::TariffNotCarriedByOcpp {
                 pointer: format!("/elements/{index}/restrictions"),
@@ -616,12 +632,18 @@ fn fixed_conditions(
     Ok(fixed)
 }
 
-/// A price bound, in the two figures OCPP's `PriceType` states one in.
+/// A price bound, in the two figures OCPP's `PriceType` states.
 ///
-/// The same rule the OCPI crossing applies to `PriceLimit`: the pre-tax figure
-/// is the one a receiver enforces, so a gross bound is converted at the rate the
+/// `exclTax` and `inclTax` are the same pair as OCPI's `PriceLimit`, and a
+/// tariff that states both crosses with both — they bind separately
+/// `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]`, so a station given only one
+/// enforces only one.
+///
+/// Where the tariff states one limb, the other is derived at the rate the
 /// tariff's own components carry — [`Tariff::vat_basis`], asked through the same
-/// function both crossings and the rating engine use.
+/// function both crossings and the rating engine use — because the pre-tax
+/// figure is the one a receiver enforces and a gross bound written into it is a
+/// bound enforced nineteen per cent too high, against the driver.
 ///
 /// A basis **nobody stated** is zero per cent here, exactly as
 /// [`emob_tariff::Rated::tax_summary`] already reads one, so an ordinary gross
@@ -629,17 +651,30 @@ fn fixed_conditions(
 /// `exclTax == inclTax` instead of being refused. Only components that state
 /// *different* rates leave no single taxable amount, and only that refuses.
 fn cost(
-    amount: Decimal,
+    limit: emob_tariff::PriceLimit,
     tariff: &Tariff,
     pointer: &str,
     crossing: &mut Crossing<()>,
 ) -> Result<Price, SeamError> {
+    // Both limbs stated: nothing to derive, and nothing to lose.
+    if let (Some(net), Some(gross)) = (limit.before_taxes, limit.after_taxes) {
+        let mut price = Price::new();
+        price.excl_tax = Some(wire_of(net)?);
+        price.incl_tax = Some(wire_of(gross)?);
+        return Ok(price);
+    }
+    let Some(amount) = limit.in_basis(tariff.tax_included) else {
+        return Ok(Price::new());
+    };
+    // A bound stated only in the basis the prices are *not* quoted in still has
+    // to reach the station in `exclTax`, so it is converted the same way.
+    let states_gross = tariff.tax_included == TaxIncluded::Yes || limit.before_taxes.is_none();
     let mut price = Price::new();
     match tariff.tax_included {
-        TaxIncluded::No | TaxIncluded::NotApplicable => {
+        _ if !states_gross => {
             price.excl_tax = Some(wire_of(amount)?);
         }
-        TaxIncluded::Yes => {
+        _ => {
             let Some(rate) = tariff.vat_basis().rate() else {
                 return Err(SeamError::TariffNotCarriedByOcpp {
                     pointer: pointer.to_owned(),
@@ -664,7 +699,7 @@ fn cost(
                 crossing.note(
                     format!("{pointer}/exclTax"),
                     format!(
-                        "this tariff's prices are gross and OCPP states a bound before tax as well: \
+                        "this bound is gross and OCPP states one before tax as well: \
                          {amount} at {rate} % is {net} to the minor unit, which grosses back up to \
                          {}",
                         net * factor
@@ -758,6 +793,7 @@ fn to_wire(value: Decimal) -> Option<(Wire, Decimal)> {
 mod tests {
     use super::*;
     use emob_core::Currency;
+    use emob_tariff::PriceLimit;
     use emob_tariff::{
         Chargeable, PriceComponent, TariffElement, TariffKind, rate as rate_session,
     };
@@ -968,6 +1004,31 @@ mod tests {
     }
 
     #[test]
+    fn a_reservation_element_is_refused_rather_than_shown_as_a_charging_price() {
+        // OCPP 2.1's Tariff and Cost block prices a transaction. A reservation
+        // runs before one exists, and stripping the restriction would put its
+        // price per hour on the screen as the price of charging.
+        let mut tariff = gross(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        tariff.elements.push(emob_tariff::TariffElement {
+            components: vec![PriceComponent::new(Dimension::Time, dec("5.00"))],
+            restrictions: emob_tariff::Restrictions {
+                reservation: Some(emob_tariff::ReservationRestriction::Reservation),
+                ..emob_tariff::Restrictions::default()
+            },
+        });
+
+        let err = to_ocpp(&tariff, at()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SeamError::TariffNotCarriedByOcpp { ref pointer, ref reason }
+                    if pointer == "/elements/1" && reason.contains("RESERVATION")
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn an_unevaluable_restriction_is_refused_the_same_way_the_ocpi_crossing_refuses_it() {
         let mut tariff = gross(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
         tariff.tax_included = TaxIncluded::No;
@@ -1096,7 +1157,7 @@ mod tests {
         let mut tariff = gross(vec![
             PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
         ]);
-        tariff.min_price = Some(dec("5.00"));
+        tariff.min_price = Some(PriceLimit::gross(dec("5.00")));
 
         let crossing = to_ocpp(&tariff, at()).unwrap();
         let min = crossing.value.min_cost.as_ref().unwrap();
@@ -1123,7 +1184,7 @@ mod tests {
         // which is exactly what the rating engine computes for the session that
         // bound applies to.
         let mut tariff = gross(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
-        tariff.min_price = Some(dec("5.00"));
+        tariff.min_price = Some(PriceLimit::gross(dec("5.00")));
 
         let crossing = to_ocpp(&tariff, at()).unwrap();
         let min = crossing.value.min_cost.as_ref().unwrap();
@@ -1144,7 +1205,7 @@ mod tests {
             PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
             PriceComponent::new(Dimension::Flat, dec("0.50")).with_vat(dec("7")),
         ]);
-        tariff.max_price = Some(dec("40.00"));
+        tariff.max_price = Some(PriceLimit::gross(dec("40.00")));
 
         let err = to_ocpp(&tariff, at()).unwrap_err();
         assert!(

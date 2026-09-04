@@ -104,7 +104,9 @@
 pub mod crossing;
 pub mod error;
 pub mod ocpi;
+pub mod oicp;
 pub mod partner;
+pub mod signed;
 pub mod token;
 
 pub use crossing::{Crossing, Note};
@@ -116,4 +118,5 @@ pub use ocpi::preflight::{Finding, Report, Severity, SignedDataPolicy, preflight
 // vocabularies that agree.
 pub use emob_core::Role;
 pub use partner::{OcpiVersion, Partner, PartnerRegistry, Reach};
+pub use signed::SignedPayload;
 pub use token::{RoamingToken, TokenType};

@@ -113,11 +113,15 @@
 
 pub mod claim;
 pub mod error;
+pub mod estimate;
 pub mod factors;
 
-pub use claim::{Attribution, Claim, ClaimBuilder, PointRecord, Window};
+pub use claim::{Attribution, Claim, ClaimBuilder, PointRecord, Route, Window};
 pub use error::ThgError;
+pub use estimate::{
+    Estimate, EstimateClaim, EstimateClaimBuilder, RegistrationEvidence, VehicleRecord,
+};
 pub use factors::{
     BasisKind, DirectSupply, DriveEfficiency, EmissionsBasis, FIRST_COUNTED_YEAR, MJ_PER_KWH,
-    RenewableSource, counting_factor,
+    RenewableSource, VehicleClass, counting_factor,
 };

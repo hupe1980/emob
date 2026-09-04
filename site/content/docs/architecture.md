@@ -78,7 +78,7 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `agentd` | The advisory plane on `agentplane`: specialists that correlate across many exact answers, and cannot move money by construction. Three — evidence triage, the tariff sweep, and a compliance sweep that judges duties which have not started binding yet against the estate as it stands |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-748 tests. The domain crates do no I/O, read no clock and hold no binary floats;
+**842 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
 `emob-service` is the one shared place that stops being true, and everything
 above it is a daemon. `just ci` green.
 
@@ -250,7 +250,7 @@ instead of an argument.
 
 | Crate | Holds |
 |---|---|
-| `emob-roam` (OICP, eMIP) | Hubject and GIREVE legacy, beside the OCPI half that is built. Blocked on `oicp-kit` being published — this workspace does not take path dependencies any more |
+| `emob-roam` (eMIP) | GIREVE legacy, beside the OCPI and OICP halves that are built. Only if a partner forces it — GIREVE speaks OCPI |
 | `emob-pnc` | Plug & Charge contracts, certificate pools, multi-PKI |
 | `emob-smart` | Site load management, OCPP charging profiles, DER control, the § 14a guard, V2G |
 | `emob-sim` (the rest) | Virtual EVs with 15118 PnC handshakes, MockHubject, an OCPI peer-in-a-process |
@@ -467,7 +467,7 @@ One canonical model; every wire native; translation cost recorded.
 | Wire | Partner | Via | State |
 |---|---|---|---|
 | OCPI 2.3.0 (2.2.1 translated at the edge) | peers, most hubs | `ocpi-kit` | ✅ |
-| OICP 2.3 | Hubject | `oicp-kit` | 📐 — blocked on the kit being published |
+| OICP 2.3 | Hubject | `oicp-kit` | ✅ out — the transport is `roamd`'s |
 | eMIP | GIREVE legacy | only if a partner forces it — GIREVE speaks OCPI | 📐 |
 | OCHP | e-clearing.net | not planned; the spec froze in 2016 | ✖ |
 
@@ -515,9 +515,10 @@ reaches for one.
 | Guard | Prevents |
 |---|---|
 | `no-floats` | a workspace exact everywhere it was reviewed and approximate in the helper nobody read |
-| `check-citations` | a rule citing a document nobody can produce — in the prose as well as the code: the READMEs, this site, and every comment that names a paragraph |
+| `check-citations` | a rule citing a document nobody can produce — in the prose as well as the code: the READMEs, this site, and every comment that names a paragraph. The documents themselves are third-party and not in this repository, so on a clone the guard cannot ask whether each is *indexed* and says so — while the half that asks whether a citation is a form the workspace recognises at all runs from a table compiled into the binary, and therefore runs in CI |
 | `check-manifests` | a `cargo publish` that fails after the version is spent |
 | `purity` | a domain crate that reaches for a clock, a socket or the filesystem in **its own** source |
 | `check-graph` | the other half: a clock, a socket or a database reaching a domain crate through a **dependency**, which `purity` greps past — a `uuid`/`v7` identifier is `SystemTime::now` behind a manifest line |
+| `check-prose` | a sentence a person reads with a hole in it. Rust joins a `\`-continued string literal with no separator, so dropping the backslash moves the continuation's indentation *inside* the string: it still compiles, every test matching a substring still passes, and the message reaches an operator with a run of spaces in the middle of it. The six that had accumulated were all in refusal texts — the longest strings here, and the only thing a person sees when the platform says no |
 | `check-wire` | a date or an instant in a serialisable type going out as `time`'s derived **nine-element array** instead of RFC 3339. Nothing fails when it does — a round trip through the same library succeeds either way — so every such field has to name the module it writes with |
-| `check-concepts` | a design document that states a count it does not hold — how many decisions the log records, how many rules the README heads — and a `D` number that repeats or leaves a gap. Prose has no test, and a claim nothing holds drifts one-directionally and silently |
+| `check-concepts` | a design document that states a count it does not hold — how many decisions the log records, how many rules the README heads, how big the test suite is, and how many tests each crate's own row claims — and a `D` number that repeats or leaves a gap. Prose has no test, and a claim nothing holds drifts one-directionally and silently. The per-crate column is the lesson: a guard on a total is not a guard on the figures that make it up. It also checks the **shape** of every Markdown table, because Markdown drops a surplus cell and blanks a missing one without complaining, and a paragraph that moves one row down a table is simply gone. The internal notes it is named for are not in this repository, so the half that reads them skips **by name** and the half over published prose runs anyway: a guard that skips in silence reads exactly like one that passed |
