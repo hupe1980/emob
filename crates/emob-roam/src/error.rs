@@ -245,9 +245,26 @@ pub enum RoamError {
         source: ocpi_kit::types::InvalidString,
     },
 
-    /// The record names a party this side does not recognise.
-    #[error("{0} is not a party this node knows")]
-    UnknownParty(PartyId),
+    /// The document is a Credit CDR — a reversal, not a session.
+    ///
+    /// `credit = true` says this record exists to cancel another one, and
+    /// only its `total_cost` is negated `[OCPI 2.3.0 §mod_cdrs_cdr_object]`:
+    /// its energy and periods are the original's, repeated. Read into the
+    /// canonical model it would be a second charging session with the same
+    /// kilowatt-hours, which is the double count the ledger's correction chain
+    /// exists to prevent. What it *is* is an instruction to the ledger about
+    /// the record it names, and that is a service's decision rather than a
+    /// conversion.
+    #[error(
+        "this is a Credit CDR reversing {credit_reference_id} [OCPI 2.3.0 §mod_cdrs_cdr_object]: \
+         it repeats the original's energy with `total_cost` negated and is not a session to \
+         settle — apply it to the ledger as the reversal of the record it names, and read the \
+         replacement that follows it as the new record"
+    )]
+    CreditCdr {
+        /// The id of the record it reverses, as the document states it.
+        credit_reference_id: String,
+    },
 
     /// A connector this build cannot name in OCPI's vocabulary.
     ///

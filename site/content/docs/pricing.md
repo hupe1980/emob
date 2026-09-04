@@ -203,8 +203,9 @@ Each kind of threshold is cut in the quantity it is *about*:
 
 - **Energy exactly at an energy threshold**, because energy is what is being
   tiered and what is being settled.
-- **Time exactly at a clock threshold**, because 22:00 is 22:00 — read in the
-  UTC offset the period itself carries, and on every day the period spans.
+- **Time exactly at a clock threshold**, because 22:00 is 22:00 — read on the
+  wall clock of the tariff's own zone, never the offset the timestamps happen
+  to carry, and on every day the period spans.
 - **The local midnight a weekday restriction turns on**, which is the one
   threshold the tariff never names: without it a session running Friday 23:00 to
   Saturday 01:00 arrives as a single period and is priced for both hours at
@@ -597,11 +598,26 @@ before the session either.
 Beyond those, time of day, calendar date, cumulative energy, cumulative duration,
 average power and weekday all select which elements apply.
 
-## What is not here yet 📐
+## Publishing a version
 
-*Publishing* a version — deciding when a new one takes effect, telling partners,
-and pushing `SetDefaultTariff` to the estate's 2.1 stations — belongs with
-`tarifd`. All three payloads exist; the service that decides *when* does not.
+*Which* version is in force is decided here, by its own window. *Telling people*
+is `tarifd`'s, and the distinction is load-bearing: `[AFIR Art. 5(4)]` requires
+the price to be known to end users **before they initiate** a recharging
+session, so a publication that goes out when a version takes effect is already
+late for everybody standing at a point at that instant. The service therefore
+looks **forward** by a lead time, and asks a second, sharper question beside it —
+which versions are in force right now that some audience was never told about.
+The first is work; the second is a driver shown one price and billed another.
+
+All three audiences or none. OCPP 2.1 refuses a tariff it cannot state without
+widening the price against the driver, and publishing the other two anyway would
+leave the national access point and every roaming partner quoting a price the
+estate's own stations do not charge — a driver comparing on a map, misled by a
+document this operator published. And a delivery is recorded only after the
+answer comes back, so a push that failed stays visible rather than being
+forgotten by a service that sent something once and believed itself.
+
+## What is not here 📐
 
 The invoice itself is `emob-billing`'s: the breakdown above is the input it
 needs, and it becomes an EN 16931 document, a SEPA collection and a balanced set

@@ -227,9 +227,11 @@ pub fn verify(delivery: &Delivery<'_>, secrets: &[Secret], header: &str) -> bool
 /// The base64 MAC of a delivery under one secret.
 fn mac(delivery: &Delivery<'_>, secret: &Secret) -> String {
     // `new_from_slice` is infallible for HMAC — the construction accepts a key
-    // of any length — so the error is unreachable rather than handled.
-    let mut hmac = HmacSha256::new_from_slice(&secret.0)
-        .unwrap_or_else(|_| HmacSha256::new_from_slice(&[]).expect("HMAC takes any key length"));
+    // of any length — so this is a signature, not a fallible step. The branch
+    // that used to stand here fell back to an **empty** key, which is a
+    // different signature reached silently: unreachable, and the wrong thing to
+    // be unreachable to.
+    let mut hmac = HmacSha256::new_from_slice(&secret.0).expect("HMAC takes a key of any length");
     hmac.update(&delivery.signed_bytes());
     base64::engine::general_purpose::STANDARD.encode(hmac.finalize().into_bytes())
 }

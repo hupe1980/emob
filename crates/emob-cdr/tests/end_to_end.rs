@@ -1059,11 +1059,12 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
         .unwrap_err();
     assert!(err.to_string().contains("price this session per kWh"));
 
-    // Close the second: the clock cannot resolve a span this long, so nothing
-    // it measured is long enough to bill. The span judged is the one that is
-    // **billed** — half a minute of occupancy after a half-hour charge — rather
-    // than the session's whole length, because it is the occupancy fee that
-    // rests on the clock and the kilowatt-hours do not.
+    // Close the second: the clock cannot resolve a span this short, so the
+    // half minute it measured is not a value an invoice may use. The span
+    // judged is the one that is **billed** — half a minute of occupancy after
+    // a half-hour charge — rather than the session's whole length, because it
+    // is the occupancy fee that rests on the clock and the kilowatt-hours do
+    // not. And it is the *line* that goes, not the record: the energy bills.
     let coarse = emob_core::ClockResolution::conforming();
     let mut brief = Session::open(
         "s-brief".parse().unwrap(),
@@ -1101,14 +1102,22 @@ fn the_two_ways_a_duration_stops_being_billable_are_both_enforced() {
         .end(at(30) + time::Duration::seconds(30), EndReason::Local)
         .unwrap();
 
-    let err = CdrBuilder::from_session(&brief, Direction::Import)
+    let cdr = CdrBuilder::from_session(&brief, Direction::Import)
         .unwrap()
         .key(PartyId::new("DE", "ABC").unwrap(), "cdr-1".parse().unwrap())
         .evidence(evidence_ref(&evidence))
         .clock(coarse)
         .rated_with(&occupancy)
         .build()
-        .unwrap_err();
-    assert!(err.to_string().contains("its clock can resolve"), "{err}");
-    assert!(err.to_string().contains("price this session per kWh"));
+        .expect("the energy bills; the half minute does not");
+    let rated = &cdr.cost.as_ref().unwrap().rated;
+    assert_eq!(rated.amount_for(Dimension::ParkingTime), None);
+    assert!(rated.amount_for(Dimension::Energy).is_some());
+    let notes: Vec<String> = rated.reasons().collect();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("REA 6-A") && n.contains("30 s")),
+        "{notes:?}"
+    );
 }

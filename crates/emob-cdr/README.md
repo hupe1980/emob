@@ -128,16 +128,73 @@ own records make — a station that stops sending `MeterValues` while its own st
 machine still says `Charging` would otherwise be billed an occupancy fee per
 minute for time it says the car was taking energy. So the fill is built where
 the session history is in scope, cuts at its state changes as well as at the
-grid, and asks `Session::charging_throughout`, which is **not** the negation of
+grid, and asks `Session::charging_throughout` — the **one** question every
+period on the record is asked, metered or not. It is not the negation of
 `suspended_throughout`: `Pending` and `Ended` are neither, and both are exactly
-the "connected and not charging" the fee prices.
+the "connected and not charging" the fee prices; asking "not suspended" of a
+metered period billed the minute a car sat `EVConnected` before its charge began
+as charging time.
 
-And when the meter and the state machine disagree — energy across a quarter hour
-the session logged as suspended from end to end — the builder refuses rather than
-picking one, because guessing is how a driver is billed for a charge the
-operator's own log says never happened.
+And when the meter and the state machine disagree — energy across a period the
+session says it was not charging in — the builder refuses rather than picking
+one, because guessing is how a driver is billed for a charge the operator's own
+log says never happened. The split holds the register flat across the session's
+idle intervals, so the disagreement it reports is the meter's own rather than one
+a straight line between two readings invented.
+
+## The other half: re-rating a partner's record
+
+A CPO issues a CDR priced with its own tariff. The eMSP that receives it owes its
+**driver** a different number and owes the CPO a comparison — so a partner's
+record arrives unpriced and this is what prices it:
+
+```rust
+let mine = theirs.rerated_with(&retail_tariff, ClockResolution::conforming())?;
+assert_eq!(mine.periods, theirs.periods);      // the same session, by construction
+assert!(mine.was_priced_with(&retail_tariff)); // …and it names which tariff
+```
+
+It exists rather than being left to the caller because the composition is where
+the gates get skipped. Reaching for `chargeable()` and `emob_tariff::rate`
+directly — the obvious way, and what this crate's own fixtures did — silently
+drops all four: a tariff that was not in force when the session ran, a version
+the meter says was superseded mid-session, a duration the signed records do not
+vouch for, and the clock resolution `[REA 6-A §3.1]` puts under a per-minute fee.
+`priced` is the one place a `Cost` is made, and both doors open onto it.
 
 ## The cross-checks nobody runs
+
+### Where the price changed
+
+`[OCMF Tab. 7, TX=T]` is the station's own record of where its price changed,
+and a CDR is priced by the **one** version in force when the session started
+`[AFIR Art. 5(4)]`:
+
+```rust
+CdrBuilder::from_session(&session, Direction::Import)?
+    .evidence(evidence_marking_a_change_at(at(15)))
+    .rated_with(&tariff)
+    .build()
+// Err: the signed records mark a tariff change at … [OCMF Tab. 7, TX=T], inside
+//      this session, and a record is priced by the one version in force when it
+//      started [AFIR Art. 5(4)]: the station says two prices applied and this
+//      record states one
+```
+
+Billing either of them is picking a number over a signed statement that
+contradicts it, and OCPP 2.1's `ChangeTransactionTariff` makes this a shape the
+protocol produces rather than a hypothetical. Where the change did not land on a
+settlement boundary the message says so too, because
+`[PTB-A 50.7 §3.1.7.2]` does not permit one there. A change at the session's own
+edges is not inside it, and an unrated record has no price to contradict.
+
+### …and what is inside the value
+
+`EvidenceRef::compensated_loss` carries the cable loss the meter compensated
+`[OCMF Tab. 7, CL]`. Nothing is subtracted — the compensation is already inside
+the register the session billed — and it travels because a partner disputing the
+energy asks exactly this, and because `[REA 6-A §3.2]` makes telling the affected
+party what is inside a measured value a duty rather than a courtesy.
 
 ### Who was charging
 

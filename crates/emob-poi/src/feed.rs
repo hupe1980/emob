@@ -170,10 +170,11 @@ pub fn check(sites: &[Site], updates: &[PointUpdate]) -> Result<()> {
         agree(&point.facility, &update.point)?;
 
         // …and the register has the last word on what may be said about it.
-        // `Report` enforces this at construction, so an update built here
-        // cannot contradict its own point; this catches an update built against
-        // one inventory and published against another.
-        crate::status::Report::new(&point.facility.id, point.lifecycle, update.report.status())?;
+        // `ChargingPoint::report` enforces this at construction against the
+        // point the caller held; this asks the same question of the point this
+        // feed actually publishes, which catches an update built against one
+        // inventory and sent against another.
+        point.report(update.report.status())?;
     }
     Ok(())
 }
@@ -194,7 +195,7 @@ fn agree(published: &Facility, referenced: &Facility) -> Result<()> {
 mod tests {
     use super::*;
     use crate::site::{Address, ChargingPoint, Connector, ConnectorType, Coordinates, Station};
-    use crate::status::{Lifecycle, PointStatus, Report};
+    use crate::status::{Lifecycle, PointStatus};
     use emob_core::{EvseId, PartyId};
     use rust_decimal::Decimal;
 
@@ -222,11 +223,18 @@ mod tests {
     }
 
     fn update(point: Facility) -> PointUpdate {
+        // Through the published point, because that is the only constructor —
+        // and the one the deleted `Report::operating` used to let every test
+        // walk around (D217).
+        let sites = inventory();
+        let published = &sites[0].stations[0].points[0];
         PointUpdate {
             site: Facility::new("site"),
             station: Facility::new("station"),
             point,
-            report: Report::operating(PointStatus::Available),
+            report: published
+                .report(PointStatus::Available)
+                .expect("an operating point may report `available`"),
             price: None,
         }
     }

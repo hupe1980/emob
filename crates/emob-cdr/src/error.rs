@@ -58,14 +58,21 @@ pub enum CdrError {
         signed: IdentificationStrength,
     },
 
-    /// The meter says energy moved in a slot the session says it was suspended
-    /// for.
+    /// The meter says energy moved in a period the session says it was not
+    /// charging in.
+    ///
+    /// Not raised over a straight line drawn across a pause: the split holds
+    /// the register flat over the session's idle intervals, so this fires only
+    /// where the meter itself moved with no charging time to attribute it to.
     #[error(
-        "{energy} moved in the quarter hour beginning {at}, which the session records as suspended: the meter and the state machine disagree"
+        "{energy} moved in the period beginning {at}, which the session records as {} rather than charging: the meter and the state machine disagree",
+        state.map_or_else(|| "not yet started".to_owned(), |s| format!("{s:?}").to_lowercase())
     )]
-    EnergyWhileSuspended {
-        /// The settlement slot.
+    EnergyWhileNotCharging {
+        /// When the period began.
         at: time::OffsetDateTime,
+        /// The state the session was in.
+        state: Option<emob_session::SessionState>,
         /// What the meter recorded.
         energy: Energy,
     },
@@ -98,19 +105,26 @@ pub enum CdrError {
     )]
     EnergyNotBillable,
 
-    /// The session is shorter than the station's clock can resolve.
+    /// The signed records mark a tariff change inside the session.
+    ///
+    /// `[OCMF Tab. 7, TX]`'s `T` marker is the station's own record of where
+    /// its price changed, and a CDR is priced by the single version in force
+    /// when the session started `[AFIR Art. 5(4)]`. The two cannot both be
+    /// right about one session.
     #[error(
-        "the tariff charges for {dimension:?} but the session lasted {} s, below the {} s its clock can resolve [REA 6-A §3.1]: a measured value shorter than the shortest measurable span is not one an invoice may use. The energy is unaffected — price this session per kWh",
-        measured.whole_seconds(),
-        shortest.whole_seconds()
+        "the signed records mark a tariff change at {at} [OCMF Tab. 7, TX=T], inside this          session, and a record is priced by the one version in force when it started          [AFIR Art. 5(4)]: the station says two prices applied and this record states one.          Split the session at the change, or price it with the version history{}",
+        if *on_settlement_boundary {
+            ""
+        } else {
+            " — and note that the change did not land on a settlement-period boundary, which [PTB-A 50.7 §3.1.7.2] does not permit: one quarter hour is then under two tariffs"
+        }
     )]
-    DurationBelowClockResolution {
-        /// Which time dimension the tariff prices.
-        dimension: emob_tariff::Dimension,
-        /// How long the session lasted.
-        measured: time::Duration,
-        /// The shortest span the clock may be billed for.
-        shortest: time::Duration,
+    SignedTariffChangeInsideSession {
+        /// When the meter says the price changed.
+        at: time::OffsetDateTime,
+        /// Whether that instant is a quarter-hour boundary — the only place
+        /// `[PTB-A 50.7 §3.1.7.2]` allows a change to take effect.
+        on_settlement_boundary: bool,
     },
 
     /// The tariff was not in force when the session started.

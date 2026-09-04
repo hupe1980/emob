@@ -32,6 +32,21 @@ pub struct Subscription {
 /// which is how an advisory queue stops being read.
 pub const TABLE: &[Subscription] = &[
     Subscription {
+        specialist: crate::skills::compliance::NAME,
+        // A duty commencing is the event this specialist exists for: the
+        // calendar knows the date years ahead, and the only advice that arrives
+        // *before* a breach is the one triggered by the date rather than by the
+        // breach. `breach-detected` is the other half, and it is not redundant
+        // — that one fires per point, and this is what turns "one point failed"
+        // into "which duty, across how many". `notice-window-opened` is the
+        // `[LSV26 §4]` deadline, which is a duty with a clock on it.
+        on: &[
+            events::compliance::DUTY_COMMENCED,
+            events::compliance::BREACH_DETECTED,
+            events::compliance::NOTICE_WINDOW_OPENED,
+        ],
+    },
+    Subscription {
         specialist: crate::skills::evidence::NAME,
         // A refusal is the event; a key that could not be resolved is the
         // commonest single cause of one, and it arrives separately because the

@@ -75,10 +75,10 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `emob-billing` | The last seam: rated records become an EN 16931 invoice whose rounding happens once, at the line, and whose residual is reported; the VAT treatment derived from the parties, so a roaming settlement is taxed where the reseller is established `[UStG §3g]`; a SEPA collection; and postings addressed by role rather than by account number |
 | `emob-thg` | The greenhouse-gas quota: `[38k §6(3)]`'s **four** conditions as four fields in the paragraph's own order, a notification built only from energy a meter signed, and no factor held as a constant — the emissions value is announced annually in the Bundesanzeiger, so it is an argument carried with the notice |
 | `emob-service` | The shell every daemon shares, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature |
-| `agentd` | The advisory plane on `agentplane`: specialists that correlate across many exact answers, and cannot move money by construction |
+| `agentd` | The advisory plane on `agentplane`: specialists that correlate across many exact answers, and cannot move money by construction. Three — evidence triage, the tariff sweep, and a compliance sweep that judges duties which have not started binding yet against the estate as it stands |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-697 tests. The domain crates do no I/O, read no clock and hold no binary floats;
+748 tests. The domain crates do no I/O, read no clock and hold no binary floats;
 `emob-service` is the one shared place that stops being true, and everything
 above it is a daemon. `just ci` green.
 
@@ -255,8 +255,8 @@ instead of an argument.
 | `emob-smart` | Site load management, OCPP charging profiles, DER control, the § 14a guard, V2G |
 | `emob-sim` (the rest) | Virtual EVs with 15118 PnC handshakes, MockHubject, an OCPI peer-in-a-process |
 
-Services — `csmsd` and `agentd` are built; `roamd`, `empd`, `pncd`, `poid`,
-`tarifd`, `billd`, `opsd` and an optional edge `sited` are 📐.
+Services — `csmsd`, `agentd`, `poid` and `tarifd` are built; `roamd`, `empd`,
+`pncd`, `billd`, `opsd` and an optional edge `sited` are 📐.
 
 ## One inventory, three audiences
 
@@ -413,9 +413,16 @@ and they are the hard sixty per cent of a platform:
 | `iso15118` | The EXI codec, the -2/-20 message sets, the Plug & Charge signature profile. Already a **dev**-dependency of `emob-core`: it owns the unambiguous spelling of a vehicle-communication generation, and a test asserts ours is its spelling — the DATEX II profile's own literal `iso15118` means -20 and has no name for -2, so an ambiguous one published in the official record is a claim of compliance with a 2027 duty |
 | `eebus` | The § 14a wire at a site's grid connection point |
 
-The billing half comes from `billing`, `en16931` (+ formats), `sepa` and
-`doubleentry`; the market-communication half — German pass-through charging
-under NZR-EMob — from `mako`.
+The billing half comes from `en16931` (+ formats) and `sepa`, with
+`doubleentry` reserved for the daemon that holds a journal; the
+market-communication half — German pass-through charging under NZR-EMob — from
+`mako`. Three siblings are deliberately **not** taken: `billing`, because the
+hard part of an OCPI tariff is which element prices which second and a second
+pricing engine is the drift `emob-tariff` exists to prevent; `rubo4e`, because
+the seam it would serve consumes `mako-emob`'s own `Ladevorgang` rather than a
+BO4E object; and `rutmf`, because the contract model a TM Forum surface would
+expose does not exist yet. Each is recorded with its reason in the concepts, so
+nobody reaches for it twice.
 
 ### Why the CDR depends on the Eichrecht crate
 
@@ -512,3 +519,5 @@ reaches for one.
 | `check-manifests` | a `cargo publish` that fails after the version is spent |
 | `purity` | a domain crate that reaches for a clock, a socket or the filesystem in **its own** source |
 | `check-graph` | the other half: a clock, a socket or a database reaching a domain crate through a **dependency**, which `purity` greps past — a `uuid`/`v7` identifier is `SystemTime::now` behind a manifest line |
+| `check-wire` | a date or an instant in a serialisable type going out as `time`'s derived **nine-element array** instead of RFC 3339. Nothing fails when it does — a round trip through the same library succeeds either way — so every such field has to name the module it writes with |
+| `check-concepts` | a design document that states a count it does not hold — how many decisions the log records, how many rules the README heads — and a `D` number that repeats or leaves a gap. Prose has no test, and a claim nothing holds drifts one-directionally and silently |

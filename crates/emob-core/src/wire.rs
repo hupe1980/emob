@@ -205,6 +205,57 @@ pub mod clock {
     }
 }
 
+/// A **list** of instants, each as RFC 3339.
+///
+/// `time` offers `rfc3339` for one instant and `rfc3339::option` for none or
+/// one; a `Vec<OffsetDateTime>` has neither, and a field that forgets to say so
+/// falls back to the derived representation — a list of nine-element arrays,
+/// which round-trips through this codebase perfectly and reaches a partner as
+/// nonsense. That is the same defect as D85, and it came back on the very next
+/// timestamp added to a serialisable type, which is why `cargo xtask
+/// check-wire` now fails the build on a time field with no pinned spelling.
+#[cfg(feature = "serde")]
+pub mod rfc3339_list {
+    use serde::{Deserialize as _, Deserializer, Serializer, ser::SerializeSeq as _};
+
+    /// Write each instant as RFC 3339.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the serializer returns.
+    pub fn serialize<S: Serializer>(
+        value: &[time::OffsetDateTime],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(value.len()))?;
+        for at in value {
+            let text = at
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|e| serde::ser::Error::custom(e.to_string()))?;
+            seq.serialize_element(&text)?;
+        }
+        seq.end()
+    }
+
+    /// Read them back.
+    ///
+    /// # Errors
+    ///
+    /// [`serde::de::Error`] for an element that is not an RFC 3339 instant.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<time::OffsetDateTime>, D::Error> {
+        use serde::de::Error as _;
+        let raw = <Vec<std::borrow::Cow<'_, str>>>::deserialize(deserializer)?;
+        raw.into_iter()
+            .map(|text| {
+                time::OffsetDateTime::parse(&text, &time::format_description::well_known::Rfc3339)
+                    .map_err(D::Error::custom)
+            })
+            .collect()
+    }
+}
+
 /// A duration as a whole number of seconds.
 ///
 /// `time::Duration` serialises as `[seconds, nanoseconds]` by default. Every
@@ -339,6 +390,36 @@ pub mod weekday {
 
 #[cfg(all(test, feature = "serde"))]
 mod tests {
+    #[test]
+    fn a_list_of_instants_crosses_as_rfc_3339_rather_than_as_arrays() {
+        // The defect D85 fixed, returning on the next timestamp added to a
+        // serialisable type: `time` offers `rfc3339` for one instant and
+        // `rfc3339::option` for none or one, and a `Vec` has neither — so a
+        // field that forgets falls back to a list of nine-element arrays.
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct Sample {
+            #[serde(with = "super::rfc3339_list")]
+            at: Vec<time::OffsetDateTime>,
+        }
+
+        let sample = Sample {
+            at: vec![
+                time::macros::datetime!(2026-01-02 10:15:00 +1),
+                time::macros::datetime!(2026-01-02 10:30:00 +1),
+            ],
+        };
+        let json = serde_json::to_string(&sample).unwrap();
+        assert_eq!(
+            json,
+            r#"{"at":["2026-01-02T10:15:00+01:00","2026-01-02T10:30:00+01:00"]}"#
+        );
+        assert_eq!(serde_json::from_str::<Sample>(&json).unwrap(), sample);
+
+        // …and an empty list is an empty list rather than null.
+        let none = Sample { at: Vec::new() };
+        assert_eq!(serde_json::to_string(&none).unwrap(), r#"{"at":[]}"#);
+    }
+
     use time::macros::{date, datetime, time as clock_time};
 
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]

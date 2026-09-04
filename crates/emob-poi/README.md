@@ -98,11 +98,15 @@ published as `available` for months, and it is the commonest defect in European
 charging data. A schema validator has nothing to say about it.
 
 ```rust
-Report::new(point, Lifecycle::Decommissioned, PointStatus::Available)
-// Err(StatusContradictsRegister)
+point.lifecycle = Lifecycle::Decommissioned;
+point.report(PointStatus::Available)      // Err(StatusContradictsRegister)
+point.report(PointStatus::Removed)        // Ok — the register's own answer
 ```
 
-There is no other constructor. The document cannot be built.
+`ChargingPoint::report` is the only constructor, and it reads the lifecycle off
+the point rather than taking it beside the status — a constructor given both is
+one a caller satisfies by handing over the lifecycle that makes the status legal
+(D217). The document cannot be built.
 
 ## The silence between the two publications
 
@@ -160,7 +164,8 @@ Nothing here opens a socket, reads a file or asks the time — the publication
 time is an argument, so an export replayed two years later produces the same
 bytes. `just purity` fails the build if that stops being true. The Mobilithek's
 `snapshotPush` is a service's business; a publication here is a value and a
-string.
+string. That service is [`poid`](../../services/poid), which decides *when* a
+snapshot goes out and *whether the access point took it*.
 
 ## License
 

@@ -106,8 +106,8 @@ pub mod tax;
 
 pub use error::BillingError;
 pub use invoice::{
-    Contact, Counterparty, Invoice, InvoiceBuilder, InvoiceLine, PaymentDetails, TaxSubtotal,
-    unit_code,
+    Contact, Counterparty, DocumentAdjustment, DocumentAdjustmentKind, Invoice, InvoiceBuilder,
+    InvoiceLine, PaymentDetails, TaxSubtotal, unit_code,
 };
 pub use payment::{Collection, Creditor, Mandate, PaymentError};
 pub use postings::{Posting, Postings, Role, Side};

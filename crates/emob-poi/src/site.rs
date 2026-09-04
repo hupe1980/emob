@@ -207,6 +207,22 @@ impl ChargingPoint {
         }
     }
 
+    /// The status this point may publish, checked against **its own** register
+    /// entry.
+    ///
+    /// The only way to build a [`Report`](crate::status::Report), and it lives
+    /// here rather than on that type because the lifecycle is a fact about a
+    /// point (D217).
+    ///
+    /// # Errors
+    ///
+    /// [`PoiError::StatusContradictsRegister`] for a status the register
+    /// forbids: a decommissioned point published as `available` is a driver
+    /// sent to a concrete pad.
+    pub fn report(&self, status: crate::status::PointStatus) -> Result<crate::status::Report> {
+        crate::status::Report::checked(&self.facility.id, self.lifecycle, status)
+    }
+
     /// Whether `[AFIR Art. 5]` treats this point as a fast one.
     ///
     /// The threshold the article turns on twice: at 50 kW and above the ad-hoc

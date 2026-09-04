@@ -304,6 +304,75 @@ async fn a_station_signing_with_an_unprovisioned_key_is_named_before_the_audit()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_station_whose_claimed_key_does_not_decode_is_named_rather_than_skipped() {
+    // `[OCA SMV §3.2.2]` has a station send its own public key beside each
+    // signed value, and the comparison against the registry is what names a
+    // meter swapped without anybody being told. A key that does not decode at
+    // all stops that comparison happening — silently, on every session from
+    // that station — so it is its own finding rather than a `continue`.
+    //
+    // The record itself is untouched: only the `publicKey` envelope is
+    // corrupted, so the session still assembles and still bills. The claim
+    // decides nothing; being unable to *check* it is the fault.
+    let (prefix, _) = OCA_1_6_SAMPLED_VALUE
+        .split_once(r#""publicKey":""#)
+        .expect("the OCA fixture carries a claimed key");
+    let corrupt = format!("{prefix}\"publicKey\":\"////not-a-key////\"}}");
+
+    let csmsd = Arc::new(Csmsd::new(
+        PartyId::new("DE", "ABC").unwrap(),
+        registry(),
+        tariff(),
+    ));
+    let (addr, server) = serve(Arc::clone(&csmsd)).await;
+    let handle = connect(&addr, "CP-1");
+    handle.call(boot()).await.expect("the CSMS answers a boot");
+    handle.wait_ready().await;
+    let started = handle
+        .call(v1_6::StartTransactionRequest::new(
+            1,
+            "HRWWBX8".to_owned(),
+            0,
+            DateTime::parse("2023-05-19T13:52:39Z").unwrap(),
+        ))
+        .await
+        .expect("the CSMS answers a start");
+    handle
+        .call(
+            v1_6::StopTransactionRequest::new(
+                OCPP_METER_STOP_WH,
+                DateTime::parse("2023-05-19T13:55:48Z").unwrap(),
+                started.transaction_id,
+            )
+            .with_reason(v1_6::Reason::Local)
+            .with_transaction_data(vec![v1_6::MeterValue::new(
+                DateTime::parse("2023-05-19T13:55:48Z").unwrap(),
+                vec![
+                    v1_6::SampledValue::new(corrupt)
+                        .with_format(v1_6::ValueFormat::SignedData)
+                        .with_context(v1_6::ReadingContext::TransactionEnd)
+                        .with_measurand(v1_6::Measurand::EnergyActiveImportRegister),
+                ],
+            )]),
+        )
+        .await
+        .expect("the CSMS answers a stop");
+    handle.shutdown(Duration::from_secs(2)).await;
+    server.abort();
+
+    let outcomes = csmsd.outcomes();
+    assert!(
+        outcomes
+            .iter()
+            .any(|o| matches!(o, Outcome::UnreadableClaimedKey { .. })),
+        "a claimed key nobody can read has to be named: {outcomes:?}"
+    );
+    // …and the session itself is untouched: the key that decides anything comes
+    // from the registry, out of band.
+    assert_eq!(csmsd.settled(), 1, "{outcomes:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_station_nobody_provisioned_is_answered_unknown_rather_than_admitted() {
     // `[OCPP 2.0.1 Part 4 §3.1.1]` wants a 404 rather than a 401, so an operator
     // can tell a typo from a bad password — and a station nobody provisioned has

@@ -52,7 +52,7 @@ use emob_poi::rate;
 use emob_poi::site::{
     Address, ChargingPoint, Connector, ConnectorType, Coordinates, Facility, Site, Station,
 };
-use emob_poi::status::{PointStatus, Report};
+use emob_poi::status::PointStatus;
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, TaxIncluded};
 use rust_decimal::Decimal;
 
@@ -353,12 +353,19 @@ fn every_path_the_status_publication_emits_is_one_the_reference_instance_contain
     let (published_rate, _) = rate::publish(&tariff(), "74034E3E-RATE");
     let (feed, _) = feed_of(vec![site()], published_rate);
 
+    // Every report comes off the point the feed publishes, because
+    // `ChargingPoint::report` is the only constructor there is.
+    let inventory = site();
+    let points: Vec<_> = inventory.points().collect();
+
     let updates = vec![
         PointUpdate {
             site: Facility::new("21F02723-SITE"),
             station: Facility::new("21F02723-STATION"),
             point: Facility::new("21F02723-POINT-1"),
-            report: Report::operating(PointStatus::Charging),
+            report: points[0]
+                .report(PointStatus::Charging)
+                .expect("an operating point may report `charging`"),
             price: Some(emob_poi::datex::PriceUpdate {
                 rate_id: "74034E3E-RATE".to_owned(),
                 price_type: "pricePerKWh",
@@ -369,7 +376,9 @@ fn every_path_the_status_publication_emits_is_one_the_reference_instance_contain
             site: Facility::new("21F02723-SITE"),
             station: Facility::new("21F02723-STATION"),
             point: Facility::new("21F02723-POINT-2"),
-            report: Report::operating(PointStatus::Available),
+            report: points[1]
+                .report(PointStatus::Available)
+                .expect("an operating point may report `available`"),
             price: None,
         },
     ];

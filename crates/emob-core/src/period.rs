@@ -75,9 +75,45 @@ impl QuarterHour {
     /// `[PTB-A 50.7 §3.1.7.2]` requires a meter to preserve across a
     /// synchronisation.
     ///
-    /// Not a number anything here counts to: a clock-change day has 92 or 100,
-    /// and a grid built by adding fifteen minutes needs no branch for it.
+    /// Nothing in the settlement grid counts *to* it: a grid built by adding
+    /// fifteen minutes of real time needs no branch for a clock change, which is
+    /// why `emob_session::split` has none. What the number is for is the
+    /// question one layer out — how many Messperioden a given day actually has —
+    /// and [`Self::periods_in_local_day`] answers that by walking the same grid
+    /// rather than by returning this (D218).
     pub const PERIODS_PER_ORDINARY_DAY: u32 = 96;
+
+    /// How many settlement periods one local calendar day holds in a zone.
+    ///
+    /// A quarter hour is fifteen minutes of *real* time and a local day is the
+    /// span between two local midnights, so an ordinary day has
+    /// [`Self::PERIODS_PER_ORDINARY_DAY`], a spring-forward day **92** and an
+    /// autumn-fold day **100**. That is the number a balance-group submission is
+    /// validated against `[A6 §IV.1]`: a series with 96 entries for 25 October
+    /// is missing an hour of somebody's balance group, and one with 96 for
+    /// 29 March carries four periods that did not happen.
+    ///
+    /// Measured between the two midnights rather than read from a table of
+    /// transition dates, so a zone that shifts by half an hour, at an hour other
+    /// than 02:00, or not at all needs no case.
+    ///
+    /// `None` is an answer rather than an absence: the day is **not** a whole
+    /// number of settlement periods, because a midnight does not land on the
+    /// grid. Every civil offset in use today is a whole number of quarter hours
+    /// — the fact `emob_session::split` relies on to have no daylight-saving
+    /// branch — so it takes an offset like Liberia's `-00:44:30` before 1972 to
+    /// reach, and returning 96 there would state a period count for a day that
+    /// has none.
+    #[must_use]
+    pub fn periods_in_local_day(zone: &crate::TimeZone, date: time::Date) -> Option<u32> {
+        let start = zone.instant_at(date, time::Time::MIDNIGHT)?;
+        let end = zone.instant_at(date.next_day()?, time::Time::MIDNIGHT)?;
+        if !Self::is_boundary(start) || !Self::is_boundary(end) {
+            return None;
+        }
+        let seconds = (end - start).whole_seconds();
+        u32::try_from(seconds / Self::SECONDS).ok()
+    }
 
     /// The quarter hour that contains `at`.
     #[must_use]
@@ -293,6 +329,76 @@ pub enum ClockResolutionError {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_local_day_is_not_always_ninety_six_periods() {
+        use crate::TimeZone;
+        let berlin = TimeZone::new("Europe/Berlin").unwrap();
+
+        // The ordinary case, and the only one anybody hard-codes.
+        assert_eq!(
+            QuarterHour::periods_in_local_day(&berlin, time::macros::date!(2026 - 06 - 15)),
+            Some(QuarterHour::PERIODS_PER_ORDINARY_DAY)
+        );
+
+        // Spring forward: 02:00 becomes 03:00, so the day is 23 hours and four
+        // periods short. A series with 96 entries for this date carries four
+        // that did not happen.
+        assert_eq!(
+            QuarterHour::periods_in_local_day(&berlin, time::macros::date!(2026 - 03 - 29)),
+            Some(92)
+        );
+
+        // Autumn fold: 03:00 becomes 02:00, so the day is 25 hours. A series
+        // with 96 entries here is missing an hour of somebody's balance group.
+        assert_eq!(
+            QuarterHour::periods_in_local_day(&berlin, time::macros::date!(2026 - 10 - 25)),
+            Some(100)
+        );
+
+        // A zone that shifts by half an hour, and one that does not shift at
+        // all — neither needs a table here, because the answer is measured.
+        let lord_howe = TimeZone::new("Australia/Lord_Howe").unwrap();
+        assert_eq!(
+            QuarterHour::periods_in_local_day(&lord_howe, time::macros::date!(2026 - 04 - 05)),
+            Some(98),
+            "Lord Howe moves by thirty minutes, not an hour"
+        );
+        let utc = TimeZone::utc();
+        for date in [
+            time::macros::date!(2026 - 03 - 29),
+            time::macros::date!(2026 - 10 - 25),
+        ] {
+            assert_eq!(
+                QuarterHour::periods_in_local_day(&utc, date),
+                Some(QuarterHour::PERIODS_PER_ORDINARY_DAY)
+            );
+        }
+    }
+
+    #[test]
+    fn a_day_that_is_not_a_whole_number_of_periods_says_so_rather_than_rounding() {
+        use crate::TimeZone;
+        // Liberia ran at -00:44:30 until January 1972 — the last civil offset in
+        // the world that was not a whole number of quarter hours. Local midnight
+        // there is 00:44:30 UTC, which is not on the settlement grid, so the day
+        // is not a whole number of Messperioden and `None` says exactly that.
+        //
+        // It is the one fixture that proves the branch is reachable, and it is
+        // the mirror of the fact `emob_session::split` relies on: every offset
+        // in use *today* is a whole number of quarter hours, which is why that
+        // module has no daylight-saving branch at all.
+        let monrovia = TimeZone::new("Africa/Monrovia").unwrap();
+        assert_eq!(
+            QuarterHour::periods_in_local_day(&monrovia, time::macros::date!(1970 - 01 - 15)),
+            None
+        );
+        // …and the same zone after the change is an ordinary 96.
+        assert_eq!(
+            QuarterHour::periods_in_local_day(&monrovia, time::macros::date!(2026 - 06 - 15)),
+            Some(QuarterHour::PERIODS_PER_ORDINARY_DAY)
+        );
+    }
     use super::*;
     use time::macros::datetime;
 

@@ -225,9 +225,11 @@ endpoint. It is deliberately the thinnest thing in the workspace, and
 rule that could be *wrong* lives here and is tested here, so the daemon is
 sockets, routing and bookkeeping.
 
-## What is not here yet 📐
+## What is not here 📐
 
-The service that **pushes** a tariff version to an estate — deciding when a new
-one takes effect, and clearing the old one, since OCPP 2.1 has no field for a
-version's expiry. The payload exists; the schedule is a daemon's business. Smart
-charging profiles and OCPP 2.1 DER control are a separate crate, still designed.
+Smart charging profiles and OCPP 2.1 DER control are a separate crate.
+
+Deciding *when* a version takes effect is `tarifd`'s and the socket is `csmsd`'s.
+The one thing the payload itself cannot carry is a version's expiry — the 2.1
+tariff object has no field for it — so it is reported with the crossing's other
+costs, and retiring a version is a separate `ClearTariffs` call.

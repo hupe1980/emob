@@ -29,18 +29,11 @@ number:
 | the national access point | `emob-poi` → DATEX II | `[AFIR Art. 20(2)(c)]` |
 
 Almost every stack computes that number in four places and reconciles none of
-them against the invoice.
-
-## One tariff, two readers
-
-A charging tariff has two jobs that platforms normally implement twice: it
-**rates** a finished session, and it is **displayed** before the session starts
-(`[AFIR Art. 5(4)]`, `[PAngV]`). When those come from two places they drift —
-the screen reads a CMS field somebody typed, the invoice reads the tariff
-engine, and one of them was updated.
-
-Here `rate()` and `describe()` read the same `PriceComponent` values off the
-same `Tariff`. Neither can quote a number the other does not use.
+them against the invoice. The two that drift first are the top two: the screen
+reads a CMS field somebody typed and the invoice reads the tariff engine, and
+one of them was updated. Here `describe()` and `rate()` read the same
+`PriceComponent` values off the same `Tariff` (`[AFIR Art. 5(4)]`, `[PAngV]`),
+and neither can quote a number the other does not use.
 
 ```rust
 let tariff = Tariff::simple(
@@ -131,9 +124,10 @@ The pieces are differences of cumulative values, so they telescope back to the
 period's own total to the last digit — the same construction the quarter-hour
 split uses.
 
-A clock threshold is read in the session's own UTC offset, because that is the
-frame the restrictions are matched in, and on every day the period spans: an
-overnight session crosses `22:00` and `06:00` on two different dates.
+A clock threshold is read on the wall clock of the tariff's own zone — never
+the offset the timestamps happen to carry, see below — and on every day the
+period spans: an overnight session crosses `22:00` and `06:00` on two different
+dates.
 
 ### Charging time and occupancy are stated, not inferred
 
@@ -143,6 +137,27 @@ car at 100 % state of charge can leave a quarter hour at exactly `0.000 kWh`
 while the session's own state machine says it was charging. `Period::charging`
 carries the answer rather than deriving it, and the CDR takes it from the
 session history.
+
+### A span the clock cannot resolve is not a line
+
+`[REA 6-A §3.1]`: "Messwerte unterhalb der kürzest möglichen Zeitspanne werden
+nicht für Abrechnungszwecke verwendet." A duration is a measured value, and the
+measuring instrument's resolution is a fact about the session rather than the
+tariff — so `Chargeable` carries it, at the regulation's sixty-second cap unless
+the station's type approval states better, and a time dimension whose whole
+measured span falls below it is dropped with `RatingNote::DurationBelowResolution`:
+
+```rust
+let rated = rate(&occupancy_tariff, &session);        // 30 s of occupancy, 60 s clock
+assert_eq!(rated.amount_for(Dimension::ParkingTime), None);
+assert!(rated.amount_for(Dimension::Energy).is_some());  // the kilowatt-hours bill
+
+let rated = rate(&occupancy_tariff, &session.with_clock(ten_second_clock));
+assert_eq!(rated.amount_for(Dimension::ParkingTime), Some(dec("0.05")));
+```
+
+Judged on the measurement as a whole rather than per period, because a session
+sampled every second still measured its minutes.
 
 ## A tariff has an identity over time
 
@@ -195,6 +210,9 @@ change landing mid-period would put one settlement slot under two tariffs, and
 the error names the *next* boundary rather than the nearest, because a price may
 not start applying earlier than it was published.
 
+*Which* version governs is decided here; *telling* the four readers is
+[`tarifd`](../../services/tarifd)'s, and it publishes **before** a version takes
+effect rather than when it does — for the same reason the article gives.
 
 ## Tax is a breakdown, not a number
 

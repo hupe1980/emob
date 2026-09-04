@@ -64,7 +64,11 @@ pub use subscriptions::{Subscription, specialists_for};
 /// rather than a row that dispatches into nothing.
 #[must_use]
 pub fn registered_specialists() -> Vec<&'static str> {
-    vec![skills::evidence::NAME, skills::tariff::NAME]
+    vec![
+        skills::compliance::NAME,
+        skills::evidence::NAME,
+        skills::tariff::NAME,
+    ]
 }
 
 /// Build the runtime with every specialist wired.
@@ -75,6 +79,7 @@ pub fn registered_specialists() -> Vec<&'static str> {
 #[must_use]
 pub fn runtime(store: Arc<dyn JournalStore>) -> Arc<Runtime> {
     Runtime::builder(store)
+        .skill(skills::compliance::ComplianceSweep)
         .skill(skills::evidence::EvidenceTriage)
         .skill(skills::tariff::TariffReview)
         .build()
@@ -146,8 +151,9 @@ mod tests {
         // The names are a `const` in two places — the registry and the
         // descriptors — and they have to be the same names.
         let registered = registered_specialists();
+        assert!(registered.contains(&skills::compliance::NAME));
         assert!(registered.contains(&skills::evidence::NAME));
         assert!(registered.contains(&skills::tariff::NAME));
-        assert_eq!(registered.len(), 2, "add a specialist, add it here");
+        assert_eq!(registered.len(), 3, "add a specialist, add it here");
     }
 }

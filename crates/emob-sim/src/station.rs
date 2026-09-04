@@ -350,6 +350,15 @@ pub struct SessionPlan {
     /// A post that does not is a post whose settlement slots are interpolated,
     /// and the split says so.
     pub clock_aligned: bool,
+    /// How long the vehicle sat connected before the charge began.
+    ///
+    /// The ordinary OCPP 2.0.1 shape: `TransactionEvent(Started)` with
+    /// `chargingState = EVConnected` carrying the `Transaction.Begin` reading,
+    /// then `Charging` some seconds later with no reading at all. Drawn from
+    /// five seconds to three minutes so the fleet exercises both halves of
+    /// `[REA 6-A §3.1]`: a wait the clock cannot resolve, which is dropped from
+    /// the occupancy fee with a note, and one it can, which is billed.
+    pub connected_before_charging: time::Duration,
 }
 
 impl SessionPlan {
@@ -377,10 +386,23 @@ impl SessionPlan {
             ended_at,
             energy: Energy::from_wh(Decimal::from(wh)).expect("a positive draw"),
             clock_aligned: !rng.one_in(5),
+            connected_before_charging: time::Duration::seconds(
+                i64::try_from(rng.between(5, 180)).unwrap_or(5),
+            ),
         }
     }
 
+    /// When the charge began: the transaction's own start plus the wait.
+    #[must_use]
+    pub fn charging_from(&self) -> time::OffsetDateTime {
+        self.started_at + self.connected_before_charging
+    }
+
     /// The readings the station takes, starting from a register value.
+    ///
+    /// The register does not move before [`Self::charging_from`]: the opening
+    /// reading and any clock-aligned sample inside the wait repeat the opening
+    /// value, which is what a real meter reports while the vehicle negotiates.
     fn readings(&self, opening: Decimal) -> Vec<PlannedReading> {
         let mut instants = vec![(self.started_at, ReadingContext::TransactionBegin)];
         if self.clock_aligned {
@@ -394,15 +416,15 @@ impl SessionPlan {
 
         // A tapering curve, allocated by *cumulative* weight so the pieces
         // telescope back to the plan's energy exactly — the same construction
-        // the settlement split uses, for the same reason.
-        let total_seconds = (self.ended_at - self.started_at).whole_seconds().max(1);
+        // the settlement split uses, for the same reason. It runs from the
+        // instant the charge began, not from the plug-in.
+        let charging_from = self.charging_from();
+        let total_seconds = (self.ended_at - charging_from).whole_seconds().max(1);
         let energy = self.energy.kwh();
         instants
             .iter()
             .map(|&(at, context)| {
-                let elapsed = (at - self.started_at)
-                    .whole_seconds()
-                    .clamp(0, total_seconds);
+                let elapsed = (at - charging_from).whole_seconds().clamp(0, total_seconds);
                 PlannedReading {
                     at,
                     register: opening + taper(energy, elapsed, total_seconds),
@@ -452,7 +474,9 @@ fn ocpp_events(
                 Some(context.as_str().to_owned()),
             )];
             if index == 0 {
-                TransactionEvent::started(*at, signed)
+                // `chargingState = EVConnected`: the transaction opens with the
+                // vehicle plugged in and nothing flowing yet.
+                TransactionEvent::started(*at, signed).suspended()
             } else {
                 TransactionEvent::updated(*at, signed)
             }
@@ -469,6 +493,12 @@ fn ocpp_events(
             emob_session::EndReason::Local,
         ));
     }
+
+    // …and `Charging`, some seconds after the opening, with no reading — the
+    // event a real station sends when the vehicle starts drawing, and the one a
+    // straight-line interpolation used to invent energy in front of. Appended
+    // rather than inserted: `Transaction::assemble` orders events by instant.
+    events.push(TransactionEvent::updated(plan.charging_from(), vec![]));
     events
 }
 
@@ -589,6 +619,7 @@ mod tests {
             ended_at: day() + time::Duration::hours(2),
             energy: Energy::from_kwh(Decimal::from(40)).unwrap(),
             clock_aligned: true,
+            connected_before_charging: time::Duration::seconds(30),
         };
         let charged = station.charge(&plan, &[]);
         let readings = charged.series.readings();
@@ -612,6 +643,7 @@ mod tests {
             ended_at: day() + time::Duration::hours(1),
             energy: Energy::from_kwh(Decimal::from(20)).unwrap(),
             clock_aligned: true,
+            connected_before_charging: time::Duration::seconds(30),
         };
 
         let clean = station.clone().charge(&plan, &[]);

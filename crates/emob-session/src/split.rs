@@ -57,6 +57,25 @@
 //! whichever supplier held the boundary, so the assumption travels with the
 //! number rather than being forgotten.
 //!
+//! # …and constant power means constant power *while charging*
+//!
+//! A straight line between two readings is the honest guess across a gap the
+//! session says nothing about. It is a wrong guess across a gap the session
+//! says something about: a transaction that opens `EVConnected`, starts
+//! charging thirty seconds later and sends its next meter value at the quarter
+//! hour — the ordinary OCPP 2.0.1 shape — has a register that did not move for
+//! those thirty seconds, and a line drawn from the opening reading attributes
+//! thirty seconds' worth of energy to an interval the operator's own state
+//! machine calls suspended. The CDR builder then refuses the record for a
+//! contradiction the arithmetic invented.
+//!
+//! So [`into_periods`] takes the session's **idle intervals** beside its cuts,
+//! and interpolates over *charging time only*: the register is held flat across
+//! an idle interval and the gap's energy is spread over the seconds that remain.
+//! Where a gap has no charging time at all and the register moved anyway, the
+//! line is drawn across the whole gap and the contradiction is left standing for
+//! the builder to report — it is now a real one.
+//!
 //! # Quarter hours and daylight saving
 //!
 //! A quarter hour here is an instant plus fifteen minutes of real time. Every
@@ -77,6 +96,16 @@ use crate::meter::{MeterSeries, ReadingContext};
 pub enum Provenance {
     /// A meter reading landed on this instant. The station measured it.
     Measured,
+    /// The register was **held** at a measured reading's value across an
+    /// interval the session says nothing flowed in.
+    ///
+    /// The value is exact, on the session's own account: between the reading
+    /// and this instant the vehicle was connected and not charging, so the
+    /// register cannot have moved. What it rests on is the operator's state
+    /// machine rather than a second reading — which is why it is a third answer
+    /// rather than [`Self::Measured`], and why a settlement may still treat the
+    /// number as authoritative where it may not treat an interpolated one so.
+    Held,
     /// Derived by assuming constant power between two readings.
     ///
     /// Which a tapering charge curve does not deliver: a car at 80 % state of
@@ -93,7 +122,24 @@ impl Provenance {
     pub const fn weaker(self, other: Self) -> Self {
         match (self, other) {
             (Self::Measured, Self::Measured) => Self::Measured,
-            _ => Self::Interpolated,
+            (Self::Interpolated, _) | (_, Self::Interpolated) => Self::Interpolated,
+            _ => Self::Held,
+        }
+    }
+
+    /// Whether the number this provenance describes is exact — measured, or
+    /// held at a measurement — rather than assumed.
+    #[must_use]
+    pub const fn is_exact(self) -> bool {
+        !matches!(self, Self::Interpolated)
+    }
+
+    /// The provenance of a boundary whose value was carried unchanged from a
+    /// reading: a held measurement, or an interpolation that was already one.
+    const fn held_from(reading: Self) -> Self {
+        match reading {
+            Self::Measured | Self::Held => Self::Held,
+            Self::Interpolated => Self::Interpolated,
         }
     }
 }
@@ -184,15 +230,15 @@ impl SessionSplit {
             .filter(|s| s.provenance == Provenance::Interpolated)
     }
 
-    /// Whether every slot was measured at both its boundaries.
+    /// Whether every slot's energy is exact — measured at both its boundaries,
+    /// or held at a measurement across an interval the session says nothing
+    /// flowed in — with nothing interpolated anywhere.
     ///
     /// The question a settlement process should ask before treating the split
     /// as authoritative.
     #[must_use]
     pub fn fully_measured(&self) -> bool {
-        self.slots
-            .iter()
-            .all(|s| s.provenance == Provenance::Measured)
+        self.slots.iter().all(|s| s.provenance.is_exact())
     }
 
     /// The series in the form the market side reads it: each period labelled by
@@ -258,11 +304,19 @@ impl SessionSplit {
 /// [`SplitError`] when the series cannot be split — a zero-length session, or
 /// one so long that splitting it is a corruption rather than a charge.
 pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitError> {
-    into_periods(series, &[])
+    into_periods(series, &[], &[])
 }
 
+/// An interval `[from, to)` in which the session says no energy flowed.
+///
+/// What [`into_periods`] holds the register flat across. The session's own
+/// history is the source — [`crate::Session::idle_intervals`] derives them —
+/// and a meter series never produces one, because a meter cannot tell a taper
+/// from a suspension.
+pub type Idle = (time::OffsetDateTime, time::OffsetDateTime);
+
 /// Split a session's meter series across quarter hours, cutting also at every
-/// instant in `cuts`.
+/// instant in `cuts` and interpolating only across the time outside `idle`.
 ///
 /// The grid says where the *energy* settles `[A6 §IV.1]`; `cuts` say where
 /// anything else about the session changed. The caller with the session's own
@@ -270,10 +324,19 @@ pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitErr
 /// carries one answer to "was the vehicle charging here" instead of one answer
 /// for a quarter hour that held two.
 ///
+/// `idle` is the same history read the other way: the intervals in which the
+/// session says nothing flowed. A boundary that falls inside one takes the
+/// register value at the interval's start, and a gap between two readings
+/// spreads its energy over the seconds that were **not** idle — because a
+/// straight line across a suspension attributes energy to an interval the
+/// operator's own record says moved none, and the CDR builder then refuses a
+/// contradiction the arithmetic invented. See the module documentation.
+///
 /// Cuts outside the series, and cuts that land on a boundary the grid already
-/// produced, cost one comparison and change nothing. Conservation is unaffected
-/// whatever they are: every interior boundary still appears once positive and
-/// once negative in the telescoping sum.
+/// produced, cost one comparison and change nothing; so do idle intervals
+/// outside the series. Conservation is unaffected whatever they are: every
+/// interior boundary still appears once positive and once negative in the
+/// telescoping sum.
 ///
 /// ```
 /// use emob_session::{MeterReading, MeterSeries, ReadingContext, split};
@@ -287,9 +350,12 @@ pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitErr
 ///     MeterReading::new(datetime!(2026-01-02 10:30 +1), kwh("110.000"), Direction::Import, ReadingContext::TransactionEnd),
 /// ])?;
 ///
-/// // The charge finished at 10:20, in the middle of the second quarter hour.
-/// let split = split::into_periods(&series, &[datetime!(2026-01-02 10:20 +1)])?;
+/// // The charge finished at 10:20, in the middle of the second quarter hour,
+/// // and the car sat there until 10:30.
+/// let stopped = datetime!(2026-01-02 10:20 +1);
+/// let split = split::into_periods(&series, &[stopped], &[(stopped, datetime!(2026-01-02 10:30 +1))])?;
 /// assert_eq!(split.slots.len(), 3, "10:00–10:15, 10:15–10:20, 10:20–10:30");
+/// assert!(split.slots[2].energy.is_zero(), "nothing flowed while it sat there");
 /// assert!(split.conserves());
 /// // …and the market side still sees two Messperioden.
 /// assert_eq!(split.market_series().len(), 2);
@@ -302,6 +368,7 @@ pub fn into_quarter_hours(series: &MeterSeries) -> Result<SessionSplit, SplitErr
 pub fn into_periods(
     series: &MeterSeries,
     cuts: &[time::OffsetDateTime],
+    idle: &[Idle],
 ) -> Result<SessionSplit, SplitError> {
     let start = series.first().at;
     let end = series.last().at;
@@ -341,7 +408,8 @@ pub fn into_periods(
 
     // Each boundary's cumulative register value, computed exactly once. This is
     // what makes the sum telescope.
-    let cumulative = cumulative_along(series, &boundaries);
+    let idle = normalised_idle(idle, start, end);
+    let cumulative = cumulative_along(series, &boundaries, &idle);
 
     let mut slots = Vec::with_capacity(boundaries.len().saturating_sub(1));
     for i in 0..boundaries.len() - 1 {
@@ -396,6 +464,7 @@ pub fn into_periods(
 fn cumulative_along(
     series: &MeterSeries,
     boundaries: &[time::OffsetDateTime],
+    idle: &[Idle],
 ) -> Vec<(Decimal, Provenance)> {
     let readings = series.readings();
     let last = &readings[readings.len() - 1];
@@ -423,9 +492,41 @@ fn cumulative_along(
             }
             let after = &readings[index + 1];
 
-            // Linear interpolation: constant power across the gap.
-            let gap = (after.at - before.at).whole_seconds();
-            let offset = (at - before.at).whole_seconds();
+            // Linear interpolation: constant power across the gap — across the
+            // part of it the session was charging in. The register is held
+            // flat over an idle interval, so the gap's energy is spread over
+            // the seconds that remain. A gap with no charging time at all in
+            // which the register nonetheless moved is a contradiction between
+            // the meter and the state machine; the line is then drawn across
+            // the whole gap, and the CDR builder reports the disagreement.
+            let (gap, offset) = {
+                let active_gap = charging_seconds(before.at, after.at, idle);
+                if active_gap > 0 {
+                    let active_offset = charging_seconds(before.at, at, idle);
+                    // No charging time between a reading and this boundary:
+                    // the register cannot have moved, so the value is the
+                    // reading's — held, not interpolated — from whichever
+                    // side the idle stretch touches.
+                    if active_offset == 0 {
+                        return (
+                            before.register.kwh(),
+                            Provenance::held_from(measured_if_useful(before.context)),
+                        );
+                    }
+                    if active_offset == active_gap {
+                        return (
+                            after.register.kwh(),
+                            Provenance::held_from(measured_if_useful(after.context)),
+                        );
+                    }
+                    (active_gap, active_offset)
+                } else {
+                    (
+                        (after.at - before.at).whole_seconds(),
+                        (at - before.at).whole_seconds(),
+                    )
+                }
+            };
             if gap <= 0 {
                 return (before.register.kwh(), Provenance::Interpolated);
             }
@@ -443,6 +544,43 @@ fn cumulative_along(
             )
         })
         .collect()
+}
+
+/// The idle intervals clipped to the series, sorted, and merged where they
+/// touch or overlap — so [`charging_seconds`] can subtract them without
+/// counting a second twice.
+fn normalised_idle(
+    idle: &[Idle],
+    start: time::OffsetDateTime,
+    end: time::OffsetDateTime,
+) -> Vec<Idle> {
+    let mut clipped: Vec<Idle> = idle
+        .iter()
+        .map(|&(from, to)| (from.max(start), to.min(end)))
+        .filter(|(from, to)| to > from)
+        .collect();
+    clipped.sort_unstable();
+    let mut merged: Vec<Idle> = Vec::with_capacity(clipped.len());
+    for (from, to) in clipped {
+        match merged.last_mut() {
+            Some((_, last_to)) if from <= *last_to => *last_to = (*last_to).max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    merged
+}
+
+/// The whole seconds of `[from, to)` that lie outside every idle interval.
+///
+/// `idle` is [`normalised_idle`]'s output: disjoint and ascending, so each
+/// interval's overlap with the window is subtracted exactly once.
+fn charging_seconds(from: time::OffsetDateTime, to: time::OffsetDateTime, idle: &[Idle]) -> i64 {
+    let total = (to - from).whole_seconds();
+    let idle_inside: i64 = idle
+        .iter()
+        .map(|&(a, b)| (b.min(to) - a.max(from)).whole_seconds().max(0))
+        .sum();
+    total - idle_inside
 }
 
 /// A reading that lands on a boundary counts as measuring it only when it was
@@ -833,7 +971,7 @@ mod tests {
             (20, "110.000", ReadingContext::InterruptionBegin),
             (45, "110.000", ReadingContext::TransactionEnd),
         ]);
-        let split = into_periods(&s, &[at(20)]).unwrap();
+        let split = into_periods(&s, &[at(20)], &[]).unwrap();
 
         let windows: Vec<(i64, i64)> = split
             .slots
@@ -863,7 +1001,7 @@ mod tests {
             (0, "100.000", ReadingContext::TransactionBegin),
             (30, "110.000", ReadingContext::TransactionEnd),
         ]);
-        let split = into_periods(&s, &[at(20), at(25)]).unwrap();
+        let split = into_periods(&s, &[at(20), at(25)], &[]).unwrap();
         assert_eq!(split.slots.len(), 4, "10:00, 10:15, 10:20, 10:25");
 
         let market = split.market_series();
@@ -884,8 +1022,128 @@ mod tests {
         let plain = into_quarter_hours(&s).unwrap();
         // Before the start, after the end, on the start, on the end, and on a
         // grid boundary the split already produced.
-        let cut = into_periods(&s, &[at(-5), at(0), at(15), at(30), at(99)]).unwrap();
+        let cut = into_periods(&s, &[at(-5), at(0), at(15), at(30), at(99)], &[]).unwrap();
         assert_eq!(cut, plain);
+        // …and so does an idle interval that lies outside the series.
+        let idle = into_periods(&s, &[], &[(at(-30), at(-5)), (at(30), at(60))]).unwrap();
+        assert_eq!(idle, plain);
+    }
+
+    #[test]
+    fn energy_is_interpolated_over_charging_time_only() {
+        // The ordinary OCPP 2.0.1 shape: the transaction opens `EVConnected`
+        // with a `Transaction.Begin` reading, starts charging thirty seconds
+        // later, and sends its next meter value at the quarter hour. Drawn as
+        // one straight line, the first thirty seconds get 1/30 of the gap's
+        // energy — attributed to an interval the session says moved none.
+        let begin = at(0);
+        let charging_from = at(0) + time::Duration::seconds(30);
+        let s = series(&[
+            (0, "100.000", ReadingContext::TransactionBegin),
+            (15, "105.000", ReadingContext::SampleClock),
+        ]);
+
+        let naive = into_periods(&s, &[charging_from], &[]).unwrap();
+        assert!(
+            !naive.slots[0].energy.is_zero(),
+            "a straight line invents energy in the suspended interval: {}",
+            naive.slots[0].energy
+        );
+
+        let split = into_periods(&s, &[charging_from], &[(begin, charging_from)]).unwrap();
+        assert_eq!(split.slots.len(), 2);
+        assert!(
+            split.slots[0].energy.is_zero(),
+            "the register is held flat while nothing flows"
+        );
+        assert_eq!(split.slots[1].energy, kwh("5.000"));
+        assert!(split.conserves());
+        // …and both numbers are exact rather than assumed: the boundary at
+        // 10:00:30 is the opening reading's value, held.
+        assert_eq!(split.slots[0].provenance, Provenance::Held);
+        assert_eq!(split.slots[1].provenance, Provenance::Held);
+        assert!(split.fully_measured(), "nothing was interpolated");
+        assert_eq!(split.interpolated().count(), 0);
+    }
+
+    #[test]
+    fn a_held_value_is_only_as_good_as_the_reading_it_is_held_from() {
+        // Held from a `Sample.Periodic` reading — a coincidence rather than a
+        // measurement — is still an assumption.
+        let charging_from = at(15) + time::Duration::seconds(30);
+        let s = series(&[
+            (0, "100.000", ReadingContext::TransactionBegin),
+            (15, "105.000", ReadingContext::SamplePeriodic),
+            (30, "110.000", ReadingContext::TransactionEnd),
+        ]);
+        let split = into_periods(&s, &[charging_from], &[(at(15), charging_from)]).unwrap();
+        assert_eq!(split.slots[1].energy, Energy::ZERO);
+        assert_eq!(split.slots[1].provenance, Provenance::Interpolated);
+        assert!(!split.fully_measured());
+
+        // Provenance orders as measured > held > interpolated.
+        assert_eq!(
+            Provenance::Measured.weaker(Provenance::Held),
+            Provenance::Held
+        );
+        assert_eq!(Provenance::Held.weaker(Provenance::Held), Provenance::Held);
+        assert_eq!(
+            Provenance::Held.weaker(Provenance::Interpolated),
+            Provenance::Interpolated
+        );
+        assert!(Provenance::Held.is_exact());
+        assert!(!Provenance::Interpolated.is_exact());
+    }
+
+    #[test]
+    fn an_idle_interval_in_the_middle_of_a_gap_moves_energy_to_the_charging_sides() {
+        // Readings at 10:00 and 10:30, 12 kWh between them; suspended from
+        // 10:10 to 10:20. Twenty charging minutes carry the twelve
+        // kilowatt-hours: six before the pause, none during it — on either
+        // side of the 10:15 grid boundary — and six after.
+        let s = series(&[
+            (0, "0", ReadingContext::TransactionBegin),
+            (30, "12", ReadingContext::TransactionEnd),
+        ]);
+        let split = into_periods(&s, &[at(10), at(20)], &[(at(10), at(20))]).unwrap();
+        let energies: Vec<String> = split
+            .slots
+            .iter()
+            .map(|slot| slot.energy.kwh().normalize().to_string())
+            .collect();
+        assert_eq!(energies, ["6", "0", "0", "6"]);
+        assert!(split.conserves());
+    }
+
+    #[test]
+    fn a_register_that_moves_across_a_wholly_idle_gap_is_left_for_the_builder() {
+        // The session says nothing flowed between the two readings and the
+        // meter says 5 kWh did. There is no charging time to spread it over,
+        // so the line is drawn across the whole gap — the contradiction is
+        // real, and `emob-cdr` is where it is reported.
+        let s = series(&[
+            (0, "100", ReadingContext::TransactionBegin),
+            (30, "105", ReadingContext::TransactionEnd),
+        ]);
+        let split = into_periods(&s, &[], &[(at(0), at(30))]).unwrap();
+        assert_eq!(split.slots.len(), 2);
+        assert_eq!(split.slots[0].energy.kwh().normalize().to_string(), "2.5");
+        assert!(split.conserves());
+    }
+
+    #[test]
+    fn overlapping_and_touching_idle_intervals_count_each_second_once() {
+        let s = series(&[
+            (0, "0", ReadingContext::TransactionBegin),
+            (30, "12", ReadingContext::TransactionEnd),
+        ]);
+        // 10:10–10:20 stated three times over, in pieces that overlap and touch.
+        let messy = [(at(10), at(16)), (at(14), at(18)), (at(18), at(20))];
+        let clean = [(at(10), at(20))];
+        assert_eq!(
+            into_periods(&s, &[at(10), at(20)], &messy).unwrap(),
+            into_periods(&s, &[at(10), at(20)], &clean).unwrap()
+        );
     }
 
     #[test]

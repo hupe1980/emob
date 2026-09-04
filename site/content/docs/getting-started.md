@@ -9,7 +9,7 @@ nav = "Getting started"
 
 # Getting started
 
-Twelve crates are built from this workspace today, with two daemons on top of
+Twelve crates are built from this workspace today, with four daemons on top of
 them. Everything on this page runs. ✅
 
 ```console
@@ -262,11 +262,15 @@ point.v2g = V2gCommunication::both_generations();
 
 let report = assess(&point, date!(2027-01-01));
 
-for finding in report.failing() {
+for finding in report.breaches() {
     println!("{}  {}", finding.obligation.citation, finding.obligation.remedy);
 }
 assert_eq!(report.verdict(), Verdict::Failing);  // the data and register duties are still open
 ```
+
+`breaches()` rather than `failing()`, because one entry in the calendar is not a
+duty: the greenhouse-gas quota's preconditions are worth money and break no law
+when unmet, so they are `forgone()` and the verdict does not read them.
 
 Duties that bind the **provider** rather than the point — `[AFIR Art. 5(5)]`'s
 disclosure obligation and its outright ban on cross-border roaming surcharges —

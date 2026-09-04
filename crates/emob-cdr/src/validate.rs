@@ -150,6 +150,22 @@ pub enum Finding {
         /// What the signed register says.
         signed: emob_core::Direction,
     },
+    /// The record's own signed evidence marks a tariff change inside the
+    /// session it prices with one version.
+    ///
+    /// `[OCMF Tab. 7, TX=T]` is the station's own record of where its price
+    /// changed, and `[AFIR Art. 5(4)]` makes the governing version the one in
+    /// force when the session started — so a change signed *inside* the session
+    /// is the meter saying two prices applied to a record that states one. The
+    /// builder refuses to emit it; this is the same question asked of a record
+    /// somebody else built.
+    SignedTariffChangeInsideSession {
+        /// When the meter says the price changed.
+        at: time::OffsetDateTime,
+        /// Whether that instant is a settlement-period boundary — the only
+        /// place `[PTB-A 50.7 §3.1.7.2]` permits a change to take effect.
+        on_settlement_boundary: bool,
+    },
     /// The record is priced for time, and its own evidence says the duration
     /// may not be billed.
     DurationNotBillable {
@@ -243,6 +259,9 @@ impl Finding {
             // …and a duration priced off a clock the signed record does not
             // vouch for is a number the payer cannot be asked to accept.
             | Self::DurationNotBillable { .. }
+            // A price the record's own evidence contradicts is not one either
+            // party can settle against.
+            | Self::SignedTariffChangeInsideSession { .. }
             // …as is one the record's own periods do not account for.
             | Self::CostDurationExceedsRecord { .. }
             // Import billed as export is the fault that reverses the sign of a
@@ -309,6 +328,18 @@ impl core::fmt::Display for Finding {
             Self::EnergyNotPriced { total } => write!(
                 f,
                 "the record moved {total} and its price charges nothing per kWh: lawful below 50 kW [AFIR Art. 5(4)], and also what a dropped energy line looks like"
+            ),
+            Self::SignedTariffChangeInsideSession {
+                at,
+                on_settlement_boundary,
+            } => write!(
+                f,
+                "the signed records mark a tariff change at {at} [OCMF Tab. 7, TX=T], inside a session this record prices with the one version in force when it started [AFIR Art. 5(4)]{}",
+                if *on_settlement_boundary {
+                    ""
+                } else {
+                    ", and not on a settlement-period boundary [PTB-A 50.7 §3.1.7.2]"
+                }
             ),
             Self::DurationNotBillable { dimension } => write!(
                 f,
@@ -504,6 +535,21 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
         }
         None => {}
     }
+    // The station's own account of where its price changed, against a record
+    // priced by one version. The builder refuses to emit this; a partner's
+    // exporter has no such gate.
+    if let Some(evidence) = &cdr.evidence
+        && let Some(&at) = evidence
+            .tariff_changes
+            .iter()
+            .find(|&&at| at > cdr.started_at && at < cdr.ended_at)
+    {
+        findings.push(Finding::SignedTariffChangeInsideSession {
+            at,
+            on_settlement_boundary: emob_session::QuarterHour::is_boundary(at),
+        });
+    }
+
     // The same gate the builder applies, re-applied to a record somebody
     // else built. A partner that prices a duration off an unsynchronised
     // clock has produced a number this side cannot defend either.
@@ -679,6 +725,7 @@ mod tests {
             started_at: at(0),
             ended_at: at(30),
             auth_path: AuthPath::Roaming,
+            authorization_reference: Some("auth-9".into()),
             periods: vec![period(0, 15, "10.000"), period(15, 30, "8.000")],
             total_energy: kwh("18.000"),
             direction: Direction::Import,
@@ -689,6 +736,8 @@ mod tests {
                 energy_billable: true,
                 duration_billable: true,
                 direction: Some(Direction::Import),
+                compensated_loss: None,
+                tariff_changes: Vec::new(),
             }),
             cost: None,
             supersedes: None,
@@ -699,6 +748,11 @@ mod tests {
         Cost {
             tariff_id: tariff.id.clone(),
             tariff_fingerprint: tariff.fingerprint(),
+            // Deliberately **not** through `Cdr::rerated_with`: these fixtures
+            // are documents a partner built, and several of them are shapes
+            // this side refuses to build at all — which is the whole point of
+            // a validator. Pricing them through the gated door would refuse
+            // the fixture and test nothing.
             rated: emob_tariff::rate(tariff, &cdr.chargeable().unwrap()),
         }
     }

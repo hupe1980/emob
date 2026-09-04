@@ -103,6 +103,29 @@ fn every_fault_in_the_catalogue_is_actually_exercised() {
         clock_refusals < outcome.refused.len(),
         "an unsynchronised clock must not be the only reason anything is refused"
     );
+
+    // …and it does refuse on its own, where it should: a session whose only
+    // fault is the clock, on a post that prices occupancy, with a wait before
+    // the charge that the clock *can* resolve. The fee then rests on a duration
+    // the signed records do not vouch for, and that is the refusal's reason.
+    // Before the fleet's sessions opened `EVConnected`, no session ever billed
+    // a duration and this gate was exercised by nothing.
+    assert!(
+        clock_refusals > 0,
+        "the clock fault never stood alone: {}",
+        outcome.summary()
+    );
+    for refusal in outcome
+        .refused
+        .iter()
+        .filter(|r| r.faults == vec![Fault::UnsynchronisedClock])
+    {
+        assert!(
+            refusal.reasons.iter().any(|r| r.contains("duration")),
+            "{:?}",
+            refusal.reasons
+        );
+    }
 }
 
 #[test]

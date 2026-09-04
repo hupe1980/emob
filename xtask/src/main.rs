@@ -16,10 +16,14 @@ fn main() -> Result<()> {
         Some("check-citations") => check_citations(&root),
         Some("check-manifests") => check_manifests(&root),
         Some("check-graph") => check_graph(&root),
+        Some("check-wire") => check_wire(&root),
+        Some("check-concepts") => check_concepts(&root),
         Some("check-all") => {
             no_floats(&root)?;
             check_citations(&root)?;
             check_manifests(&root)?;
+            check_wire(&root)?;
+            check_concepts(&root)?;
             check_graph(&root)
         }
         Some("help" | "--help" | "-h") | None => {
@@ -49,9 +53,407 @@ cargo xtask <task>
   check-graph       no domain crate has a clock, a socket or a database in its
                     dependency graph — the half of `just purity` that greps
                     cannot see, because a dependency is not our source
+  check-wire        every date, time and instant in a serialisable type names
+                    the spelling it crosses the wire in: `time`'s own derived
+                    form is a nine-element array a partner cannot read
+  check-concepts    every count concepts/ states about itself is the count it
+                    holds: the decision log's own total, and the numbered list
+                    of rules its README says how many of there are
   check-all         all of the above
 "
     );
+}
+
+/// Every count `concepts/` states about itself is the count it holds.
+///
+/// # Why a prose document needs a guard at all
+///
+/// The rest of this workspace keeps its concrete claims in code, where a test
+/// can hold them. Two of them are not in code and cannot be: how many decisions
+/// the log records, and how many rules the design keeps re-learning. Both are
+/// *stated in words* in the document that holds them, and prose has no test —
+/// which is the argument D168 made for keeping such claims few, and is exactly
+/// why the two that exist drifted.
+///
+/// They drifted in the way an unchecked claim always does: one-directionally and
+/// invisibly. `DECISIONS.md` said "a hundred and seventy-four things" over two
+/// hundred and thirteen entries, and `README.md` headed **nine** rules over a
+/// list of ten whose ninth and tenth were in the wrong order (D211–D213). No
+/// link broke, no reference dangled, and nothing anywhere disagreed — because
+/// nothing anywhere was looking.
+///
+/// So the two claims are checked, and the numbering is checked with them: a
+/// stable identifier that skips or repeats is a citation from code that quietly
+/// means something else.
+fn check_concepts(root: &Path) -> Result<()> {
+    let concepts = root.join("concepts");
+    if !concepts.is_dir() {
+        println!("check-concepts: concepts/ is absent; skipping");
+        return Ok(());
+    }
+
+    let mut problems: Vec<String> = Vec::new();
+
+    // ── The decision log ────────────────────────────────────────────────────
+    let decisions = std::fs::read_to_string(concepts.join("DECISIONS.md"))
+        .context("reading concepts/DECISIONS.md")?;
+    let numbers = decision_numbers(&decisions);
+    if numbers.is_empty() {
+        bail!("concepts/DECISIONS.md holds no `**D<n> — …**` entries at all");
+    }
+    let held = numbers.len();
+    match stated_count(&decisions) {
+        Some(stated) if stated == held => {}
+        Some(stated) => problems.push(format!(
+            "concepts/DECISIONS.md opens by claiming {stated} entries and holds {held}"
+        )),
+        None => problems.push(
+            "concepts/DECISIONS.md does not open with a spelled-out count of its entries"
+                .to_owned(),
+        ),
+    }
+    // `D` numbers are cited from code comments and from the other documents, so
+    // a repeat is two entries answering to one citation and a gap is a citation
+    // with nothing behind it.
+    //
+    // **Not** file order. The log is grouped by topic — "Exactness and
+    // representation", "Cryptography and identifiers" — so D3 sits after D27
+    // and always has. What has to hold is that the identifiers are unique and
+    // the range is dense, which is a property of the set rather than of the
+    // sequence; checking the sequence instead reports twelve findings about the
+    // document's shape and none about its content.
+    let mut sorted = numbers.clone();
+    sorted.sort_unstable();
+    for pair in sorted.windows(2) {
+        if pair[1] == pair[0] {
+            problems.push(format!(
+                "concepts/DECISIONS.md records D{} twice: two entries answer to one citation",
+                pair[0]
+            ));
+        } else if pair[1] != pair[0] + 1 {
+            problems.push(format!(
+                "concepts/DECISIONS.md has no D{}..=D{}: a `D` number is a stable identifier \
+                 and a gap is a citation with nothing behind it",
+                pair[0] + 1,
+                pair[1] - 1
+            ));
+        }
+    }
+    if sorted.first() != Some(&1) {
+        problems.push(format!(
+            "concepts/DECISIONS.md starts at D{:?} rather than D1",
+            sorted.first()
+        ));
+    }
+
+    // ── The rules the design keeps re-learning ──────────────────────────────
+    let readme = std::fs::read_to_string(concepts.join("README.md"))
+        .context("reading concepts/README.md")?;
+    let (heading, items) = numbered_rules(&readme);
+    match (heading, items.len()) {
+        (Some(stated), held) if stated == held => {}
+        (Some(stated), held) => problems.push(format!(
+            "concepts/README.md heads {stated} rules and lists {held}"
+        )),
+        (None, _) => {
+            problems.push("concepts/README.md has no '## <spelled-out> rules …' heading".to_owned())
+        }
+    }
+    for (index, number) in items.iter().enumerate() {
+        let expected = index + 1;
+        if *number != expected {
+            problems.push(format!(
+                "concepts/README.md's rule list reaches {number} where {expected} was due: a \
+                 reader counting down the list finds a different rule than a reference to it does"
+            ));
+        }
+    }
+
+    if !problems.is_empty() {
+        for problem in &problems {
+            eprintln!("❌ {problem}");
+        }
+        bail!(
+            "{} claim{} in concepts/ that the documents do not hold",
+            problems.len(),
+            if problems.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    println!(
+        "✅ check-concepts: {held} decisions, {} rules, each the number stated",
+        items.len()
+    );
+    Ok(())
+}
+
+/// The `D` numbers of the log's entries, in the order they appear.
+///
+/// An entry opens a line as `**D<n> — `. A *section* intro opens as
+/// `**D<n>–D<m> came from …**` and is not one, which is why the em dash after
+/// the number is part of the pattern.
+fn decision_numbers(text: &str) -> Vec<usize> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("**D")?;
+            let end = rest.find(|c: char| !c.is_ascii_digit())?;
+            if !rest[end..].starts_with(" — ") {
+                return None;
+            }
+            rest[..end].parse().ok()
+        })
+        .collect()
+}
+
+/// The count a document opens by claiming, written out in words.
+///
+/// Spelled out rather than in digits because that is how the document reads, and
+/// a guard that only understood `213` would be satisfied by prose nobody writes.
+fn stated_count(text: &str) -> Option<usize> {
+    // The opening sentence, which is the only place the total is claimed.
+    let head: String = text.lines().take(12).collect::<Vec<_>>().join(" ");
+    words_to_number(&head)
+}
+
+/// The heading's spelled-out count, and the numbers the list under it actually
+/// reaches.
+fn numbered_rules(text: &str) -> (Option<usize>, Vec<usize>) {
+    let Some(start) = text.find(" rules this design keeps re-learning") else {
+        return (None, Vec::new());
+    };
+    let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+    let heading = words_to_number(&text[line_start..start]);
+
+    let body = &text[start..];
+    let end = body[1..].find("\n## ").map_or(body.len(), |i| i + 1);
+    let items = body[..end]
+        .lines()
+        .filter_map(|line| {
+            let digits: String = line.chars().take_while(char::is_ascii_digit).collect();
+            if digits.is_empty() || !line[digits.len()..].starts_with(". **") {
+                return None;
+            }
+            digits.parse().ok()
+        })
+        .collect();
+    (heading, items)
+}
+
+/// A count written in English words, up to the low thousands — enough for a
+/// decision log and a list of rules, and deliberately not a general parser.
+fn words_to_number(text: &str) -> Option<usize> {
+    const UNITS: [(&str, usize); 21] = [
+        ("zero", 0),
+        ("one", 1),
+        ("two", 2),
+        ("three", 3),
+        ("four", 4),
+        ("five", 5),
+        ("six", 6),
+        ("seven", 7),
+        ("eight", 8),
+        ("nine", 9),
+        ("ten", 10),
+        ("eleven", 11),
+        ("twelve", 12),
+        ("thirteen", 13),
+        ("fourteen", 14),
+        ("fifteen", 15),
+        ("sixteen", 16),
+        ("seventeen", 17),
+        ("eighteen", 18),
+        ("nineteen", 19),
+        ("twenty", 20),
+    ];
+    const TENS: [(&str, usize); 8] = [
+        ("twenty", 20),
+        ("thirty", 30),
+        ("forty", 40),
+        ("fifty", 50),
+        ("sixty", 60),
+        ("seventy", 70),
+        ("eighty", 80),
+        ("ninety", 90),
+    ];
+
+    let lower = text.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let mut total = 0usize;
+    let mut current = 0usize;
+    let mut seen = false;
+    for token in tokens {
+        let word = token.trim_end_matches('s');
+        if word == "hundred" || word == "thousand" {
+            // English writes "a hundred and seventy-four", so the article is
+            // the multiplier. Without this the commonest spelling of the very
+            // claim being checked parses as "no number here at all", and the
+            // guard reports the wrong reason for a real finding.
+            let scale = if word == "hundred" { 100 } else { 1000 };
+            current = current.max(1) * scale;
+            seen = true;
+            continue;
+        }
+        if word == "and" || word == "a" || word == "an" {
+            continue;
+        }
+        if let Some((_, tens)) = TENS.iter().find(|(w, _)| *w == word) {
+            current += tens;
+            seen = true;
+            continue;
+        }
+        if let Some((_, unit)) = UNITS.iter().find(|(w, _)| *w == word) {
+            current += unit;
+            seen = true;
+            continue;
+        }
+        // Hyphenated forms — "seventy-four" — arrive as two tokens above; any
+        // other word ends the number.
+        if seen {
+            total += current;
+            return Some(total);
+        }
+    }
+    seen.then_some(total + current)
+}
+
+/// Every date, time and instant in a serialisable type pins the spelling it
+/// crosses the wire in.
+///
+/// # Why this is a guard and not a review note
+///
+/// `time`'s derived `Serialize` writes its internal representation: an
+/// `OffsetDateTime` becomes a nine-element array, a `Date` becomes a year and an
+/// *ordinal day*. All of it round-trips through this codebase perfectly, which
+/// is exactly why nothing notices — `from_str(to_string(x)) == x` holds for any
+/// encoding, including one no partner can read (D85).
+///
+/// That was found once by reading, fixed across the workspace, and **came back
+/// on the next timestamp added to a serialisable type** — `EvidenceRef`'s list
+/// of signed tariff-change instants, which went out as a list of arrays for
+/// exactly as long as it took to write this check (D209). A defect that returns
+/// the moment attention moves is a defect that needs a build failure rather than
+/// a convention.
+///
+/// The rule: a field whose type mentions a `time` type, inside a struct that
+/// derives `Serialize`, must carry `#[serde(with = …)]`. What that module is —
+/// `time::serde::rfc3339`, `emob_core::wire::date`, one of this workspace's own
+/// — is the author's call; *saying* is not.
+fn check_wire(root: &Path) -> Result<()> {
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+
+    for file in rust_sources(root)? {
+        let source = std::fs::read_to_string(&file)
+            .with_context(|| format!("reading {}", file.display()))?;
+        // Everything from the first `#[cfg(test)]` is a fixture, and a fixture
+        // does not cross a wire.
+        let body = source
+            .split_once("#[cfg(test)]")
+            .map_or(source.as_str(), |(before, _)| before);
+
+        for (name, attrs, fields) in serialisable_structs(body) {
+            for (field, ty, field_attrs) in struct_fields(&fields) {
+                if !mentions_a_time_type(&ty) || field_attrs.contains("serde(with") {
+                    continue;
+                }
+                checked += 1;
+                problems.push(format!("  {}: {name}.{field}: {ty}", file.display()));
+            }
+            let _ = attrs;
+        }
+    }
+
+    if !problems.is_empty() {
+        bail!(
+            "these fields cross a wire in `time`'s own derived form, which is a nine-element \
+             array no partner can read — name the spelling with `#[serde(with = …)]`:\n{}",
+            problems.join("\n")
+        );
+    }
+    let _ = checked;
+    println!(
+        "🕰️  check-wire: every date and instant in a serialisable type names its wire spelling"
+    );
+    Ok(())
+}
+
+/// Struct declarations that derive `Serialize`, as `(name, attributes, body)`.
+fn serialisable_structs(source: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for (index, _) in source.match_indices("struct ") {
+        // The attributes are whatever precedes the declaration back to the
+        // previous blank line — enough to see a `derive` or a `cfg_attr`.
+        let head = &source[..index];
+        let attrs_start = head.rfind("\n\n").map_or(0, |at| at + 2);
+        let attrs = &head[attrs_start..];
+        if !attrs.contains("Serialize") {
+            continue;
+        }
+        let rest = &source[index + "struct ".len()..];
+        let Some(brace) = rest.find('{') else {
+            continue;
+        };
+        let name = rest[..brace].trim().to_owned();
+        // A tuple struct or a generic bound is not a field list this reads.
+        if name.contains('(') || name.is_empty() {
+            continue;
+        }
+        let Some(end) = rest[brace..].find("\n}") else {
+            continue;
+        };
+        out.push((
+            name,
+            attrs.to_owned(),
+            rest[brace + 1..brace + end].to_owned(),
+        ));
+    }
+    out
+}
+
+/// The public fields of a struct body, as `(name, type, its attributes)`.
+fn struct_fields(body: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut attrs = String::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[") {
+            attrs.push_str(trimmed);
+            continue;
+        }
+        if trimmed.starts_with("///") || trimmed.starts_with("//") || trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("pub ")
+            && let Some((name, ty)) = rest.split_once(':')
+            && !name.contains('(')
+        {
+            out.push((
+                name.trim().to_owned(),
+                ty.trim().trim_end_matches(',').to_owned(),
+                std::mem::take(&mut attrs),
+            ));
+            continue;
+        }
+        attrs.clear();
+    }
+    out
+}
+
+/// Whether a field's type mentions something `time` serialises structurally.
+fn mentions_a_time_type(ty: &str) -> bool {
+    [
+        "OffsetDateTime",
+        "time::Date",
+        "time::Time",
+        "time::Duration",
+        "Weekday",
+    ]
+    .iter()
+    .any(|needle| ty.contains(needle))
 }
 
 fn workspace_root() -> Result<PathBuf> {
@@ -755,6 +1157,61 @@ mod tests {
                 "{not_a_citation:?} is not a citation"
             );
         }
+    }
+
+    #[test]
+    fn a_count_written_in_words_is_read_as_a_number() {
+        // The spellings the documents actually use, including the article that
+        // stands in for the multiplier.
+        assert_eq!(
+            words_to_number("A hundred and seventy-four things"),
+            Some(174)
+        );
+        assert_eq!(
+            words_to_number("Two hundred and thirteen things"),
+            Some(213)
+        );
+        assert_eq!(words_to_number("## Ten rules this design"), Some(10));
+        assert_eq!(words_to_number("## Nine rules"), Some(9));
+        assert_eq!(words_to_number("Twenty-one entries"), Some(21));
+        // …and prose with no count in it is not a count of zero.
+        assert_eq!(
+            words_to_number("Each is now a test rather than a paragraph."),
+            None
+        );
+    }
+
+    #[test]
+    fn a_section_intro_is_not_an_entry() {
+        // `**D34–D40 came from …**` introduces a run; `**D34 — …**` is one of
+        // them. Counting the first as an entry would report the log holding
+        // more than it does, and the em dash after the number is the difference.
+        let text = "\
+**D34–D40 came from running a record this workspace did not write.** Every test
+**D34 — secp192r1 is not a legacy curiosity.** The reference
+**D35 — Something else.** More
+not a decision at all
+";
+        assert_eq!(decision_numbers(text), vec![34, 35]);
+    }
+
+    #[test]
+    fn the_rule_list_is_read_with_its_heading() {
+        let text = "\
+## Ten rules this design keeps re-learning
+
+Some prose.
+
+1. **First.** Body
+   continued.
+2. **Second.** Body
+
+## Feedback to sibling crates
+3. **Not a rule — this is past the section.**
+";
+        let (heading, items) = numbered_rules(text);
+        assert_eq!(heading, Some(10));
+        assert_eq!(items, vec![1, 2], "the list stops at the next heading");
     }
 
     #[test]

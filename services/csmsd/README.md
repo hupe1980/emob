@@ -165,6 +165,25 @@ GSH01.1K2L. Its `meterStop` says **108814** watt-hours, the meter's *lifetime*
 register. The CDR that comes out bills **0.636 kWh**, the signed transaction
 difference. Nothing between the socket and the ledger can see the first number.
 
+## The key a station claims, and being able to check it
+
+`[OCA SMV §3.2.2]` has a station send its own public key beside each signed
+value. The claim decides nothing — the key that verifies comes from the registry,
+out of band `[OCMF §Relation of Serial Numbers]` — but the two agreeing narrows a
+dispute to the numbers, and the two disagreeing names a meter swapped without the
+registry hearing about it.
+
+```rust
+Outcome::KeyMismatch { identity, claimed }        // a meter nobody told us about
+Outcome::UnreadableClaimedKey { identity, detail } // …and one we cannot even check
+```
+
+The second exists because the first silently stopped happening. A `publicKey`
+envelope that does not decode was answered with `continue`, so the comparison
+never ran and a swapped meter behind an unreadable key was never named. The
+session still bills — being unable to check a claim is not a reason to refuse the
+measurement — and the operator is told, because the fix is a provisioning one.
+
 ## License
 
 MIT OR Apache-2.0.

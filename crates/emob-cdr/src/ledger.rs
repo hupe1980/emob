@@ -262,6 +262,14 @@ fn describe_difference(existing: &Cdr, incoming: &Cdr) -> String {
             existing.auth_path, incoming.auth_path
         ));
     }
+    if existing.authorization_reference != incoming.authorization_reference {
+        // The provider's own handle on the decision it made. A partner
+        // restating it is restating which authorisation this record settles.
+        differences.push(format!(
+            "authorization reference {:?} → {:?}",
+            existing.authorization_reference, incoming.authorization_reference
+        ));
+    }
     if existing.evidence != incoming.evidence {
         differences.push("the signed evidence differs".to_owned());
     }

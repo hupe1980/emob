@@ -19,8 +19,8 @@ value survives in, and the driver contract all of it turns into an invoice.
 > [`emob-poi`](crates/emob-poi), [`emob-roam`](crates/emob-roam),
 > [`emob-billing`](crates/emob-billing), [`emob-thg`](crates/emob-thg),
 > [`emob-service`](crates/emob-service)
-> and [`emob-sim`](crates/emob-sim) — with two daemons on top of them and
-> **697 tests**, an end-to-end test that drives the Open Charge Alliance's own
+> and [`emob-sim`](crates/emob-sim) — with four daemons on top of them and
+> **748 tests**, an end-to-end test that drives the Open Charge Alliance's own
 > OCPP example message from the wire to a taxable amount and back out again as a
 > file the driver's verifier reads, records from **five** real meters this
 > workspace did not write, one session that settles at the same money over three
@@ -441,6 +441,21 @@ let split = session.split(Direction::Import)?;   // cut at the grid and at
 Since the sum telescopes whatever the boundaries are, an extra boundary costs
 nothing. A quarter hour may then hold two slots, and `market_series()` sums them
 back — the market settles a whole Messperiode against one balance group.
+
+The same history shapes the interpolation. A transaction that opens
+`EVConnected`, starts charging thirty seconds later and sends its next meter
+value at the quarter hour — the ordinary OCPP 2.0.1 shape — has a register that
+did not move for those thirty seconds, and a straight line from the opening
+reading puts energy into an interval the operator's own record calls suspended.
+So the split holds the register flat across the session's idle intervals and
+spreads a gap's energy over the seconds it was charging in; the contradiction the
+builder reports is then the meter's own, not one the arithmetic invented.
+
+And the minutes the clock cannot resolve are not billed, rather than the record
+refused: `[REA 6-A §3.1]` says a measured value below the clock's shortest span
+"werden nicht für Abrechnungszwecke verwendet", so a thirty-second occupancy
+under a sixty-second clock is a line the rating drops with its reason, and the
+kilowatt-hours bill.
 
 ### The identification is read, not asked for
 
@@ -1051,6 +1066,17 @@ One genuinely signed session goes out over three paths — self-roaming, OCPI
 arrive verbatim and re-verify at the far end against the *receiver's* registry,
 never against the key the document carries.
 
+**And the other hat is a test rather than a claim.** The EMP half is a partner's
+record read back unpriced, re-rated at *this* side's retail price, and invoiced
+to a driver — and re-rating goes through the same door the issuer used, because
+the obvious composition (`rate(&retail, &cdr.chargeable()?)`) silently skips
+every gate: a tariff not in force when the session ran, a version the meter says
+was superseded mid-session, a duration the signed records do not vouch for, and
+the clock resolution under a per-minute fee. The periods, the energy and the
+evidence stay the record's own, so the CPO's number and the eMSP's are about the
+same session by construction and the margin between them is a comparison rather
+than a coincidence.
+
 **And the account is one vocabulary, not three.** `Crossing<T>` and its
 pointer-addressed `Note` live in `emob-core`, beside the settlement grid, for
 the same reason that type is there: three seams now owe one. OCPI, the DATEX II
@@ -1090,6 +1116,21 @@ for reason in crossing.reasons() { … }         // named per record, by JSON Po
 The tax follows from the *rounded* taxable amount, by the standard's own rule, so
 that residual is the whole of what the document approximates. A tiered session
 keeps its tiers, because a tiered invoice has to show them.
+
+The item price is the **net** one, because that is what BT-146 is defined as: a
+gross tariff's own figure put there states a price that does not produce the
+line, off by the whole VAT rate, and `Invoice::reconciles` asks every line to
+reproduce its own amount from its own numbers. A tariff's minimum or maximum is a
+document level allowance or charge rather than a line — a cap as a line is a
+negative BT-146 that `BR-27` refuses outright, and rounding the line and the
+difference independently demanded a cent more than the cap the driver was
+promised.
+
+And a time line is stated in **seconds**, against a price per 3600 of them.
+OCPI quotes time per hour and 3600 has two factors of three, so twenty-five
+minutes is `0.41666…` h and a rounded quantity no longer reproduces its own
+amount; EN 16931's BT-149 — the item price base quantity — is the field for
+exactly that, and `1500 SEC × 6.00 ÷ 3600` is `2.50` to the last digit.
 
 And the verdict is the deliverable, not the XML. `to_en16931` returns the
 semantic document **and** its report; `xrechnung` will not hand back a document
@@ -1325,8 +1366,10 @@ argument, carried with the notice it came from.
 | Service | What it does | State |
 |---|---|---|
 | [`csmsd`](services/csmsd) | The CSMS a station connects to: OCPP 1.6J/2.0.1/2.1 on `ocpp-kit` transport, the two ledgers side by side, the chain from a signed value to a settled record | ✅ |
-| [`agentd`](services/agentd) | The advisory plane on `agentplane` — specialists that correlate across many exact answers, and cannot move money by construction | ✅ |
-| `roamd`, `empd`, `pncd`, `poid`, `tarifd`, `billd`, `opsd`, `sited` | | 📐 |
+| [`agentd`](services/agentd) | The advisory plane on `agentplane` — specialists that correlate across many exact answers, and cannot move money by construction. Evidence triage, the tariff sweep, and a compliance sweep that answers **which duties this estate will fail on the day they start** | ✅ |
+| [`poid`](services/poid) | The national access point feed `[AFIR Art. 20(2)]`: the DATEX II snapshot, the updates that reference it, and a feed nobody refreshed named rather than read as current | ✅ |
+| [`tarifd`](services/tarifd) | Publishing a tariff version to the three audiences owed it, from one decimal, **before** it takes effect — and to none of them if the stations cannot be given it | ✅ |
+| `roamd`, `empd`, `pncd`, `billd`, `opsd`, `sited` | | 📐 |
 
 `emob-roam` is the one crate whose MSRV is not the workspace's. Everything that
 decides money promises **1.94**, which is the floor the sibling workspaces
@@ -1347,7 +1390,7 @@ because CI does not run it.
 just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs
 just test       # cargo test --workspace --all-features
-just guards     # no-floats, check-citations, check-manifests, check-graph
+just guards     # no-floats, check-citations, check-manifests, check-wire, check-concepts, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
 ```

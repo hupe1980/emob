@@ -87,18 +87,6 @@ pub enum PoiError {
         facility: String,
     },
 
-    /// A price cannot be expressed in the profile's own vocabulary.
-    ///
-    /// See [`crate::rate`] — `[DATEX-II-Profil Tab. A.116]` has no literal for
-    /// the occupancy fee `[AFIR Art. 5(4)]` explicitly permits.
-    #[error("{dimension} has no faithful price type in the profile: {because}")]
-    UnpublishablePrice {
-        /// The tariff dimension that has no target.
-        dimension: &'static str,
-        /// Why not.
-        because: &'static str,
-    },
-
     /// A rate is published at a site whose wall clock runs on a different zone.
     ///
     /// A tariff's `22:00` is local civil time at the charge point

@@ -86,13 +86,37 @@ So `Session::split` cuts at the session's own state changes as well as at the
 grid, and each is another boundary in the same telescoping sum:
 
 ```rust
-let split = session.split(Direction::Import)?;    // grid + state changes
-let split = split::into_periods(&series, &cuts)?; // the primitive underneath
+let split = session.split(Direction::Import)?;           // grid + state changes + idle
+let split = split::into_periods(&series, &cuts, &idle)?; // the primitive underneath
 ```
 
 Conservation is unaffected — interior boundaries cancel wherever they fall — and
 `market_series()` sums the slices of a quarter hour back together, so the market
 side still sees one entry per Messperiode.
+
+### …and constant power means constant power *while charging*
+
+A straight line between two readings is the honest guess across a gap the
+session says nothing about, and a wrong one across a gap it does. The ordinary
+OCPP 2.0.1 transaction opens `EVConnected` with a `Transaction.Begin` reading,
+starts charging thirty seconds later with no reading, and sends its next meter
+value at the quarter hour; its register did not move for those thirty seconds,
+and a line from the opening reading attributes energy to an interval the
+operator's own state machine calls suspended.
+
+So `Session::split` hands the interpolation `Session::idle_intervals()` — every
+stretch of the history in a state other than `Charging` — and the register is
+held flat across them, the gap's energy spread over the seconds that remain:
+
+```rust
+let split = split::into_periods(&series, &[charging_from], &[(begin, charging_from)])?;
+assert!(split.slots[0].energy.is_zero());   // nothing flowed before the charge began
+assert!(split.conserves());                  // and the total is untouched
+```
+
+Where a gap has no charging time at all and the register moved anyway, the line
+is drawn across the whole gap and the contradiction is left standing for
+`emob-cdr` to report — because it is now the meter's own.
 
 ## The instant that names a period
 
@@ -121,7 +145,12 @@ for slot in split.interpolated() {
 ```
 
 `Provenance::Measured` means a `Sample.Clock` reading landed on that boundary.
-`Provenance::Interpolated` means it was derived by assuming constant power
+`Provenance::Held` means the register was carried unchanged from a measured
+reading across an interval the session says nothing flowed in — exact, on the
+operator's own account, and a third answer because it rests on the state machine
+rather than on a second reading; `fully_measured()` accepts it, `interpolated()`
+does not list it. `Provenance::Interpolated` means it was derived by assuming
+constant power
 across a gap — which a tapering charge curve does not deliver: a car at 80 %
 state of charge draws far less at the end of a gap than at its start, so a
 straight line over-allocates to the later side. The error lands on whichever
@@ -149,6 +178,24 @@ UTC offset in the world is a whole number of quarter hours, so a UTC
 quarter-hour boundary is a local one everywhere — and the 92- and 100-slot days
 of a clock change are simply days with fewer or more instants in them. Nothing
 counts to 96.
+
+The market side *does* count, and 96 is what every exporter hard-codes. A
+balance-group submission is validated on how many Messperioden a day holds
+`[A6 §IV.1]`, so a series with 96 entries for 25 October is missing an hour of
+somebody's balance group:
+
+```rust
+let berlin = TimeZone::new("Europe/Berlin")?;
+QuarterHour::periods_in_local_day(&berlin, date!(2026-06-15));  // Some(96)
+QuarterHour::periods_in_local_day(&berlin, date!(2026-03-29));  // Some(92)  spring forward
+QuarterHour::periods_in_local_day(&berlin, date!(2026-10-25));  // Some(100) autumn fold
+```
+
+Measured between the two local midnights rather than read from a table of
+transition dates, so a zone that shifts by half an hour or at an hour other than
+02:00 needs no case. `None` says the day is not a whole number of periods at all
+— a civil offset that is not a multiple of fifteen minutes, which Liberia was the
+last of, in 1972.
 
 ## Authorisation paths are not interchangeable
 
@@ -217,19 +264,18 @@ assert_eq!(session.state_at(at(50)), Some(SessionState::Suspended));
 assert!(session.suspended_throughout(at(45), at(60)));   // half an hour to price
 ```
 
-`emob-cdr` uses the same history the other way round: energy across a quarter
-hour the session logged as suspended from end to end means the meter and the
-state machine disagree, and it refuses the record rather than picking one.
+`emob-cdr` uses the same history the other way round: energy across a period
+the session says it was not charging in means the meter and the state machine
+disagree, and it refuses the record rather than picking one.
 
-**And the interval is asked two ways, because there are four states.**
+**And there are four states, so the question is asked as "was it charging".**
 `charging_throughout` is not the negation of `suspended_throughout`: `Pending` is
 authorised with nothing flowing and `Ended` is over, and both are "connected and
-not charging" — which is exactly what the fee prices. Where a meter reading
-exists it is the evidence, so a slot is charging unless the session says it was
-suspended throughout; where nothing was measured there is none, so the question
-has to run the other way round. Asking `!suspended_throughout` there would read
-"the record never said suspended" as "the vehicle was charging", which is an
-absence standing in for a claim.
+not charging" — which is exactly what the fee prices. Every period a CDR carries
+is asked the first question, metered or not; asking `!suspended_throughout`
+instead reads "the record never said suspended" as "the vehicle was charging",
+and bills the minute a car sat `EVConnected` before its charge began as charging
+time.
 
 Import and export are separate registers counting separate quantities, and one
 session can hold both. They never net: 18 kWh drawn and 5 kWh returned is 18 and

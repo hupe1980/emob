@@ -355,6 +355,15 @@ fn the_record_comes_back_as_the_record_that_went_out() {
 
     assert_eq!(read.key, original.key);
     assert_eq!(read.session_id, original.session_id);
+    assert_eq!(
+        read.authorization_reference, original.authorization_reference,
+        "the provider's own reference for the authorisation it granted survives"
+    );
+    assert_eq!(
+        wire.authorization_reference.as_ref().map(|r| r.as_str()),
+        Some("auth-9"),
+        "…because OCPI has a field for it [OCPI 2.3.0 §mod_cdrs_cdr_object]"
+    );
     assert_eq!(read.evse_id, original.evse_id);
     assert_eq!(read.started_at, original.started_at);
     assert_eq!(read.ended_at, original.ended_at);
@@ -608,4 +617,113 @@ fn the_total_is_broken_out_per_dimension_so_the_partner_can_check_a_part_of_it()
         crossing.value.total_cost.after_taxes(),
         "one dimension priced this session, so its share is the whole of it"
     );
+}
+
+#[test]
+fn the_cable_loss_the_meter_compensated_reaches_the_partner() {
+    // `[OCMF Tab. 7, CL]` states how much of the register is cable rather than
+    // vehicle. OCPI has no field for it, the compensation is already inside
+    // `total_energy` so nothing is adjusted — and a partner disputing the
+    // energy will ask exactly this. `[REA 6-A §3.2]` makes telling the
+    // affected party what is inside a measured value a duty, not a courtesy.
+    let evidence = evidence();
+    let mut cdr = cdr(&evidence);
+    cdr.evidence.as_mut().unwrap().compensated_loss = Some(Energy::from_kwh(dec("0.150")).unwrap());
+
+    let token = token();
+    let context = context(&token, payloads());
+    let partner = Partner::emsp(PartyId::new("NL", "TNM").unwrap());
+    let crossing = to_ocpi(&cdr, &partner, &context).expect("a rated import CDR crosses");
+
+    let notes: Vec<String> = crossing.reasons().collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.contains("cable loss") && note.contains("0.150")),
+        "{notes:?}"
+    );
+    // …and the energy on the wire is untouched: the compensation is inside it.
+    assert_eq!(
+        crossing.value.total_energy.get(),
+        cdr.total_energy.kwh(),
+        "nothing is adjusted"
+    );
+}
+
+#[test]
+fn a_correction_crosses_as_a_credit_cdr_and_a_replacement_that_names_nothing() {
+    // OCPI corrects a record in two documents [OCPI 2.3.0 §mod_cdrs_cdr_object]:
+    // a Credit CDR — `credit = true`, `credit_reference_id` naming the
+    // original, `total_cost` negated and nothing else — and then a new CDR
+    // "with the fields `credit` and `credit_reference_id` omitted". The
+    // replacement used to name the original in `credit_reference_id`, which is
+    // the reversal's field and which `ocpi-kit`'s own validator refuses on a
+    // record that is not one.
+    let evidence = evidence();
+    let original = cdr(&evidence);
+    let token = token();
+    let context = context(&token, payloads());
+    let partner = Partner::emsp(PartyId::new("NL", "TNM").unwrap());
+
+    // The reversal.
+    let credit = emob_roam::ocpi::cdr::to_ocpi_credit(&original, &partner, &context, "cdr-1-C")
+        .expect("a rated record has a reversal");
+    let wire = &credit.value;
+    assert!(wire.is_credit());
+    assert_eq!(wire.id.as_str(), "cdr-1-C");
+    assert_eq!(
+        wire.credit_reference_id.as_ref().map(|id| id.as_str()),
+        Some("cdr-1")
+    );
+    let sent = to_ocpi(&original, &partner, &context).unwrap().value;
+    assert_eq!(
+        wire.total_cost.after_taxes().get(),
+        -sent.total_cost.after_taxes().get(),
+        "`total_cost` carries the negative of the original"
+    );
+    assert_eq!(
+        wire.total_energy, sent.total_energy,
+        "…and, as the specification prescribes, nothing else is negated"
+    );
+    assert_eq!(wire.total_energy_cost, sent.total_energy_cost);
+    assert!(wire.validate().is_ok(), "{:?}", wire.validate().err());
+    assert!(credit.reasons().any(|r| r.contains("Credit CDR")));
+
+    // A Credit CDR is an instruction about a record already held, not a
+    // session: read in, it would put the same kilowatt-hours in the ledger
+    // twice. So the inbound side refuses it by name.
+    let err = from_ocpi(wire, None).unwrap_err();
+    assert!(
+        matches!(&err, RoamError::CreditCdr { credit_reference_id } if credit_reference_id == "cdr-1"),
+        "{err}"
+    );
+
+    // The replacement names nothing — the pairing is the ledger's — and the
+    // crossing says so rather than putting the original's id in a field that
+    // would make the document claim to be the reversal.
+    let replacement = CdrBuilder::from_session(&session(), Direction::Import)
+        .unwrap()
+        .key(PartyId::new("DE", "ABC").unwrap(), "cdr-2".parse().unwrap())
+        .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
+        .rated_with(&tariff())
+        .supersedes(original.key.clone())
+        .build()
+        .unwrap();
+    let crossing = to_ocpi(&replacement, &partner, &context).unwrap();
+    assert!(!crossing.value.is_credit());
+    assert!(crossing.value.credit_reference_id.is_none());
+    assert!(
+        crossing.value.validate().is_ok(),
+        "{:?}",
+        crossing.value.validate().err()
+    );
+    assert!(
+        crossing
+            .reasons()
+            .any(|r| r.contains("supersedes") && r.contains("to_ocpi_credit")),
+        "{:?}",
+        crossing.reasons().collect::<Vec<_>>()
+    );
+    let back = from_ocpi(&crossing.value, None).unwrap();
+    assert_eq!(back.value.cdr.supersedes, None);
 }

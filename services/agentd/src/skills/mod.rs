@@ -19,5 +19,6 @@
 //! free-text dispute, say — is a manifest rather than a module, and it goes
 //! through the same [`crate::advice::Advice`] leaf as these do.
 
+pub mod compliance;
 pub mod evidence;
 pub mod tariff;

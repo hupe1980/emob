@@ -64,7 +64,7 @@ pub mod split;
 pub use auth::{AuthError, AuthPath, Authorization, Subject, TokenRef};
 pub use meter::{MeterError, MeterReading, MeterSeries, ReadingContext};
 pub use session::{EndReason, Session, SessionError, SessionState, StateChange};
-pub use split::{Provenance, SessionSplit, Slot, SplitError};
+pub use split::{Idle, Provenance, SessionSplit, Slot, SplitError};
 // The settlement grid is market vocabulary and lives in `emob-core`; it is
 // re-exported because every consumer of a `Slot` needs it in the same breath.
 pub use emob_core::QuarterHour;

@@ -219,15 +219,12 @@ impl Session {
     /// are "connected and not charging" — which is what `[AFIR Art. 5(4)]`'s
     /// occupancy fee prices — and neither is suspended.
     ///
-    /// The distinction only bites where nothing was measured, and there it
-    /// decides money. A slot the meter reported energy in is charging unless the
-    /// session says it was suspended throughout, because the energy is the
-    /// evidence; a stretch of the window the meter said **nothing** about has no
-    /// such evidence, so the question has to be put the other way round — did
-    /// the operator's own record say the vehicle was charging — and answered
-    /// `false` when it did not say so at all. Asking `!suspended_throughout`
-    /// there would read "the session never said suspended" as "the vehicle was
-    /// charging", which is an absence standing in for a claim.
+    /// This is the question `emob-cdr` asks of every period it prices, metered
+    /// or not: a period is charging when the operator's own record says it was,
+    /// and occupancy otherwise. Asking `!suspended_throughout` instead reads
+    /// "the session never said suspended" as "the vehicle was charging", which
+    /// is an absence standing in for a claim — and bills the minute a car sat
+    /// `EVConnected` before its charge began as charging time.
     ///
     /// [`Pending`]: SessionState::Pending
     /// [`Ended`]: SessionState::Ended
@@ -346,8 +343,43 @@ impl Session {
         self.ended_at.map(|end| end - self.started_at)
     }
 
+    /// The intervals in which this session says no energy flowed — every
+    /// stretch of its history in a state other than [`SessionState::Charging`],
+    /// as `[from, to)` pairs in time order.
+    ///
+    /// A `Pending` session is authorised with nothing flowing, a `Suspended`
+    /// one is held at zero, and an `Ended` one is over; none of them moves the
+    /// register. The last interval — the time after the end, or the current
+    /// state of a session still running — is open-ended.
+    ///
+    /// This is what [`Self::split`] hands the interpolation, so a gap between
+    /// two readings spreads its energy over the seconds the session was
+    /// charging rather than in a straight line across a suspension. A meter
+    /// cannot tell a taper from a pause; the state machine can, and it is the
+    /// operator's own record of which was which.
+    #[must_use]
+    pub fn idle_intervals(&self) -> Vec<(time::OffsetDateTime, time::OffsetDateTime)> {
+        let mut idle = Vec::new();
+        for (index, change) in self.history.iter().enumerate() {
+            if change.state == SessionState::Charging {
+                continue;
+            }
+            // The last entry — `Ended`, or whatever state a running session
+            // is in now — has no successor and is open-ended.
+            let to = self.history.get(index + 1).map_or(
+                time::OffsetDateTime::new_utc(time::Date::MAX, time::Time::MIDNIGHT),
+                |next| next.at,
+            );
+            if to > change.at {
+                idle.push((change.at, to));
+            }
+        }
+        idle
+    }
+
     /// Split a direction's energy across the quarter hours it touched, cut also
-    /// wherever the session changed state.
+    /// wherever the session changed state, with the energy of every gap between
+    /// two readings spread over the time the session was **charging** in it.
     ///
     /// The input `mako-emob` needs to assign each quarter hour to the balance
     /// group of the supplier the driver chose `[A6 §IV.1]` —
@@ -366,6 +398,17 @@ impl Session {
     /// The session's own history says where the line falls, so it is drawn
     /// there.
     ///
+    /// # …and why the state changes shape the interpolation too
+    ///
+    /// The same history says where the register *could* have moved. A
+    /// transaction that opens `EVConnected`, starts charging thirty seconds
+    /// later and sends its next meter value at the quarter hour — the ordinary
+    /// OCPP 2.0.1 shape — has a register that did not move for those thirty
+    /// seconds, and a straight line from the opening reading attributes energy
+    /// to an interval the operator's own record calls suspended. So the split
+    /// is handed [`Self::idle_intervals`] and holds the register flat across
+    /// them; see [`crate::split::into_periods`].
+    ///
     /// # Errors
     ///
     /// [`SessionError::NoSeries`] when the direction has no readings, or
@@ -375,7 +418,7 @@ impl Session {
             .series_for(direction)
             .ok_or(SessionError::NoSeries { direction })?;
         let cuts: Vec<time::OffsetDateTime> = self.history.iter().map(|change| change.at).collect();
-        into_periods(series, &cuts).map_err(SessionError::Split)
+        into_periods(series, &cuts, &self.idle_intervals()).map_err(SessionError::Split)
     }
 }
 
@@ -676,6 +719,69 @@ mod tests {
             None,
             "a caller treating this as zero would invoice a session it has no readings for"
         );
+    }
+
+    #[test]
+    fn the_idle_intervals_are_every_stretch_the_session_was_not_charging() {
+        let mut s = session();
+        s.transition_to(SessionState::Charging, at(1)).unwrap();
+        s.transition_to(SessionState::Suspended, at(20)).unwrap();
+        s.transition_to(SessionState::Charging, at(25)).unwrap();
+        assert_eq!(
+            s.idle_intervals(),
+            vec![(at(0), at(1)), (at(20), at(25))],
+            "pending at the start, then the pause"
+        );
+        s.end(at(30), EndReason::Local).unwrap();
+        assert_eq!(
+            s.idle_intervals().last().map(|(from, _)| *from),
+            Some(at(30)),
+            "…and the time after the end, which no reading can fall in"
+        );
+
+        // A session that ends without ever charging is idle from start to end.
+        let mut never = session();
+        never.end(at(10), EndReason::Local).unwrap();
+        assert_eq!(never.idle_intervals()[0], (at(0), at(10)));
+    }
+
+    #[test]
+    fn the_split_holds_the_register_flat_while_the_session_says_nothing_flowed() {
+        // The ordinary OCPP 2.0.1 shape: `EVConnected` at the opening reading,
+        // charging thirty seconds later, the next meter value at the quarter
+        // hour. The thirty seconds carry no energy, whatever a straight line
+        // between the readings would have said.
+        let mut s = session();
+        s.transition_to(SessionState::Suspended, at(0)).unwrap();
+        let charging_from = at(0) + time::Duration::seconds(30);
+        s.transition_to(SessionState::Charging, charging_from)
+            .unwrap();
+        s.attach_series(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    MeterReading::new(
+                        at(0),
+                        kwh("100.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionBegin,
+                    ),
+                    MeterReading::new(
+                        at(15),
+                        kwh("105.000"),
+                        Direction::Import,
+                        ReadingContext::SampleClock,
+                    ),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let split = s.split(Direction::Import).unwrap();
+        assert_eq!(split.slots[0].to, charging_from);
+        assert!(split.slots[0].energy.is_zero());
+        assert_eq!(split.slots[1].energy, kwh("5.000"));
+        assert!(split.conserves());
     }
 
     #[test]

@@ -180,7 +180,7 @@ pub fn to_ocpi(
 
     let mut crossing = Crossing::lossless(());
 
-    let (periods, charging_seconds, parking_seconds) = crossing.absorb_from(charging_periods(cdr));
+    let (periods, parking_seconds) = crossing.absorb_from(charging_periods(cdr));
 
     let session_seconds = (cdr.ended_at - cdr.started_at).whole_seconds();
     let (total_time, time_rounded) = hours(session_seconds);
@@ -209,9 +209,15 @@ pub fn to_ocpi(
     // session. Where the two differ, an OCPI reader — which takes a period as
     // running to the next one's start — puts the difference *inside* a
     // measured period.
-    let measured_seconds = charging_seconds + parking_seconds;
-    if measured_seconds < session_seconds {
-        let uncovered = session_seconds - measured_seconds;
+    //
+    // Measured from the exact durations rather than from the whole-second
+    // figures above: OCPP stamps events to the millisecond, each period's
+    // `whole_seconds` truncates its own fraction, and a sum of truncations
+    // falls short of the truncated span by up to a second per period — which
+    // reported a gap on a record that had none.
+    let covered: time::Duration = cdr.periods.iter().map(ChargingPeriod::duration).sum();
+    let uncovered = ((cdr.ended_at - cdr.started_at) - covered).whole_seconds();
+    if uncovered > 0 {
         crossing.note(
             "/charging_periods",
             format!(
@@ -229,6 +235,25 @@ pub fn to_ocpi(
     let auth_method = auth_method(cdr.auth_path);
     if let Some(reason) = auth_method_note(cdr.auth_path) {
         crossing.note("/auth_method", reason);
+    }
+
+    // How much of the register was cable rather than vehicle
+    // `[OCMF Tab. 7, CL]`. OCPI has no field for it and the compensation is
+    // already inside `total_energy`, so nothing is adjusted — but a partner
+    // disputing the energy will ask exactly this, and `[REA 6-A §3.2]` makes
+    // telling the affected party what is inside a measured value a duty.
+    if let Some(loss) = cdr.evidence.as_ref().and_then(|e| e.compensated_loss)
+        && !loss.is_zero()
+    {
+        crossing.note(
+            "/total_energy",
+            format!(
+                "{loss} of this session's register is cable loss the meter compensated \
+                 [OCMF Tab. 7, CL]. It is already inside `total_energy` — nothing here is \
+                 adjusted — and OCPI has no field to say so, which is the figure a dispute about \
+                 this energy turns on [REA 6-A §3.2]"
+            ),
+        );
     }
 
     let signed_data = signed_data(cdr.evidence.as_ref(), context, &mut crossing)?;
@@ -263,13 +288,24 @@ pub fn to_ocpi(
     }
 
     if let Some(previous) = &cdr.supersedes {
+        // OCPI corrects a CDR in two documents: a Credit CDR that reverses the
+        // original — `credit = true`, `credit_reference_id` naming it, and
+        // `total_cost` negated — and then "a new CDR with a new unique ID and
+        // the fields `credit` and `credit_reference_id` **omitted**"
+        // `[OCPI 2.3.0 §mod_cdrs_cdr_object]`. This is that replacement, so
+        // the link to what it replaces has no field to travel in; naming the
+        // original in `credit_reference_id` would make this document claim to
+        // be the reversal, which `ocpi-kit`'s own validator refuses. The
+        // reversal is `to_ocpi_credit`, and the partner has to have received
+        // it first.
         crossing.note(
-            "/credit_reference_id",
+            "/id",
             format!(
-                "this record supersedes {previous}. OCPI corrects with a Credit CDR that \
-                 reverses the original and a replacement beside it \
-                 [OCPI 2.3.0 §mod_cdrs_cdr_object]; this is the replacement, and the reversal \
-                 is a separate document the partner has to have received"
+                "this record supersedes {previous}. OCPI carries that in two documents — a \
+                 Credit CDR reversing the original, then this replacement with `credit` and \
+                 `credit_reference_id` omitted [OCPI 2.3.0 §mod_cdrs_cdr_object] — so the \
+                 replacement itself names nothing. Send the Credit CDR from `to_ocpi_credit` \
+                 before it"
             ),
         );
     }
@@ -290,6 +326,16 @@ pub fn to_ocpi(
         .session_id(bounded::<36>("session_id", cdr.session_id.as_str())?)
         .cdr_token(cdr_token(context.token)?)
         .auth_method(auth_method)
+        // *"Reference to the authorization given by the eMSP"* — the provider's
+        // own handle on the decision it answered the `Authorize` with. Without
+        // it a partner settling this record has only the session id the CPO
+        // invented, and nothing of its own to correlate against.
+        .maybe_authorization_reference(
+            cdr.authorization_reference
+                .as_deref()
+                .map(|reference| bounded::<36>("authorization_reference", reference))
+                .transpose()?,
+        )
         .cdr_location(context.location.clone())
         .currency(bounded_ocpi::<3>("currency", cost.rated.currency.as_str())?)
         .charging_periods(periods)
@@ -305,27 +351,90 @@ pub fn to_ocpi(
         .maybe_total_time_cost(component_price(&cost.rated, Dimension::Time))
         .total_parking_time(Number::new(total_parking_time))
         .maybe_total_parking_cost(component_price(&cost.rated, Dimension::ParkingTime))
-        .maybe_credit_reference_id(
-            cdr.supersedes
-                .as_ref()
-                .map(|previous| bounded::<39>("credit_reference_id", previous.id.as_str()))
-                .transpose()?,
-        )
         .last_updated(context.last_updated)
         .build();
 
     Ok(crossing.map(|()| built))
 }
 
-/// The charging periods, and how many seconds of the session they cover,
-/// split by whether the vehicle was charging.
-#[allow(clippy::type_complexity)]
-fn charging_periods(
-    cdr: &Cdr,
-) -> Crossing<(Vec<ocpi_kit::v2_3_0::cdrs::ChargingPeriod>, i64, i64)> {
+/// The Credit CDR that reverses a record already sent to a partner.
+///
+/// OCPI has no way to amend a CDR: *"a CDR is immutable"*, and a correction is
+/// two documents. The first is this one — the original again, with `credit`
+/// set, `credit_reference_id` naming the original's `id`, and **only**
+/// `total_cost` carrying "the negative amounts of the original CDR"
+/// `[OCPI 2.3.0 §mod_cdrs_cdr_object]`. The second is the replacement, which
+/// [`to_ocpi`] produces from the superseding record with both fields omitted.
+///
+/// `credit_id` is the Credit CDR's own id, which the specification wants
+/// distinct from the original's — "the id of the original CDR with something
+/// appended like for example `-C`" — and allows up to 39 characters for that
+/// reason, three more than a normal record may use.
+///
+/// # Errors
+///
+/// Everything [`to_ocpi`] refuses, and [`RoamError::TooLong`] or
+/// [`RoamError::InvalidString`] for a `credit_id` OCPI's 39-character field
+/// will not hold.
+pub fn to_ocpi_credit(
+    original: &Cdr,
+    partner: &Partner,
+    context: &Context<'_>,
+    credit_id: &str,
+) -> Result<Crossing<ocpi_kit::v2_3_0::Cdr>, RoamError> {
+    let outbound = to_ocpi(original, partner, context)?;
+    let mut crossing = Crossing::lossless(());
+    crossing.absorb_notes("", outbound.notes().to_vec());
+    let mut credit = outbound.into_value_discarding_notes();
+
+    credit.id = bounded::<39>("id", credit_id)?;
+    credit.credit = Some(true);
+    credit.credit_reference_id = Some(bounded::<39>(
+        "credit_reference_id",
+        original.key.id.as_str(),
+    )?);
+
+    // The specification is explicit that the reversal lives in `total_cost`
+    // alone: every other total — energy, time, the per-dimension costs — is
+    // carried as the original stated it, and a partner reconciling the two
+    // documents reads the pair as "this one, undone".
+    let before = credit.total_cost.before_taxes.get();
+    let mut reversed = Price::new(Number::new(-before));
+    reversed.taxes = credit
+        .total_cost
+        .taxes
+        .iter()
+        .filter_map(|tax| {
+            TaxAmount::new(
+                tax.name.as_str(),
+                tax.percentage,
+                Number::new(-tax.amount.get()),
+            )
+            .ok()
+        })
+        .collect();
+    credit.total_cost = reversed;
+
+    crossing.note(
+        "/total_cost",
+        format!(
+            "this is the Credit CDR for {}: `total_cost` carries the negative of the original \
+             and, as the specification prescribes, nothing else is negated \
+             [OCPI 2.3.0 §mod_cdrs_cdr_object]. The energy and the per-dimension costs are the \
+             original's, for the partner to match the pair by",
+            original.key
+        ),
+    );
+
+    Ok(crossing.map(|()| credit))
+}
+
+/// The charging periods, and how many whole seconds of them the vehicle was
+/// parked rather than charging — the figure `total_parking_time` states.
+fn charging_periods(cdr: &Cdr) -> Crossing<(Vec<ocpi_kit::v2_3_0::cdrs::ChargingPeriod>, i64)> {
     let mut crossing = Crossing::lossless(());
     let mut periods = Vec::with_capacity(cdr.periods.len());
-    let (mut charging_seconds, mut parking_seconds) = (0_i64, 0_i64);
+    let mut parking_seconds = 0_i64;
 
     for (index, period) in cdr.periods.iter().enumerate() {
         let seconds = period.duration().whole_seconds();
@@ -336,9 +445,7 @@ fn charging_periods(
                 format!("{seconds} s is {in_hours} h rounded to {HOURS_SCALE} places"),
             );
         }
-        if period.charging {
-            charging_seconds += seconds;
-        } else {
+        if !period.charging {
             parking_seconds += seconds;
         }
 
@@ -347,7 +454,7 @@ fn charging_periods(
         // curve does not deliver. The assumption travels with the number all
         // the way to the partner's copy, because a settlement dispute turns on
         // it and OCPI has no field that says so.
-        if period.provenance != Provenance::Measured {
+        if period.provenance == Provenance::Interpolated {
             crossing.note(
                 format!("/charging_periods/{index}"),
                 format!(
@@ -379,7 +486,7 @@ fn charging_periods(
         }
     }
 
-    crossing.map(|()| (periods, charging_seconds, parking_seconds))
+    crossing.map(|()| (periods, parking_seconds))
 }
 
 /// One period, in OCPI's dimensions.

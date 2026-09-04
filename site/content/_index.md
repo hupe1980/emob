@@ -87,7 +87,7 @@ on the screen the regulation actually names.
 ## A rulebook the code actually consults
 
 <div class="cards">
-<div class="card"><h3>Compliance is a query</h3><p>“Are we AFIR-ready for 2027?” is normally a consulting engagement. Here it is a function call against a calendar of dated, cited duties — and a build guard fails if a rule cites a document the source index cannot produce.</p></div>
+<div class="card"><h3>Compliance is a query, and it looks forward</h3><p>“Are we AFIR-ready for 2027?” is normally a consulting engagement. Here it is a function call against a calendar of dated, cited duties — and because every duty carries the date it begins binding, one that has not started yet is judged <em>at its own commencement date</em> against the estate as it stands. A point that will fail on 1 January is a firmware programme now rather than an enforcement letter later. A build guard fails if a rule cites a document the source index cannot produce.</p></div>
 <div class="card"><h3>Applicability is not failure</h3><p>A private depot is not <em>failing</em> the ad-hoc payment duty; the duty does not bind it. A free charger owes no payment instrument and no dynamic data — the same words appear in two articles. A 2019 point is outside the 2027 ISO 15118-20 duty because the Annex binds points <em>installed or renovated from</em> that date. Merging exemptions with real breaches is how compliance dashboards come to be ignored.</p></div>
 <div class="card"><h3>A duty knows which of three subjects it binds</h3><p>Article 5(5) binds the mobility service provider, not the point. The NIS2 energy annex names charge point operators by role and asks nothing about a point at all — size, governance, whether an early warning can leave the building inside a day. An operator whose every point is faultless can be in breach as a provider, and in breach again as a company.</p></div>
 <div class="card"><h3>A directive is not a regulation</h3><p>NIS2 told Member States to apply its rules from October 2024; a directive binds nobody directly, and the German transposition came into force in December 2025. The Cyber Resilience Act beside it applies on its own dates in every Member State. Treating “the EU date” as one thing reports a breach in months when no authority could act.</p></div>
@@ -139,8 +139,8 @@ sessions unverifiable.
 
 Twelve domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
 `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`, `emob-poi`, `emob-roam`,
-`emob-billing`, `emob-thg`, `emob-service` and `emob-sim` — with two daemons on
-top of them and **697 tests**. The domain crates do no I/O, read no clock and
+`emob-billing`, `emob-thg`, `emob-service` and `emob-sim` — with four daemons on
+top of them and **748 tests**. The domain crates do no I/O, read no clock and
 hold no binary floats.
 
 What that buys, concretely:
@@ -170,7 +170,7 @@ What that buys, concretely:
   writes.
 
 Plug & Charge contracts, Hubject roaming, smart charging and the services that
-publish and invoice are designed and not yet built. Every page here marks
+invoice are designed and not yet built. Every page here marks
 ✅ built and 📐 designed, and the gap between the two is never blurred.
 
 <div class="cta">

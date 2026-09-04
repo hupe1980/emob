@@ -16,11 +16,21 @@
 //!
 //! ## Which basis
 //!
-//! EN 16931's line amount (BT-131) is a **net** figure, always. A tariff quoted
-//! gross therefore has its lines converted, at the rate its own components
-//! carry, before anything is rounded — and `emob-tariff` has already done that
-//! arithmetic once, per VAT category, in [`Rated::tax_summary`]. Doing it again
-//! here would be a second engine.
+//! EN 16931's line amount (BT-131) is a **net** figure, always — and so is its
+//! item price, BT-146, which is defined *exclusive of VAT*. A tariff quoted
+//! gross therefore has both converted, at the same rate, before anything is
+//! rounded: a document whose price does not reproduce its own line amount is one
+//! a Peppol access point returns (`PEPPOL-EN16931-R120`), and a partner
+//! multiplying the two columns simply reads it as wrong.
+//!
+//! ## In which unit
+//!
+//! OCPI quotes time per **hour** and 3600 has two factors of three, so
+//! twenty-five minutes is `0.41666…` h and a line whose quantity is rounded no
+//! longer reproduces its own amount. The standard has the field for it — BT-149,
+//! the item price base quantity — so a time line is `1500 SEC` at
+//! `6.00 EUR per 3600 SEC` and `BT-131 = BT-129 × BT-146 ÷ BT-149` holds to the
+//! last digit.
 //!
 //! ## Where
 //!
@@ -48,6 +58,19 @@
 //! The invoice is the authoritative figure — it is the document the tax office
 //! and the partner both read — and the record is the claim it was built from.
 //! Saying which is which, in the document, is the whole of it.
+//!
+//! ## …and a bound is not a line at all
+//!
+//! `[OCPI 2.3.0 §Tariff]`'s `min_price` and `max_price` move a session's total
+//! without changing what was delivered, and a maximum moves it **down**. Put on
+//! the document as a line, a cap is a line with a negative amount and a negative
+//! BT-146 — which `BR-27` refuses outright, so the whole invoice is invalid.
+//! EN 16931 models exactly this as a document level allowance or charge
+//! (BG-20/BG-21), whose amount is a positive magnitude and which the totals
+//! chain subtracts or adds: `BT-109 = BT-106 − BT-107 + BT-108` (`BR-CO-13`).
+//! See [`DocumentAdjustment`] — including why the amount is derived from what
+//! the document states rather than from the exact difference, and why a bound
+//! with no lines to adjust is the line.
 //!
 //! # One line per price, not one per session
 //!
@@ -251,10 +274,32 @@ pub struct InvoiceLine {
     /// …and where it ends.
     #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
     pub ended_at: time::OffsetDateTime,
-    /// How much, in the unit the price is quoted in — kWh, hours, one session.
+    /// How much, in the line's own unit — BT-129: kilowatt-hours, **whole
+    /// seconds** for the two time dimensions, one for a session fee.
+    ///
+    /// Seconds rather than hours, because a duration in hours is usually not a
+    /// decimal — 3600 has two factors of three — and a line whose quantity is
+    /// rounded no longer reproduces its own amount. The price stays per hour,
+    /// and the standard has the field that reconciles the two: [`Self::base_quantity`].
     pub quantity: Decimal,
-    /// The price per unit that applied — BT-146.
+    /// The item **net** price — BT-146: the price of one unit *excluding VAT*,
+    /// in the unit the tariff quotes (per kWh, per **hour**, per session).
+    ///
+    /// Not the tariff's own figure where that is gross. BT-146 is defined
+    /// exclusive of VAT, so a tariff quoting `0.49` gross at 19 % states
+    /// `0.411764…` here — stripped at the same rate the line's amount is, so
+    /// the two cannot disagree, and carried at full precision because the
+    /// standard caps the field at no scale and rounding it is what breaks
+    /// `BT-131 = BT-129 × BT-146 ÷ BT-149`.
     pub unit_price: Decimal,
+    /// How many of [`Self::quantity`]'s units one [`Self::unit_price`] buys —
+    /// BT-149, the item price base quantity, in the same unit code (BT-150).
+    ///
+    /// `3600` for a time line — "6.00 EUR per 3600 SEC" — and `1` otherwise.
+    /// This is what lets `BT-131 = BT-129 × BT-146 ÷ BT-149` hold exactly for
+    /// twenty-five minutes at six euros an hour, which no quantity in hours can
+    /// do: `1500 × 6.00 ÷ 3600` is `2.50`, and `0.41666… × 6.00` is not.
+    pub base_quantity: Decimal,
     /// The rate this line is taxed at — BT-152, and `None` where the category
     /// states none.
     ///
@@ -298,25 +343,99 @@ impl InvoiceLine {
         unit_code(self.dimension)
     }
 
-    /// The tax on this line, at a rate.
+    /// Whether the line's own numbers reproduce its exact net —
+    /// `BT-129 × BT-146 ÷ BT-149`, the identity `BT-131` is derived from
+    /// (`PEPPOL-EN16931-R120`), before the document rounds it to the minor
+    /// unit.
+    ///
+    /// True by construction, and re-checkable because an [`Invoice`] can be
+    /// deserialised from somewhere this crate did not build it —
+    /// [`Invoice::reconciles`] asks it of every line. EN 16931 itself has **no**
+    /// rule tying BT-131 to quantity × price; Peppol and `XRechnung` do, at a
+    /// tolerance of two minor units, and a document that fails it is one an
+    /// access point returns.
     #[must_use]
-    pub fn tax_at(&self, rate: Decimal, currency: Currency) -> Decimal {
-        Money::new(self.net * rate / HUNDRED, currency)
-            .round_to_minor_unit()
-            .amount()
+    pub fn reconciles(&self) -> bool {
+        self.quantity * self.unit_price / self.base_quantity == self.exact_net
     }
+}
+
+/// Whether a document-level adjustment reduces or increases the taxable
+/// amount — BG-20 or BG-21.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum DocumentAdjustmentKind {
+    /// BG-20 — a document level **allowance**, which reduces BT-109.
+    Allowance,
+    /// BG-21 — a document level **charge**, which increases it.
+    Charge,
+}
+
+impl DocumentAdjustmentKind {
+    /// The sign this side contributes to a taxable amount — and to the revenue
+    /// the books credit, which is the same figure.
+    #[must_use]
+    pub const fn sign(self) -> Decimal {
+        match self {
+            Self::Allowance => Decimal::NEGATIVE_ONE,
+            Self::Charge => Decimal::ONE,
+        }
+    }
+}
+
+/// A tariff's minimum or maximum, as the document states it — BG-20 / BG-21.
+///
+/// # Why a bound is not a line
+///
+/// `[OCPI 2.3.0 §Tariff]`'s `min_price` and `max_price` move the session's
+/// total without changing what was delivered, and a cap moves it **down**. Put
+/// on the document as an invoice line, a cap is a line with a negative amount
+/// and a negative BT-146 — which `BR-27` refuses outright, so the whole invoice
+/// is invalid. EN 16931 models exactly this as a document level allowance, whose
+/// amount is stated as a **positive magnitude** and subtracted by the totals
+/// chain (`BR-CO-11`, `BR-CO-13`).
+///
+/// # And the amount is derived from what the document states
+///
+/// A cap says the session costs at most €10.00. Rounding the lines and the
+/// exact cap difference independently and subtracting one from the other misses
+/// that by a cent — the invoice then demands €10.01 for a session the tariff
+/// capped at ten euros, which is the one number the driver was promised. So the
+/// amount is the difference between what this record's lines state on the
+/// document and what the bound says the record comes to, both rounded to the
+/// minor unit: the document reaches the tariff's own figure exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DocumentAdjustment {
+    /// Which side of the totals chain it sits on.
+    pub kind: DocumentAdjustmentKind,
+    /// Which record's bound this is.
+    pub cdr: CdrKey,
+    /// BT-92 / BT-99 — the amount, always a **positive** magnitude.
+    pub amount: Decimal,
+    /// What it came to exactly, before the document rounded it.
+    pub exact_amount: Decimal,
+    /// BT-96 / BT-103 — the rate it is taxed at, absent under the one category
+    /// that states none. See [`InvoiceLine::vat_rate`].
+    pub vat_rate: Option<Decimal>,
+    /// BT-97 / BT-104 — the reason, in words.
+    pub reason: String,
 }
 
 /// The UN/ECE Recommendation 20 unit code a dimension is measured in.
 ///
-/// `KWH` and `HUR` are the obvious two. `C62` — "one", a dimensionless count —
-/// is the code for a session fee, and it is the code the standard's own
-/// examples use for anything billed per occurrence.
+/// `KWH` for energy and `C62` — "one", a dimensionless count — for a session
+/// fee, which is the code the standard's own examples use for anything billed
+/// per occurrence. The two time dimensions are `SEC`, not `HUR`: a duration in
+/// hours is usually not a decimal, and a quantity in whole seconds against a
+/// price per 3600 of them ([`InvoiceLine::base_quantity`]) reproduces its line
+/// exactly.
 #[must_use]
 pub const fn unit_code(dimension: Dimension) -> &'static str {
     match dimension {
         Dimension::Energy => "KWH",
-        Dimension::Time | Dimension::ParkingTime => "HUR",
+        Dimension::Time | Dimension::ParkingTime => "SEC",
         Dimension::Flat => "C62",
     }
 }
@@ -378,6 +497,11 @@ pub struct Invoice {
     pub treatment: TaxTreatment,
     /// The lines — BG-25.
     pub lines: Vec<InvoiceLine>,
+    /// The document level allowances and charges — BG-20 and BG-21.
+    ///
+    /// One per record whose tariff bound moved its total. See
+    /// [`DocumentAdjustment`] for why a cap cannot be a line.
+    pub adjustments: Vec<DocumentAdjustment>,
     /// The VAT breakdown — BG-23. Derived from the lines.
     pub tax: Vec<TaxSubtotal>,
     /// What the lines came to **exactly**, before each was rounded to the
@@ -393,20 +517,55 @@ impl Invoice {
     /// The sum of the line amounts — BT-106.
     #[must_use]
     pub fn line_total(&self) -> Money {
+        // Every term is already a minor-unit figure; the rounding only sets the
+        // scale, so a document total reads `0.00 EUR` rather than `0 EUR`.
         Money::new(self.lines.iter().map(|line| line.net).sum(), self.currency)
+            .round_to_minor_unit()
     }
 
-    /// The taxable amount — BT-109. Equal to [`Self::line_total`] here, because
-    /// this crate issues no document-level allowances or charges.
+    /// The sum of the document level allowances — BT-107, `BR-CO-11`.
+    #[must_use]
+    pub fn allowance_total(&self) -> Money {
+        Money::new(
+            self.sum_of(DocumentAdjustmentKind::Allowance),
+            self.currency,
+        )
+    }
+
+    /// The sum of the document level charges — BT-108, `BR-CO-12`.
+    #[must_use]
+    pub fn charge_total(&self) -> Money {
+        Money::new(self.sum_of(DocumentAdjustmentKind::Charge), self.currency)
+    }
+
+    fn sum_of(&self, kind: DocumentAdjustmentKind) -> Decimal {
+        Money::new(
+            self.adjustments
+                .iter()
+                .filter(|adjustment| adjustment.kind == kind)
+                .map(|adjustment| adjustment.amount)
+                .sum(),
+            self.currency,
+        )
+        .round_to_minor_unit()
+        .amount()
+    }
+
+    /// The taxable amount — BT-109: `BT-106 − BT-107 + BT-108` (`BR-CO-13`).
     #[must_use]
     pub fn taxable_total(&self) -> Money {
-        Money::new(self.tax.iter().map(|t| t.taxable).sum(), self.currency)
+        Money::new(
+            self.line_total().amount() - self.allowance_total().amount()
+                + self.charge_total().amount(),
+            self.currency,
+        )
+        .round_to_minor_unit()
     }
 
     /// The tax across every category — BT-110.
     #[must_use]
     pub fn tax_total(&self) -> Money {
-        Money::new(self.tax.iter().map(|t| t.tax).sum(), self.currency)
+        Money::new(self.tax.iter().map(|t| t.tax).sum(), self.currency).round_to_minor_unit()
     }
 
     /// What the buyer pays — BT-112, and BT-115 because nothing is prepaid.
@@ -416,6 +575,7 @@ impl Invoice {
             self.taxable_total().amount() + self.tax_total().amount(),
             self.currency,
         )
+        .round_to_minor_unit()
     }
 
     /// What the lines came to exactly, before the document rounded them.
@@ -443,17 +603,25 @@ impl Invoice {
         )
     }
 
-    /// Whether the invoice's own numbers add up: every category's taxable
-    /// amount is the sum of its lines, and the total is the sum of the
-    /// categories.
+    /// Whether the invoice's own numbers add up, at every level the standard
+    /// states one:
+    ///
+    /// - every line reproduces its own amount from its own quantity and price
+    ///   ([`InvoiceLine::reconciles`], `PEPPOL-EN16931-R120`);
+    /// - the VAT breakdown's taxable amounts sum to BT-109 (`BR-CO-13` with
+    ///   `BR-S-08` and its siblings);
+    /// - and the payable total is the taxable amount plus the tax
+    ///   (`BR-CO-15`).
     ///
     /// True by construction, and re-checkable, because an [`Invoice`] can be
     /// deserialised from somewhere this crate did not build it.
     #[must_use]
     pub fn reconciles(&self) -> bool {
         let by_category: Decimal = self.tax.iter().map(|t| t.taxable).sum();
-        let lines: Decimal = self.lines.iter().map(|line| line.net).sum();
-        by_category == lines && self.gross_total().amount() == lines + self.tax_total().amount()
+        self.lines.iter().all(InvoiceLine::reconciles)
+            && by_category == self.taxable_total().amount()
+            && self.gross_total().amount()
+                == self.taxable_total().amount() + self.tax_total().amount()
     }
 
     /// The records this invoice bills, in line order and without repeats.
@@ -644,6 +812,7 @@ impl<'a> InvoiceBuilder<'a> {
 
         let mut crossing = Crossing::lossless(());
         let mut lines: Vec<InvoiceLine> = Vec::new();
+        let mut adjustments: Vec<DocumentAdjustment> = Vec::new();
 
         for (index, cdr) in self.records.iter().enumerate() {
             let cost = cdr.cost.as_ref().ok_or_else(|| BillingError::NotRated {
@@ -658,7 +827,15 @@ impl<'a> InvoiceBuilder<'a> {
             }
 
             let before = lines.len();
-            record_lines(cdr, &cost.rated, index + 1, &treatment, &mut lines);
+            record_lines(
+                cdr,
+                &cost.rated,
+                index + 1,
+                &treatment,
+                currency,
+                &mut lines,
+                &mut adjustments,
+            );
             note_rounding(cdr, &lines[before..], before, &mut crossing);
         }
 
@@ -666,8 +843,14 @@ impl<'a> InvoiceBuilder<'a> {
             return Err(BillingError::NoLines);
         }
 
-        let tax = breakdown(&lines, &treatment, currency);
-        let exact_taxable: Decimal = lines.iter().map(|line| line.exact_net).sum();
+        let tax = breakdown(&lines, &adjustments, &treatment, currency);
+        // What the records came to, exactly: the lines, less what the bounds
+        // took off them and plus what they added.
+        let exact_taxable: Decimal = lines.iter().map(|line| line.exact_net).sum::<Decimal>()
+            + adjustments
+                .iter()
+                .map(|a| a.kind.sign() * a.exact_amount)
+                .sum::<Decimal>();
         let invoice = Invoice {
             number: self.number,
             issued_on: self.issued_on,
@@ -679,6 +862,7 @@ impl<'a> InvoiceBuilder<'a> {
             currency,
             treatment,
             lines,
+            adjustments,
             tax,
             exact_taxable,
             payment_terms: self.payment_terms,
@@ -724,9 +908,23 @@ impl<'a> InvoiceBuilder<'a> {
 
 /// Refuse a set of records that holds both a session and its correction.
 ///
-/// Billing both is the double billing [`CdrLedger::live`] exists to prevent. A
-/// caller that assembled the list by hand gets the same check, because the fault
-/// is in the list rather than in where it came from.
+/// Billing both is the double billing [`CdrLedger::live`] exists to prevent, and
+/// a caller that assembled the list by hand is checked too, because the fault is
+/// in the list rather than in where it came from.
+///
+/// # It is not the same check, and it cannot be
+///
+/// [`CdrLedger::live`] sees the whole ledger, so it drops everything any held
+/// record supersedes — a chain `A ← B ← C` leaves only `C`, however long it
+/// runs. This sees a *list*, and a list of `[A, C]` states nothing about `A`
+/// being stale: `C` names `B`, and `B` is not here.
+///
+/// Refusing a record whose `supersedes` names a key the list does not hold
+/// would close that, and would refuse the ordinary case with it — an original
+/// billed in June and its correction issued in July, where the July invoice
+/// legitimately carries only the correction. So the check is as strong as the
+/// input allows, and the way to have the ledger's answer is to hand it the
+/// ledger ([`InvoiceBuilder::ledger`]).
 fn refuse_superseded(records: &[&Cdr]) -> Result<(), BillingError> {
     for cdr in records {
         if let Some(previous) = &cdr.supersedes
@@ -788,20 +986,28 @@ fn record_lines(
     rated: &Rated,
     ordinal: usize,
     treatment: &TaxTreatment,
+    currency: Currency,
     into: &mut Vec<InvoiceLine>,
+    adjustments: &mut Vec<DocumentAdjustment>,
 ) {
-    let currency = rated.currency;
+    let round = |amount: Decimal| Money::new(amount, currency).round_to_minor_unit().amount();
     let description = describe(cdr);
+    let first = into.len();
 
     for (position, line) in rated.lines.iter().enumerate() {
         // The rate the gross is *stripped at* and the rate the line is *taxed
         // at* are the same number, which is what keeps the gross the driver was
-        // quoted intact through the document.
+        // quoted intact through the document — and it strips the **unit price**
+        // as well as the amount, because BT-146 is defined exclusive of VAT and
+        // a document whose price does not reproduce its own line is one a
+        // Peppol access point returns (`R120`).
         let rate = effective_rate(line.vat, treatment);
-        let exact_net = net_of(line.amount, rate, rated.tax_included);
-        let net = Money::new(exact_net, currency)
-            .round_to_minor_unit()
-            .amount();
+        let unit_price = net_of(line.unit_price, rate, rated.tax_included);
+        let base_quantity = emob_tariff::Line::base_units_per_unit(line.dimension);
+        // Derived from the two figures the document states, so the identity
+        // `BT-131 = BT-129 × BT-146 ÷ BT-149` holds by construction rather than
+        // to within a rounding.
+        let exact_net = line.base_quantity * unit_price / base_quantity;
 
         into.push(InvoiceLine {
             vat_rate: stated_rate(rate, treatment),
@@ -811,36 +1017,74 @@ fn record_lines(
             description: format!("{description} — {}", dimension_name(line.dimension)),
             started_at: cdr.started_at,
             ended_at: cdr.ended_at,
-            quantity: line.quantity,
-            unit_price: line.unit_price,
-            net,
+            // The base quantity — whole seconds for time — rather than the
+            // hours a driver reads, because it is the figure the amount was
+            // computed from and the only one that reproduces it.
+            quantity: line.base_quantity,
+            unit_price,
+            base_quantity,
+            net: round(exact_net),
             exact_net,
         });
     }
 
-    // A minimum or maximum charge is a term of the total rather than of any one
-    // dimension, and it is money the driver owes. It goes on as its own line —
-    // `[OCPI 2.3.0 §Tariff]`'s bound, made visible — rather than being folded
-    // into a dimension it does not belong to.
+    // A minimum or maximum is a term of the **total** rather than of any one
+    // line, and a maximum moves it down — which as a line would be a negative
+    // BT-146 and an invoice `BR-27` refuses outright. EN 16931 models it as a
+    // document level allowance or charge; see `DocumentAdjustment`.
     if let Some(adjustment) = rated.adjustment {
         let rate = effective_rate(adjustment.vat, treatment);
-        let exact_net = net_of(adjustment.amount, rate, rated.tax_included);
-        let net = Money::new(exact_net, currency)
-            .round_to_minor_unit()
-            .amount();
-        into.push(InvoiceLine {
-            vat_rate: stated_rate(rate, treatment),
-            id: format!("{ordinal}.{}", rated.lines.len() + 1),
-            cdr: cdr.key.clone(),
-            dimension: Dimension::Flat,
-            description: format!("{description} — {}", adjustment_name(adjustment.kind)),
-            started_at: cdr.started_at,
-            ended_at: cdr.ended_at,
-            quantity: Decimal::ONE,
-            unit_price: net,
-            net,
-            exact_net,
-        });
+        // What this record's lines state on the document, and what the bound
+        // says the record comes to. Both rounded, so the document reaches the
+        // tariff's own figure exactly rather than a cent past it.
+        let stated: Decimal = into[first..].iter().map(|line| line.net).sum();
+        let exact_target = net_of(rated.exact_total().amount(), rate, rated.tax_included);
+        let signed = stated - round(exact_target);
+        let exact_signed: Decimal = into[first..]
+            .iter()
+            .map(|line| line.exact_net)
+            .sum::<Decimal>()
+            - exact_target;
+
+        // A bound with nothing to adjust **is** the line. A driver who plugged
+        // in, drew nothing and owes the minimum has no priced dimension, and
+        // `BR-16` requires an invoice to have at least one line — so a charge
+        // cannot stand alone here, and there is no document for it to be a
+        // charge *on*. The mirror case cannot arise: a maximum only moves a
+        // total the lines already exceeded, so lines exist by construction.
+        if into.len() == first {
+            into.push(InvoiceLine {
+                vat_rate: stated_rate(rate, treatment),
+                id: format!("{ordinal}.1"),
+                cdr: cdr.key.clone(),
+                dimension: Dimension::Flat,
+                description: format!("{description} — {}", adjustment_name(adjustment.kind)),
+                started_at: cdr.started_at,
+                ended_at: cdr.ended_at,
+                quantity: Decimal::ONE,
+                unit_price: exact_target,
+                base_quantity: Decimal::ONE,
+                net: round(exact_target),
+                exact_net: exact_target,
+            });
+            return;
+        }
+
+        if !signed.is_zero() || !exact_signed.is_zero() {
+            let kind = if signed.is_sign_negative() {
+                DocumentAdjustmentKind::Charge
+            } else {
+                DocumentAdjustmentKind::Allowance
+            };
+            adjustments.push(DocumentAdjustment {
+                kind,
+                cdr: cdr.key.clone(),
+                amount: signed.abs(),
+                exact_amount: exact_signed.abs(),
+                vat_rate: stated_rate(rate, treatment),
+                reason: format!("{description} — {}", adjustment_name(adjustment.kind)),
+            });
+        }
     }
 }
 
@@ -924,6 +1168,7 @@ const fn stated_rate(effective: Decimal, treatment: &TaxTreatment) -> Option<Dec
 /// two categories and one treatment, which is a document nobody can sign.
 fn breakdown(
     lines: &[InvoiceLine],
+    adjustments: &[DocumentAdjustment],
     treatment: &TaxTreatment,
     currency: Currency,
 ) -> Vec<TaxSubtotal> {
@@ -934,11 +1179,23 @@ fn breakdown(
     // each. An invoice that taxed both at one rate would over-declare on one of
     // them and state a figure no accountant can reproduce.
     let mut groups: Vec<(Option<Decimal>, Decimal)> = Vec::new();
+    let mut add = |rate: Option<Decimal>, amount: Decimal| match groups
+        .iter_mut()
+        .find(|(group, _)| *group == rate)
+    {
+        Some((_, taxable)) => *taxable += amount,
+        None => groups.push((rate, amount)),
+    };
     for line in lines {
-        match groups.iter_mut().find(|(rate, _)| *rate == line.vat_rate) {
-            Some((_, taxable)) => *taxable += line.net,
-            None => groups.push((line.vat_rate, line.net)),
-        }
+        add(line.vat_rate, line.net);
+    }
+    // `BR-S-08` and its nine siblings: a category's taxable amount is the sum
+    // of its lines **minus** the allowances and **plus** the charges in it.
+    for adjustment in adjustments {
+        add(
+            adjustment.vat_rate,
+            adjustment.kind.sign() * adjustment.amount,
+        );
     }
     groups.sort_by_key(|(rate, _)| *rate);
 
@@ -1023,6 +1280,7 @@ mod tests {
             started_at: at(0),
             ended_at: at(30),
             auth_path: AuthPath::AdHoc,
+            authorization_reference: None,
             periods: vec![ChargingPeriod {
                 quarter_hour: QuarterHour::containing(at(0)),
                 start: at(0),
@@ -1153,21 +1411,112 @@ mod tests {
     }
 
     #[test]
-    fn a_minimum_charge_is_its_own_line_rather_than_folded_into_a_dimension() {
-        // It is a term of the total and not of any dimension — the rating
+    fn a_minimum_charge_is_a_document_level_charge_and_not_a_line() {
+        // It is a term of the **total** and not of any dimension — the rating
         // engine says so — so an invoice that hid it inside the energy line
-        // would state a price per kWh nobody charged.
+        // would state a price per kWh nobody charged. EN 16931 has the group
+        // for it: BG-21, added to the taxable amount by `BR-CO-13`.
         let mut tariff = gross_tariff();
         tariff.tax_included = TaxIncluded::No;
         tariff.min_price = Some(dec("20.00"));
         let cdr = record("c-1", "10", &tariff);
         let invoice = builder(&[&cdr]).build().unwrap().value;
 
-        assert_eq!(invoice.lines.len(), 2, "{:?}", invoice.lines);
+        assert_eq!(invoice.lines.len(), 1, "{:?}", invoice.lines);
         assert_eq!(invoice.lines[0].net, dec("4.90"));
-        assert_eq!(invoice.lines[1].net, dec("15.10"));
-        assert!(invoice.lines[1].description.contains("minimum charge"));
+        assert_eq!(invoice.adjustments.len(), 1);
+        let charge = &invoice.adjustments[0];
+        assert_eq!(charge.kind, DocumentAdjustmentKind::Charge);
+        assert_eq!(
+            charge.amount,
+            dec("15.10"),
+            "stated as a positive magnitude"
+        );
+        assert!(charge.reason.contains("minimum charge"));
+
+        // BT-106 − BT-107 + BT-108 = BT-109.
+        assert_eq!(invoice.line_total().to_string(), "4.90 EUR");
+        assert_eq!(invoice.charge_total().to_string(), "15.10 EUR");
+        assert_eq!(invoice.allowance_total().to_string(), "0.00 EUR");
         assert_eq!(invoice.taxable_total().to_string(), "20.00 EUR");
+        assert!(invoice.reconciles());
+    }
+
+    #[test]
+    fn a_capped_session_is_an_allowance_and_the_document_reaches_the_cap_exactly() {
+        // A maximum moves the total **down**, and as a line that is a negative
+        // BT-146 — which `BR-27` refuses outright, so the whole invoice is
+        // invalid. It is a document level allowance, and the amount is derived
+        // from what the document states rather than from the exact difference:
+        // rounding the line and the difference independently lands a cent past
+        // the cap, and the cap is the one number the driver was promised.
+        let mut tariff = gross_tariff(); // 0.49 per kWh, gross, 19 %
+        tariff.max_price = Some(dec("10.00"));
+        let cdr = record("c-1", "29.500", &tariff); // 14.455 gross, capped to 10.00
+        let invoice = builder(&[&cdr]).build().unwrap().value;
+
+        assert_eq!(invoice.lines.len(), 1, "{:?}", invoice.lines);
+        assert_eq!(invoice.adjustments.len(), 1);
+        let allowance = &invoice.adjustments[0];
+        assert_eq!(allowance.kind, DocumentAdjustmentKind::Allowance);
+        assert_eq!(allowance.amount, dec("3.75"), "a positive magnitude");
+        assert!(allowance.reason.contains("maximum"));
+
+        assert_eq!(invoice.line_total().to_string(), "12.15 EUR");
+        assert_eq!(invoice.taxable_total().to_string(), "8.40 EUR");
+        assert_eq!(
+            invoice.gross_total().to_string(),
+            "10.00 EUR",
+            "the tariff capped this session at ten euros, and the document says ten euros"
+        );
+        assert!(invoice.reconciles());
+
+        // …and the document the standard judges is valid, which a negative
+        // line amount is not — at the CEN core a partner settles against and
+        // under the German profile a Rechnungseingangsplattform validates.
+        let crossed = crate::en16931::to_en16931(&invoice, crate::en16931::CEN_CORE).unwrap();
+        assert!(
+            crossed.value.is_valid(),
+            "{:?}",
+            crossed.value.reasons().collect::<Vec<_>>()
+        );
+        let german = crate::en16931::to_en16931(&invoice, crate::en16931::XRECHNUNG_3).unwrap();
+        assert!(
+            german
+                .value
+                .report
+                .fatal()
+                .all(|finding| finding.rule.starts_with("BR-DE")),
+            "an allowance must not itself be a finding: {:?}",
+            german.value.reasons().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_gross_tariffs_unit_price_is_stated_net_so_the_line_reproduces_itself() {
+        // BT-146 is defined **exclusive of VAT**. A gross tariff's own figure
+        // put there states a price that does not produce the line amount:
+        // 29.500 × 0.49 is 14.455 and the line is 12.15, which
+        // `PEPPOL-EN16931-R120` refuses at a hundred times its tolerance — and
+        // which a partner multiplying the two columns simply reads as wrong.
+        let cdr = record("c-1", "29.500", &gross_tariff());
+        let invoice = builder(&[&cdr]).build().unwrap().value;
+        let line = &invoice.lines[0];
+
+        assert_eq!(line.quantity, dec("29.500"));
+        assert_eq!(line.base_quantity, Decimal::ONE);
+        assert_eq!(line.unit_price, dec("0.49") / dec("1.19"));
+        assert_eq!(
+            line.vat_rate,
+            Some(dec("19")),
+            "…and the rate it was stripped at"
+        );
+        assert!(
+            line.reconciles(),
+            "BT-129 × BT-146 ÷ BT-149 = the exact BT-131"
+        );
+        assert_eq!(line.net, dec("12.15"));
+        assert!(invoice.reconciles());
     }
 
     #[test]
@@ -1249,8 +1598,8 @@ mod tests {
     #[test]
     fn the_unit_code_is_derived_from_the_dimension_and_never_stored_beside_it() {
         assert_eq!(unit_code(Dimension::Energy), "KWH");
-        assert_eq!(unit_code(Dimension::Time), "HUR");
-        assert_eq!(unit_code(Dimension::ParkingTime), "HUR");
+        assert_eq!(unit_code(Dimension::Time), "SEC");
+        assert_eq!(unit_code(Dimension::ParkingTime), "SEC");
         assert_eq!(unit_code(Dimension::Flat), "C62");
     }
 

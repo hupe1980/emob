@@ -1,0 +1,36 @@
+[package]
+name        = "tarifd"
+description = "The service that publishes a tariff version: it decides when a price takes effect, and never what it says"
+publish     = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+emob-service = { workspace = true }
+emob-tariff  = { workspace = true }
+
+# The three crossings, and nothing else: the payload for each audience is the
+# domain crate's, so this service cannot state a price of its own.
+emob-ocpp    = { workspace = true }
+emob-poi     = { workspace = true }
+emob-roam    = { workspace = true }
+
+# Only to name the payload types the daemon puts on a socket. Nothing here
+# builds one.
+ocpi-kit     = { workspace = true }
+ocpp-kit     = { workspace = true }
+
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+rust_decimal = { workspace = true }
+time         = { workspace = true, features = ["macros"] }

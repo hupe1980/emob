@@ -11,20 +11,6 @@ use emob_session::{MeterError, SessionError};
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SeamError {
-    /// The `SampledValue.value` did not hold a `SignedMeterValueType`.
-    ///
-    /// OCPP 1.6 serialises the whole object into that string field beside
-    /// `format: "SignedData"` `[OCA SMV §3.2.1]`, so a station that puts a bare
-    /// number there is one whose signed values are not where the whitepaper
-    /// says they are.
-    #[error(
-        "a SignedData sampled value did not hold a SignedMeterValueType: {detail}. OCPP 1.6 serialises the whole object into the `value` string [OCA SMV §3.2.1]"
-    )]
-    BadSampledValue {
-        /// What the JSON reader said.
-        detail: String,
-    },
-
     /// The station encodes its signed values in a format this crate does not
     /// read.
     ///
@@ -50,17 +36,6 @@ pub enum SeamError {
     #[error("the signed data set did not parse: {detail}")]
     BadRecord {
         /// What the OCMF parser said.
-        detail: String,
-    },
-
-    /// The `publicKey` envelope did not decode.
-    ///
-    /// Not fatal to billing on its own — the key that matters comes from the
-    /// registry — but a station whose claimed key is unreadable is one whose
-    /// provisioning nobody can check against the cabinet.
-    #[error("the public key the station claims did not decode: {detail}")]
-    UndecodableClaimedKey {
-        /// Which layer gave up.
         detail: String,
     },
 

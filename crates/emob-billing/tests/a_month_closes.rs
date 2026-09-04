@@ -234,7 +234,11 @@ fn a_driver_month_closes_from_the_meter_to_the_books() {
     assert_eq!(billed, dec("63.333"), "the kilowatt-hours the meter signed");
     for line in &invoice.lines {
         assert_eq!(line.unit_code(), "KWH");
-        assert_eq!(line.unit_price, dec("0.49"));
+        // BT-146 is the item price **excluding VAT**, so a tariff quoting 0.49
+        // gross at 19 % states 0.49 ÷ 1.19 here — and the line reproduces its
+        // own amount from it, which is what `PEPPOL-EN16931-R120` asks.
+        assert_eq!(line.unit_price, dec("0.49") / dec("1.19"));
+        assert!(line.reconciles());
     }
 
     // ── …and the document adds up ───────────────────────────────────────────
@@ -361,7 +365,7 @@ fn a_roaming_settlement_is_a_reverse_charge_and_the_books_show_no_vat() {
 
     assert_eq!(invoice.treatment.category, VatCategory::ReverseCharge);
     assert_eq!(invoice.treatment.place_of_supply, "FR");
-    assert_eq!(invoice.tax_total().to_string(), "0 EUR");
+    assert_eq!(invoice.tax_total().to_string(), "0.00 EUR");
     // The taxable amount is the same 26.08: what moved is who declares the tax.
     assert_eq!(invoice.taxable_total().to_string(), "26.08 EUR");
     assert_eq!(invoice.gross_total().to_string(), "26.08 EUR");
@@ -785,7 +789,7 @@ fn a_settlement_outside_the_union_is_outside_the_scope_and_states_neither_a_rate
     assert_eq!(invoice.treatment.category, VatCategory::OutOfScope);
     assert_eq!(invoice.treatment.category.code(), "O");
     assert_eq!(invoice.treatment.place_of_supply, "CH");
-    assert_eq!(invoice.tax_total().to_string(), "0 EUR");
+    assert_eq!(invoice.tax_total().to_string(), "0.00 EUR");
     assert_eq!(invoice.gross_total().to_string(), "26.08 EUR");
 
     // No rate anywhere — on the lines or on the breakdown. A rate of zero is a

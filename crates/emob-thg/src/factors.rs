@@ -31,6 +31,37 @@ pub const MJ_PER_KWH: Decimal = Decimal::from_parts(36, 0, 0, false, 1);
 /// down once here rather than at each call site that needs it.
 ///
 /// `None` before [`FIRST_COUNTED_YEAR`].
+///
+/// # There is a second schedule, and it is not this one
+///
+/// Since the *Zweites Gesetz zur Weiterentwicklung der Treibhausgasminderungs-
+/// Quote* (in force 07.06.2026, applying from obligation year 2026) the
+/// Verordnung states **two** factor schedules, and a function named for the
+/// factor has to say which one it is.
+///
+/// `[38k §7(6)]` gives purely battery-electric vehicles of classes **M3 and
+/// N3** — buses and heavy goods vehicles — a factor of 4 from 2027, stepping
+/// down 3.5 (2035), 3 (2036), 2.5 (2037), 2 (2038), 1.5 (2039), 1 (2040). At
+/// its widest that is a third more counted energy than this function returns,
+/// which is not a rounding difference.
+///
+/// **It belongs to a different route, and this crate files the other one.**
+/// `[38k §6]` is *"Energetische Menge des elektrischen Stroms aus öffentlich
+/// zugänglichen Ladepunkten"* — energy a meter at a public point measured, and
+/// the operator of that point is the claimant. `[38k §7]` is *"in anderen
+/// Fällen"*: non-public charging, where nothing measures per session, the
+/// quantity is a published *Schätzwert* rather than a reading, and the claimant
+/// is the person the vehicle is registered to.
+///
+/// So the elevated factor sits exactly where the vehicle class is a fact
+/// somebody holds a Zulassungsbescheinigung for. A public charge point does not
+/// know what it is charging, which is why `[38k §5(3)]` gives it one factor for
+/// everything — and why a `vehicle_class` argument here would be a field a
+/// caller fills in rather than a fact the estate can evidence, which is the one
+/// shape this workspace refuses everywhere else.
+///
+/// [`crate::ThgError::NotPublic`] names § 7 as the route a non-public point
+/// has, so the refusal points somewhere rather than reading as "worthless".
 #[must_use]
 pub fn counting_factor(year: i32) -> Option<Decimal> {
     match year {

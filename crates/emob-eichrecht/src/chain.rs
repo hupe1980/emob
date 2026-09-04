@@ -30,7 +30,10 @@
 //!
 //! # What this adds to the sequence rules
 //!
-//! Five checks that are about billing rather than about the format:
+//! Seven rules that are about billing rather than about the format — one row per
+//! variant of [`ChainFinding`] that is not a [`ChainFinding::Sequence`], because
+//! a rule the enum can report and the table cannot is a rule nobody reviewing
+//! this list knows about:
 //!
 //! | Rule | Source | Disqualifies |
 //! |---|---|---|
@@ -40,11 +43,12 @@
 //! | …and is reset at `TX=B`, so the session's own loss is `CL_end` | `[OCMF Tab. 7, CL]` | both |
 //! | The identification level does not change mid-session | `[OCMF Tab. 11]` | both |
 //! | An `EF` character this build does not know | `[OCMF Tab. 7, EF]` | both |
+//! | There is a usable **pair** of readings on one register to subtract at all | `[OCMF Tab. 7]` | energy |
 
 use emob_core::{Direction, Energy, IdentificationStrength};
 use ocmf::obis::Register;
 use ocmf::session::{self, Finding, SessionReport};
-use ocmf::{IdentificationLevel, MeterState, ObisCode, Record, TimeStatus, TransactionMarker};
+use ocmf::{IdentificationLevel, ObisCode, Record, TransactionMarker};
 use rust_decimal::Decimal;
 
 /// Which quantity a finding takes away.
@@ -356,8 +360,12 @@ pub struct ChainReport {
     /// The cable loss this session had compensated out of its register, when
     /// the meter reported it.
     ///
-    /// `CL_end − CL_begin` `[OCMF Tab. 7, CL]`. Not subtracted from anything —
-    /// the compensation is already inside `RV` — but carried, because a partner
+    /// `CL` accumulates across the transaction and "must be reset at `TX=B`"
+    /// `[OCMF Tab. 7, CL]`, so the session's own loss is the closing value —
+    /// computed as `CL_end − CL_begin` so that a meter which failed to reset it
+    /// still yields a difference, beside the [`ChainFinding::LossNotResetAtBegin`]
+    /// that takes the record out of billing. Not subtracted from anything — the
+    /// compensation is already inside `RV` — but carried, because a partner
     /// disputing the energy will ask how much of it was cable.
     ///
     /// An [`Energy`] and not a bare decimal, because `CL` "is given in the same
@@ -698,10 +706,6 @@ fn strength_of(level: IdentificationLevel<'_>) -> IdentificationStrength {
         IdentificationLevel::Certified => IdentificationStrength::Certified,
         IdentificationLevel::Secure => IdentificationStrength::Secure,
         // `NONE`, every error state — which `ocmf::session` has already
-        // reported as a finding — and a level the table does not define. Each
-        // is a claim nothing supports, and the weakest possible answer is the
-        // one that cannot over-state the evidence.
-        // `NONE`, every error state — which `ocmf::session` has already
         // reported as a finding — a level the table does not define, and any
         // level a later revision adds. Each is a claim nothing supports, and
         // the weakest possible answer is the one that cannot over-state the
@@ -875,24 +879,4 @@ fn instant_of(time: ocmf::OcmfTime) -> Option<time::OffsetDateTime> {
     time::OffsetDateTime::from_unix_timestamp(time.unix_seconds())
         .ok()
         .map(|at| at.to_offset(offset))
-}
-
-/// The meter state a reading has to be in before anything is billed
-/// `[OCMF Tab. 10]`, `[MessEG §33]`.
-///
-/// Re-exported so a caller reading a single record can ask the same question
-/// the chain asks, without depending on `ocmf` directly.
-#[must_use]
-pub const fn is_billable_state(state: MeterState) -> bool {
-    state.is_ok()
-}
-
-/// Whether a clock supports a duration a tariff may charge for
-/// `[OCMF Tab. 19]`.
-///
-/// `S` (synchronised) and `R` (relative accounting from a calibration-law
-/// accurate duration) qualify; `U` (unknown) and `I` (informative) do not.
-#[must_use]
-pub const fn is_billable_clock(status: TimeStatus) -> bool {
-    matches!(status, TimeStatus::Synchronized | TimeStatus::Relative)
 }

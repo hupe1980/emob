@@ -125,7 +125,7 @@
 //! exact figures survive and the caller can do either.
 
 use emob_core::quantity::{Currency, Money};
-use emob_core::{Energy, Local, TimeZone};
+use emob_core::{ClockResolution, Energy, Local, TimeZone};
 use rust_decimal::Decimal;
 
 use crate::tariff::{Dimension, PriceComponent, Restrictions, Tariff, TariffElement, TaxIncluded};
@@ -206,11 +206,23 @@ impl Period {
     }
 }
 
-/// What a session did, period by period.
+/// What a session did, period by period — and how finely its clock could
+/// tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Chargeable {
     periods: Vec<Period>,
+    /// The shortest span the station's clock may be billed for.
+    ///
+    /// `[REA 6-A §3.1]`: "Messwerte unterhalb der kürzest möglichen Zeitspanne
+    /// werden nicht für Abrechnungszwecke verwendet." A duration is a measured
+    /// value, and the measuring instrument's resolution is a fact about the
+    /// session rather than about the tariff — so it travels here, and [`rate`]
+    /// reads it. The default is the regulation's cap of sixty seconds, because
+    /// a platform that has not read the type approval has not been told the
+    /// device is better than the worst case the regulation permits.
+    #[cfg_attr(feature = "serde", serde(default))]
+    clock: ClockResolution,
 }
 
 impl Chargeable {
@@ -240,7 +252,26 @@ impl Chargeable {
             }
         }
 
-        Ok(Self { periods })
+        Ok(Self {
+            periods,
+            clock: ClockResolution::conforming(),
+        })
+    }
+
+    /// The same session, measured by a clock whose resolution is known.
+    ///
+    /// The figure comes from the station's type approval `[REA 6-A §3.1]`; a
+    /// station that states none is judged at the regulation's cap.
+    #[must_use]
+    pub const fn with_clock(mut self, clock: ClockResolution) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// The shortest span this session's clock may be billed for.
+    #[must_use]
+    pub const fn clock(&self) -> ClockResolution {
+        self.clock
     }
 
     /// A session that is one period of delivered energy.
@@ -557,6 +588,27 @@ pub enum RatingNote {
         /// The restrictions that could not be judged.
         restrictions: Vec<String>,
     },
+    /// A duration was charged for, and the station's clock cannot resolve a
+    /// span that short — so it was **not** billed `[REA 6-A §3.1]`.
+    ///
+    /// "Messwerte unterhalb der kürzest möglichen Zeitspanne werden nicht für
+    /// Abrechnungszwecke verwendet." The measured value is the duration, and
+    /// below the clock's resolution it is not a number an invoice may use, so
+    /// the line is dropped rather than the record refused: the energy is
+    /// unaffected, and a thirty-second wait before a charge begins — the
+    /// ordinary shape of a transaction that opens `EVConnected` — must not
+    /// make fifteen kilowatt-hours unbillable over five cents of occupancy.
+    ///
+    /// The mirror of an unsynchronised clock, arriving from the other end:
+    /// there the clock cannot be *placed*, here the span cannot be *resolved*.
+    DurationBelowResolution {
+        /// Which time dimension.
+        dimension: Dimension,
+        /// What the periods measured, in whole seconds.
+        measured_seconds: Decimal,
+        /// The shortest span the clock may be billed for, in seconds.
+        shortest_seconds: Decimal,
+    },
     /// A quantity was rounded up to the component's block size.
     RoundedToBlock {
         /// Which dimension.
@@ -622,6 +674,14 @@ impl core::fmt::Display for RatingNote {
             } => write!(
                 f,
                 "element {index} carries restrictions this build cannot evaluate and was skipped: {restrictions:?}"
+            ),
+            Self::DurationBelowResolution {
+                dimension,
+                measured_seconds,
+                shortest_seconds,
+            } => write!(
+                f,
+                "{measured_seconds} s of {dimension} were not billed: the station's clock resolves no span shorter than {shortest_seconds} s, and a measured value below it is not one an invoice may use [REA 6-A §3.1]. The energy is unaffected"
             ),
             Self::RoundedToBlock {
                 dimension,
@@ -886,12 +946,17 @@ impl Rated {
     }
 
     /// The taxable amount across every category.
+    ///
+    /// Every term is already rounded to the minor unit; the rounding here only
+    /// sets the scale, so a session with no lines at all reads `0.00 EUR`
+    /// rather than `0 EUR`.
     #[must_use]
     pub fn net(&self) -> Money {
         Money::new(
             self.tax_summary().iter().map(|t| t.net).sum(),
             self.currency,
         )
+        .round_to_minor_unit()
     }
 
     /// The tax across every category.
@@ -901,6 +966,7 @@ impl Rated {
             self.tax_summary().iter().map(|t| t.tax).sum(),
             self.currency,
         )
+        .round_to_minor_unit()
     }
 
     /// What the driver pays.
@@ -910,6 +976,7 @@ impl Rated {
             self.tax_summary().iter().map(|t| t.gross).sum(),
             self.currency,
         )
+        .round_to_minor_unit()
     }
 
     /// One line per note, for an operator queue.
@@ -1020,6 +1087,29 @@ pub fn rate(tariff: &Tariff, session: &Chargeable) -> Rated {
         periods: tally.periods,
         base_quantity: tally.base_quantity,
     }));
+
+    // A duration the clock cannot resolve is not a measured value an invoice
+    // may use `[REA 6-A §3.1]`. Judged per dimension over what was actually
+    // charged for — half a minute of occupancy after a half-hour charge is
+    // half a minute, not the session's whole length — and judged on the whole
+    // of it rather than per period, because the floor is on the measurement
+    // and a session sampled every second still measured its minutes.
+    let shortest = Decimal::from(session.clock.shortest_billable_span().whole_seconds());
+    for dimension in [Dimension::Time, Dimension::ParkingTime] {
+        let measured: Decimal = accumulators
+            .iter()
+            .filter(|acc| acc.dimension == dimension)
+            .map(|acc| acc.quantity)
+            .sum();
+        if !measured.is_zero() && measured < shortest {
+            accumulators.retain(|acc| acc.dimension != dimension);
+            notes.push(RatingNote::DurationBelowResolution {
+                dimension,
+                measured_seconds: measured,
+                shortest_seconds: shortest,
+            });
+        }
+    }
 
     // Block rounding applies to what was actually billed for a price, not to
     // each period of it — rounding every quarter hour up to a block would bill
@@ -1747,6 +1837,59 @@ mod tests {
         assert_eq!(r.exact_total().amount(), dec("14.45500"));
         assert_eq!(r.total().to_string(), "14.46 EUR");
         assert!(r.lines_sum_to_total());
+    }
+
+    #[test]
+    fn a_span_the_clock_cannot_resolve_is_not_billed_and_the_energy_is() {
+        // `[REA 6-A §3.1]`: "Messwerte unterhalb der kürzest möglichen
+        // Zeitspanne werden nicht für Abrechnungszwecke verwendet." Thirty
+        // seconds of occupancy against the regulation's sixty-second cap is a
+        // measured value an invoice may not use, so the line goes and the
+        // kilowatt-hours stay.
+        let t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")),
+            PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
+        ]);
+        let s = Chargeable::new(vec![
+            Period::charging(at(0), at(30), kwh("15")),
+            Period::parked(at(30), at(30) + time::Duration::seconds(30)),
+        ])
+        .unwrap();
+
+        let r = rate(&t, &s);
+        assert_eq!(r.amount_for(Dimension::ParkingTime), None);
+        assert_eq!(r.amount_for(Dimension::Energy), Some(dec("7.35")));
+        assert!(
+            r.notes.iter().any(|n| matches!(
+                n,
+                RatingNote::DurationBelowResolution {
+                    dimension: Dimension::ParkingTime,
+                    ..
+                }
+            )),
+            "{:?}",
+            r.notes
+        );
+        assert!(r.reasons().any(|n| n.contains("REA 6-A")));
+
+        // A station whose type approval states a better figure bills it.
+        let precise = ClockResolution::stated(time::Duration::seconds(10)).unwrap();
+        let r = rate(&t, &s.clone().with_clock(precise));
+        assert_eq!(r.amount_for(Dimension::ParkingTime), Some(dec("0.05")));
+        assert!(r.notes.is_empty(), "{:?}", r.notes);
+
+        // …and the floor is on the measurement as a whole, not on each period:
+        // sixty seconds measured as two half-minutes is still a minute.
+        let sampled = Chargeable::new(vec![
+            Period::charging(at(0), at(30), kwh("15")),
+            Period::parked(at(30), at(30) + time::Duration::seconds(30)),
+            Period::parked(at(30) + time::Duration::seconds(30), at(31)),
+        ])
+        .unwrap();
+        assert_eq!(
+            rate(&t, &sampled).amount_for(Dimension::ParkingTime),
+            Some(dec("0.10"))
+        );
     }
 
     #[test]

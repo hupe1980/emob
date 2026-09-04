@@ -1,0 +1,27 @@
+[package]
+name        = "poid"
+description = "The service that publishes an operator's charge points to the national access point: it decides when a snapshot goes out, and never what it says"
+publish     = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+emob-poi     = { workspace = true }
+emob-service = { workspace = true }
+emob-tariff  = { workspace = true }
+
+anyhow       = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+rust_decimal = { workspace = true }
+time         = { workspace = true, features = ["macros"] }

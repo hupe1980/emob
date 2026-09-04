@@ -140,6 +140,7 @@ The two directions are not mirror images:
 | `provenance` | nothing at all | interpolated, for every period: a number whose provenance nobody stated is not one this side may call measured |
 | `auth_path` | three values for six paths | narrowed by the token type, and noted where it cannot be |
 | `cost` | totals, no unit prices | **not** rebuilt |
+| `supersedes` | nothing on the replacement | `None` — the pairing is the receiving ledger's, from the Credit CDR it saw first |
 
 The last one is the argument. A canonical price carries one line per distinct
 price, each reproducing its own amount from its own quantity and unit price.
@@ -152,6 +153,31 @@ tariff and compares.
 Verification stays where it belongs: the payloads come back for the Eichrecht
 crate to check against **this side's** registry, and the verified result is an
 argument to the conversion rather than something it produces.
+
+### …and re-rating goes through the same door the issuer used
+
+`Cdr::rerated_with` prices a partner's record with this side's own tariff, and
+applies every gate the issuing side applies. That matters because the obvious
+composition — `rate(&retail, &cdr.chargeable()?)` — skips all four: a tariff not
+in force when the session ran, a version the meter says was superseded
+mid-session, a duration the signed records do not vouch for, and the clock
+resolution under a per-minute fee. The periods, the energy and the evidence stay
+the record's own, so the two prices are about the same session by construction.
+
+`tests/the_other_hat.rs` runs the whole EMP half: a partner's OCPI document,
+verified against **this** side's registry, re-rated at this side's retail price,
+invoiced to a driver, and the books balanced.
+
+### A correction is two documents, and neither is the other
+
+OCPI has no way to amend a CDR. It reverses one with a Credit CDR — `credit =
+true`, `credit_reference_id` naming the original, and **only** `total_cost`
+negated — and then sends "a new CDR with a new unique ID and the fields `credit`
+and `credit_reference_id` omitted". `to_ocpi_credit` writes the first; `to_ocpi`
+writes the second from the superseding record and says in its account that the
+replacement names nothing. Inbound, a Credit CDR is refused by name rather than
+read: it repeats the original's kilowatt-hours with the money negated, and read
+as a session it would put them in the ledger twice.
 
 ## Routing comes out of the identifier
 

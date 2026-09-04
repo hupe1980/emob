@@ -29,6 +29,13 @@
 //! announces what a zone *will* do, while the civil offsets of instants that
 //! have already happened are frozen — which are the only instants a settled
 //! session has.
+//!
+//! One property of the bundled copy is worth stating rather than discovering:
+//! it carries **no transitions before 1970**, so a zone asked about 1930 answers
+//! with its earliest post-1970 rule rather than with the offset that was in
+//! force. Harmless here — no charging session predates 1970 — and it is the
+//! reason `QuarterHour::periods_in_local_day`'s one non-96 fixture is Liberia in
+//! 1970 rather than Amsterdam in 1930 (D218).
 
 use core::fmt;
 

@@ -68,6 +68,18 @@ dropped record is genuinely absent from the stream. The reconciliation is
 unchanged to the last digit, which is the point: the seam is transparent to the
 arithmetic and now under the same assertion as everything else.
 
+## Every transaction opens `EVConnected`
+
+A real 2.0.1 station opens a transaction with `chargingState = EVConnected` and
+a `Transaction.Begin` reading, and reports `Charging` some seconds later with no
+reading at all. Every simulated session does the same, with a wait drawn from
+five seconds to three minutes, so the fleet exercises both halves of
+`[REA 6-A §3.1]` on every fast post: a wait the clock cannot resolve, which is
+dropped from the occupancy fee with a note, and one it can, which is billed —
+and which is the only thing that lets an unsynchronised clock refuse a session
+on its own. Before the fleet's sessions opened this way, no session ever billed
+a duration and that gate was exercised by nothing.
+
 ## The register is the station's, not the session's
 
 A real meter counts up over its whole life, and a session is a *difference*

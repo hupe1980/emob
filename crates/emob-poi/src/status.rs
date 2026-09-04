@@ -133,19 +133,24 @@ impl PointStatus {
     }
 }
 
-/// A point's live status, checked against what the register permits.
+/// A [`PointStatus`] the register permits — nothing more, and no [`Lifecycle`]
+/// beside it.
 ///
-/// Construct one with [`Report::new`]; there is no other way to make one, and
-/// that is the whole design. A `Report` in hand is a status that the register
-/// agrees with.
+/// The only constructor is [`ChargingPoint::report`], which reads the lifecycle
+/// off the point. One taking it beside the status is one a caller satisfies by
+/// handing over the lifecycle that makes the status legal, and an infallible
+/// convenience form is worse: it is the one every test reaches for, which leaves
+/// the check exercised nowhere on the path to a published feed (D217).
+///
+/// [`ChargingPoint::report`]: crate::site::ChargingPoint::report
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
-    lifecycle: Lifecycle,
     status: PointStatus,
 }
 
 impl Report {
-    /// A status a point in this lifecycle state may publish.
+    /// A status a point in this lifecycle state may publish. Crate-private: see
+    /// the type.
     ///
     /// # Errors
     ///
@@ -154,30 +159,15 @@ impl Report {
     /// prevents is not a malformed document — the profile would accept
     /// `available` for a point removed last spring — it is a driver arriving at
     /// a concrete pad.
-    pub fn new(point: &str, lifecycle: Lifecycle, status: PointStatus) -> Result<Self> {
+    pub(crate) fn checked(point: &str, lifecycle: Lifecycle, status: PointStatus) -> Result<Self> {
         match lifecycle.forced_status() {
             Some(required) if required != status => Err(PoiError::StatusContradictsRegister {
                 point: point.to_owned(),
                 lifecycle: lifecycle.as_str(),
                 status: status.as_profile_str(),
             }),
-            _ => Ok(Self { lifecycle, status }),
+            _ => Ok(Self { status }),
         }
-    }
-
-    /// The status of an operating point, whatever it is doing.
-    #[must_use]
-    pub const fn operating(status: PointStatus) -> Self {
-        Self {
-            lifecycle: Lifecycle::Operating,
-            status,
-        }
-    }
-
-    /// What the register says.
-    #[must_use]
-    pub const fn lifecycle(&self) -> Lifecycle {
-        self.lifecycle
     }
 
     /// What the feed will say.
@@ -190,30 +180,38 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site::{ChargingPoint, Connector, ConnectorType, Facility};
+    use emob_core::EvseId;
+    use rust_decimal::Decimal;
+
+    /// A point in the register, in one lifecycle state.
+    ///
+    /// Every test goes through `ChargingPoint::report`, because that is the
+    /// only path a published feed takes. Testing `Report::checked` directly
+    /// would test the half that was never the problem: the check was correct
+    /// and the publishing path did not run it (D217).
+    fn point(lifecycle: Lifecycle) -> ChargingPoint {
+        let mut point = ChargingPoint::new(
+            Facility::new("DE*ABC*E00001"),
+            EvseId::parse("DE*ABC*E00001").unwrap(),
+            Connector::new(ConnectorType::Iec62196T2Combo, Decimal::from(150)),
+        );
+        point.lifecycle = lifecycle;
+        point
+    }
 
     #[test]
     fn a_decommissioned_point_cannot_be_published_as_available() {
         // The commonest defect in European charging data, and the one a schema
         // validator has nothing to say about.
-        let refused = Report::new(
-            "DE*ABC*E00001",
-            Lifecycle::Decommissioned,
-            PointStatus::Available,
-        );
+        let removed = point(Lifecycle::Decommissioned);
         assert!(matches!(
-            refused,
+            removed.report(PointStatus::Available),
             Err(PoiError::StatusContradictsRegister { .. })
         ));
 
         // The register's own answer is admissible, and it is the only one.
-        assert!(
-            Report::new(
-                "DE*ABC*E00001",
-                Lifecycle::Decommissioned,
-                PointStatus::Removed
-            )
-            .is_ok()
-        );
+        assert!(removed.report(PointStatus::Removed).is_ok());
     }
 
     #[test]
@@ -221,15 +219,17 @@ mod tests {
         // `unavailable` and `outOfOrder` both read as "come back later" to a
         // route planner. `planned` reads as "this does not exist yet", which is
         // the true statement and the one a map should draw differently.
+        let planned = point(Lifecycle::Planned);
         assert!(matches!(
-            Report::new("p", Lifecycle::Planned, PointStatus::Unavailable),
+            planned.report(PointStatus::Unavailable),
             Err(PoiError::StatusContradictsRegister { .. })
         ));
-        assert!(Report::new("p", Lifecycle::Planned, PointStatus::Planned).is_ok());
+        assert!(planned.report(PointStatus::Planned).is_ok());
     }
 
     #[test]
     fn an_operating_point_may_say_anything_because_the_register_does_not_know() {
+        let operating = point(Lifecycle::Operating);
         for status in [
             PointStatus::Available,
             PointStatus::Charging,
@@ -237,11 +237,28 @@ mod tests {
             PointStatus::OutOfOrder,
             PointStatus::Reserved,
         ] {
-            assert!(
-                Report::new("p", Lifecycle::Operating, status).is_ok(),
-                "{status:?}"
-            );
+            assert!(operating.report(status).is_ok(), "{status:?}");
         }
+    }
+
+    #[test]
+    fn there_is_no_way_to_state_a_status_without_a_point_to_check_it_against() {
+        // The property the deleted `Report::operating` broke. It took a status
+        // and no register, so it could not fail — and being the easy one, it
+        // was what the feed tests and the publishing service both used, which
+        // left the check exercised nowhere on the path to a published document.
+        //
+        // A compile-time property, so what holds it is the absence of a public
+        // constructor rather than an assertion. What is assertable is that the
+        // one that exists reads the point's own answer: change the register and
+        // the same status stops being publishable.
+        let mut p = point(Lifecycle::Operating);
+        assert!(p.report(PointStatus::Available).is_ok());
+        p.lifecycle = Lifecycle::Decommissioned;
+        assert!(
+            p.report(PointStatus::Available).is_err(),
+            "the status did not move; the register did"
+        );
     }
 
     #[test]

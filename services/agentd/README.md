@@ -122,12 +122,61 @@ So it is one `const`, its patterns go through `emob_service::events::matches`,
 and two tests hold it down: every pattern must match at least one type in the
 catalogue, and every specialist named must be one the daemon registers.
 
+Not the reverse. Most event types are for a webhook subscriber rather than for a
+specialist, and `de.emob.billing.invoice-issued` reaching no agent is correct —
+so an unsubscribed type is a reading rather than a build failure. It was worth
+reading once: the whole `compliance.*` family sat in the catalogue with no
+subscriber, which is how the sweep below came to be written.
+
 ## What is here
 
 | Specialist | Wakes on | Answers |
 |---|---|---|
+| `compliance-sweep` | `de.emob.compliance.duty-commenced`, `…breach-detected`, `…notice-window-opened` | which duties this estate fails, and **which it will fail on the day they start** |
 | `evidence-triage` | `de.emob.evidence.refused`, `…key-unresolved` | which one fault caused most of today's unbillable energy |
 | `tariff-review` | `de.emob.tariff.version-published`, `…conformance-failed` | which points offer a tariff `[AFIR Art. 5(4)]` forbids at their power |
+
+### The one that reads the calendar forwards
+
+`emob_core::obligation::assess` judges one point on one date, and the sweep does
+not have a second implementation of any rule — it calls it, once per point. What
+it adds is the two things one assessment cannot say.
+
+**Which duty, across how many points.** An operator with four hundred posts does
+not have four hundred compliance questions; it has the handful of duties its
+estate fails and the list of posts under each. One firmware programme, one
+contract clause, one retrofit.
+
+**And the breaches that have not started.** Every entry carries the date it
+begins binding, so a duty that is `NotYetInForce` today is judged *at its own
+commencement date* against the estate as it stands. A point renovated in March
+2027 that speaks only EN ISO 15118-2 is compliant today and in breach on new
+year's day — and that is the only compliance advice that arrives before the
+breach rather than after it.
+
+```jsonc
+{ "on": "2026-09-01", "points": [ /* the inventory */ ], "horizon_days": 540 }
+```
+
+```console
+[compliance-sweep] 400 point(s) fail `afir-digitally-connected` [AFIR Art. 5(7)]
+                   → connect the point to a CSMS: without it neither the data
+                     nor the smart-charging duties can be met
+[compliance-sweep] 12 point(s) will fail `da656-iso15118-20-public`
+                   [DA-656 Anh. 2.1.2] from 2027-01-01
+                   → TLS 1.3 and the larger certificates of -20 usually mean a
+                     hardware refresh
+```
+
+The suggested action is the calendar's own `remedy`, never a second wording of
+it. The horizon is the caller's — a budget cycle wants eighteen months, a
+hardware refresh wants everything — and the date is an argument rather than a
+clock, so a run in March replays to the same answer in September.
+
+And a **forgone entitlement is not worded as a breach**: the greenhouse-gas
+quota is money, not law, so an estate that declines it reads "lawful, and worth
+money" rather than "fail". A queue that cries wolf about a subsidy is a queue
+that teaches its reader to discount the findings that matter.
 
 ## Licence
 

@@ -19,7 +19,19 @@ pub enum ThgError {
     },
 
     /// The point is not publicly accessible, so `[38k §6]` never engages.
-    #[error("{evse_id} is not publicly accessible: `[38k §6]` counts only public points")]
+    ///
+    /// Which is a refusal by **this** crate rather than a statement that the
+    /// energy is worthless: `[38k §7]` is the route for a non-public point, and
+    /// it is a different claim by a different claimant on a different quantity —
+    /// the person the vehicle is registered to, on a published estimate rather
+    /// than on a meter reading, and since the 2. THG-Novelle at `[38k §7(6)]`'s
+    /// higher factor for an M3 or N3 vehicle. None of that is a fact a charge
+    /// point holds, which is why it is somebody else's filing and not a branch
+    /// here.
+    #[error(
+        "{evse_id} is not publicly accessible: `[38k §6]` counts only public points, and a \
+         non-public point is claimed under `[38k §7]` by the vehicle keeper on an estimate"
+    )]
     NotPublic {
         /// The point.
         evse_id: String,

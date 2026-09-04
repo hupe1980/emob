@@ -89,7 +89,7 @@ Forty duties over three subjects.
 | A **manufacturer** reports an exploited vulnerability within 24 h | `[CRA Art. 14]` | 11.09.2026 | only where products with digital elements are placed on the market |
 | …and places only conformity-assessed products on the market | `[CRA Art. 13]` | 11.12.2027 | Annex I Part I ∧ the Part II vulnerability handling |
 
-## Four properties that make it trustworthy
+## Six properties that make it trustworthy
 
 ### Every duty carries its citation
 
@@ -121,7 +121,7 @@ change rather than a redesign.
 ### Applicability and satisfaction are different questions
 
 A private depot is **not failing** the ad-hoc payment duty. The duty does not
-bind it. So the calendar has five outcomes, not two:
+bind it. So the calendar has six outcomes, not two:
 
 | Status | Meaning |
 |---|---|
@@ -155,6 +155,23 @@ compliant on a 22 kW post and non-compliant on the 150 kW charger beside it.
 **The 2027 retrofit reaches safe and secure parking areas**, not only the TEN-T
 road network — and it explicitly covers points deployed *before* 13.04.2024,
 which is the whole purpose of the subparagraph.
+
+### Failing a duty and forgoing an entitlement are different answers
+
+Thirty-nine of the forty entries are duties: a regulator can fine an operator,
+order a retrofit, or forbid the operation of a point. One is not. The four
+conditions between a public kilowatt-hour and the German greenhouse-gas quota are
+worth money and break no law when unmet — the entry's own remedy ends *"…or forgo
+the quota"*. In one bucket, an estate that meets every legal duty in Europe and
+declines a subsidy reads as non-compliant. So each entry carries what failing it
+costs (D219):
+
+```rust
+report.verdict();      // Compliant — nothing unlawful
+report.breaches();     // what a regulator can act on
+report.forgone();      // money left on the table, which is not a breach
+report.failing();      // the union, for a caller that wants both
+```
 
 ### Every duty is assessable against something
 
@@ -439,7 +456,25 @@ for o in starting_between(date!(2026-09-01), date!(2027-12-31)) {
 }
 ```
 
-## What is not here yet 📐
+### …and which of them this estate will actually fail
+
+That is what the *calendar* holds. `agentd`'s compliance sweep asks it of an
+**estate**: every point against every duty, grouped by duty rather than by point
+— four hundred posts missing a CSMS connection is one firmware programme, not
+four hundred findings — and every duty that has not started binding judged *at
+its own commencement date* against the estate as it stands.
+
+```jsonc
+{ "on": "2026-09-01", "points": [ /* the inventory */ ], "horizon_days": 540 }
+```
+
+A point renovated in March 2027 that speaks only EN ISO 15118-2 is compliant
+today and in breach on new year's day, and that forecast is the only compliance
+advice arriving before the breach rather than after it. The horizon is the
+caller's; the date is an argument rather than a clock, so a run in March replays
+to the same answer in September.
+
+## What is not here 📐
 
 The Cyber Resilience Act's *artefacts* — the SBOM, the declared support period,
 the update channel — are a build pipeline rather than a calendar entry; the

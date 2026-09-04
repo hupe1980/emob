@@ -287,11 +287,45 @@ pub enum Scope {
     Undertaking,
 }
 
+/// What failing a rule in the calendar actually costs.
+///
+/// Almost every entry is a **duty**: a regulator can fine an operator, order a
+/// retrofit or forbid the operation of a point over it. One is not.
+/// `[38k §6(3)]`'s four conditions stand between a public kilowatt-hour and the
+/// greenhouse-gas quota it is worth a second time, and an operator meeting none
+/// of them has broken no law — its own remedy says so: *"…or forgo the quota"*.
+/// In one bucket, an estate that meets every legal duty in Europe and declines a
+/// German subsidy reads as failing (D219).
+///
+/// The distinction earns its place by changing an answer: [`Assessment::verdict`]
+/// reads [`Self::Breach`] only, and [`Assessment::forgone`] reports the money
+/// left on the table, which is never a compliance finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum Consequence {
+    /// A regulator can act on it: a fine, a retrofit order, a closed point.
+    Breach,
+    /// Nothing is unlawful. A benefit the estate was entitled to is forgone.
+    ForgoneEntitlement,
+}
+
+impl Consequence {
+    /// Whether failing this is a breach of law.
+    #[must_use]
+    pub const fn is_breach(self) -> bool {
+        matches!(self, Self::Breach)
+    }
+}
+
 /// One regulatory duty: what it demands, of whom, from when, and who says so.
 #[derive(Debug, Clone, Copy)]
 pub struct Obligation {
     /// The stable identifier.
     pub id: ObligationId,
+    /// What failing it costs — which is what decides whether an estate that
+    /// does not meet it is *unlawful* or merely poorer.
+    pub consequence: Consequence,
     /// A one-line statement of the duty.
     pub title: &'static str,
     /// The citation, in the form `specs/README.md` indexes.
@@ -377,9 +411,31 @@ pub struct Assessment {
 }
 
 impl Assessment {
-    /// The findings that are failing.
+    /// Every finding that is not met — breaches and forgone entitlements alike.
+    ///
+    /// The two are different answers and [`Self::breaches`] and
+    /// [`Self::forgone`] are where they are told apart; this is the union, for a
+    /// caller that wants the whole list of what an estate does not do.
     pub fn failing(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|f| f.status == Status::Failing)
+    }
+
+    /// The findings a regulator can act on.
+    ///
+    /// What [`Self::verdict`] is computed from. See [`Consequence`].
+    pub fn breaches(&self) -> impl Iterator<Item = &Finding> {
+        self.failing()
+            .filter(|f| f.obligation.consequence.is_breach())
+    }
+
+    /// The benefits this estate is entitled to and does not take.
+    ///
+    /// Not a compliance finding. An operator that meets none of `[38k §6(3)]`
+    /// has broken no law and is simply poorer, and reporting that as a breach
+    /// is a false statement about a lawful estate (D219).
+    pub fn forgone(&self) -> impl Iterator<Item = &Finding> {
+        self.failing()
+            .filter(|f| !f.obligation.consequence.is_breach())
     }
 
     /// The findings that are satisfied.
@@ -398,10 +454,15 @@ impl Assessment {
             .map(|f| f.status)
     }
 
-    /// Compliant only when nothing that binds this subject is failing.
+    /// Compliant only when nothing that binds this subject is **breached**.
+    ///
+    /// Breaches, not [`Self::failing`]: an estate that meets every legal duty
+    /// and declines to claim the greenhouse-gas quota is lawful, and this used
+    /// to call it `Failing` (D219). A forgone entitlement is money, and money
+    /// is [`Self::forgone`]'s answer rather than this one's.
     #[must_use]
     pub fn verdict(&self) -> Verdict {
-        if self.failing().next().is_some() {
+        if self.breaches().next().is_some() {
             Verdict::Failing
         } else {
             Verdict::Compliant
@@ -470,6 +531,7 @@ pub const CALENDAR: &[Obligation] = &[
     // ── AFIR Art. 5(1): ad-hoc access and payment ───────────────────────────
     Obligation {
         id: ObligationId::AfirAdHocAccess,
+        consequence: Consequence::Breach,
         title: "Ad-hoc charging must be possible without a contract",
         citation: "[AFIR Art. 5(1)]",
         applies_from: AFIR_APPLIES,
@@ -486,6 +548,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirPaymentInstrument,
+        consequence: Consequence::Breach,
         title: "A point deployed from 13.04.2024 needs a payment instrument widely used in the Union",
         citation: "[AFIR Art. 5(1)]",
         applies_from: AFIR_APPLIES,
@@ -505,18 +568,29 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirPaymentInstrumentRetrofit,
+        consequence: Consequence::Breach,
         title: "Points of at least 50 kW on TEN-T or a safe and secure parking area must be retrofitted",
         citation: "[AFIR Art. 5(1)]",
         applies_from: date!(2027 - 01 - 01),
         applies_until: None,
         rule: Rule::ChargePoint {
-            // Explicitly reaches points deployed *before* 13.04.2024 — the
-            // whole point of the subparagraph — and covers safe and secure
-            // parking areas as well as the TEN-T road network.
+            // "…deployed **before** 13 April 2024…" — the subparagraph binds
+            // exactly the population the first one does not, and covers safe
+            // and secure parking areas as well as the TEN-T road network.
+            //
+            // The date limb is load-bearing rather than decorative. A point
+            // deployed *from* 13.04.2024 already owes (a) or (b) under the
+            // first subparagraph, and `AfirPaymentInstrument` is that duty; a
+            // retrofit rule that reached it too would report one missing card
+            // reader as two failing findings with one remedy, and would state a
+            // duty over a population the Regulation does not put it on. The two
+            // entries partition the estate at 13.04.2024 exactly, with no point
+            // in both and none in neither (D215).
             applicable: |p| {
                 p.is_public()
                     && p.requires_payment
                     && p.is_at_least_50_kw()
+                    && p.commissioned_on < AFIR_APPLIES
                     && (p.on_ten_t || p.on_safe_secure_parking)
             },
             // Points (a) or (b) only: at 50 kW and above a QR flow never
@@ -528,6 +602,7 @@ pub const CALENDAR: &[Obligation] = &[
     // ── AFIR Art. 5(2): automatic authentication ────────────────────────────
     Obligation {
         id: ObligationId::AfirAutomaticAuthenticationOptOut,
+        consequence: Consequence::Breach,
         title: "Where automatic authentication is offered, the right not to use it must be shown",
         citation: "[AFIR Art. 5(2)]",
         applies_from: AFIR_APPLIES,
@@ -548,6 +623,7 @@ pub const CALENDAR: &[Obligation] = &[
     // the other checks half of what the regulator was told to look at.
     Obligation {
         id: ObligationId::AfirNonDiscriminatoryPricing,
+        consequence: Consequence::Breach,
         title: "Prices must not discriminate between end users and providers, or between providers",
         citation: "[AFIR Art. 5(3)]",
         applies_from: AFIR_APPLIES,
@@ -578,6 +654,7 @@ pub const CALENDAR: &[Obligation] = &[
     // *satisfied* the whole module turns on.
     Obligation {
         id: ObligationId::AfirEnergyBasedAdHocPrice,
+        consequence: Consequence::Breach,
         title: "At 50 kW and above the ad-hoc price must be based on a price per kWh",
         citation: "[AFIR Art. 5(4)]",
         applies_from: AFIR_APPLIES,
@@ -600,6 +677,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirPriceShownAtStation,
+        consequence: Consequence::Breach,
         title: "At 50 kW and above the price per kWh and any occupancy fee must be shown at the station",
         citation: "[AFIR Art. 5(4)]",
         applies_from: AFIR_APPLIES,
@@ -617,6 +695,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirPriceComponentsInOrder,
+        consequence: Consequence::Breach,
         title: "Below 50 kW every price component must be available, in the prescribed order",
         citation: "[AFIR Art. 5(4)]",
         applies_from: AFIR_APPLIES,
@@ -634,6 +713,7 @@ pub const CALENDAR: &[Obligation] = &[
     // ── AFIR Art. 5(5): the provider's duties ───────────────────────────────
     Obligation {
         id: ObligationId::AfirMspPriceDisclosure,
+        consequence: Consequence::Breach,
         title: "A provider must disclose every price component before the session, e-roaming costs included",
         citation: "[AFIR Art. 5(5)]",
         applies_from: AFIR_APPLIES,
@@ -650,6 +730,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirMspNoCrossBorderSurcharge,
+        consequence: Consequence::Breach,
         title: "A provider may not apply any extra charge for cross-border e-roaming",
         citation: "[AFIR Art. 5(5)]",
         applies_from: AFIR_APPLIES,
@@ -669,6 +750,7 @@ pub const CALENDAR: &[Obligation] = &[
     // These three are the ones almost no compliance model carries.
     Obligation {
         id: ObligationId::AfirDigitallyConnected,
+        consequence: Consequence::Breach,
         title: "Every publicly accessible point must be a digitally-connected recharging point",
         citation: "[AFIR Art. 5(7)]",
         applies_from: AFIR_DIGITAL_CONNECTION,
@@ -681,6 +763,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirSmartRecharging,
+        consequence: Consequence::Breach,
         title: "Points built after 13.04.2024 or renovated after 14.10.2024 must be capable of smart recharging",
         citation: "[AFIR Art. 5(8)]",
         applies_from: AFIR_APPLIES,
@@ -702,6 +785,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirFixedCableOnDc,
+        consequence: Consequence::Breach,
         title: "Every publicly accessible DC point must have a fixed recharging cable installed",
         citation: "[AFIR Art. 5(10)]",
         applies_from: AFIR_DATA_AND_CABLES,
@@ -714,6 +798,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirOwnerEnablesCompliance,
+        consequence: Consequence::Breach,
         title: "A third-party owner must supply a point whose characteristics let the operator comply with 5(2), (7), (8) and (10)",
         citation: "[AFIR Art. 5(11)]",
         applies_from: AFIR_APPLIES,
@@ -732,6 +817,7 @@ pub const CALENDAR: &[Obligation] = &[
     // ── AFIR Art. 20: the data duties, kept apart ──────────────────────────
     Obligation {
         id: ObligationId::AfirStaticData,
+        consequence: Consequence::Breach,
         title: "Static data must be available free of charge",
         citation: "[AFIR Art. 20(2)]",
         applies_from: AFIR_DATA_AND_CABLES,
@@ -744,6 +830,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirDynamicData,
+        consequence: Consequence::Breach,
         title: "Dynamic data — status, availability, ad-hoc price, renewable share — must be available free of charge",
         citation: "[AFIR Art. 20(2)]",
         applies_from: AFIR_DATA_AND_CABLES,
@@ -760,6 +847,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirDataApi,
+        consequence: Consequence::Breach,
         title: "An API giving free and unrestricted access to the data must be registered with the national access point",
         citation: "[AFIR Art. 20(3)]",
         applies_from: AFIR_DATA_AND_CABLES,
@@ -772,6 +860,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::AfirDatex2,
+        consequence: Consequence::Breach,
         title: "The national-access-point feed must use the DATEX II Recharging profile",
         citation: "[DATEX-II-Profil]",
         applies_from: DATEX2_MANDATORY,
@@ -785,6 +874,7 @@ pub const CALENDAR: &[Obligation] = &[
     // ── DA-656: vehicle-to-grid communication ───────────────────────────────
     Obligation {
         id: ObligationId::Da656Iso15118Dash2,
+        consequence: Consequence::Breach,
         title: "Public points installed or renovated from 08.01.2026 must implement EN ISO 15118-1…-5",
         citation: "[DA-656 Anh. 2.1.1]",
         applies_from: DA656_APPLIES,
@@ -802,6 +892,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Da656Iso15118Dash20Public,
+        consequence: Consequence::Breach,
         title: "Public points installed or renovated from 01.01.2027 must implement EN ISO 15118-20",
         citation: "[DA-656 Anh. 2.1.2]",
         applies_from: DA656_ISO20,
@@ -814,6 +905,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Da656Iso15118Dash20Private,
+        consequence: Consequence::Breach,
         title: "Private Mode 3/4 points installed or renovated from 01.01.2027 must implement EN ISO 15118-20",
         citation: "[DA-656 Anh. 2.1.3]",
         applies_from: DA656_ISO20,
@@ -833,6 +925,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Da656AutomaticAuthenticationBothGenerations,
+        consequence: Consequence::Breach,
         title: "A point offering automatic authentication must support both EN ISO 15118-2 and -20",
         citation: "[DA-656 Anh. 2.1.2]",
         applies_from: DA656_ISO20,
@@ -861,6 +954,7 @@ pub const CALENDAR: &[Obligation] = &[
     // over names the consequence and omits the cause.
     Obligation {
         id: ObligationId::Lsv2026TechnicalRequirements,
+        consequence: Consequence::Breach,
         title: "Every publicly accessible point must meet the applicable technical requirements",
         citation: "[LSV26 §3]",
         applies_from: LSV26_IN_FORCE,
@@ -875,6 +969,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Lsv2026TechnicalEvidence,
+        consequence: Consequence::Breach,
         title: "The operator must be able to prove compliance with § 3 on the regulator's request",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
@@ -890,6 +985,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Lsv2026CommissioningNotice,
+        consequence: Consequence::Breach,
         title: "Commissioning must be notified to the regulator at the latest two weeks afterwards",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
@@ -912,6 +1008,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Lsv2026DecommissioningNotice,
+        consequence: Consequence::Breach,
         title: "Decommissioning must be notified to the regulator without undue delay",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
@@ -931,6 +1028,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Lsv2026OperatorChangeNotice,
+        consequence: Consequence::Breach,
         title: "A change of operator must be notified by both the outgoing and the incoming operator",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
@@ -952,6 +1050,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::EichrechtConformityAssessedMeter,
+        consequence: Consequence::Breach,
         title: "Billing by energy requires a conformity-assessed meter",
         citation: "[MessEG §33]",
         applies_from: date!(2019 - 04 - 01),
@@ -964,6 +1063,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::EichrechtVerifiableValues,
+        consequence: Consequence::Breach,
         title: "The customer must be able to verify the billed measured value",
         citation: "[PTB-A 50.7]",
         applies_from: date!(2019 - 04 - 01),
@@ -984,6 +1084,7 @@ pub const CALENDAR: &[Obligation] = &[
     // owes them the third.
     Obligation {
         id: ObligationId::ReaAcMeteringOnLegacyDcOnly,
+        consequence: Consequence::Breach,
         title: "AC metering before the rectifier is only permitted in DC stations placed on the market before 2018 and rated at most 50 kW",
         citation: "[REA 6-A]",
         applies_from: REA_6A_PUBLISHED,
@@ -1003,6 +1104,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::ReaRectificationAttributable,
+        consequence: Consequence::Breach,
         title: "AC metering requires the rectification to belong to exactly one charging session",
         citation: "[REA 6-A]",
         applies_from: REA_6A_PUBLISHED,
@@ -1021,6 +1123,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::ReaRectificationLossDisclosed,
+        consequence: Consequence::Breach,
         title: "The customer must be told that rectification losses are part of the measured value",
         citation: "[REA 6-A]",
         applies_from: REA_6A_PUBLISHED,
@@ -1036,6 +1139,11 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::ThgEligibility,
+        // Not a duty. `[38k §6(3)]` is what stands between a public kilowatt-hour
+        // and the quota it is worth a second time, and an operator that meets
+        // none of it has broken no law — the remedy below says so in its own
+        // last clause.
+        consequence: Consequence::ForgoneEntitlement,
         title: "THG-Quote requires a publishable register entry, lawful metering and an issued operator code",
         citation: "[38k §6(3)]",
         applies_from: date!(2022 - 01 - 01),
@@ -1065,6 +1173,7 @@ pub const CALENDAR: &[Obligation] = &[
     // `[NIS2 Art. 33]`), not in what they owe.
     Obligation {
         id: ObligationId::Nis2Registration,
+        consequence: Consequence::Breach,
         title: "An undertaking in scope must give the competent authority its details",
         citation: "[NIS2 Art. 3(4)]",
         applies_from: NIS2_DE_IN_FORCE,
@@ -1077,6 +1186,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Nis2RiskManagement,
+        consequence: Consequence::Breach,
         title: "…and take all ten cybersecurity risk-management measures",
         citation: "[NIS2 Art. 21(2)]",
         applies_from: NIS2_DE_IN_FORCE,
@@ -1091,6 +1201,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Nis2IncidentEarlyWarning,
+        consequence: Consequence::Breach,
         title: "…and be able to warn the CSIRT within twenty-four hours of a significant incident",
         citation: "[NIS2 Art. 23(4)]",
         applies_from: NIS2_DE_IN_FORCE,
@@ -1103,6 +1214,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Nis2ManagementApproval,
+        consequence: Consequence::Breach,
         title: "The management body must approve the measures and oversee their implementation",
         citation: "[NIS2 Art. 20(1)]",
         applies_from: NIS2_DE_IN_FORCE,
@@ -1115,6 +1227,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::Nis2ManagementTraining,
+        consequence: Consequence::Breach,
         title: "…and its members must attend cybersecurity training",
         citation: "[NIS2 Art. 20(2)]",
         applies_from: NIS2_DE_IN_FORCE,
@@ -1136,6 +1249,7 @@ pub const CALENDAR: &[Obligation] = &[
     // firmware or a driver app under its own name is.
     Obligation {
         id: ObligationId::CraVulnerabilityReporting,
+        consequence: Consequence::Breach,
         title: "A manufacturer must report an actively exploited vulnerability within twenty-four hours",
         citation: "[CRA Art. 14]",
         applies_from: CRA_REPORTING_APPLIES,
@@ -1148,6 +1262,7 @@ pub const CALENDAR: &[Obligation] = &[
     },
     Obligation {
         id: ObligationId::CraEssentialRequirements,
+        consequence: Consequence::Breach,
         title: "…and place only conformity-assessed products with digital elements on the market",
         citation: "[CRA Art. 13]",
         applies_from: CRA_APPLIES,
@@ -1410,6 +1525,73 @@ mod tests {
     }
 
     #[test]
+    fn an_estate_that_declines_a_subsidy_is_lawful() {
+        // `compliant_point` claims the greenhouse-gas quota, and it was the
+        // only compliant fixture in the suite — so the one arrangement that
+        // tells the two kinds of rule apart was unreachable from anything the
+        // tests could build (D219).
+        //
+        // An operator that meets every legal duty in Europe and simply does not
+        // claim a German subsidy has broken no law. `verdict` used to call it
+        // `Failing`, which is a false statement about a lawful estate and the
+        // headline answer of the whole module.
+        let mut point = compliant_point(date!(2027 - 03 - 01));
+        point.quota = QuotaPosture::default();
+
+        let report = assess(&point, date!(2027 - 06 - 01));
+        assert_eq!(
+            report.verdict(),
+            Verdict::Compliant,
+            "breaches: {:?}",
+            report
+                .breaches()
+                .map(|f| f.obligation.id)
+                .collect::<Vec<_>>()
+        );
+
+        // The quota is still reported — as money left on the table, which is
+        // what it is.
+        let forgone: Vec<_> = report.forgone().map(|f| f.obligation.id).collect();
+        assert_eq!(forgone, vec![ObligationId::ThgEligibility]);
+        // …and `failing` is still the union, for a caller that wants both.
+        assert_eq!(report.failing().count(), 1);
+
+        // The mirror: a real breach on the same estate does move the verdict.
+        point.digitally_connected = false;
+        let breached = assess(&point, date!(2027 - 06 - 01));
+        assert_eq!(breached.verdict(), Verdict::Failing);
+        assert!(
+            breached
+                .breaches()
+                .any(|f| f.obligation.id == ObligationId::AfirDigitallyConnected)
+        );
+    }
+
+    #[test]
+    fn exactly_one_rule_in_the_calendar_is_not_a_duty() {
+        // A distinction is worth having only when something acts on it, and
+        // `verdict` acts on this one. Stated as a test so that adding a second
+        // entitlement — a future subsidy, a grant precondition — is a decision
+        // somebody makes on purpose rather than a default that spreads.
+        let entitlements: Vec<_> = CALENDAR
+            .iter()
+            .filter(|o| !o.consequence.is_breach())
+            .map(|o| o.id)
+            .collect();
+        assert_eq!(entitlements, vec![ObligationId::ThgEligibility]);
+
+        // …and every remedy for an entitlement says what forgoing it costs,
+        // because "or forgo the quota" is the half that makes it optional.
+        for obligation in CALENDAR.iter().filter(|o| !o.consequence.is_breach()) {
+            assert!(
+                obligation.remedy.contains("forgo"),
+                "{}: an entitlement's remedy has to say it is one",
+                obligation.id
+            );
+        }
+    }
+
+    #[test]
     fn a_duty_cannot_bind_before_it_exists() {
         let point = ChargePointProfile::bare(evse(), date!(2020 - 01 - 01));
         // DATEX II starts 14.04.2026. On 13.04.2026 it is not yet in force.
@@ -1435,6 +1617,7 @@ mod tests {
         // yet, and the first one that is must not be the test.
         let point = ChargePointProfile::bare(evse(), date!(2020 - 01 - 01));
         let superseded = Obligation {
+            consequence: Consequence::Breach,
             id: ObligationId::AfirDatex2,
             title: "a duty with both ends",
             citation: "[AFIR Art. 20(2)(c)]",
@@ -1611,8 +1794,80 @@ mod tests {
         );
 
         // …and it reaches points deployed long before 13.04.2024, which is the
-        // whole purpose of the subparagraph.
-        assert_eq!(point.commissioned_on, date!(2018 - 01 - 01));
+        // whole purpose of the subparagraph. Asserting the fixture's own date
+        // back at itself proves nothing about the rule; what proves it is that
+        // the *other* payment duty does not reach the same point.
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2027 - 06 - 01)),
+                ObligationId::AfirPaymentInstrument
+            ),
+            Status::NotApplicable,
+            "the first subparagraph binds points deployed from 13.04.2024"
+        );
+    }
+
+    #[test]
+    fn the_two_payment_duties_partition_the_estate_at_the_regulations_own_date() {
+        // Art. 5(1) states the duty twice: once for points deployed **from**
+        // 13.04.2024, and once — from 01.01.2027 — for the ≥ 50 kW TEN-T and
+        // safe-parking points deployed **before** it. Every fixture for the
+        // retrofit was a 2018 point, so the arrangement where the two overlap
+        // was unreachable and the date limb could go missing without any test
+        // noticing: one missing card reader then reported as two failing
+        // findings with one remedy, over a population the Regulation does not
+        // put the retrofit on (D215).
+        let judged_on = date!(2027 - 06 - 01);
+        for (commissioned, expect_first, expect_retrofit) in [
+            (
+                date!(2018 - 01 - 01),
+                Status::NotApplicable,
+                Status::Failing,
+            ),
+            (
+                date!(2024 - 04 - 12),
+                Status::NotApplicable,
+                Status::Failing,
+            ),
+            (
+                date!(2024 - 04 - 13),
+                Status::Failing,
+                Status::NotApplicable,
+            ),
+            (
+                date!(2026 - 06 - 01),
+                Status::Failing,
+                Status::NotApplicable,
+            ),
+        ] {
+            let mut point = ChargePointProfile::bare(evse(), commissioned);
+            point.rated_power_kw = Decimal::from(350);
+            point.ad_hoc_payment = AdHocPayment::QrCode; // never enough at 350 kW
+            point.on_ten_t = true;
+
+            let report = assess(&point, judged_on);
+            assert_eq!(
+                status_of(&report, ObligationId::AfirPaymentInstrument),
+                expect_first,
+                "first subparagraph, deployed {commissioned}"
+            );
+            assert_eq!(
+                status_of(&report, ObligationId::AfirPaymentInstrumentRetrofit),
+                expect_retrofit,
+                "2027 retrofit, deployed {commissioned}"
+            );
+
+            // Exactly one of the two binds it: no point owes the card reader
+            // twice, and none escapes owing it at all.
+            let binding = [
+                status_of(&report, ObligationId::AfirPaymentInstrument),
+                status_of(&report, ObligationId::AfirPaymentInstrumentRetrofit),
+            ]
+            .into_iter()
+            .filter(|status| *status != Status::NotApplicable)
+            .count();
+            assert_eq!(binding, 1, "deployed {commissioned}");
+        }
     }
 
     #[test]

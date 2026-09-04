@@ -23,6 +23,11 @@ anyhow       = { workspace = true }
 rust_decimal = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
+
+# A compliance sweep asks the calendar about a **date**, and the date is an
+# argument rather than a clock so a run in March replays to the same answer in
+# September.
+time         = { workspace = true }
 tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing      = { workspace = true }
 

@@ -39,7 +39,7 @@
 //! **unpriced**, and [`Inbound::stated_total`] carries what the partner says it
 //! costs, for exactly that comparison.
 
-use emob_cdr::{Cdr, CdrKey, ChargingPeriod, EvidenceRef};
+use emob_cdr::{Cdr, ChargingPeriod, EvidenceRef};
 use emob_core::{Currency, Direction, Energy, Money, QuarterHour};
 use emob_session::{AuthPath, Provenance};
 use ocpi_kit::v2_3_0::cdrs::{AuthMethod, CdrDimensionType};
@@ -89,6 +89,17 @@ pub fn from_ocpi(
 ) -> Result<Crossing<Inbound>, RoamError> {
     if cdr.charging_periods.is_empty() {
         return Err(RoamError::NoPeriods);
+    }
+    // A Credit CDR is the original's energy repeated with `total_cost`
+    // negated: an instruction about a record already held, not a session.
+    // Reading it in would put the same kilowatt-hours in the ledger twice.
+    if cdr.is_credit() {
+        return Err(RoamError::CreditCdr {
+            credit_reference_id: cdr
+                .credit_reference_id
+                .as_ref()
+                .map_or_else(|| "(unnamed)".to_owned(), |id| id.as_str().to_owned()),
+        });
     }
 
     let mut crossing = Crossing::lossless(());
@@ -145,6 +156,12 @@ pub fn from_ocpi(
             started_at: cdr.start_date_time.into(),
             ended_at: cdr.end_date_time.into(),
             auth_path,
+            // The provider's own reference for the authorisation it granted,
+            // straight back out of the field OCPI carries it in.
+            authorization_reference: cdr
+                .authorization_reference
+                .as_ref()
+                .map(|reference| reference.as_str().to_owned()),
             periods,
             total_energy,
             // OCPI's `ENERGY_EXPORT` is Session-only and `total_energy` carries
@@ -154,20 +171,14 @@ pub fn from_ocpi(
             direction: Direction::Import,
             evidence,
             cost: None,
-            // The same CPO by construction: OCPI keys a CDR per
-            // `country_code`/`party_id`, and a credit reference names a record
-            // of the sender's own. The party is the one already parsed for
-            // this record's own key rather than a second reading of the same
-            // two fields — a second reading needs a fallback, and a fallback
-            // here would key a correction onto a party nobody has.
-            supersedes: cdr
-                .credit_reference_id
-                .as_ref()
-                .and_then(|previous| previous.as_str().parse().ok())
-                .map(|id| CdrKey {
-                    party: key.party.clone(),
-                    id,
-                }),
+            // OCPI's replacement record carries no link to what it replaces:
+            // the correction is a Credit CDR *followed by* "a new CDR with a
+            // new unique ID and the fields `credit` and `credit_reference_id`
+            // omitted" `[OCPI 2.3.0 §mod_cdrs_cdr_object]`. So a record that
+            // arrives is a record, and which one it supersedes is a fact the
+            // receiving ledger establishes from the Credit CDR it saw first —
+            // a service's pairing rather than a field this side can read.
+            supersedes: None,
         },
         stated_total: Money::new(cdr.total_cost.after_taxes().get(), currency),
     };

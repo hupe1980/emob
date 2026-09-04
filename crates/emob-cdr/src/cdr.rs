@@ -149,6 +149,27 @@ pub struct EvidenceRef {
     /// `None` for a register whose OBIS code the verifier could not classify —
     /// which is not the same as import.
     pub direction: Option<Direction>,
+    /// How much of the billed register is cable rather than vehicle, when the
+    /// meter reported it `[OCMF Tab. 7, CL]`.
+    ///
+    /// Never subtracted from anything — the compensation is already inside the
+    /// register value — and carried because a partner disputing the energy will
+    /// ask how much of it was cable, and because `[REA 6-A §3.2]` makes telling
+    /// the customer what is inside a measured value a duty rather than a
+    /// courtesy. The chain has computed this since the register was read; until
+    /// it reached the record it stopped at the crate that computed it, which is
+    /// a fact modelled and never consulted.
+    pub compensated_loss: Option<Energy>,
+    /// The instants the signed records mark a **tariff change** at
+    /// `[OCMF Tab. 7, TX=T]`, in the order the meter signed them.
+    ///
+    /// The station's own account of where its price changed. A record is priced
+    /// by the version in force when the session started `[AFIR Art. 5(4)]`, so
+    /// a change the meter signed *inside* the session is the station saying two
+    /// prices applied to something this record prices with one —
+    /// [`CdrBuilder::build`] refuses that rather than billing one of the two.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::rfc3339_list"))]
+    pub tariff_changes: Vec<time::OffsetDateTime>,
 }
 
 impl EvidenceRef {
@@ -171,6 +192,8 @@ impl EvidenceRef {
             energy_billable: evidence.is_billable(),
             duration_billable: evidence.is_billable_for_time(),
             direction: evidence.direction(),
+            compensated_loss: evidence.compensated_loss(),
+            tariff_changes: evidence.tariff_change_instants(),
         }
     }
 }
@@ -220,6 +243,18 @@ pub struct Cdr {
     pub ended_at: time::OffsetDateTime,
     /// How it was authorised.
     pub auth_path: AuthPath,
+    /// The reference the **provider** gave when it authorised the session, when
+    /// there was one.
+    ///
+    /// OCPI carries it on the Session and on the CDR
+    /// `[OCPI 2.3.0 §mod_cdrs_cdr_object]` — *"Reference to the authorization
+    /// given by the eMSP"* — and it is the eMSP's own handle on the decision it
+    /// made. Without it on the record, a provider settling a CDR cannot tie it
+    /// to the `Authorize` it answered: it has the session id the **CPO**
+    /// invented and nothing of its own. The session has carried this since the
+    /// authorisation paths were modelled and no seam read it, which is a field
+    /// stored and never consulted.
+    pub authorization_reference: Option<String>,
     /// The periods, in time order, summing to [`Self::total_energy`].
     pub periods: Vec<ChargingPeriod>,
     /// The total. Equal to the sum of the periods, checked at construction.
@@ -251,12 +286,12 @@ impl Cdr {
         self.ended_at - self.started_at
     }
 
-    /// Whether every period's energy was measured rather than interpolated.
+    /// Whether every period's energy is exact — measured, or held at a
+    /// measurement across an interval the session says nothing flowed in —
+    /// rather than interpolated.
     #[must_use]
     pub fn fully_measured(&self) -> bool {
-        self.periods
-            .iter()
-            .all(|p| p.provenance == Provenance::Measured)
+        self.periods.iter().all(|p| p.provenance.is_exact())
     }
 
     /// Whether this CDR is backed by signed evidence.
@@ -288,11 +323,56 @@ impl Cdr {
             .is_some_and(|c| c.tariff_fingerprint == tariff.fingerprint())
     }
 
+    /// Price this record again, with another party's tariff.
+    ///
+    /// # The other half of roaming
+    ///
+    /// A CPO issues a CDR priced with its own tariff. The eMSP that receives it
+    /// owes its **driver** a different number — its own retail price — and owes
+    /// the CPO a comparison. `emob_roam::ocpi::from_ocpi` therefore lands a
+    /// partner's record **unpriced**, and this is what prices it.
+    ///
+    /// It exists rather than being left to the caller because the composition
+    /// is where the gates get skipped. Reaching for [`Self::chargeable`] and
+    /// [`emob_tariff::rate`] directly — the obvious way to do it — silently
+    /// drops all four: a retail tariff that was not in force when the session
+    /// ran, a version the meter says was superseded mid-session, a duration the
+    /// signed records do not vouch for, and the clock resolution
+    /// `[REA 6-A §3.1]` puts under a per-minute fee. An eMSP re-rating a
+    /// hundred thousand partner records a month with none of them is the same
+    /// class of failure as a CPO issuing them without: every unit test passes
+    /// and the composition does not (rule 5).
+    ///
+    /// `clock` is what the **station's** type approval states, which a partner's
+    /// document does not carry: [`ClockResolution::conforming`] is the honest
+    /// answer for a record whose approval this side has not read, and it is the
+    /// worst case the regulation permits rather than a guess.
+    ///
+    /// The periods, the energy, the evidence and the key are the record's own —
+    /// only the price changes, so the two numbers are about the same session by
+    /// construction and the comparison is a comparison.
+    ///
+    /// # Errors
+    ///
+    /// Every gate [`CdrBuilder::build`] applies to a price:
+    /// [`CdrError::TariffNotInForce`] for a version that did not govern the
+    /// session, [`CdrError::SignedTariffChangeInsideSession`] where the meter
+    /// says another applied inside it, [`CdrError::DurationNotBillable`] where
+    /// the price charges for time the signed records do not vouch for, and
+    /// [`CdrError::NotChargeable`] where the periods do not form a session.
+    pub fn rerated_with(&self, tariff: &Tariff, clock: ClockResolution) -> Result<Self, CdrError> {
+        Ok(Self {
+            cost: Some(priced(self, tariff, clock)?),
+            ..self.clone()
+        })
+    }
+
     /// The session, in the terms a tariff prices it.
     ///
     /// The bridge between the settlement grid and the price: a CDR's periods
     /// *are* the rating periods, so a re-rating by the receiving party reads
-    /// exactly the same slices the issuer did.
+    /// exactly the same slices the issuer did — through
+    /// [`Self::rerated_with`], which is the same door the issuer used.
     ///
     /// # Errors
     ///
@@ -342,6 +422,7 @@ pub struct CdrBuilder<'a> {
     started_at: time::OffsetDateTime,
     ended_at: time::OffsetDateTime,
     auth_path: AuthPath,
+    authorization_reference: Option<String>,
     split: SessionSplit,
     /// Whether the session was charging in each slot, in the split's order —
     /// read off the session's state machine rather than guessed from the
@@ -367,8 +448,8 @@ impl<'a> CdrBuilder<'a> {
     /// changing.
     /// [`CdrError::Session`] when the session cannot be split,
     /// [`CdrError::ReadingsOutsideSession`] when the meter series covers time
-    /// the session does not, or [`CdrError::EnergyWhileSuspended`] when a slot
-    /// moved energy the session says it was not charging in.
+    /// the session does not, or [`CdrError::EnergyWhileNotCharging`] when a
+    /// slot moved energy the session says it was not charging in.
     pub fn from_session(session: &Session, direction: Direction) -> Result<Self, CdrError> {
         let ended_at = session.ended_at.ok_or(CdrError::SessionNotEnded)?;
         let split = session.split(direction)?;
@@ -395,25 +476,34 @@ impl<'a> CdrBuilder<'a> {
         }
 
         // The session's own history says when it was charging; the meter says
-        // how much moved. When they disagree — energy across a slot the session
-        // was suspended for from end to end — one of the two is wrong, and
-        // guessing which is how a driver is billed for a charge the operator's
-        // own records say never happened.
+        // how much moved. The split is cut at every transition, so each slot
+        // lies inside one state, and `charging_throughout` is the one question
+        // asked of every period this record carries — metered here, unmetered
+        // below — because a period is charging when the operator's own record
+        // says it was, and occupancy otherwise. `Pending` is a car connected
+        // and authorised with nothing flowing, which is exactly what
+        // `[AFIR Art. 5(4)]`'s fee prices; reading it as charging because the
+        // session had not yet said "suspended" billed that minute as charging
+        // time.
         //
-        // The same question, asked of the slot's *measured* window rather than
-        // of the whole quarter hour, also decides whether the period is priced
-        // as charging or as occupancy — so it is answered once, here, and
-        // carried on the record.
+        // When the two disagree — energy across a slot the session says moved
+        // none — one of them is wrong, and guessing which is how a driver is
+        // billed for a charge the operator's own records say never happened.
+        // The split already holds the register flat across the session's idle
+        // intervals, so this can only fire where the meter itself moved with
+        // no charging time to attribute it to: a real contradiction rather
+        // than one a straight line invented.
         let mut charging = Vec::with_capacity(split.slots.len());
         for slot in &split.slots {
-            let suspended = session.suspended_throughout(slot.from, slot.to);
-            if suspended && !slot.energy.is_zero() {
-                return Err(CdrError::EnergyWhileSuspended {
-                    at: slot.quarter_hour.start(),
+            let was_charging = session.charging_throughout(slot.from, slot.to);
+            if !was_charging && !slot.energy.is_zero() {
+                return Err(CdrError::EnergyWhileNotCharging {
+                    at: slot.from,
+                    state: session.state_at(slot.from),
                     energy: slot.energy,
                 });
             }
-            charging.push(!suspended);
+            charging.push(was_charging);
         }
 
         // The meter series spans the readings; the session spans the parking
@@ -443,6 +533,7 @@ impl<'a> CdrBuilder<'a> {
             started_at: session.started_at,
             ended_at,
             auth_path: session.authorization.path,
+            authorization_reference: session.authorization.authorization_reference.clone(),
             split,
             charging,
             unmetered,
@@ -466,7 +557,9 @@ impl<'a> CdrBuilder<'a> {
     /// werden nicht für Abrechnungszwecke verwendet." The figure comes from the
     /// device's type approval, and until it does the builder assumes the worst
     /// case the regulation permits — sixty seconds — because it has not been
-    /// told the device is better than that.
+    /// told the device is better than that. A duration below it is not billed:
+    /// the rating drops the time line and notes why, and the energy is
+    /// untouched — see [`emob_tariff::RatingNote::DurationBelowResolution`].
     #[must_use]
     pub const fn clock(mut self, clock: ClockResolution) -> Self {
         self.clock = clock;
@@ -623,6 +716,7 @@ impl<'a> CdrBuilder<'a> {
             started_at,
             ended_at,
             auth_path: self.auth_path,
+            authorization_reference: self.authorization_reference,
             periods,
             total_energy: self.split.total,
             direction: self.split.direction,
@@ -642,96 +736,117 @@ impl<'a> CdrBuilder<'a> {
         }
 
         if let Some(tariff) = self.tariff {
-            // A tariff that was not in force when the session started did not
-            // price it, whatever its numbers say. `[AFIR Art. 5(4)]`: the
-            // price has to be known to the driver before they start, so the
-            // version in force at that instant is the one that governs.
-            if !tariff.covers(cdr.started_at) {
-                return Err(CdrError::TariffNotInForce {
-                    tariff_id: tariff.id.to_string(),
-                    at: cdr.started_at,
-                    valid_from: tariff.valid_from,
-                    valid_until: tariff.valid_until,
-                });
-            }
-
-            let chargeable = cdr.chargeable()?;
-            let rated = emob_tariff::rate(tariff, &chargeable);
-
-            // The two duration gates below ask about the duration this record
-            // **charges for**, not about the dimensions the tariff mentions.
-            //
-            // The difference is a false refusal that costs real revenue: a
-            // tariff whose occupancy fee begins after four hours prices
-            // `ParkingTime` somewhere, and a thirty-minute session under it
-            // charges no duration at all. Refusing to build that record —
-            // because the *tariff* names a time dimension — throws away the
-            // kilowatt-hours as well, over a fee nobody was charged.
-            //
-            // It is also the rule [`crate::validate`] already applies to a
-            // record somebody else built, and a builder stricter than its own
-            // validator is a builder that refuses records it would accept.
-            for (dimension, seconds) in charged_durations(&rated) {
-                // `[OCMF Tab. 19]` states how far the station's clock can be
-                // trusted, and `[OCMF Tab. 7, EF]` flags a time value as
-                // unusable separately from an energy one. Billing a duration
-                // off a clock the signed record does not vouch for is billing a
-                // number nobody can defend. The energy is unaffected, so the
-                // fix is a per-kWh tariff rather than a blocked session.
-                if let Some(evidence) = &cdr.evidence
-                    && !evidence.duration_billable
-                {
-                    return Err(CdrError::DurationNotBillable { dimension });
-                }
-
-                // The same gate from the other end. A clock that cannot be
-                // *placed* `[OCMF Tab. 19]` and a span that cannot be
-                // *resolved* `[REA 6-A §3.1]` both leave a duration nobody can
-                // defend — and a thirty-second session billed per minute is the
-                // second one. The span judged is the one that was billed, which
-                // for an occupancy fee is not the session's whole length.
-                if !self.clock.permits(seconds) {
-                    return Err(CdrError::DurationBelowClockResolution {
-                        dimension,
-                        measured: seconds,
-                        shortest: self.clock.shortest_billable_span(),
-                    });
-                }
-            }
-
-            cdr.cost = Some(Cost {
-                tariff_id: tariff.id.clone(),
-                tariff_fingerprint: tariff.fingerprint(),
-                rated,
-            });
+            cdr.cost = Some(priced(&cdr, tariff, self.clock)?);
         }
 
         Ok(cdr)
     }
 }
 
-/// The durations a rating actually charged for, in the order
+/// Price a record with a tariff, applying every gate that stands between a
+/// session and a number somebody pays.
+///
+/// The **one** place a `Cost` is made, so that a CDR this workspace builds and
+/// one an eMSP re-rates from a partner pass through the same rules. Pricing a
+/// record by reaching for [`Cdr::chargeable`] and [`emob_tariff::rate`] directly
+/// skips all four of them, which is why [`Cdr::rerated_with`] exists rather than
+/// leaving the composition to a caller.
+///
+/// # Errors
+///
+/// [`CdrError::TariffNotInForce`] for a version that did not govern the session,
+/// [`CdrError::SignedTariffChangeInsideSession`] where the meter says another
+/// version applied inside it, [`CdrError::DurationNotBillable`] where the price
+/// charges for time the signed records do not vouch for, and
+/// [`CdrError::NotChargeable`] where the periods do not form a session.
+fn priced(cdr: &Cdr, tariff: &Tariff, clock: ClockResolution) -> Result<Cost, CdrError> {
+    // A tariff that was not in force when the session started did not price it,
+    // whatever its numbers say. `[AFIR Art. 5(4)]`: the price has to be known
+    // to the driver before they start, so the version in force at that instant
+    // is the one that governs.
+    if !tariff.covers(cdr.started_at) {
+        return Err(CdrError::TariffNotInForce {
+            tariff_id: tariff.id.to_string(),
+            at: cdr.started_at,
+            valid_from: tariff.valid_from,
+            valid_until: tariff.valid_until,
+        });
+    }
+
+    // …and the station's own account of where its price changed. A record is
+    // priced by one version — the one in force when the session started — so a
+    // `TX=T` the meter signed *inside* the session is the signature component
+    // saying two prices applied to something this record prices with one.
+    // Billing either of them is picking a number over a signed statement that
+    // contradicts it.
+    //
+    // The marker is optional and most stations never emit one, so its absence
+    // says nothing; its presence is the one case where the price this workspace
+    // computed is contradicted by evidence.
+    if let Some(evidence) = &cdr.evidence
+        && let Some(&at) = evidence
+            .tariff_changes
+            .iter()
+            .find(|&&at| at > cdr.started_at && at < cdr.ended_at)
+    {
+        return Err(CdrError::SignedTariffChangeInsideSession {
+            at,
+            on_settlement_boundary: QuarterHour::is_boundary(at),
+        });
+    }
+
+    // The clock's resolution travels with the session: a span the clock cannot
+    // resolve is a measured value an invoice may not use `[REA 6-A §3.1]`, and
+    // the rating drops that line — and only that line — with a note saying so.
+    // A thirty-second wait before a charge begins is the ordinary shape of a
+    // transaction that opens `EVConnected`, and it must not make the
+    // kilowatt-hours unbillable over five cents of occupancy.
+    let chargeable = cdr.chargeable()?.with_clock(clock);
+    let rated = emob_tariff::rate(tariff, &chargeable);
+
+    // The duration gate below asks about the duration this record **charges
+    // for**, not about the dimensions the tariff mentions.
+    //
+    // The difference is a false refusal that costs real revenue: a tariff whose
+    // occupancy fee begins after four hours prices `ParkingTime` somewhere, and
+    // a thirty-minute session under it charges no duration at all. Refusing to
+    // build that record — because the *tariff* names a time dimension — throws
+    // away the kilowatt-hours as well, over a fee nobody was charged.
+    //
+    // It is also the rule [`crate::validate`] already applies to a record
+    // somebody else built, and a builder stricter than its own validator is a
+    // builder that refuses records it would accept.
+    for dimension in charged_durations(&rated) {
+        // `[OCMF Tab. 19]` states how far the station's clock can be trusted,
+        // and `[OCMF Tab. 7, EF]` flags a time value as unusable separately
+        // from an energy one. Billing a duration off a clock the signed record
+        // does not vouch for is billing a number nobody can defend. The energy
+        // is unaffected, so the fix is a per-kWh tariff rather than a blocked
+        // session.
+        if let Some(evidence) = &cdr.evidence
+            && !evidence.duration_billable
+        {
+            return Err(CdrError::DurationNotBillable { dimension });
+        }
+    }
+
+    Ok(Cost {
+        tariff_id: tariff.id.clone(),
+        tariff_fingerprint: tariff.fingerprint(),
+        rated,
+    })
+}
+
+/// The time dimensions a rating actually charged for, in the order
 /// `[AFIR Art. 5(4)]` prescribes.
 ///
 /// Read off the rated lines rather than off the tariff, because the question
-/// the Eichrecht gates ask is "does this record bill a duration", and a tariff
+/// the Eichrecht gate asks is "does this record bill a duration", and a tariff
 /// that prices one under conditions this session never met does not.
-///
-/// The span comes from [`Rated::base_quantity_for`], which is in **whole
-/// seconds** and therefore exact — the same figure the line's amount was
-/// computed from. Summing the hours would divide by 3600 once per line and hand
-/// the comparison a number that is not the one that was billed.
-fn charged_durations(rated: &Rated) -> Vec<(Dimension, time::Duration)> {
+fn charged_durations(rated: &Rated) -> Vec<Dimension> {
     [Dimension::Time, Dimension::ParkingTime]
         .into_iter()
-        .filter_map(|dimension| {
-            let seconds = rated.base_quantity_for(dimension);
-            if seconds.is_zero() {
-                return None;
-            }
-            let seconds = i64::try_from(seconds.trunc()).unwrap_or(i64::MAX);
-            Some((dimension, time::Duration::seconds(seconds)))
-        })
+        .filter(|&dimension| !rated.base_quantity_for(dimension).is_zero())
         .collect()
 }
 
@@ -756,14 +871,13 @@ fn charged_durations(rated: &Rated) -> Vec<(Dimension, time::Duration)> {
 /// same shape as inferring the flag from `energy == 0`, which this crate refuses
 /// one field away.
 ///
-/// So the state machine answers — and it is asked
-/// [`Session::charging_throughout`] rather than the negation of
-/// `suspended_throughout`, because with no reading to stand as evidence the
-/// burden runs the other way: a piece is charging when the operator's own record
-/// says it was, and occupancy otherwise. `Pending` and `Ended` are neither
-/// charging nor suspended, and both are exactly the "connected and not charging"
-/// the fee is for. The energy is `ZERO` and [`Provenance::Interpolated`] either
-/// way, because that zero *is* assumed from the absence of readings.
+/// So the state machine answers — [`Session::charging_throughout`], the same
+/// question the metered periods are asked, because a piece is charging when the
+/// operator's own record says it was, and occupancy otherwise. `Pending` and
+/// `Ended` are neither charging nor suspended, and both are exactly the
+/// "connected and not charging" the fee is for. The energy is `ZERO` and
+/// [`Provenance::Interpolated`] either way, because that zero *is* assumed from
+/// the absence of readings.
 fn unmetered_periods(
     session: &Session,
     from: time::OffsetDateTime,
@@ -927,6 +1041,8 @@ mod tests {
             energy_billable: true,
             duration_billable: true,
             direction: Some(Direction::Import),
+            compensated_loss: None,
+            tariff_changes: Vec::new(),
         }
     }
 
@@ -1674,8 +1790,16 @@ mod tests {
                         Direction::Import,
                         ReadingContext::TransactionBegin,
                     ),
+                    // The register had not moved when the session paused…
+                    MeterReading::new(
+                        at(15),
+                        kwh("100.000"),
+                        Direction::Import,
+                        ReadingContext::SampleClock,
+                    ),
                     // …and yet ten kilowatt-hours crossed the meter between
-                    // 10:15 and 10:30.
+                    // 10:15 and 10:30, measured at both ends. There is no
+                    // charging time to attribute them to.
                     MeterReading::new(
                         at(30),
                         kwh("110.000"),
@@ -1691,10 +1815,108 @@ mod tests {
 
         let err = CdrBuilder::from_session(&s, Direction::Import).unwrap_err();
         assert!(
-            matches!(err, CdrError::EnergyWhileSuspended { .. }),
+            matches!(err, CdrError::EnergyWhileNotCharging { .. }),
             "{err}"
         );
-        assert!(err.to_string().contains("records as suspended"));
+        assert!(err.to_string().contains("records as suspended"), "{err}");
+    }
+
+    #[test]
+    fn the_ordinary_ocpp_201_shape_builds_and_prices_the_wait_as_occupancy() {
+        // `TransactionEvent(Started)` with `chargingState = EVConnected` and a
+        // `Transaction.Begin` reading; `Charging` thirty seconds later with no
+        // reading; `Sample.Clock` at the quarter hour; `Ended` at 10:40. The
+        // most common transaction shape on a 2.0.1 estate — and, drawn as one
+        // straight line between the readings, one that was refused for a
+        // contradiction the interpolation itself had invented.
+        let charging_from = at(0) + time::Duration::seconds(30);
+        let mut s = Session::open(
+            "s-201".parse().unwrap(),
+            "DE*AB7*E840*6487".parse().unwrap(),
+            Authorization::ad_hoc(),
+            at(0),
+        );
+        s.transition_to(emob_session::SessionState::Suspended, at(0))
+            .unwrap();
+        s.transition_to(emob_session::SessionState::Charging, charging_from)
+            .unwrap();
+        s.attach_series(
+            MeterSeries::new(
+                Direction::Import,
+                vec![
+                    MeterReading::new(
+                        at(0),
+                        kwh("100.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionBegin,
+                    ),
+                    MeterReading::new(
+                        at(15),
+                        kwh("105.000"),
+                        Direction::Import,
+                        ReadingContext::SampleClock,
+                    ),
+                    MeterReading::new(
+                        at(40),
+                        kwh("115.000"),
+                        Direction::Import,
+                        ReadingContext::TransactionEnd,
+                    ),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        s.end(at(40), EndReason::Local).unwrap();
+
+        let occupancy = Tariff::simple(
+            "ad-hoc-dc".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            vec![
+                PriceComponent::new(Dimension::Energy, dec("0.49")),
+                PriceComponent::new(Dimension::ParkingTime, dec("6.00")),
+            ],
+        );
+        let cdr = CdrBuilder::from_session(&s, Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-201".parse().unwrap())
+            .rated_with(&occupancy)
+            .build()
+            .expect("the ordinary 2.0.1 transaction shape builds");
+
+        // The thirty seconds before the charge began moved nothing and were
+        // not charging: occupancy, not charging time, and no invented energy.
+        let wait = &cdr.periods[0];
+        assert_eq!((wait.start, wait.end), (at(0), charging_from));
+        assert!(wait.energy.is_zero());
+        assert!(!wait.charging, "EVConnected is connected and not charging");
+        assert!(cdr.periods[1].charging);
+        assert!(cdr.conserves());
+        assert_eq!(cdr.total_energy.to_string(), "15.000 kWh");
+
+        let rated = &cdr.cost.as_ref().unwrap().rated;
+        assert_eq!(rated.amount_for(Dimension::Energy), Some(dec("7.35000")));
+        // Thirty seconds is below the sixty the regulation's cap resolves, so
+        // the occupancy line goes and the record says why `[REA 6-A §3.1]` —
+        // rather than the kilowatt-hours going with it.
+        assert_eq!(rated.amount_for(Dimension::ParkingTime), None);
+        assert!(rated.reasons().any(|r| r.contains("REA 6-A")));
+        assert!(crate::validate(&cdr).is_settleable());
+
+        // A station whose type approval states a ten-second clock bills it:
+        // thirty seconds at 6.00 an hour.
+        let precise = ClockResolution::stated(time::Duration::seconds(10)).unwrap();
+        let cdr = CdrBuilder::from_session(&s, Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-201".parse().unwrap())
+            .clock(precise)
+            .rated_with(&occupancy)
+            .build()
+            .unwrap();
+        let rated = &cdr.cost.as_ref().unwrap().rated;
+        assert_eq!(rated.amount_for(Dimension::ParkingTime), Some(dec("0.05")));
     }
 
     #[test]
@@ -1998,18 +2220,21 @@ mod tests {
             vec![PriceComponent::new(Dimension::Time, dec("6.00"))],
         );
 
-        let err = CdrBuilder::from_session(&brief_session(), Direction::Import)
+        let cdr = CdrBuilder::from_session(&brief_session(), Direction::Import)
             .unwrap()
             .key(party(), "cdr-1".parse().unwrap())
             .rated_with(&by_the_minute)
             .build()
-            .unwrap_err();
+            .expect("the record builds; the line it may not bill is dropped");
 
+        let rated = &cdr.cost.as_ref().unwrap().rated;
+        assert_eq!(rated.amount_for(Dimension::Time), None);
+        assert_eq!(cdr.total_cost().unwrap().to_string(), "0.00 EUR");
         assert!(
-            matches!(err, CdrError::DurationBelowClockResolution { .. }),
-            "{err}"
+            rated.reasons().any(|r| r.contains("REA 6-A")),
+            "{:?}",
+            rated.notes
         );
-        assert!(err.to_string().contains("price this session per kWh"));
 
         // …and the energy is genuinely unaffected.
         let per_kwh = Tariff::simple(
@@ -2052,6 +2277,101 @@ mod tests {
 
         // Thirty seconds at 6.00 an hour.
         assert_eq!(cdr.total_cost().unwrap().to_string(), "0.05 EUR");
+    }
+
+    #[test]
+    fn a_signed_tariff_change_inside_the_session_is_refused() {
+        // `[OCMF Tab. 7, TX=T]` is the station's own record of where its price
+        // changed. A CDR is priced by the one version in force when the session
+        // started `[AFIR Art. 5(4)]`, so a change signed inside it is the meter
+        // saying two prices applied to a record that states one — and billing
+        // either of them is picking a number over a signed statement that
+        // contradicts it. The instants were read off the chain and dropped at
+        // this seam until now, which is a rule modelled and never consulted.
+        let mut signed = evidence(IdentificationStrength::Trusted);
+        signed.tariff_changes = vec![at(15)];
+
+        let err = CdrBuilder::from_session(&ended_session(), Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-1".parse().unwrap())
+            .evidence(signed.clone())
+            .rated_with(&tariff())
+            .build()
+            .unwrap_err();
+        assert!(
+            matches!(err, CdrError::SignedTariffChangeInsideSession { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("TX=T"), "{err}");
+        assert!(
+            !err.to_string().contains("settlement-period boundary"),
+            "10:15 is a boundary, so the metrology rule is not the objection: {err}"
+        );
+
+        // …and one that lands mid-period says that too `[PTB-A 50.7 §3.1.7.2]`.
+        let mut off_grid = evidence(IdentificationStrength::Trusted);
+        off_grid.tariff_changes = vec![at(20)];
+        let err = CdrBuilder::from_session(&ended_session(), Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-1".parse().unwrap())
+            .evidence(off_grid)
+            .rated_with(&tariff())
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("PTB-A 50.7"), "{err}");
+
+        // A change at the session's own edges is not inside it: a version that
+        // takes effect exactly when the session ends priced none of it.
+        let mut edges = evidence(IdentificationStrength::Trusted);
+        edges.tariff_changes = vec![at(0), at(30)];
+        assert!(
+            CdrBuilder::from_session(&ended_session(), Direction::Import)
+                .unwrap()
+                .key(party(), "cdr-1".parse().unwrap())
+                .evidence(edges)
+                .rated_with(&tariff())
+                .build()
+                .is_ok()
+        );
+
+        // …and an unrated record is not priced at all, so there is nothing for
+        // the marker to contradict.
+        assert!(
+            CdrBuilder::from_session(&ended_session(), Direction::Import)
+                .unwrap()
+                .key(party(), "cdr-1".parse().unwrap())
+                .evidence(signed)
+                .build()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_cable_loss_the_meter_compensated_reaches_the_record() {
+        // `[OCMF Tab. 7, CL]` states how much of the register is cable rather
+        // than vehicle. The chain has computed it since the register was read
+        // and it stopped at the crate that computed it — so a partner disputing
+        // the energy, and a customer `[REA 6-A §3.2]` entitled to know what is
+        // inside a measured value, could not be told.
+        let mut with_loss = evidence(IdentificationStrength::Trusted);
+        with_loss.compensated_loss = Some(kwh("0.150"));
+
+        let cdr = CdrBuilder::from_session(&ended_session(), Direction::Import)
+            .unwrap()
+            .key(party(), "cdr-1".parse().unwrap())
+            .evidence(with_loss)
+            .rated_with(&tariff())
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            cdr.evidence.as_ref().unwrap().compensated_loss,
+            Some(kwh("0.150"))
+        );
+        // Nothing is subtracted: the compensation is already inside the
+        // register the session billed.
+        assert_eq!(cdr.total_energy.to_string(), "18.000 kWh");
+        assert!(crate::validate(&cdr).is_settleable());
     }
 
     #[test]

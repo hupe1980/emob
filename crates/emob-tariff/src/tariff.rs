@@ -240,12 +240,12 @@ impl Restrictions {
     /// Whether anything here is read against the **wall clock** rather than
     /// against a quantity.
     ///
-    /// The distinction matters because a time of day, a weekday and a calendar
-    /// date can only be judged in the UTC offset a period carries — an
-    /// `OffsetDateTime` knows an offset, not a time zone — while kilowatt-hours,
-    /// seconds elapsed and kilowatts do not care. [`crate::rate`] reports a
-    /// session whose periods disagree about the offset only when a restriction
-    /// actually reads it.
+    /// A time of day, a weekday and a calendar date are judged on the local
+    /// civil clock [`Tariff::time_zone`] puts an instant at; kilowatt-hours,
+    /// seconds elapsed and kilowatts have no clock in them. A crossing that
+    /// cannot carry the zone — or a partner's document that arrives without one
+    /// — needs to know which of the two kinds a tariff restricts on, because
+    /// only the first is affected.
     #[must_use]
     pub fn reads_the_wall_clock(&self) -> bool {
         self.start_time.is_some()

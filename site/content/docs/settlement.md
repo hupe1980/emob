@@ -111,8 +111,8 @@ One `charging` flag per quarter hour cannot describe the one a charge finishes
 in, so the split cuts at the session's own state changes as well as at the grid:
 
 ```rust
-let split = session.split(Direction::Import)?;    // grid + state changes
-let split = split::into_periods(&series, &cuts)?; // the primitive underneath
+let split = session.split(Direction::Import)?;           // grid + state changes + idle
+let split = split::into_periods(&series, &cuts, &idle)?; // the primitive underneath
 ```
 
 Every cut is another boundary in the same telescoping sum, so conservation is
@@ -144,15 +144,37 @@ assert!(!split.fully_measured());
 for slot in split.interpolated() { /* … */ }
 ```
 
-`Measured` means a `Sample.Clock` reading landed on that boundary.
-`Interpolated` means the number was derived by assuming constant power across a
-gap — which a tapering charge curve does not deliver. A car at 80 % state of
+`Measured` means a `Sample.Clock` reading landed on that boundary. `Held` means
+the register was carried unchanged from a measured reading across an interval
+the session says nothing flowed in — exact, on the operator's own account, and a
+third answer because it rests on the state machine rather than on a second
+reading. `Interpolated` means the number was derived by assuming constant power
+across a gap — which a tapering charge curve does not deliver. A car at 80 % state of
 charge draws far less at the end of a gap than at its start, so a straight line
 over-allocates to the later side, and the error lands on whichever supplier held
 the boundary.
 
 That assumption therefore travels with the number, all the way onto the CDR the
 partner receives, rather than being forgotten at the point it was made.
+
+### …and constant power means constant power *while charging*
+
+A straight line between two readings is the honest guess across a gap the
+session says nothing about, and a wrong one across a gap it does. The ordinary
+OCPP 2.0.1 transaction opens `EVConnected` with a `Transaction.Begin` reading,
+starts charging thirty seconds later with no reading, and sends its next meter
+value at the quarter hour. Its register did not move for those thirty seconds,
+and a line from the opening reading attributes energy to an interval the
+operator's own state machine calls suspended — which the CDR builder then
+refused as a contradiction the arithmetic itself had invented.
+
+So `Session::split` hands the interpolation the session's **idle intervals** —
+every stretch of the history in a state other than `Charging` — and the register
+is held flat across them, the gap's energy spread over the seconds that remain.
+Conservation is untouched: the cumulative values still telescope. Where a gap
+has no charging time at all and the register moved anyway, the line is drawn
+across the whole gap and the contradiction is left standing for the builder to
+report, because it is now the meter's own.
 
 ### A coincidence is not a measurement
 
@@ -169,6 +191,24 @@ offset in the world is a whole number of quarter hours, so a UTC quarter-hour
 boundary is a local one everywhere — and the 92- and 100-slot days of a clock
 change are simply days with fewer or more instants in them. Nothing counts to
 96.
+
+The market side *does* count, and 96 is what every exporter hard-codes. A
+balance-group submission is validated on how many Messperioden a day holds
+`[A6 §IV.1]`, so a series with 96 entries for 25 October is missing an hour of
+somebody's balance group:
+
+```rust
+let berlin = TimeZone::new("Europe/Berlin")?;
+QuarterHour::periods_in_local_day(&berlin, date!(2026-06-15));  // Some(96)
+QuarterHour::periods_in_local_day(&berlin, date!(2026-03-29));  // Some(92)  spring forward
+QuarterHour::periods_in_local_day(&berlin, date!(2026-10-25));  // Some(100) autumn fold
+```
+
+Measured between the two local midnights rather than read from a table of
+transition dates, so a zone that shifts by half an hour or at an hour other than
+02:00 needs no case. `None` says the day is not a whole number of periods at all
+— a civil offset that is not a multiple of fifteen minutes, which Liberia was the
+last of, in 1972.
 
 ## Sessions keep when, not only what
 
@@ -333,10 +373,13 @@ the car was taking energy, on the strength of an absence.
 
 So the fill is built where the session history is still in scope, cuts at the
 session's state changes as well as at the grid, and asks
-`Session::charging_throughout` — which is **not** the negation of
-`suspended_throughout`. There are four states and two of them are neither:
+`Session::charging_throughout` — the **one** question every period on the
+record is asked, metered or not. It is not the negation of
+`suspended_throughout`: there are four states and two of them are neither.
 `Pending` is authorised with nothing flowing and `Ended` is over, and both are
-"connected and not charging", which is exactly what the fee prices.
+"connected and not charging", which is exactly what the fee prices — and asking
+"not suspended" of a metered period billed the minute a car sat `EVConnected`
+before its charge began as charging time.
 
 ## Tokens are never stored raw
 
@@ -550,6 +593,39 @@ invoice.lines[1].vat_rate;   //  7 — the service fee's
 invoice.tax.len();           //  2 — and the standard's own BR-S-08 checks it
 ```
 
+### A bound is not a line, and the price is the net one
+
+`min_price` and `max_price` move a session's total without changing what was
+delivered, and a maximum moves it **down** — which as a line is a negative
+amount and a negative BT-146, and `BR-27` refuses the document outright. So a
+bound is a document level allowance or charge (BG-20/BG-21), a positive magnitude
+the totals chain subtracts or adds, and its amount is derived from what the
+document states: rounding the line and the exact difference independently landed
+a cent past the cap, and the cap is the one number the driver was promised. A
+bound with no lines to adjust is the line, because `BR-16` requires an invoice to
+have one.
+
+BT-146 is likewise the item price **excluding VAT**, so a gross tariff's own
+figure does not belong there: `29.500 × 0.49` is `14.455` where the line says
+`12.15`. Both are stripped at the same rate, and `Invoice::reconciles` asks every
+line to reproduce its own amount from its own numbers.
+
+### A time line is stated in seconds, against a price per hour
+
+OCPI quotes time per hour and 3600 has two factors of three, so twenty-five
+minutes is `0.41666…` h and a line whose quantity is rounded no longer reproduces
+its own amount. EN 16931 has the field for exactly this — BT-149, the item price
+base quantity — so a time line carries `1500 SEC` at `6.00 EUR per 3600 SEC`,
+and `BT-131 = BT-129 × BT-146 ÷ BT-149` holds to the last digit. The same
+divide-last identity the rating enforces per line, now on the document itself.
+
+### And nothing is substituted, including a date
+
+Every figure that will not fit the standard's own types is refused rather than
+replaced — an amount too precise for a currency's minor unit, and a date outside
+EN 16931's four-digit year. Falling back to the epoch would not do: `1970-01-01`
+is a perfectly valid `BT-2`, so nothing objects and the document is sendable.
+
 ### The verdict is the deliverable, not the XML
 
 An invoice that serialises and does not validate is an invoice that comes back.
@@ -575,10 +651,16 @@ commercial term the caller holds, and this crate reads no clock to invent one.
 ### A roaming settlement is not taxed where the charge point stands
 
 Recharging an EV is a single composite supply of **goods** — the electricity —
-which the Court of Justice settled in C-282/22. `[UStG §3g]` then says a supply
-of electricity **to a reseller** is made where that reseller is established, and
-an e-mobility provider buying sessions through roaming is exactly a reseller: it
-does not consume the electricity, it resells it.
+which the Court of Justice settled in C-282/22. The three-party shape every
+roaming session has is a second question, and C-60/23 (*Digital Charging
+Solutions*, 17.10.2024) settles it: where the driver contracts with an e-mobility
+provider rather than with the operator of the point, the chain is a **commission
+structure** under Article 14(2)(c) — two successive supplies of goods, CPO to
+eMSP and eMSP to driver — held so despite the eMSP controlling neither when,
+where nor how much is drawn. That is what makes an eMSP a *taxable dealer*.
+
+`[UStG §3g]` then says a supply of electricity **to a taxable dealer** is made
+where that dealer is established.
 
 ```rust
 let rates = VatRates::new().at("DE", dec("19"));
@@ -590,11 +672,28 @@ assert_eq!(treatment.place_of_supply, "FR");
 Putting 19 % on that invoice charges tax that may not be charged and that the
 partner cannot reclaim.
 
-**And the rate follows the place of supply, not the charge point.** A
-*domestic* reseller moves the place of supply to a country that need not be the
-one the posts stand in: a German operator running chargers in France and
-settling with a German eMSP is taxed in Germany, at 19 %, on kilowatt-hours
-drawn under a 20 % regime. So the rates are a table the caller states —
+### Where the supply is taxed and who pays it are two questions
+
+Article 195 shifts the liability to the recipient only "if the supplies are
+carried out by a taxable person **not established within that Member State**". A
+CPO with a branch or a VAT registration in the buyer's country is making an
+ordinary local supply there, at that country's rate, and a reverse charge on it
+drops tax that was due. So establishment is stated rather than inferred from the
+two countries:
+
+```rust
+let cpo = TaxStatus::business("DE", "DE123456789");
+TaxTreatment::decide(&cpo, &french_emsp, "DE", &rates)?;    // AE, place FR
+
+let cpo = cpo.also_established_in(["FR"]);
+TaxTreatment::decide(&cpo, &french_emsp, "DE", &rates)?;    // S at 20 %, place FR
+```
+
+**And the rate follows the place of supply, not the charge point.** The place of
+supply need not be the country the posts stand in: a German operator running
+chargers in France and settling with a German eMSP is taxed in Germany, at 19 %,
+on kilowatt-hours drawn under a 20 % regime. So the rates are a table the caller
+states —
 `VatRates` — and `decide` looks up the one belonging to the place of supply it
 derived. A standard-rated supply whose place of supply has no rate stated is
 refused, because the two silent alternatives are an invoice that over-declares
@@ -626,6 +725,15 @@ naming the party that has none: EN 16931's `BR-AE-2` and `BR-AE-3` refuse that
 document anyway, and refusing it where the rule lives means the message names the
 missing identifier instead of a rule id.
 
+### The fee that is not electricity
+
+The same judgment treats a **periodic subscription** an eMSP charges its driver —
+one that buys access rather than kilowatt-hours — as consideration for a separate
+supply of *services*, under its own place-of-supply rule. Nothing in `emob-billing`
+builds such a line: an invoice is assembled from rated CDRs and every one of them
+is electricity. A document carrying both would need a VAT **category** per line
+where this crate has one per document, so that is `empd`'s document.
+
 ### …and the books agree with the document
 
 Under a reverse charge there is **no VAT posting**, because the liability is the
@@ -636,6 +744,11 @@ return that reconciles against nothing it sent.
 let books = postings::postings_for(&invoice);
 assert!(books.balances());     // before a single account is named
 ```
+
+A tariff's minimum or maximum moves the revenue role it belongs to, chosen from
+the largest line **of that record** rather than of the document — otherwise a
+month of energy sessions plus one capped occupancy session books the cap against
+energy revenue, for a session that delivered no energy.
 
 The movements are addressed by *role* — receivable, energy revenue, service
 revenue, VAT payable at a rate — and a caller maps them onto its own chart. SKR03
@@ -656,9 +769,9 @@ timestamp off the system clock, and a collection file that differs between two
 runs of one billing job is a file no bank reconciles — so every one of those
 fields is an argument, and a test asserts the same inputs produce the same bytes.
 
-## What is not here yet 📐
+## What is not here 📐
 
-The service that decides *when* a month closes, holds the contracts an invoice is
-addressed to and submits the document — `billd` and `empd` — is designed and not
-built. So are CII and ZUGFeRD: UBL is the syntax the German platforms accept, and
-nothing has asked for the other yet.
+Deciding *when* a month closes, holding the contracts an invoice is addressed to
+and submitting the document belong to `billd` and `empd`. CII and ZUGFeRD are a
+second syntax for the same semantic document; UBL is the one the German
+platforms accept.

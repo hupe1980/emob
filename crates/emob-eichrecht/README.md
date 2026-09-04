@@ -175,10 +175,19 @@ the same party that issues the invoice.
 ```rust
 evidence.suspended_intervals();      // what the meter signed, not what the CSMS said
 evidence.tariff_change_instants();   // `[PTB-A 50.7 §3.1.7.2]` wants these on a grid boundary
+evidence.compensated_loss();         // how much of the register was cable `[OCMF Tab. 7, CL]`
 ```
 
 Empty for the ordinary station that never emits `S` — the marker is optional — so
 it is evidence *for* a fee where it exists, never a precondition of one.
+
+**And all three leave this crate.** `emob-ocpp` compares the suspensions against
+the protocol's own account of them; `emob-cdr` refuses a record whose signed
+records mark a tariff change **inside** a session it prices with the one version
+in force when that session started `[AFIR Art. 5(4)]`, and carries the cable loss
+onto the record so a partner disputing the energy — and a customer
+`[REA 6-A §3.2]` entitles to know what is inside a measured value — can be told.
+Each of the three was computed here and consulted nowhere until it was.
 
 ## Scope
 

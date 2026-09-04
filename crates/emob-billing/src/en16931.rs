@@ -34,17 +34,17 @@
 //! | which tariff version priced it | `BT-127`, the free-text line note, is the only place it fits, and it goes there |
 //! | a rating note | the same — and a note that stayed behind is a note nobody can invoke |
 
-use emob_core::{Crossing, Money};
+use emob_core::Crossing;
 use en16931::invoice::{
-    Code, CreditTransfer, DirectDebit, Item, LineVat, Party, PaymentInstructions, PaymentMeans,
-    PostalAddress, PriceDetails, VatBreakdown,
+    Code, CreditTransfer, DirectDebit, DocumentAllowanceCharge, Item, LineVat, Party,
+    PaymentInstructions, PaymentMeans, PostalAddress, PriceDetails, VatBreakdown,
 };
 use en16931::validation::ValidationReport;
 use en16931::{Date, Identifier, InvoiceAmount, Percentage, Quantity};
 use rust_decimal::Decimal;
 
 use crate::error::BillingError;
-use crate::invoice::{Counterparty, Invoice, InvoiceLine, PaymentDetails};
+use crate::invoice::{Counterparty, DocumentAdjustmentKind, Invoice, InvoiceLine, PaymentDetails};
 use crate::tax::VatCategory;
 
 /// The CEN core specification identifier — BT-24.
@@ -109,7 +109,7 @@ pub fn to_en16931(
     let mut builder = en16931::Invoice::builder(
         specification,
         invoice.number.clone(),
-        date_of(invoice.issued_on),
+        date_of(invoice.issued_on, "issue date (BT-2)")?,
         COMMERCIAL_INVOICE,
         invoice.currency.as_str(),
     )
@@ -127,6 +127,8 @@ pub fn to_en16931(
     for line in &invoice.lines {
         builder = builder.line(invoice_line(invoice, line)?);
     }
+
+    builder = adjustments(invoice, builder)?;
 
     // BG-23 is stated rather than reconciled from the lines, because the
     // category and its reason are a property of the whole document — a supply is
@@ -154,26 +156,17 @@ pub fn to_en16931(
         builder = builder.vat_breakdown(entry);
     }
 
-    let totals = en16931::invoice::DocumentTotals {
-        line_total: amount(invoice.line_total().amount(), invoice, "line total")?,
-        allowance_total: None,
-        charge_total: None,
-        taxable_total: amount(invoice.taxable_total().amount(), invoice, "taxable total")?,
-        vat_total: Some(amount(invoice.tax_total().amount(), invoice, "VAT total")?),
-        vat_total_accounting: None,
-        gross_total: amount(invoice.gross_total().amount(), invoice, "gross total")?,
-        paid: None,
-        rounding: None,
-        due: amount(invoice.gross_total().amount(), invoice, "amount due")?,
-    };
-
+    let totals = totals_of(invoice)?;
     let mut built = builder.totals(totals).build();
     built.invoicing_period = Some(en16931::invoice::Period {
-        start: Some(date_of(invoice.period_from)),
-        end: Some(date_of(invoice.period_to)),
+        start: Some(date_of(
+            invoice.period_from,
+            "invoicing period start (BT-73)",
+        )?),
+        end: Some(date_of(invoice.period_to, "invoicing period end (BT-74)")?),
     });
     if let Some(due) = invoice.due_on {
-        built.due_date = Some(date_of(due));
+        built.due_date = Some(date_of(due, "due date (BT-9)")?);
     }
     built.payment = invoice.payment.as_ref().map(payment_instructions);
 
@@ -200,6 +193,19 @@ pub fn to_en16931(
              usually read at. EN 16931 caps neither — BT-146 is an unbounded decimal and BT-129 a \
              quantity — so nothing was narrowed, and a renderer that shows two will show a price \
              that does not reproduce its own line",
+        );
+    }
+    if invoice
+        .lines
+        .iter()
+        .any(|line| line.base_quantity != Decimal::ONE)
+    {
+        crossing.note(
+            "/lines",
+            "a time line is stated in whole seconds against a price per 3600 of them (BT-149), \
+             because a duration in hours is usually not a decimal and a rounded quantity no \
+             longer reproduces its own amount. A renderer that ignores BT-149 shows a price per \
+             second that is 3600 times too high",
         );
     }
 
@@ -247,6 +253,64 @@ pub fn xrechnung(invoice: &Invoice) -> Result<Crossing<String>, BillingError> {
     Ok(crossing.map(|()| written.xml))
 }
 
+/// BG-22 — the totals chain, in the order `BR-CO-10` … `BR-CO-16` states it.
+fn totals_of(invoice: &Invoice) -> Result<en16931::invoice::DocumentTotals, BillingError> {
+    Ok(en16931::invoice::DocumentTotals {
+        line_total: amount(invoice.line_total().amount(), invoice, "line total")?,
+        // BT-107 / BT-108, stated only when there is one: `BR-CO-11` and
+        // `BR-CO-12` make each the sum of its group, and an explicit zero on a
+        // document with no allowances is a figure with nothing behind it.
+        allowance_total: non_zero(invoice.allowance_total().amount())
+            .map(|total| amount(total, invoice, "allowance total"))
+            .transpose()?,
+        charge_total: non_zero(invoice.charge_total().amount())
+            .map(|total| amount(total, invoice, "charge total"))
+            .transpose()?,
+        taxable_total: amount(invoice.taxable_total().amount(), invoice, "taxable total")?,
+        vat_total: Some(amount(invoice.tax_total().amount(), invoice, "VAT total")?),
+        vat_total_accounting: None,
+        gross_total: amount(invoice.gross_total().amount(), invoice, "gross total")?,
+        paid: None,
+        rounding: None,
+        due: amount(invoice.gross_total().amount(), invoice, "amount due")?,
+    })
+}
+
+/// BG-20 / BG-21 — a tariff's minimum or maximum, on the side the totals chain
+/// subtracts or adds.
+///
+/// Stated as a positive magnitude, because a cap put on as a line is a negative
+/// BT-146 and `BR-27` refuses the document outright.
+fn adjustments(
+    invoice: &Invoice,
+    mut builder: en16931::invoice::InvoiceBuilder,
+) -> Result<en16931::invoice::InvoiceBuilder, BillingError> {
+    for adjustment in &invoice.adjustments {
+        let entry = DocumentAllowanceCharge {
+            amount: amount(adjustment.amount, invoice, "allowance or charge")?,
+            base_amount: None,
+            percentage: None,
+            vat: LineVat {
+                category: Code::new(invoice.treatment.category.code()),
+                rate: adjustment.vat_rate.map(Percentage::new),
+            },
+            reason: Some(adjustment.reason.clone()),
+            reason_code: None,
+        };
+        builder = match adjustment.kind {
+            DocumentAdjustmentKind::Allowance => builder.allowance(entry),
+            DocumentAdjustmentKind::Charge => builder.charge(entry),
+        };
+    }
+    Ok(builder)
+}
+
+/// A total worth stating: `None` for zero, which is a figure with nothing
+/// behind it on a document that has no allowances or charges.
+const fn non_zero(total: Decimal) -> Option<Decimal> {
+    if total.is_zero() { None } else { Some(total) }
+}
+
 /// Take a crossing apart so a second stage can add to its account.
 fn split<T>(crossing: Crossing<T>) -> (Crossing<()>, T) {
     let mut carrier = Crossing::lossless(());
@@ -270,8 +334,11 @@ fn invoice_line(
         unit_code: Code::new(line.unit_code()),
         net_amount: amount(line.net, invoice, &format!("line {}", line.id))?,
         period: Some(en16931::invoice::Period {
-            start: Some(date_of(line.started_at.date())),
-            end: Some(date_of(line.ended_at.date())),
+            start: Some(date_of(
+                line.started_at.date(),
+                "line period start (BT-134)",
+            )?),
+            end: Some(date_of(line.ended_at.date(), "line period end (BT-135)")?),
         }),
         allowances: Vec::new(),
         charges: Vec::new(),
@@ -279,8 +346,12 @@ fn invoice_line(
             net_price: en16931::UnitPriceAmount::new(line.unit_price),
             price_discount: None,
             gross_price: None,
-            base_quantity: None,
-            base_quantity_code: None,
+            // BT-149/BT-150: "6.00 EUR per 3600 SEC". Stated only where it is
+            // not one, and in the line's own unit code, which `R130` requires.
+            base_quantity: (line.base_quantity != Decimal::ONE)
+                .then(|| Quantity::new(line.base_quantity)),
+            base_quantity_code: (line.base_quantity != Decimal::ONE)
+                .then(|| Code::new(line.unit_code())),
         },
         vat: LineVat {
             category: Code::new(invoice.treatment.category.code()),
@@ -391,16 +462,26 @@ fn party(counterparty: &Counterparty, category: VatCategory) -> Party {
 
 /// A calendar day, through `en16931`'s own `time` conversion.
 ///
-/// # Why this cannot fail in practice, and does not pretend it cannot
+/// # A date that will not fit is refused, not replaced
 ///
 /// `en16931::Date` bounds the year to four digits, which every date a charging
-/// session carries satisfies. The conversion is still fallible in the type
-/// system, and the fallback is the epoch rather than a panic: a domain crate
-/// that aborts on a corrupt timestamp takes a whole billing run down over one
-/// record, and a date of `1970-01-01` on an invoice is a fault every validator
-/// and every human notices immediately.
-fn date_of(date: time::Date) -> Date {
-    Date::try_from(date).unwrap_or_else(|_| Date::new(1970, 1, 1).expect("a literal date"))
+/// session carries satisfies — so this cannot fail in practice. The tempting
+/// answer when it does is the **epoch**: a domain crate must not abort a
+/// billing run over one record, and `1970-01-01` is a fault anybody notices.
+///
+/// Neither half holds. `1970-01-01` is a perfectly valid `BT-2`, so no validator
+/// objects and the document is sendable: an invoice issued fifty-six years ago,
+/// or — where the field is `BT-9` — one that fell due before the customer
+/// existed. And refusing does not abort anything: every caller here already
+/// returns a `Result`, exactly as [`amount`] does for a figure that will not
+/// fit. Substituting a date is inventing one on behalf of somebody who will be
+/// invoiced for it, which is the repair this workspace refuses at every other
+/// seam.
+fn date_of(date: time::Date, what: &str) -> Result<Date, BillingError> {
+    Date::try_from(date).map_err(|_| BillingError::UnrepresentableDate {
+        what: what.to_owned(),
+        date: date.to_string(),
+    })
 }
 
 fn amount(value: Decimal, invoice: &Invoice, what: &str) -> Result<InvoiceAmount, BillingError> {
@@ -411,10 +492,36 @@ fn amount(value: Decimal, invoice: &Invoice, what: &str) -> Result<InvoiceAmount
     })
 }
 
-/// The gross total as this workspace's own money type, for a caller that has
-/// the EN 16931 document and wants the figure back in the vocabulary the rest of
-/// the stack speaks.
-#[must_use]
-pub fn total_of(invoice: &Invoice) -> Money {
-    invoice.gross_total()
+#[cfg(test)]
+mod tests {
+    use super::{Date, date_of};
+    use crate::error::BillingError;
+
+    #[test]
+    fn a_date_the_standard_cannot_state_is_refused_rather_than_replaced() {
+        // It used to fall back to the epoch, on the argument that `1970-01-01`
+        // is a fault anybody notices. It is not: it is a perfectly valid BT-2,
+        // so no validator objects and the document is sendable — an invoice
+        // issued fifty-six years ago, or one that fell due before the customer
+        // existed. Substituting a date is inventing one on behalf of somebody
+        // who will be invoiced for it, which is the repair this workspace
+        // refuses at every other seam.
+        // `time` reaches back before the common era; EN 16931 bounds the year
+        // to `0..=9999`.
+        let before_the_era = time::Date::from_calendar_date(-44, time::Month::March, 15)
+            .expect("a `time` date outside EN 16931's four-digit year");
+        let err = date_of(before_the_era, "issue date (BT-2)").unwrap_err();
+        assert!(
+            matches!(err, BillingError::UnrepresentableDate { .. }),
+            "{err}"
+        );
+        assert!(err.to_string().contains("issue date (BT-2)"), "{err}");
+
+        // …and an ordinary date crosses untouched.
+        let ordinary = time::Date::from_calendar_date(2026, time::Month::July, 1).unwrap();
+        assert_eq!(
+            date_of(ordinary, "issue date (BT-2)").unwrap(),
+            Date::new(2026, 7, 1).unwrap()
+        );
+    }
 }

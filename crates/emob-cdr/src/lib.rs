@@ -18,7 +18,25 @@
 //!   at once, separated into what blocks settlement and what is worth knowing,
 //!   and nothing repaired behind the caller's back.
 //!
-//! # The two cross-checks nobody runs
+//! # The four cross-checks nobody runs
+//!
+//! Each asks the same question of a different quantity: **does the session's own
+//! account of itself agree with what a meter signed?** They stay four because
+//! they take different things away — a failed assignment removes the payer, an
+//! untrustworthy clock removes the duration — and one that collapsed them would
+//! refuse a whole record over a fee nobody was charged. All four read the
+//! evidence rather than a field a caller filled in, which is what
+//! [`EvidenceRef::from_evidence`](cdr::EvidenceRef::from_evidence) is for.
+//!
+//! **Whether the energy may be billed.** A CDR's energy comes from the
+//! *session's* meter series, so without this a record is priced off a register
+//! nothing verified while carrying an `EvidenceRef` that makes it look checked —
+//! a settled record for a forged session, with every unit test passing (D70).
+//!
+//! **Which way it flowed.** `[OCMF Tab. 25]` reserves `B*` for import and `C*`
+//! for export, so the signed register *states* the direction, and a record
+//! claiming a draw over a `C2` register is a V2G discharge billed as consumption
+//! — the operator paying for energy the driver supplied.
 //!
 //! **Who was charging.** A session records *how* it was authorised; the signed
 //! meter record states *how strongly* the driver was identified

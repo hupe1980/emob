@@ -28,9 +28,71 @@ decision rather than a mapping.
 | | |
 |---|---|
 | `invoice` | the exact, unrounded amounts become figures in a currency's minor unit — **once, at the line** — and the difference is stated |
-| `tax` | who owes the VAT, and in which country. For a roaming settlement that is **not** where the charge point stands `[UStG §3g]` |
+| `tax` | who owes the VAT, in which country, and **who is liable for it** — two questions, not one. For a roaming settlement the place of supply is not where the charge point stands `[UStG §3g]`, and the reverse charge follows only where the seller is not established there (Art. 195) |
 | `en16931` | the document, and the verdict on it: 223 syntax-independent rules plus the national usage specification, run before anything is sent |
 | `payment` · `postings` | the collection, and the books |
+
+## A bound is not a line
+
+`[OCPI 2.3.0 §Tariff]`'s `min_price` and `max_price` move a session's total
+without changing what was delivered, and a maximum moves it **down**. Put on the
+document as a line, a cap is a negative amount and a negative BT-146 — and
+`BR-27` refuses that outright, so the whole invoice is invalid. EN 16931 has the
+group for it:
+
+```rust
+invoice.lines.len();                    // 1 — the energy that was delivered
+invoice.adjustments[0].kind;             // Allowance — BG-20
+invoice.adjustments[0].amount;           // 3.75, a positive magnitude
+invoice.line_total();                    // 12.15 — BT-106
+invoice.taxable_total();                 // 8.40  — BT-109 = 106 − 107 + 108
+invoice.gross_total();                   // 10.00 — the cap, exactly
+```
+
+The amount is derived from what the **document** states — the rounded lines less
+the rounded target — rather than from the exact difference: rounding the two
+independently landed a cent past the cap, and the cap is the one number the
+driver was promised. A bound with nothing to adjust *is* the line, because
+`BR-16` requires an invoice to have one and a charge has no document to be a
+charge on.
+
+The books move the revenue that bound belongs to, chosen from the largest line
+**of that record** — the same scope `emob_tariff::Adjustment::vat` uses for the
+rate. Asked of the whole document instead, a month of energy sessions plus one
+capped occupancy session books the cap against energy revenue for a session that
+delivered none (D214).
+
+## The item price is the net one
+
+BT-146 is defined **exclusive of VAT**. A gross tariff's own figure put there
+states a price that does not produce the line — `29.500 × 0.49` is `14.455`
+where the line says `12.15`, off by the whole rate, which
+`PEPPOL-EN16931-R120` refuses at a hundred times its tolerance. Both the amount
+and the price are stripped at the same rate, and every line reproduces itself:
+
+```rust
+assert!(invoice.lines.iter().all(InvoiceLine::reconciles));   // and so does
+assert!(invoice.reconciles());                                 // the document
+```
+
+## A time line is stated in seconds, against a price per hour
+
+OCPI quotes time per hour, and 3600 has two factors of three: twenty-five
+minutes is `0.41666…` h, and a line whose quantity is rounded no longer
+reproduces its own amount. EN 16931 has the field for exactly this — BT-149,
+the item price base quantity — so a time line carries whole seconds at the
+tariff's own hourly price:
+
+```rust
+line.quantity;        // 1500        — BT-129, in SEC
+line.unit_price;      // 6.00        — BT-146, per hour
+line.base_quantity;   // 3600        — BT-149: "6.00 EUR per 3600 SEC"
+line.net;             // 2.50        — BT-131 = 1500 × 6.00 ÷ 3600, exactly
+```
+
+Energy and session lines carry a base quantity of one and are written without
+it. A renderer that ignores BT-149 shows a price per second 3600 times too
+high, and the crossing's account says so.
 
 ## The rounding happens once, at the line, and says so
 
@@ -89,13 +151,37 @@ for reason in crossing.reasons() { println!("{reason}"); }
 Recharging an EV is a **single composite supply of goods** — the electricity —
 not a bundle of services. The Court of Justice settled that in C‑282/22.
 
+C‑60/23 (*Digital Charging Solutions*, 17.10.2024) settles the three-party shape
+every roaming session has: where the driver contracts with an e-mobility provider
+rather than with the operator of the point, the chain is a **commission
+structure** under Article 14(2)(c) — two successive supplies of goods, CPO to
+eMSP and eMSP to driver — and the Court held so despite the eMSP controlling
+neither when, where nor how much is drawn. That is what makes an eMSP a *taxable
+dealer*, and it is the premise everything below rests on.
+
 `[UStG §3g]`, Article 38 of the VAT Directive, then says that a supply of
-electricity **to a reseller** is made where that reseller is established. An
-e-mobility provider buying sessions through roaming is exactly a reseller: it
-does not consume the electricity, it resells it. So a German CPO settling with a
-French eMSP is not making a German supply at all — the place of supply is
-France, German VAT does not arise, and the invoice states the reverse charge
-with the partner's own VAT identifier on it `[UStG §13b]`.
+electricity **to a taxable dealer** is made where that dealer is established. An
+e-mobility provider buying sessions through roaming is exactly one: it does not
+consume the electricity, it resells it. So a German CPO settling with a French
+eMSP is not making a German supply at all — the place of supply is France, and
+German VAT does not arise.
+
+### Where the supply is taxed and who pays it are two questions
+
+Article 195 shifts the liability to the recipient — the reverse charge
+`[UStG §13b]` — only "if the supplies are carried out by a taxable person **not
+established within that Member State**". A CPO with a branch or a VAT
+registration in the buyer's country is making an ordinary **local** supply there,
+at that country's rate, and a reverse charge on it drops tax that was due. So
+establishment is stated rather than inferred from the two countries (D211):
+
+```rust
+let cpo = TaxStatus::business("DE", "DE123456789");
+TaxTreatment::decide(&cpo, &french_emsp, "DE", &rates)?;    // AE, place FR
+
+let cpo = cpo.also_established_in(["FR"]);
+TaxTreatment::decide(&cpo, &french_emsp, "DE", &rates)?;    // S at 20 %, place FR
+```
 
 The ad-hoc leg does not share it. A driver paying at the point is not a
 reseller, so `[UStG §3g]` never engages and the supply is taxed where the
@@ -116,10 +202,11 @@ assert_eq!(treatment.place_of_supply, "FR");
 ### The rate belongs to the place of supply, not to the charge point
 
 Which is why the rates are a small table rather than one number. `[UStG §3g]`
-moves the place of supply, and a **domestic** reseller moves it to a country
-that need not be the one the points stand in: a German operator running chargers
-in France and settling with a German eMSP is taxed in Germany, at 19 %, on
-kilowatt-hours drawn under a 20 % regime.
+moves the place of supply, and it moves it to a country that need not be the one
+the points stand in: a German operator running chargers in France and settling
+with a German eMSP is taxed in Germany, at 19 %, on kilowatt-hours drawn under a
+20 % regime — the seller is established there, so the supply is local and the
+rate is the place of supply's own.
 
 ```rust
 let rates = VatRates::new().at("FR", dec("20")).at("DE", dec("19"));
@@ -166,6 +253,15 @@ The category type is **`en16931`'s own**: all ten codes with four predicates
 generated from the CEN artefacts, of which `forbids_exemption_reason` and
 `states_rate` are the two that decide the paragraph above. What stays here is the
 part `en16931` cannot know — which category two *parties* produce.
+
+### The fee that is not electricity
+
+C‑60/23 also holds that a **periodic subscription** an eMSP charges its driver —
+one that buys access rather than kilowatt-hours — is a *separate supply of
+services*, under its own place-of-supply rule rather than Article 38 or 39.
+Nothing here builds such a line: an invoice is assembled from rated CDRs and
+every one of them is electricity. A document carrying both needs a VAT
+**category** per line where this crate has one per document, so it is `empd`'s.
 
 And the books agree with the document: under a reverse charge there is **no VAT
 posting**, because the liability is the recipient's. A platform that posts 19 %

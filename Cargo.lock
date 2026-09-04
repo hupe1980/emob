@@ -14,6 +14,7 @@ dependencies = [
  "rust_decimal",
  "serde",
  "serde_json",
+ "time",
  "tokio",
  "tracing",
 ]
@@ -665,6 +666,7 @@ dependencies = [
 name = "emob-roam"
 version = "0.1.0"
 dependencies = [
+ "emob-billing",
  "emob-cdr",
  "emob-core",
  "emob-eichrecht",
@@ -1652,6 +1654,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "poid"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "emob-core",
+ "emob-poi",
+ "emob-service",
+ "emob-tariff",
+ "rust_decimal",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2294,6 +2313,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "tarifd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "emob-core",
+ "emob-ocpp",
+ "emob-poi",
+ "emob-roam",
+ "emob-service",
+ "emob-tariff",
+ "ocpi-kit",
+ "ocpp-kit",
+ "rust_decimal",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

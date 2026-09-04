@@ -126,11 +126,15 @@ as `available` for months, and it is the commonest defect in European charging
 data. A schema validator has nothing to say about it.
 
 ```rust
-Report::new(point, Lifecycle::Decommissioned, PointStatus::Available)
-// Err(StatusContradictsRegister)
+point.lifecycle = Lifecycle::Decommissioned;
+point.report(PointStatus::Available)      // Err(StatusContradictsRegister)
+point.report(PointStatus::Removed)        // Ok — the register's own answer
 ```
 
-There is no other constructor. The document cannot be built.
+`ChargingPoint::report` is the only constructor, and it reads the lifecycle off
+the point rather than taking it beside the status — a constructor given both is
+one a caller satisfies by handing over the lifecycle that makes the status legal
+(D217). The document cannot be built.
 
 ## The silence between the two publications
 
@@ -193,9 +197,10 @@ is an argument, so an export replayed two years later produces the same bytes.
 Pushing the snapshot is a service's business; a publication here is a value and a
 string.
 
-## What is not here yet 📐
+## What is not here 📐
 
-The daemon that publishes on a schedule and pushes the snapshot, and the
-availability fan-out behind it. OCPI's own Locations module is built for the
-purpose the CDR needs it for — the location a partner's record names — and lands
-in full with the roaming service.
+Deciding *which* points changed since the last publication. `poid` takes the
+updates, refuses the ones no consumer could resolve and says when the feed has
+gone stale; producing them reads a live estate. OCPI's own Locations module is
+built for the purpose the CDR needs it for — the location a partner's record
+names — and the rest of it is a roaming service's publishing surface.

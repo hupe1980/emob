@@ -223,6 +223,23 @@ the price, one field over. And OCPI's length bounds are enforced rather than
 truncated: 45 characters is not generous for a German street, and a truncated
 address names a different building.
 
+## A correction is two documents, and neither is the other
+
+OCPI has no way to amend a CDR. It reverses one with a Credit CDR — `credit =
+true`, `credit_reference_id` naming the original, and **only** `total_cost`
+negated — and then sends "a new CDR with a new unique ID and the fields `credit`
+and `credit_reference_id` omitted" `[OCPI 2.3.0 §mod_cdrs_cdr_object]`:
+
+```rust
+let reversal = to_ocpi_credit(&original, &partner, &context, "cdr-1-C")?;
+let replacement = to_ocpi(&corrected, &partner, &context)?;   // names nothing
+```
+
+The replacement's account says what it replaces, because the document cannot.
+Inbound, a Credit CDR is refused by name rather than read: it repeats the
+original's kilowatt-hours with the money negated, and read as a session it would
+put them in the ledger twice.
+
 ## What it proves
 
 `tests/the_same_session.rs` runs one genuinely signed session — real ECDSA over

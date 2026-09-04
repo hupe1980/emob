@@ -114,6 +114,24 @@ pub enum Outcome {
         /// What it claims to sign with.
         claimed: String,
     },
+    /// A station sent a public key beside its signed value and the key does not
+    /// decode.
+    ///
+    /// Not fatal to billing on its own: the key that decides anything comes
+    /// from the registry, out of band `[OCMF §Relation of Serial Numbers]`, and
+    /// the chain verifies against that. It is reported because it has its own
+    /// fix — a station whose claimed key is unreadable is one whose provisioning
+    /// nobody can **check** against the cabinet, so the comparison D186 exists
+    /// for silently stops happening and a swapped meter stops being noticed.
+    ///
+    /// Skipping it is the shape this workspace keeps finding: the rule written
+    /// down on the error variant, and the code going `continue` past it.
+    UnreadableClaimedKey {
+        /// Which station.
+        identity: String,
+        /// What made it unreadable.
+        detail: String,
+    },
 }
 
 /// The CSMS.
@@ -319,8 +337,18 @@ impl Csmsd {
 
         for event in &transaction.events {
             for reading in &event.signed {
-                let Some(Ok(claimed)) = reading.value.public_key() else {
-                    continue;
+                let claimed = match reading.value.public_key() {
+                    Some(Ok(claimed)) => claimed,
+                    // The station sent no key at all, which is what most of the
+                    // fleet does and says nothing.
+                    None => continue,
+                    Some(Err(error)) => {
+                        lock(&self.outcomes).push(Outcome::UnreadableClaimedKey {
+                            identity: identity.to_string(),
+                            detail: error.to_string(),
+                        });
+                        return;
+                    }
                 };
                 // Compared as **keys**, not as bytes. A station may send the
                 // same point as a bare SEC1 encoding, wrapped in a
@@ -328,11 +356,18 @@ impl Csmsd {
                 // `oca:base16:asn1:` envelope — three spellings of one key, and
                 // a byte comparison calls two of them a mismatch and sends an
                 // operator after a meter nobody swapped.
-                let Ok(claimed) = ocmf::PublicKey::from_bytes(
+                let claimed = match ocmf::PublicKey::from_bytes(
                     &claimed.bytes,
                     registered.as_ref().map(ocmf::PublicKey::curve),
-                ) else {
-                    continue;
+                ) {
+                    Ok(claimed) => claimed,
+                    Err(error) => {
+                        lock(&self.outcomes).push(Outcome::UnreadableClaimedKey {
+                            identity: identity.to_string(),
+                            detail: error.to_string(),
+                        });
+                        return;
+                    }
                 };
                 if registered.as_ref() == Some(&claimed) {
                     continue;

@@ -296,7 +296,10 @@ be reset at TX=B" `[OCMF Tab. 7]` — a transaction opening on a non-zero
 cumulated loss is carrying compensation from the previous session into this one.
 The loss is never subtracted (the compensation is already inside `RV`) but it is
 carried onto the report, because a partner disputing the energy will ask how much
-of it was cable.
+of it was cable — and it reaches them: the figure travels on the CDR, and the
+OCPI crossing states it as a note because the wire has no field for it and
+`[REA 6-A §3.2]` makes telling the affected party what is inside a measured
+value a duty rather than a courtesy.
 
 And it comes back as an `Energy`, not a bare decimal: `CL` "is given in the same
 unit as RV which is specified in RU" `[OCMF Tab. 7, CL]`, and `RU` is `Wh` on
@@ -504,6 +507,16 @@ device is better than the worst case the regulation permits, so
 `ClockResolution` defaults to the cap and a station that knows better says so —
 the same reasoning that makes an unevaluable tariff restriction never match.
 
+The two rules are answered differently, on purpose. A clock that cannot be
+placed vouches for no duration at all, so a tariff that charges for one is
+refused by name. A span below the resolution is one *measured value* the
+regulation says not to use, so the rating drops that line — and only that line —
+with `RatingNote::DurationBelowResolution` saying why, and the kilowatt-hours
+bill. The distinction bites on every fast charger: a car sits `EVConnected` for
+thirty seconds before its charge begins, an occupancy fee prices those seconds,
+and refusing the record over five cents of occupancy would make the most common
+transaction shape on a 2.0.1 estate unbillable.
+
 ## Curves, and the meter that named the gap
 
 `[OCMF Tab. 22]` names seven algorithms. **Four** verify in pure Rust —
@@ -544,7 +557,7 @@ same digest against secp192r1's 24-byte field even compiles. Verification goes
 through the prehash path instead, which applies the X9.62 conversion in both
 directions.
 
-## What is not here yet 📐
+## What is not here 📐
 
 The retention windows per artefact: MessEV and PTB give them and the reading is
 not settled, so nothing here expires an artefact. The verification half, the

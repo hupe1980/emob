@@ -28,19 +28,63 @@
 //! of supply of *electricity* has its own rule, and the place of supply of a
 //! *service* does not.
 //!
+//! # ...and who supplies it to whom, which is the case this workspace is about
+//!
+//! C-282/22 answers *what* is supplied, at one point, to one driver. It does not
+//! answer the three-party shape every roaming session has, and that second
+//! question is the one the reseller rule below stands on.
+//!
+//! Case C-60/23 (*Digital Charging Solutions*, 17 October 2024) answers it. Where
+//! the driver holds a contract with an e-mobility provider rather than with the
+//! operator of the point, the chain is a **commission structure** under
+//! Article 14(2)(c) of the VAT Directive — `[UStG §3(3)]` — and the statutory
+//! fiction is **two successive supplies of goods**: CPO to eMSP, eMSP to driver.
+//! The eMSP is not an intermediary earning a fee on somebody else's supply. It
+//! buys electricity and sells electricity, and the Court reached that conclusion
+//! even though the eMSP controls neither when, where nor how much is drawn.
+//!
+//! That is what makes an eMSP a *taxable dealer* in Article 38's sense, and
+//! therefore what makes `[UStG §3g]` engage on the settlement leg at all. Citing
+//! only C-282/22 for it asserts the premise rather than sourcing it — and the
+//! premise is the whole reason a roaming invoice looks different from an ad-hoc
+//! one.
+//!
+//! **The fee that is not electricity.** The same judgment treats a periodic
+//! subscription an eMSP charges its driver — one that buys access rather than
+//! kilowatt-hours — as consideration for a **separate supply of services**, under
+//! its own place-of-supply rule rather than under Article 38 or 39. Nothing here
+//! builds such a line: an invoice is assembled from rated CDRs and every one of
+//! them is electricity. A document carrying both would need a VAT *category* per
+//! line, and this crate gives it one per document. That is a service's document
+//! rather than this crate's, and it is written down here so the boundary is a
+//! decision rather than an oversight.
+//!
 //! # The rule the roaming model runs into
 //!
 //! `[UStG §3g]` — Article 38 of the VAT Directive — says that a supply of
-//! electricity **to a reseller** is made where that reseller is established. An
-//! e-mobility provider buying sessions from a charge point operator in order to
-//! sell them on to its own drivers is exactly a reseller: it does not consume
-//! the electricity, it resells it. So a German CPO settling with a French eMSP
-//! is not making a German supply at all — the place of supply is France, German
-//! VAT does not arise, and the invoice states the reverse charge with the
-//! partner's own VAT identifier on it `[UStG §13b]`.
+//! electricity **to a taxable dealer** is made where that dealer "has established
+//! his business or has a fixed establishment for which the goods are supplied".
+//! An e-mobility provider buying sessions from a charge point operator in order
+//! to sell them on to its own drivers is exactly such a dealer: it does not
+//! consume the electricity, it resells it. So a German CPO settling with a French
+//! eMSP is not making a German supply at all — the place of supply is France, and
+//! German VAT does not arise.
+//!
+//! **What happens there next is a second question, and it has two answers.**
+//! Article 195 makes the *recipient* liable — the reverse charge `[UStG §13b]` —
+//! only "if the supplies are carried out by a taxable person **not established
+//! within that Member State**". A CPO with a fixed establishment or a VAT
+//! registration in the buyer's own country is making an ordinary **local** supply
+//! there, at that country's rate; an invoice stating a reverse charge instead has
+//! dropped tax that was due, and the buyer cannot reclaim against it either. The
+//! place of supply moving and the liability shifting are two facts, and a model
+//! that reads the second off `seller.country != buyer.country` has only asked
+//! about the first. [`TaxStatus::also_established_in`] is where the second is
+//! stated.
 //!
 //! The driver leg is the ordinary one: the eMSP supplies its own customer, and
-//! that supply *is* where the electricity is consumed.
+//! that supply *is* where the electricity is consumed — Article 39, the rule for
+//! every supply of electricity Article 38 does not catch.
 //!
 //! **This is the case the ad-hoc leg does not share.** A driver paying at the
 //! point with a card is not a reseller, so `[UStG §3g]` never engages and the
@@ -88,17 +132,6 @@ use crate::error::BillingError;
 /// table (D183).
 pub use en16931::codes::VatCategory;
 
-/// Whether this category levies tax on this invoice — `en16931`'s
-/// `carries_tax`, under the name the rest of this crate reads it by.
-///
-/// False for every category but `S`, `L`, `M` and `B`, and that is the point:
-/// under a reverse charge the tax exists and is *somebody else's* to declare, so
-/// the invoice's own tax amount is zero and its total is its net.
-#[must_use]
-pub const fn levies_tax(category: VatCategory) -> bool {
-    category.carries_tax()
-}
-
 /// What a counterparty is, for the purpose of deciding the tax.
 ///
 /// Three facts, and every one of them is somebody else's to establish. This type
@@ -121,6 +154,33 @@ pub struct TaxStatus {
     /// for a driver, and false for a fleet operator whose vehicles consume what
     /// it buys.
     pub reseller: bool,
+    /// The **other** countries this party has a fixed establishment or a VAT
+    /// registration in.
+    ///
+    /// # Why one country is not enough
+    ///
+    /// [`Self::country`] answers "where is this party established" — one place,
+    /// and the one Article 38 puts a reseller's supply at. It cannot answer
+    /// "is this party established *there*", and Article 195 asks exactly that
+    /// of the **seller**: the recipient accounts for the tax only where the
+    /// supplier is *not* established in the member state the tax is due in.
+    ///
+    /// A charge point operator running posts across Europe is routinely
+    /// registered in several member states, and with one field the question
+    /// "is the seller established in the buyer's country" collapses into
+    /// "is it the seller's own country" — which answers `no` for every operator
+    /// that has a branch there, and produces a reverse-charge invoice for a
+    /// supply that owed local VAT.
+    ///
+    /// Empty is the ordinary case and means what it says: established in
+    /// [`Self::country`] and nowhere else.
+    ///
+    /// This does **not** model Article 38's second limb — "a fixed
+    /// establishment *for which the goods are supplied*". Which establishment a
+    /// supply is made to is a fact about the transaction rather than about the
+    /// party, and a caller that knows it states it by naming that country in
+    /// [`Self::country`] on the status it passes for this invoice.
+    pub also_established_in: Vec<String>,
 }
 
 impl TaxStatus {
@@ -132,6 +192,7 @@ impl TaxStatus {
             country: country.into(),
             vat_identifier: None,
             reseller: false,
+            also_established_in: Vec::new(),
         }
     }
 
@@ -142,6 +203,7 @@ impl TaxStatus {
             country: country.into(),
             vat_identifier: Some(vat_identifier.into()),
             reseller: false,
+            also_established_in: Vec::new(),
         }
     }
 
@@ -153,7 +215,40 @@ impl TaxStatus {
             country: country.into(),
             vat_identifier: Some(vat_identifier.into()),
             reseller: true,
+            also_established_in: Vec::new(),
         }
+    }
+
+    /// Also established — or VAT-registered — in these countries.
+    ///
+    /// The fact Article 195 turns on, stated by the caller because it lives in a
+    /// customer master and a registration file, like every other fact this type
+    /// carries. See [`Self::also_established_in`].
+    #[must_use]
+    pub fn also_established_in<I, S>(mut self, countries: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.also_established_in = countries
+            .into_iter()
+            .map(|c| c.as_ref().to_ascii_uppercase())
+            .collect();
+        self
+    }
+
+    /// Whether this party is established in a country — its own, or one of the
+    /// others it stated.
+    ///
+    /// Article 195's test, asked of the seller against the place of supply.
+    #[must_use]
+    pub fn established_in(&self, country: &str) -> bool {
+        let country = country.to_ascii_uppercase();
+        self.country.to_ascii_uppercase() == country
+            || self
+                .also_established_in
+                .iter()
+                .any(|c| c.to_ascii_uppercase() == country)
     }
 
     /// Whether this party is established inside the European Union.
@@ -290,19 +385,24 @@ impl TaxTreatment {
     ) -> Result<Self, BillingError> {
         let point = point_country.to_ascii_uppercase();
         let buyer_country = buyer.country.to_ascii_uppercase();
-        let seller_country = seller.country.to_ascii_uppercase();
 
-        // `[UStG §3g]`: a supply of electricity to a reseller is made where the
-        // reseller is established. This is the roaming leg, and it is the only
-        // branch in which the charge point's own country stops deciding.
+        // `[UStG §3g]`: a supply of electricity to a taxable dealer is made
+        // where that dealer is established. This is the roaming leg, and it is
+        // the only branch in which the charge point's own country stops
+        // deciding.
         if buyer.reseller {
-            if buyer_country == seller_country {
-                // A domestic reseller. The place of supply moved to a country
-                // the seller is already registered in, so nothing is shifted —
-                // it is an ordinary domestic supply, taxed at **that** country's
-                // rate and not at the rate where the point stands. The two are
-                // the same for an operator that only operates at home, and
-                // different for one that does not.
+            // Article 195: the recipient accounts for the tax only where the
+            // supplier is **not established** in the member state the tax is due
+            // in. A seller that *is* established there — its own country, or one
+            // it stated a branch or a registration in — is making an ordinary
+            // local supply, taxed at **that** country's rate and not at the rate
+            // where the point stands.
+            //
+            // Reading this off `buyer_country == seller_country` alone, which is
+            // what this branch used to do, answers `not established` for every
+            // operator with a branch in the buyer's country and states a reverse
+            // charge on a supply that owed local VAT (D211).
+            if seller.established_in(&buyer_country) {
                 return Ok(Self {
                     rate: standard_rate(rates, &buyer_country, &point)?,
                     category: VatCategory::Standard,
@@ -502,6 +602,7 @@ mod tests {
             country: "FR".into(),
             vat_identifier: None,
             reseller: true,
+            also_established_in: Vec::new(),
         };
         let err = TaxTreatment::decide(
             &cpo(),
@@ -512,6 +613,44 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("has none"), "{err}");
         assert!(err.to_string().contains("[UStG §3g]"), "{err}");
+    }
+
+    #[test]
+    fn a_seller_established_where_the_tax_is_due_owes_local_vat_not_a_reverse_charge() {
+        // Article 195 shifts the liability only where the supplier is **not
+        // established** in the member state the tax is due in. A German CPO with
+        // a French branch, selling to a French eMSP, is making an ordinary
+        // French supply — and a reverse charge there drops 20 % that was due.
+        let emsp = TaxStatus::reseller("FR", "FR12345678901");
+        let rates = VatRates::new().at("DE", dec("19")).at("FR", dec("20"));
+
+        // Without the branch: the place of supply moves and the liability with
+        // it, which is the ordinary roaming leg.
+        let away = TaxTreatment::decide(&cpo(), &emsp, "DE", &rates).unwrap();
+        assert_eq!(away.category, VatCategory::ReverseCharge);
+
+        // With it: the place of supply still moves — Article 38 is unchanged —
+        // and the liability does not.
+        let registered = cpo().also_established_in(["FR"]);
+        let home = TaxTreatment::decide(&registered, &emsp, "DE", &rates).unwrap();
+        assert_eq!(home.category, VatCategory::Standard);
+        assert_eq!(home.place_of_supply, "FR", "Article 38 still moves it");
+        assert_eq!(home.rate, dec("20"), "and the rate is the place's own");
+        assert_eq!(
+            home.reason, None,
+            "`S` forbids an exemption reason (BR-S-*)"
+        );
+    }
+
+    #[test]
+    fn establishment_is_asked_of_the_seller_and_is_case_insensitive() {
+        let seller = TaxStatus::business("DE", "DE123456789").also_established_in(["fr", "AT"]);
+        assert!(seller.established_in("DE"), "its own country");
+        assert!(seller.established_in("FR"));
+        assert!(seller.established_in("at"));
+        assert!(!seller.established_in("NL"));
+        // The ordinary case states nothing and answers only its own country.
+        assert!(!TaxStatus::business("DE", "DE123456789").established_in("FR"));
     }
 
     #[test]

@@ -67,6 +67,26 @@ pub enum BillingError {
         stated_for: String,
     },
 
+    /// A date will not fit an EN 16931 date.
+    ///
+    /// The standard bounds the year to four digits, which every date a charging
+    /// session carries satisfies — so this cannot arise for an invoice this
+    /// crate built from records. It can for one deserialised from elsewhere,
+    /// and substituting a date there would put a day on the document that
+    /// nothing about the session supports: an issue date `BT-2` no validator
+    /// objects to, or a due date `BT-9` that fell in the past.
+    #[error(
+        "the {what} is {date}, which EN 16931 cannot state: a document carries the day it was \
+         issued and the day it falls due, and substituting one would put a date on the invoice \
+         that nothing about the session supports"
+    )]
+    UnrepresentableDate {
+        /// Which business term.
+        what: String,
+        /// The date that would not fit.
+        date: String,
+    },
+
     /// An amount will not fit the currency's minor unit.
     ///
     /// EN 16931 amounts are exact to two decimals and the standard refuses a

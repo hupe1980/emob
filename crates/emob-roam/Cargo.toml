@@ -50,6 +50,10 @@ emob-eichrecht = { workspace = true }
 # one number cannot be checked from inside any one of the three crates that
 # carry it.
 emob-ocpp      = { workspace = true }
+# Dev only, and only for `tests/the_other_hat.rs`: the EMP half of the platform
+# is a partner's record re-rated at this side's retail price and invoiced to a
+# driver, and that composition spans four crates. No one of them can assert it.
+emob-billing   = { workspace = true }
 hex            = { workspace = true }
 p256           = { workspace = true }
 serde_json     = { workspace = true }
