@@ -41,7 +41,20 @@ use rust_decimal::Decimal;
 use time::macros::datetime;
 
 /// How far apart two slicings of one session may state its exact total.
-const PLACES: u32 = 9;
+///
+/// A **tolerance**, compared against a difference — not a number of places to
+/// round both figures to before comparing them. Rounding is a step function, so
+/// two totals a few units in `Decimal`'s last place apart can straddle a half at
+/// the ninth decimal and round to different figures: `75.5570803125` and
+/// `75.557080312500000000000000002` differ by 2 × 10⁻²⁷ and by one at the ninth
+/// place. That is the failure D245 and D246 are about, in the test written to
+/// catch it (D286).
+const TOLERANCE: Decimal = Decimal::from_parts(1, 0, 0, false, 9);
+
+/// Whether two exact totals agree to within [`TOLERANCE`].
+fn agree(left: Decimal, right: Decimal) -> bool {
+    (left - right).abs() <= TOLERANCE
+}
 
 /// A tiny deterministic generator — the workspace takes no `rand`, and a seeded
 /// integer sequence is what a replayable property test wants anyway.
@@ -278,7 +291,7 @@ fn sliced(stretches: &[Stretch], start: time::OffsetDateTime, pieces: u64) -> Ch
 /// Read off the [`Chargeable`] rather than off the stretches it was built from,
 /// because that is the input the rating is answerable for.
 ///
-/// Compared to [`PLACES`] rather than to the last digit, for the reason stated
+/// Compared to [`TOLERANCE`] rather than to the last digit, for the reason stated
 /// at the top of this file: the two sums group the same pieces differently, and
 /// `Decimal` carries ninety-six bits, so adding values that already spend
 /// twenty-something places on a repeating fraction rounds the last of them.
@@ -318,31 +331,102 @@ fn accounted_for(rated: &Rated, dimension: Dimension) -> Decimal {
     rated.base_quantity_for(dimension) + named
 }
 
-/// A Saturday evening in the German winter, so the weekday and the wall-clock
-/// restrictions both have something to bite on and long sessions cross local
-/// midnight into a Sunday.
-const START: time::OffsetDateTime = datetime!(2026-01-03 21:30 +1);
+/// The instant the generated sessions are anchored to — a **Saturday** evening
+/// in the German winter, which is where every one of them used to begin.
+const ANCHOR: time::OffsetDateTime = datetime!(2026-01-03 21:30 +1);
+
+/// A start instant for one case, drawn across the whole week and the whole
+/// clock.
+///
+/// # Why a constant was not enough, in the one dimension already known to bite
+///
+/// Every session used to begin at [`ANCHOR`], a Saturday at 21:30, and no
+/// generated session runs longer than about nine hours. So every one of them
+/// lay inside Saturday and Sunday — and the weekday element this generator
+/// builds restricts to exactly `{Saturday, Sunday}`. Its answer was therefore
+/// the **same at every instant of every session**, four thousand cases deep:
+/// the midnight cut was placed and changed nothing, and the property that
+/// exists to protect D139 — a weekday changing at an instant the tariff never
+/// names — ran on the one arrangement in which that failure cannot occur.
+///
+/// The wall clock had the same hole from the other side. Restrictions are drawn
+/// on whole hours across the day and a session only ever covered 21:30 to about
+/// 06:30, so a `09:00`–`17:00` band never overlapped a session at all: not a
+/// threshold that was crossed and checked, but an element that never matched.
+///
+/// Drawing the day and the hour puts Friday→Saturday and Sunday→Monday — the
+/// two transitions where the weekend price actually changes — and the whole
+/// clock inside the generator's reach (D285).
+fn start_at(rng: &mut Rng) -> time::OffsetDateTime {
+    let day = i64::try_from(rng.between(0, 6)).expect("in range");
+    let minute = i64::try_from(rng.between(0, 24 * 60 - 1)).expect("in range");
+    ANCHOR.replace_time(time::Time::MIDNIGHT)
+        + time::Duration::days(day)
+        + time::Duration::minutes(minute)
+}
 
 #[test]
 fn the_total_does_not_depend_on_how_finely_the_session_was_sliced() {
     let mut rng = Rng(0x5EED_1234_ABCD_0001);
 
+    // The weekend restriction is the one dimension a bug has already been found
+    // in (D139), and the generator used to be unable to exercise it: every
+    // session began on a Saturday and ended by Sunday, so `{Saturday, Sunday}`
+    // answered the same at every instant of every one of them. Counted, so it
+    // cannot narrow back.
+    let mut weekdays_started_on: Vec<time::Weekday> = Vec::new();
+    let mut crossed_the_weekend_edge = 0usize;
+    let mut crossed_a_midnight = 0usize;
+
     for case in 0..2000 {
         let t = tariff(&mut rng);
         let stretches = session(&mut rng);
+        let start = start_at(&mut rng);
 
-        let coarse = rate(&t, &sliced(&stretches, START, 1)).exact_total();
-        let quarterly = rate(&t, &sliced(&stretches, START, 4)).exact_total();
-        let fine = rate(&t, &sliced(&stretches, START, 37)).exact_total();
+        let coarse = rate(&t, &sliced(&stretches, start, 1)).exact_total();
+        let quarterly = rate(&t, &sliced(&stretches, start, 4)).exact_total();
+        let fine = rate(&t, &sliced(&stretches, start, 37)).exact_total();
 
         for other in [quarterly, fine] {
-            assert_eq!(
-                coarse.amount().round_dp(PLACES),
-                other.amount().round_dp(PLACES),
+            assert!(
+                agree(coarse.amount(), other.amount()),
                 "case {case}: one session, two slicings, two prices ({coarse} vs {other})"
             );
         }
+
+        let seconds: u64 = stretches.iter().map(|s| s.seconds).sum();
+        let end = start + time::Duration::seconds(i64::try_from(seconds).expect("in range"));
+        if !weekdays_started_on.contains(&start.weekday()) {
+            weekdays_started_on.push(start.weekday());
+        }
+        if start.date() != end.date() {
+            crossed_a_midnight += 1;
+            let weekend = |d: time::OffsetDateTime| {
+                matches!(d.weekday(), time::Weekday::Saturday | time::Weekday::Sunday)
+            };
+            if weekend(start) != weekend(end) {
+                crossed_the_weekend_edge += 1;
+            }
+        }
     }
+
+    assert_eq!(
+        weekdays_started_on.len(),
+        7,
+        "the generator started sessions on {} of the seven weekdays",
+        weekdays_started_on.len()
+    );
+    assert!(
+        crossed_a_midnight > 100,
+        "only {crossed_a_midnight} of 2000 sessions crossed a local midnight, so the cut D139 \
+         added was placed on almost nothing"
+    );
+    assert!(
+        crossed_the_weekend_edge > 25,
+        "only {crossed_the_weekend_edge} sessions crossed **into or out of** the weekend, which \
+         is the only arrangement in which the weekday restriction changes its answer mid-session \
+         — the shape a fixed Saturday start made unreachable (D285)"
+    );
 }
 
 #[test]
@@ -375,7 +459,7 @@ fn a_tier_boundary_inside_a_period_too_short_to_hold_it_still_tiers() {
     };
 
     let kwh = |s: &str| Energy::from_kwh(s.parse::<Decimal>().unwrap()).unwrap();
-    let at = |s: u64| START + time::Duration::seconds(i64::try_from(s).unwrap());
+    let at = |s: u64| ANCHOR + time::Duration::seconds(i64::try_from(s).unwrap());
 
     // Ten kilowatt-hours in a hundred seconds, as one period and as fifty
     // two-second slices of 0.2 kWh each. Four at 0.30 and six at 0.42 = 3.72.
@@ -422,7 +506,7 @@ fn every_quantity_is_either_priced_or_named() {
 
     for case in 0..2000 {
         let t = tariff(&mut rng);
-        let chargeable = sliced(&session(&mut rng), START, 3);
+        let chargeable = sliced(&session(&mut rng), start_at(&mut rng), 3);
         let rated = rate(&t, &chargeable);
         let priced = t.dimensions();
 
@@ -434,10 +518,11 @@ fn every_quantity_is_either_priced_or_named() {
             if !priced.contains(&dimension) {
                 continue;
             }
-            assert_eq!(
-                accounted_for(&rated, dimension).round_dp(PLACES),
-                actual.round_dp(PLACES),
-                "case {case}: {dimension} was neither charged for nor named"
+            let accounted = accounted_for(&rated, dimension);
+            assert!(
+                agree(accounted, actual),
+                "case {case}: {dimension} was neither charged for nor named ({accounted} \
+                 accounted for, {actual} measured)"
             );
         }
     }
@@ -449,7 +534,7 @@ fn every_line_reproduces_its_own_amount() {
 
     for case in 0..2000 {
         let t = tariff(&mut rng);
-        let rated = rate(&t, &sliced(&session(&mut rng), START, 5));
+        let rated = rate(&t, &sliced(&session(&mut rng), start_at(&mut rng), 5));
         assert!(
             rated.lines_reconcile(),
             "case {case}: a line does not explain its own amount: {:?}",

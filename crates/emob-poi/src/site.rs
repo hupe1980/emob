@@ -13,6 +13,8 @@
 //! facts that change when somebody sends an engineer, not when somebody plugs
 //! in. What changes on a minute's notice is [`crate::status`].
 
+pub use emob_core::ConnectorType;
+
 use emob_core::{AdHocPayment, CurrentType, EvseId, PartyId, TimeZone, V2gCommunication};
 use rust_decimal::Decimal;
 
@@ -84,56 +86,6 @@ pub struct Address {
     pub city: String,
     /// ISO 3166-1 alpha-2.
     pub country_code: String,
-}
-
-/// A charging interface, in the profile's own vocabulary.
-///
-/// `[DATEX-II-Profil Tab. A.88]` enumerates about forty; these are the ones a
-/// European public point can carry. The variants are named for what they are
-/// rather than for the profile's spelling — [`ConnectorType::as_profile_str`]
-/// does the translation, and it is the only place the wire spelling appears.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum ConnectorType {
-    /// IEC 62196 Type 2, the European AC socket.
-    Iec62196T2,
-    /// IEC 62196 Type 2 with the DC pins — CCS2, the European DC standard.
-    Iec62196T2Combo,
-    /// IEC 62196 Type 1, the North American and Japanese AC plug.
-    Iec62196T1,
-    /// IEC 62196 Type 1 with DC pins — CCS1.
-    Iec62196T1Combo,
-    /// `CHAdeMO`.
-    Chademo,
-    /// A domestic socket of type F — the German *Schuko*.
-    DomesticF,
-    /// CEE 400 V industrial, three phase, 16 A.
-    Cee5,
-}
-
-impl ConnectorType {
-    /// The spelling `[DATEX-II-Profil Tab. A.88]` uses.
-    #[must_use]
-    pub const fn as_profile_str(self) -> &'static str {
-        match self {
-            Self::Iec62196T2 => "iec62196T2",
-            Self::Iec62196T2Combo => "iec62196T2COMBO",
-            Self::Iec62196T1 => "iec62196T1",
-            Self::Iec62196T1Combo => "iec62196T1COMBO",
-            Self::Chademo => "chademo",
-            Self::DomesticF => "domesticF",
-            Self::Cee5 => "cee5",
-        }
-    }
-
-    /// Whether this interface carries direct current.
-    #[must_use]
-    pub const fn is_dc(self) -> bool {
-        matches!(
-            self,
-            Self::Iec62196T2Combo | Self::Iec62196T1Combo | Self::Chademo
-        )
-    }
 }
 
 /// One socket or tethered cable, and what it can deliver.
@@ -221,6 +173,94 @@ impl ChargingPoint {
     /// sent to a concrete pad.
     pub fn report(&self, status: crate::status::PointStatus) -> Result<crate::status::Report> {
         crate::status::Report::checked(&self.facility.id, self.lifecycle, status)
+    }
+
+    /// The compliance profile of this point, as far as the **inventory** knows
+    /// it.
+    ///
+    /// # The seam this closes
+    ///
+    /// [`emob_core::ChargePointProfile`]'s own documentation has always said
+    /// that "`emob-poi` builds it from the OCPI model", and no such function
+    /// existed: every field of every profile the calendar judged was typed in
+    /// by a caller. That is the workspace's third rule — *a check fed by a
+    /// caller is not a check* — at the largest scale it occurs in. A point
+    /// whose connectors are `[AFIR Anh. II 1.1]`'s subject is published to the
+    /// national access point out of `self.connectors`, and was judged out of
+    /// whatever a compliance report happened to be handed.
+    ///
+    /// So the facts the inventory holds come from the inventory: the
+    /// identifier, the current, the power, **the interfaces**, how a driver
+    /// with no contract pays, which vehicle-communication generations the point
+    /// speaks, and whether the register says it is live.
+    ///
+    /// # What it cannot answer, and does not pretend to
+    ///
+    /// Everything else is left at [`ChargePointProfile::bare`](emob_core::ChargePointProfile::bare)'s value for the
+    /// caller to state — the notice dates, the metering posture, the price
+    /// indication, the ownership arrangement. Those live in a register export,
+    /// a type approval and a contract, and a bridge that guessed them would put
+    /// the fault this function exists to remove one layer further in.
+    ///
+    /// `commissioned_on` is an argument for the same reason: a location model
+    /// says a point is operating, not since when, and `[LSV26 §4(1) Nr. 1]`'s
+    /// deadline runs from a date.
+    ///
+    /// ```
+    /// use emob_poi::{ChargingPoint, Connector, ConnectorType, Facility};
+    /// use emob_core::Accessibility;
+    /// use emob_core::obligation::{ObligationId, Status, assess};
+    /// use rust_decimal::Decimal;
+    /// use time::macros::date;
+    ///
+    /// let point = ChargingPoint::new(
+    ///     Facility::new("DE*ABC*P1"),
+    ///     "DE*ABC*E123*1".parse()?,
+    ///     Connector::new(ConnectorType::Chademo, Decimal::from(50)),
+    /// );
+    /// let profile = point.profile(date!(2025 - 01 - 01), Accessibility::Public);
+    ///
+    /// // A CHAdeMO-only DC post: lawful hardware, unlawful as the only
+    /// // interface `[AFIR Anh. II 1.2]` — and the finding comes off the
+    /// // inventory rather than off a flag somebody set.
+    /// let report = assess(&profile, date!(2026 - 06 - 01));
+    /// assert_eq!(
+    ///     report.status_of(ObligationId::AfirAnnexIiConnector),
+    ///     Some(Status::Failing)
+    /// );
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn profile(
+        &self,
+        commissioned_on: time::Date,
+        accessibility: emob_core::Accessibility,
+    ) -> emob_core::ChargePointProfile {
+        let mut profile =
+            emob_core::ChargePointProfile::bare(self.evse_id.clone(), commissioned_on);
+        profile.accessibility = accessibility;
+        profile.current_type = self.current_type;
+        profile.rated_power_kw = self.max_power_kw;
+        profile.connectors = self.connectors.iter().map(|c| c.kind).collect();
+        // IEC 61851-1 Mode 2 — an ordinary socket with an in-cable control box
+        // — is what a point offering *only* domestic sockets is, and it is the
+        // applicability limb of `[DA-656 Anh. 2.1.3]`. Read off the interfaces
+        // rather than taken as a flag, for the same reason as the rest.
+        profile.domestic_socket = !self.connectors.is_empty()
+            && self
+                .connectors
+                .iter()
+                .all(|c| c.kind == ConnectorType::DomesticF);
+        profile.ad_hoc_payment = self.ad_hoc_payment;
+        profile.v2g = self.v2g;
+        // A decommissioned point is out of service; the register's own notice
+        // dates are not the inventory's to state.
+        profile.registration = emob_core::Registration {
+            decommissioning: (self.lifecycle == Lifecycle::Decommissioned)
+                .then(|| emob_core::Notice::unreported(commissioned_on)),
+            ..emob_core::Registration::default()
+        };
+        profile
     }
 
     /// Whether `[AFIR Art. 5]` treats this point as a fast one.
@@ -457,5 +497,57 @@ mod tests {
         let latitude = Decimal::from_str_exact("50.779599").unwrap();
         assert_eq!(latitude.to_string(), "50.779599");
         assert_eq!(latitude.scale(), 6);
+    }
+
+    #[test]
+    fn the_profile_the_calendar_judges_comes_off_the_inventory() {
+        use emob_core::obligation::{ObligationId, Status, assess};
+
+        // One inventory, two audiences: the same connector list that reaches
+        // the national access point is the one `[AFIR Anh. II 1.2]` is judged
+        // against. Before this bridge existed the second one was whatever a
+        // report was handed.
+        let mut post = point("p1", "DE*ABC*E00001", 150);
+        let on = time::macros::date!(2026 - 06 - 01);
+        let commissioned = time::macros::date!(2025 - 01 - 01);
+
+        let profile = post.profile(commissioned, emob_core::Accessibility::Public);
+        assert_eq!(profile.rated_power_kw, kw(150));
+        assert_eq!(profile.current_type, CurrentType::Dc);
+        assert_eq!(
+            assess(&profile, on).status_of(ObligationId::AfirAnnexIiConnector),
+            Some(Status::Satisfied)
+        );
+
+        // Swap the interface for one Annex II does not admit on its own and the
+        // finding follows, with nothing else touched.
+        post.connectors = vec![Connector::new(ConnectorType::Chademo, kw(150))];
+        assert_eq!(
+            assess(
+                &post.profile(commissioned, emob_core::Accessibility::Public),
+                on
+            )
+            .status_of(ObligationId::AfirAnnexIiConnector),
+            Some(Status::Failing)
+        );
+
+        // A garage socket is Mode 2, and the bridge reads that off the
+        // interfaces rather than taking it as a flag — which is what keeps
+        // `[DA-656 Anh. 2.1.3]` off it.
+        let schuko = ChargingPoint::new(
+            Facility::new("p2"),
+            EvseId::parse("DE*ABC*E00002").unwrap(),
+            Connector::new(ConnectorType::DomesticF, kw(3)),
+        );
+        assert!(
+            schuko
+                .profile(commissioned, emob_core::Accessibility::Private)
+                .domestic_socket
+        );
+        assert!(
+            !post
+                .profile(commissioned, emob_core::Accessibility::Public)
+                .domestic_socket
+        );
     }
 }

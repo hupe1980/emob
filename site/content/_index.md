@@ -1,7 +1,7 @@
 +++
 title = "emob"
 template = "index.html"
-description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, a quarter-hour split that conserves energy exactly, one tariff that reaches the driver, the roaming partner and the national access point as one number, AFIR and Eichrecht as executable cited rules, and no binary float anywhere near the money."
+description = "Open-source EV charging operations for Europe — CPO and eMSP in one Rust workspace. Signed meter values, exact settlement, AFIR and Eichrecht as code."
 +++
 
 Someone plugs in a car. Four minutes later a number exists that two companies
@@ -139,8 +139,8 @@ sessions unverifiable.
 
 Twelve domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
 `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`, `emob-poi`, `emob-roam`,
-`emob-billing`, `emob-thg`, `emob-service` and `emob-sim` — with four daemons on
-top of them and **842 tests**. The domain crates do no I/O, read no clock and
+`emob-billing`, `emob-thg`, `emob-service` and `emob-sim` — with seven daemons on
+top of them and **913 tests**. The domain crates do no I/O, read no clock and
 hold no binary floats.
 
 What that buys, concretely:
@@ -165,6 +165,10 @@ What that buys, concretely:
   and postings that balance — with the rounding stated rather than absorbed, and
   a cross-border settlement taxed where the reseller is established rather than
   where the charge point stands;
+- the closing itself is a decision rather than a batch: the invoice number is
+  spent once, a period that has been closed is not closed again, a re-rated month
+  cancels before it re-bills, and nothing reaches the books until the recipient's
+  platform has accepted the document;
 - the year's greenhouse-gas quota is filed from the same records, by both the
   routes the Verordnung gives — a public point's metered kilowatt-hours and a
   depot's registered vehicles — and a point that fails one of the four conditions
@@ -176,9 +180,9 @@ What that buys, concretely:
   is a leaf nothing consumes, and its principal cannot hold a capability that
   writes.
 
-Plug & Charge contracts, smart charging, and the daemons that peer and invoice
-are designed and not yet built. Every page here marks ✅ built and 📐 designed,
-and the gap between the two is never blurred.
+Plug & Charge contracts and smart charging are designed and not yet built. Every
+page here marks ✅ built and 📐 designed, and the gap between the two is never
+blurred.
 
 <div class="cta">
 

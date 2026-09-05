@@ -108,7 +108,7 @@ pub use en16931::{Specification, Syntax};
 pub use error::BillingError;
 pub use invoice::{
     Cancelled, Contact, Counterparty, DocumentAdjustment, DocumentAdjustmentKind, DocumentKind,
-    Invoice, InvoiceBuilder, InvoiceLine, PaymentDetails, TaxSubtotal, unit_code,
+    Invoice, InvoiceBuilder, InvoiceLine, PaymentDetails, Subscription, TaxSubtotal, unit_code,
 };
 pub use payment::{Collection, Creditor, Mandate, PaymentError};
 pub use postings::{Posting, Postings, Role, Side};

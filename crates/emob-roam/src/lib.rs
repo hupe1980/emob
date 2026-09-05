@@ -117,6 +117,6 @@ pub use ocpi::preflight::{Finding, Report, Severity, SignedDataPolicy, preflight
 // OCPI wire, and two enums for one concept is a conversion table between two
 // vocabularies that agree.
 pub use emob_core::Role;
-pub use partner::{OcpiVersion, Partner, PartnerRegistry, Reach};
+pub use partner::{DEFAULT_SETTLEMENT_WINDOW, OcpiVersion, Partner, PartnerRegistry, Reach, Wire};
 pub use signed::SignedPayload;
 pub use token::{RoamingToken, TokenType};

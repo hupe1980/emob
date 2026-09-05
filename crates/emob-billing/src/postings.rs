@@ -66,13 +66,29 @@ pub enum Role {
     /// accounting even where one invoice carries both, and an operator that
     /// cannot see the split cannot answer what its occupancy fees earned.
     ServiceRevenue,
-    /// VAT owed to a tax authority, at one rate.
+    /// VAT owed to **one** tax authority, at one rate.
     ///
-    /// Carries the rate, because an operator posts 19 % and 7 % to different
-    /// accounts and a role that could not say which would collapse them.
+    /// # Two fields, because a liability has a creditor
+    ///
+    /// The rate is here because an operator posts 19 % and 7 % to different
+    /// accounts and a role that could not say which would collapse them. The
+    /// **place of supply** is here for the sharper version of the same reason: a
+    /// VAT liability is owed to a named tax authority, and a document may now
+    /// carry two.
+    ///
+    /// C-60/23 is what makes that ordinary rather than exotic. A German
+    /// provider's monthly fee to a private driver is taxed in Germany
+    /// `[UStG §3a(1)]` while the electricity beside it is taxed where it was
+    /// drawn `[UStG §3g]`, so one invoice can owe 19 % in two countries — and
+    /// where the two rates happen to be equal, a role keyed on the rate alone
+    /// posts them to one account and an operator files one of them in the wrong
+    /// country (D270).
     VatPayable {
         /// The rate, as a percentage.
         rate: Decimal,
+        /// The country whose VAT this is — the place of supply the treatment
+        /// concluded.
+        place_of_supply: String,
     },
 }
 
@@ -82,7 +98,10 @@ impl core::fmt::Display for Role {
             Self::Receivable => f.write_str("receivable"),
             Self::EnergyRevenue => f.write_str("energy revenue"),
             Self::ServiceRevenue => f.write_str("service revenue"),
-            Self::VatPayable { rate } => write!(f, "VAT payable at {rate} %"),
+            Self::VatPayable {
+                rate,
+                place_of_supply,
+            } => write!(f, "VAT payable in {place_of_supply} at {rate} %"),
         }
     }
 }
@@ -251,7 +270,10 @@ pub fn postings_for(invoice: &Invoice) -> Postings {
             && !subtotal.tax.is_zero()
         {
             postings.push(Posting {
-                role: Role::VatPayable { rate },
+                role: Role::VatPayable {
+                    rate,
+                    place_of_supply: subtotal.place_of_supply.clone(),
+                },
                 side: Side::Credit,
                 amount: subtotal.tax,
             });
@@ -828,7 +850,10 @@ mod tests {
                     amount: dec("2.52"),
                 },
                 Posting {
-                    role: Role::VatPayable { rate: dec("19") },
+                    role: Role::VatPayable {
+                        rate: dec("19"),
+                        place_of_supply: "DE".to_owned(),
+                    },
                     side: Side::Credit,
                     amount: dec("2.79"),
                 },

@@ -80,6 +80,45 @@ fn tariff(rng: &mut Rng) -> Tariff {
     if rng.chance(50) {
         t.min_price = Some(PriceLimit::gross(dec(rng.between(0, 400), 2)));
     }
+    // A tariff whose energy price is **conditional**, and a block size on the
+    // occupancy fee. Both are shapes an operator writes on purpose — a
+    // promotional first tier, a fee billed in whole minutes — and neither was
+    // reachable: every generated tariff priced energy unconditionally, in one
+    // step, so the two lawful ways a billed quantity differs from a measured one
+    // were the one region this property never entered. Ten per cent of the
+    // records built from a generator that could reach them were records the
+    // builder emitted and the validator blocked (D258).
+    if rng.chance(35) {
+        t.elements.insert(
+            0,
+            emob_tariff::TariffElement {
+                components: vec![PriceComponent::new(
+                    Dimension::Energy,
+                    dec(rng.between(20, 60), 2),
+                )],
+                restrictions: emob_tariff::Restrictions {
+                    min_kwh: Some(Decimal::from(rng.between(1, 25))),
+                    ..emob_tariff::Restrictions::default()
+                },
+            },
+        );
+        // …and half the time nothing behind it, so the first kilowatt-hours are
+        // charged by nothing at all rather than by a cheaper tier.
+        if rng.chance(50) {
+            t.elements.retain(|e| {
+                e.component(Dimension::Energy).is_none() || e.restrictions.min_kwh.is_some()
+            });
+        }
+    }
+    if rng.chance(30)
+        && let Some(component) = t
+            .elements
+            .iter_mut()
+            .flat_map(|e| e.components.iter_mut())
+            .find(|c| c.dimension == Dimension::ParkingTime)
+    {
+        *component = component.clone().with_step_size(60 * 15);
+    }
     // A reservation element, so a generated record can carry the **second**
     // rating a CDR holds. Without it the property below said nothing about the
     // half of `Cost` that `validate` had never read (D250).
@@ -173,6 +212,8 @@ fn a_record_that_builds_is_a_record_that_validates() {
     let mut built = 0usize;
     let mut refused = 0usize;
     let mut reserved = 0usize;
+    let mut gave_energy_away = 0usize;
+    let mut rounded_to_a_block = 0usize;
 
     for case in 0..1000 {
         let t = tariff(&mut rng);
@@ -206,6 +247,23 @@ fn a_record_that_builds_is_a_record_that_validates() {
         // 1. The builder emits nothing its own validator blocks — except the
         //    one finding that is about evidence rather than arithmetic, and
         //    nothing here is signed.
+        if let Some(cost) = &cdr.cost {
+            if !cost
+                .rated
+                .unpriced_for(emob_tariff::Dimension::Energy)
+                .is_zero()
+            {
+                gave_energy_away += 1;
+            }
+            if !cost
+                .rated
+                .block_surplus_for(emob_tariff::Dimension::ParkingTime)
+                .is_zero()
+            {
+                rounded_to_a_block += 1;
+            }
+        }
+
         let report = validate(&cdr);
         assert!(
             report
@@ -265,6 +323,16 @@ fn a_record_that_builds_is_a_record_that_validates() {
         reserved > 200,
         "only {reserved} records carried a reservation, so the second rating on a `Cost` \
          is a shape this property does not reach"
+    );
+    assert!(
+        gave_energy_away > 100,
+        "only {gave_energy_away} records left energy unpriced, so the shape that blocked a lawful \
+         promotional tariff is one this property does not reach"
+    );
+    assert!(
+        rounded_to_a_block > 50,
+        "only {rounded_to_a_block} records rounded a duration to a block, so the other lawful \
+         difference between a billed quantity and a measured one is unreached"
     );
     assert!(
         refused < 200,

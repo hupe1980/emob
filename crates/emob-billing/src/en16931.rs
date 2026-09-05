@@ -64,7 +64,6 @@ const GENERAL_INFORMATION: &str = "AAI";
 
 use crate::error::BillingError;
 use crate::invoice::{Counterparty, DocumentAdjustmentKind, Invoice, InvoiceLine, PaymentDetails};
-use crate::tax::VatCategory;
 
 /// The specification a document is written against — BT-24, **and** the rule
 /// set it is judged by.
@@ -228,8 +227,8 @@ pub fn to_en16931(
         invoice.currency.as_str(),
     )
     .business_process(BILLING_PROCESS)
-    .seller(party(&invoice.seller, invoice.treatment.category))
-    .buyer(party(&invoice.buyer, invoice.treatment.category));
+    .seller(party(&invoice.seller, invoice.exclusive_category))
+    .buyer(party(&invoice.buyer, invoice.exclusive_category));
 
     if let Some(terms) = &invoice.payment_terms {
         builder = builder.payment_terms(terms.clone());
@@ -246,30 +245,10 @@ pub fn to_en16931(
 
     builder = adjustments(invoice, builder)?;
 
-    // BG-23 is stated rather than reconciled from the lines, because the
-    // category and its reason are a property of the whole document — a supply is
-    // a reverse charge or it is not — and `build_reconciled` would recompute the
-    // numbers and then have nowhere to put the reason. The numbers are the ones
-    // `crate::Invoice` already computed and asserts it can reproduce.
+    // BG-23 **repeats**, one entry per category and rate, because a document
+    // can carry two supplies in two places at once (D269).
     for subtotal in &invoice.tax {
-        let mut entry = VatBreakdown {
-            taxable_amount: amount(subtotal.taxable, invoice, "taxable amount")?,
-            tax_amount: amount(subtotal.tax, invoice, "tax amount")?,
-            category: Code::new(subtotal.category.code()),
-            // `None` under `O`, the only category that states no rate:
-            // `BR-O-05`'s breakdown sibling refuses the field, and zero is the
-            // field. `TaxSubtotal::rate` already carries the distinction.
-            rate: subtotal.rate.map(Percentage::new),
-            exemption_reason: None,
-            exemption_reason_code: None,
-        };
-        if subtotal.category.requires_exemption_reason() {
-            // BT-120. `[UStG §14a]` asks for the same sentence in German law,
-            // and `TaxTreatment` is where it was decided rather than invented
-            // here.
-            entry.exemption_reason.clone_from(&invoice.treatment.reason);
-        }
-        builder = builder.vat_breakdown(entry);
+        builder = builder.vat_breakdown(vat_breakdown(invoice, subtotal)?);
     }
 
     let totals = totals_of(invoice)?;
@@ -479,7 +458,7 @@ fn adjustments(
             base_amount: None,
             percentage: None,
             vat: LineVat {
-                category: Code::new(invoice.treatment.category.code()),
+                category: Code::new(adjustment.vat_category.code()),
                 rate: adjustment.vat_rate.map(Percentage::new),
             },
             reason: Some(adjustment.reason.clone()),
@@ -542,7 +521,7 @@ fn invoice_line(
                 .then(|| Code::new(line.unit_code())),
         },
         vat: LineVat {
-            category: Code::new(invoice.treatment.category.code()),
+            category: Code::new(line.vat_category.code()),
             rate: vat_rate,
         },
         item: Item {
@@ -596,12 +575,45 @@ fn payer_notes(
     mut builder: en16931::invoice::InvoiceBuilder,
 ) -> en16931::invoice::InvoiceBuilder {
     for note in &invoice.notes {
-        builder = builder.coded_note(
-            en16931::invoice::InvoiceNote::new(format!("{}: {}", note.cdr, note.text))
-                .with_subject(GENERAL_INFORMATION),
-        );
+        let text = note
+            .cdr
+            .as_ref()
+            .map_or_else(|| note.text.clone(), |cdr| format!("{cdr}: {}", note.text));
+        builder = builder
+            .coded_note(en16931::invoice::InvoiceNote::new(text).with_subject(GENERAL_INFORMATION));
     }
     builder
+}
+
+/// One BG-23 entry, from the subtotal `crate::Invoice` already computed.
+///
+/// Stated rather than reconciled from the lines: the exemption reason is a
+/// sentence `TaxTreatment` decided and `build_reconciled` would recompute the
+/// numbers and then have nowhere to put it. The numbers are the ones the invoice
+/// asserts it can reproduce.
+fn vat_breakdown(
+    invoice: &Invoice,
+    subtotal: &crate::invoice::TaxSubtotal,
+) -> Result<VatBreakdown, BillingError> {
+    let mut entry = VatBreakdown {
+        taxable_amount: amount(subtotal.taxable, invoice, "taxable amount")?,
+        tax_amount: amount(subtotal.tax, invoice, "tax amount")?,
+        category: Code::new(subtotal.category.code()),
+        // `None` under `O`, the only category that states no rate: `BR-O-05`'s
+        // breakdown sibling refuses the field, and zero is the field.
+        // `TaxSubtotal::rate` already carries the distinction.
+        rate: subtotal.rate.map(Percentage::new),
+        exemption_reason: None,
+        exemption_reason_code: None,
+    };
+    if subtotal.category.requires_exemption_reason() {
+        // BT-120. `[UStG §14a]` asks for the same sentence in German law, and
+        // `TaxTreatment` is where it was decided rather than invented here.
+        entry
+            .exemption_reason
+            .clone_from(&subtotal.exemption_reason);
+    }
+    Ok(entry)
 }
 
 /// BG-16, from the invoice's own statement of how it will be paid.
@@ -632,7 +644,7 @@ fn payment_instructions(details: &PaymentDetails) -> PaymentInstructions {
     }
 }
 
-/// A party, as the document's own VAT category permits it to be stated.
+/// A party, as the document's own tax statement permits it to be stated.
 ///
 /// # The identifier that has to be left off
 ///
@@ -647,8 +659,13 @@ fn payment_instructions(details: &PaymentDetails) -> PaymentInstructions {
 /// A German operator invoicing a reseller established outside the Union
 /// therefore omits its own identifier from that document, which is exactly the
 /// field a platform would fill in from a customer master without asking.
-fn party(counterparty: &Counterparty, category: VatCategory) -> Party {
-    let identifiers_allowed = category != VatCategory::OutOfScope;
+///
+/// The question is asked of the **document** rather than of a category, because
+/// `O` is exclusive: `BR-O-11` … `BR-O-14` forbid it to share one at all, so a
+/// document either states nothing else or is refused before it reaches here.
+/// [`Invoice::exclusive_category`] is that fact, decided once by the builder.
+fn party(counterparty: &Counterparty, exclusive: bool) -> Party {
+    let identifiers_allowed = !exclusive;
     Party {
         name: Some(counterparty.name.clone()),
         trading_name: None,

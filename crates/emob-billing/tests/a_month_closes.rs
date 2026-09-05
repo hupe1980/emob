@@ -329,7 +329,10 @@ fn a_driver_month_closes_from_the_meter_to_the_books() {
         vec![
             &postings::Role::Receivable,
             &postings::Role::EnergyRevenue,
-            &postings::Role::VatPayable { rate: dec("19") },
+            &postings::Role::VatPayable {
+                rate: dec("19"),
+                place_of_supply: "DE".to_owned(),
+            },
         ],
         "a driver invoice moves a receivable, revenue and the VAT it owes"
     );
@@ -363,8 +366,8 @@ fn a_roaming_settlement_is_a_reverse_charge_and_the_books_show_no_vat() {
     .unwrap()
     .value;
 
-    assert_eq!(invoice.treatment.category, VatCategory::ReverseCharge);
-    assert_eq!(invoice.treatment.place_of_supply, "FR");
+    assert_eq!(invoice.tax[0].category, VatCategory::ReverseCharge);
+    assert_eq!(invoice.tax[0].place_of_supply, "FR");
     assert_eq!(invoice.tax_total().to_string(), "0.00 EUR");
     // The taxable amount is the same 26.08: what moved is who declares the tax.
     assert_eq!(invoice.taxable_total().to_string(), "26.08 EUR");
@@ -836,9 +839,13 @@ fn a_settlement_outside_the_union_is_outside_the_scope_and_states_neither_a_rate
     .unwrap()
     .value;
 
-    assert_eq!(invoice.treatment.category, VatCategory::OutOfScope);
-    assert_eq!(invoice.treatment.category.code(), "O");
-    assert_eq!(invoice.treatment.place_of_supply, "CH");
+    assert_eq!(invoice.tax[0].category, VatCategory::OutOfScope);
+    assert_eq!(invoice.tax[0].category.code(), "O");
+    assert_eq!(invoice.tax[0].place_of_supply, "CH");
+    assert!(
+        invoice.exclusive_category,
+        "`O` may not share a document [BR-O-11..14]"
+    );
     assert_eq!(invoice.tax_total().to_string(), "0.00 EUR");
     assert_eq!(invoice.gross_total().to_string(), "26.08 EUR");
 
@@ -870,5 +877,244 @@ fn a_settlement_outside_the_union_is_outside_the_scope_and_states_neither_a_rate
             .roles()
             .iter()
             .any(|role| matches!(role, postings::Role::VatPayable { .. }))
+    );
+}
+
+/// The same estate's tariff, quoting **no** VAT rate of its own.
+///
+/// The ordinary shape for an operator whose points stand in more than one
+/// country: what a supply is taxed at is decided by where it happens, and a
+/// tariff that states a rate is stating one about its own gross price.
+fn tariff_without_a_stated_rate() -> Tariff {
+    Tariff::simple(
+        "cross-border".parse().unwrap(),
+        Currency::EUR,
+        TariffKind::AdHoc,
+        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+        vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+    )
+}
+
+#[test]
+fn the_courts_own_facts_are_one_document_with_two_supplies_in_one_place() {
+    // C-60/23 (*Digital Charging Solutions*, 17 October 2024). The provider
+    // bills "first for the quantity of electricity supplied on a monthly basis,
+    // and second for access to the network and adjacent services", and the fixed
+    // fee is charged "regardless of whether the user actually purchased
+    // electricity during the relevant period". The Court held the access to be a
+    // **separate and independent** supply of services.
+    //
+    // A German provider, German points and a private driver: two supplies, and
+    // they happen to land in the same country at the same rate — so EN 16931
+    // states one breakdown group, correctly. What makes it worth a test is that
+    // nothing here *assumed* they would agree.
+    let party = PartyId::new("DE", "ABC").unwrap();
+    let mut ledger = CdrLedger::new();
+    let (session, evidence) = session(0, "s-1", "100.000", "129.500");
+    let cdr = CdrBuilder::from_session(&session, Direction::Import)
+        .unwrap()
+        .key(party, "cdr-sub".parse().unwrap())
+        .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
+        .rated_with(&tariff())
+        .build()
+        .unwrap();
+    assert!(ledger.accept(cdr).is_stored());
+
+    let invoice = InvoiceBuilder::new(
+        "R-2026-0100",
+        date!(2026 - 07 - 01),
+        (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),
+        cpo(),
+        Counterparty::new("Jan de Vries", "Amsterdam", TaxStatus::consumer("NL")),
+    )
+    .supplied_from("DE", dec("19"))
+    .subscription(emob_billing::Subscription::new(
+        "network access, June 2026",
+        dec("4.99"),
+        date!(2026 - 06 - 01),
+        date!(2026 - 06 - 30),
+    ))
+    .ledger(&ledger)
+    .due_on(date!(2026 - 07 - 15))
+    .build()
+    .unwrap()
+    .value;
+
+    // The fee is a line with no record behind it: it is owed whether or not the
+    // driver ever plugged in, which is the fact the Court turned on.
+    let fee = invoice.lines.last().unwrap();
+    assert_eq!(fee.description, "network access, June 2026");
+    assert_eq!(fee.net, dec("4.99"));
+    assert_eq!(fee.vat_category, VatCategory::Standard);
+    assert_eq!(fee.started_at.date(), date!(2026 - 06 - 01));
+
+    // Both supplies are German and standard-rated, so BG-23 has one group —
+    // 12.15 of electricity plus 4.99 of access.
+    assert_eq!(invoice.tax.len(), 1);
+    assert_eq!(invoice.tax[0].place_of_supply, "DE");
+    assert_eq!(invoice.tax[0].taxable, dec("17.14"));
+    assert!(invoice.reconciles());
+}
+
+#[test]
+fn a_subscription_is_a_second_supply_and_the_document_states_two_places_of_supply() {
+    // C-60/23 (*Digital Charging Solutions*, 17 October 2024). The provider
+    // bills "first for the quantity of electricity supplied on a monthly basis,
+    // and second for access to the network and adjacent services", and the fixed
+    // fee is charged "regardless of whether the user actually purchased
+    // electricity during the relevant period". The Court held the access to be a
+    // **separate and independent** supply of services.
+    //
+    // Separate means it does not follow the electricity anywhere. This is the
+    // document `emob-billing` would not build until the VAT category moved onto
+    // the line where EN 16931 has always had it (D269).
+    let party = PartyId::new("DE", "ABC").unwrap();
+    let mut ledger = CdrLedger::new();
+    let (session, evidence) = session(0, "s-1", "100.000", "129.500");
+    let cdr = CdrBuilder::from_session(&session, Direction::Import)
+        .unwrap()
+        .key(party, "cdr-sub".parse().unwrap())
+        .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
+        .rated_with(&tariff_without_a_stated_rate())
+        .build()
+        .unwrap();
+    assert!(ledger.accept(cdr).is_stored());
+
+    // The same provider and driver, and a charge point in **France**. The
+    // electricity moves and the subscription does not, which is the whole of
+    // what "separate and independent" means.
+    let invoice = InvoiceBuilder::new(
+        "R-2026-0100",
+        date!(2026 - 07 - 01),
+        (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),
+        cpo(),
+        Counterparty::new("Jan de Vries", "Amsterdam", TaxStatus::consumer("NL")),
+    )
+    .supplied_from("FR", dec("20"))
+    .vat_rate_in("DE", dec("19"))
+    .subscription(emob_billing::Subscription::new(
+        "network access, June 2026",
+        dec("4.99"),
+        date!(2026 - 06 - 01),
+        date!(2026 - 06 - 30),
+    ))
+    .ledger(&ledger)
+    .due_on(date!(2026 - 07 - 15))
+    .build()
+    .unwrap()
+    .value;
+
+    // The electricity is taxed where it was drawn `[UStG §3g]`…
+    let energy = invoice
+        .tax
+        .iter()
+        .find(|t| t.rate == Some(dec("20")))
+        .expect("the French supply");
+    assert_eq!(energy.place_of_supply, "FR");
+    assert_eq!(energy.category, VatCategory::Standard);
+
+    // …and the fee where the **supplier** is `[UStG §3a(1)]`, because a service
+    // to a private person does not follow its customer.
+    let service = invoice
+        .tax
+        .iter()
+        .find(|t| t.rate == Some(dec("19")))
+        .expect("the German supply");
+    assert_eq!(service.place_of_supply, "DE");
+    assert_eq!(service.taxable, dec("4.99"));
+    assert_eq!(service.tax, dec("0.95"));
+
+    // One document, two subtotals, and every line naming its own category.
+    assert_eq!(invoice.tax.len(), 2);
+    assert!(!invoice.exclusive_category);
+    assert_eq!(
+        invoice.lines.last().unwrap().description,
+        "network access, June 2026"
+    );
+    assert!(invoice.reconciles());
+
+    // The books owe VAT to **two** tax authorities, and a role keyed on the
+    // rate alone would have collapsed them the moment the two rates matched
+    // (D270).
+    let books = postings::postings_for(&invoice);
+    assert!(books.balances(), "{books:?}");
+    let owed: Vec<String> = books
+        .roles()
+        .iter()
+        .filter(|role| matches!(role, postings::Role::VatPayable { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        owed,
+        vec!["VAT payable in DE at 19 %", "VAT payable in FR at 20 %"]
+    );
+
+    // …and the standard accepts the document, which is the check that matters:
+    // BT-151 per line and BG-23 repeating are what EN 16931 was always shaped
+    // for.
+    let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core).unwrap();
+    assert!(
+        crossed.value.is_valid(),
+        "{:?}",
+        crossed.value.reasons().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        crossed.value.invoice.vat_breakdown.len(),
+        2,
+        "BG-23 repeats, which is what the standard was always shaped for"
+    );
+}
+
+#[test]
+fn a_tariff_that_states_its_own_rate_at_a_point_in_another_country_says_so() {
+    // `[UStG §3g]` and Article 39 move where a supply is taxed; they do not move
+    // the gross price a driver was shown. A tariff written for a German estate
+    // and priced at a French point states 19 % inside a supply France taxes at
+    // 20 %, and both readings are wrong to impose in silence: overriding changes
+    // what the driver pays, and ignoring it leaves a document whose stated place
+    // of supply and stated rate belong to two different countries (D271).
+    let party = PartyId::new("DE", "ABC").unwrap();
+    let mut ledger = CdrLedger::new();
+    let (session, evidence) = session(0, "s-1", "100.000", "129.500");
+    let cdr = CdrBuilder::from_session(&session, Direction::Import)
+        .unwrap()
+        .key(party, "cdr-1".parse().unwrap())
+        .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
+        // The tariff states 19 % of its own.
+        .rated_with(&tariff())
+        .build()
+        .unwrap();
+    assert!(ledger.accept(cdr).is_stored());
+
+    let crossed = InvoiceBuilder::new(
+        "R-2026-0101",
+        date!(2026 - 07 - 01),
+        (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),
+        cpo(),
+        Counterparty::new(
+            "Erika Mustermann",
+            "Beispielstadt",
+            TaxStatus::consumer("DE"),
+        ),
+    )
+    // …and the point stands in France.
+    .supplied_from("FR", dec("20"))
+    .ledger(&ledger)
+    .due_on(date!(2026 - 07 - 15))
+    .build()
+    .unwrap();
+
+    let invoice = &crossed.value;
+    assert_eq!(invoice.tax[0].place_of_supply, "FR");
+    assert_eq!(
+        invoice.tax[0].rate,
+        Some(dec("19")),
+        "the gross price the driver was shown is not moved"
+    );
+    let said = crossed.reasons().collect::<Vec<_>>();
+    assert!(
+        said.iter()
+            .any(|note| note.contains("does not levy") && note.contains("FR")),
+        "{said:?}"
     );
 }

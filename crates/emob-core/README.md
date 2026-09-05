@@ -255,9 +255,24 @@ for finding in report.failing() {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Forty duties from AFIR, Delegated Regulation (EU) 2025/656, LSV 2026,
-MessEG/PTB-A, the THG-Quote's four preconditions and the NIS2/CRA cybersecurity regime,
-as dated, cited, executable rules. Four properties make it trustworthy:
+**47 duties** from AFIR — Article 5 **and Annex II**, the interface requirement
+`[LSV26 §5]` lets the regulator close a point over — Delegated Regulation (EU)
+2025/656, LSV 2026, the Preisangabenverordnung, MessEG/PTB-A, the THG-Quote's
+four preconditions and the NIS2/CRA cybersecurity regime, as dated, cited,
+executable rules. Four properties make it trustworthy:
+
+The `[MessEG]` rows are the half of the Eichrecht that is about **dates and
+paperwork** rather than signatures — an estate can verify every record end to end
+and fail all of them. The verification period is the one that costs money: eight
+years `[MessEV Anl. 7 Nr. 6.7]`, from the placing on the market
+`[MessEG §37(1) S. 2]`, ending with the calendar year `[MessEV §34(2)]`. It is
+the only duty here that is a fact about the **day it is asked on**, which is why
+a rule's satisfaction test takes that date.
+
+The `[PAngV §14]` rows are the ones no European model carries: the *Arbeitspreis*
+at the post since **28.05.2022**, at **any** power, by one of three named media —
+so a 22 kW post priced by the minute alone is lawful under `[AFIR Art. 5(4)]`
+and an Ordnungswidrigkeit here.
 
 Three of them come from `[REA 6-A]`, the Regelermittlungsausschuss's e-mobility
 rulebook, and all three bind a DC station that meters on the **AC side, before
@@ -347,6 +362,11 @@ Two things in that regime are easy to get wrong, and both are tested:
   06.12.2025, and the calendar uses the German day. The Cyber Resilience Act
   beside it is a Regulation, so `[CRA Art. 71]`'s own dates apply directly
   everywhere.
+- **…and a window the statute grants is part of the duty.** The German law gives
+  the *registration* three months from the day an undertaking comes into scope,
+  so one already in scope when the law applied owed it from 06.03.2026. That
+  entry is dated from the day its window closes; the four beside it carry no
+  transitional provision and are dated from the day the law applies.
 
 A test asserts that every duty in the calendar is answerable by **exactly one**
 of the three profiles, so none can go quietly unassessable — and so that adding
@@ -354,10 +374,10 @@ a fourth subject cannot leave a duty behind.
 
 ### Every entry is exercisable in both directions
 
-Forty duties, each a pair of closures. A `satisfied` that reads the wrong field —
+Forty-seven duties, each a pair of closures. A `satisfied` that reads the wrong field —
 or the right one negated — answers every question about that duty confidently and
 wrongly, and a report is clean either way: nothing fails, and there is no
-arithmetic to disagree. One property covers all of them (D256):
+arithmetic to disagree. One property covers all of them:
 
 ```rust
 // 1. A subject that does everything the calendar asks fails nothing.
@@ -407,6 +427,28 @@ for a duration, the day names for a weekday — and `Currency`, `QuarterHour` an
 `ClockResolution` write themselves. Reading runs through the validating
 constructors, so a bad currency code, a clock resolution above `[REA 6-A §3.1]`'s
 cap and a quarter hour off the settlement grid are refused on the way in.
+
+### …and so does everything else that can refuse
+
+Those three were the only ones for a long time, and the rule they state is
+general: **a constructor that states a rule is the door the wire comes through**,
+or the rule holds everywhere except where values arrive from. A
+`derive(Deserialize)` restores a value and asks the type nothing, and a store, an
+outbox or a partner's document is exactly that path.
+
+`Energy` is the one that mattered most. It is a non-negative magnitude with
+`Direction` beside it, so that a V2G discharge can never cancel a draw inside one
+billing period — and a `#[serde(transparent)]` derive read `-10.000` straight
+into it. `PartyId` is the other: it now travels as the one string it is written
+as, `DE*ABC`, read back through the `FromStr` that accepts all five spellings the
+market uses, where the derived two-member form accepted
+`{"country_code":"Deutschland","party_id":"!"}` and made a lower-case party
+compare unequal to the same party. Every opaque id refuses the blank its `new`
+refuses.
+
+`cargo xtask check-constructors` is the rule rather than the habit: a type whose
+fields are private and whose construction can refuse may not *derive*
+`Deserialize`.
 
 Every identifier here reads back the way it writes, `PartyId` included. A type
 with a `Display` and no `FromStr` cannot round-trip, and every caller that reads

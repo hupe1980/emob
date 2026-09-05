@@ -1,13 +1,12 @@
 +++
 title = "The Eichrecht chain"
 weight = 2
-description = "How a signed meter value becomes an invoice line: the questions kept apart, which quantity each failure takes away, and the reason a valid signature is not enough."
+description = "How a signed meter value becomes an invoice line: the questions kept apart, which quantity each failure takes away, and why a valid signature is not enough."
 
 [extra]
+state = "built"
 nav = "Eichrecht"
 +++
-
-# The Eichrecht chain ✅
 
 German calibration law makes a kilowatt-hour bill valid only if the customer can
 verify the measured value against a conformity-assessed meter, arbitrarily long
@@ -52,6 +51,43 @@ bill and the driver still has to be able to check it.
 What happens to a verified quantity next is
 [sessions and settlement](@/docs/settlement.md); what turns it into money is
 [tariffs](@/docs/pricing.md).
+
+## …and the half of the Eichrecht that no signature answers
+
+Everything above is about the **record**. `[MessEG §31(2)]` puts four duties on
+whoever *uses the meter* and `[MessEG §33(2)]` one on whoever uses its *values*,
+and an estate can verify every record end to end and be in breach of all five.
+They live in the [obligation calendar](@/docs/compliance.md) rather than here,
+because none of them is a fact about a set of signed records.
+
+**The verification period is the one that costs money.** `[MessEG §37(1)]`
+forbids using a meter once its Eichfrist has run, and three sentences decide when
+that is:
+
+- it starts at the **placing on the market** for an MID instrument, not at
+  commissioning and not at any Eichung `[MessEG §37(1) S. 2]`;
+- it runs **eight** years for charging equipment `[MessEV Anl. 7 Nr. 6.7]`, where
+  the general default is two;
+- and it ends *"mit dem Ende des Jahres, in dem die Frist rechnerisch endet"*
+  `[MessEV §34(2)]`.
+
+So a meter placed on the market in March 2018 runs to 31 December 2026. Compute
+it in 365-day blocks instead and two leap days put the answer on 30 December
+2025 — which the third sentence then turns into a whole year of kilowatt-hours
+billed off a meter that may not be used.
+
+**A firmware push is an intervention.** `[MessEG §31(2) Nr. 4]` wants the record
+of every maintenance, repair or *"elektronisch vorgenommene"* measure on the
+meter, kept three months past the period and at most five years. A CSMS is what
+performs those, and it is the one retention **figure** the German metrology texts
+give.
+
+**And the party that measured nothing still owes a confirmation.**
+`[MessEG §33(2)]` asks whoever uses measured values to have the meter's operator
+confirm that it meets its own duties. A provider re-billing a roaming session
+cannot inspect that meter and is not excused: the confirmation is a clause in a
+roaming agreement. It is the duty a single-hat model cannot see, because an
+operator billing its own sessions is both parties.
 
 ## The format is `ocmf`'s, and that is the point
 
@@ -255,6 +291,20 @@ a test asserts that every finding takes away at least one — a finding that
 disqualified nothing would be a finding that changes no answer. The gate is
 enforced one layer up too: `emob-cdr` refuses to price a per-minute tariff
 against evidence that cannot carry a duration, and names the fix.
+
+The mapping reads both ways, and the second direction is the one a dispute needs.
+`Evidence::reasons` lists everything wrong with the records; `reasons_for` lists
+what took **one** quantity away:
+
+```rust
+evidence.reasons_for(Disqualifies::Duration);   // the clock
+evidence.reasons_for(Disqualifies::Energy);     // empty — the register held up
+```
+
+Without it a caller could ask whether the minutes were billable and never why
+not, so an operator answering a driver's dispute about an occupancy fee was
+handed everything the chain found — including the parts that took nothing away
+from it.
 
 ### A user assignment can fail
 

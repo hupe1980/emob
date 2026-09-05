@@ -336,9 +336,9 @@ fn a_partners_record_becomes_this_sides_invoice() {
     .expect("the driver's invoice");
     let invoice = crossing.value;
 
-    assert_eq!(invoice.treatment.place_of_supply, "DE");
+    assert_eq!(invoice.tax[0].place_of_supply, "DE");
     assert_eq!(
-        invoice.treatment.category,
+        invoice.tax[0].category,
         emob_billing::VatCategory::Standard,
         "a driver is not a reseller, so [UStG §3g] never engages"
     );

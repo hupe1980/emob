@@ -18,7 +18,7 @@
 //! somebody who will be invoiced for it.
 
 use emob_core::{Activity, Energy, IdentificationStrength};
-use emob_tariff::{Dimension, Rated, RatingNote};
+use emob_tariff::{Dimension, Rated};
 use rust_decimal::Decimal;
 
 use crate::cdr::Cdr;
@@ -125,9 +125,19 @@ pub enum Finding {
     /// Only raised when the price actually **charges** for energy. A tariff
     /// with no energy component charges nothing per kWh and prices no
     /// kilowatt-hours, which is not a mismatch — see [`Self::EnergyNotPriced`].
+    ///
+    /// Nor is a difference the rating already **accounts for**: a `step_size`
+    /// bills up to a block more than was delivered and a dimension nothing
+    /// matched is charged nothing at all, and both are stated on the record.
+    /// `accounted` is the billed quantity with those two put back, and it is
+    /// what has to equal `total`. See
+    /// [`emob_tariff::Rated::accounted_quantity_for`].
     CostEnergyMismatch {
-        /// The energy the price was computed for.
+        /// The energy the price was computed for, in kWh.
         priced: Decimal,
+        /// …and the same figure with the block rounding taken back off and the
+        /// unpriced quantity added on: what the price says was delivered.
+        accounted: Decimal,
         /// The energy the record claims.
         total: Energy,
     },
@@ -187,12 +197,16 @@ pub enum Finding {
     /// per minute, so a record billing ninety minutes of a sixty-minute session
     /// is thirty minutes the payer is asked to accept on the sender's word. A
     /// block rounding legitimately bills up to one block more and says so in a
-    /// note, which is the one excess this does not report.
+    /// note — so the block it declares is **subtracted**, exactly, rather than
+    /// excusing whatever excess happens to sit beside it (D258).
     CostDurationExceedsRecord {
         /// Which time dimension.
         dimension: Dimension,
         /// The seconds the price charged for.
         priced_seconds: Decimal,
+        /// …with the block it declared taken back off and the seconds it
+        /// reported unpriced added on: what the price says was there.
+        accounted_seconds: Decimal,
         /// The seconds the record's own periods account for.
         record_seconds: Decimal,
     },
@@ -415,9 +429,13 @@ impl core::fmt::Display for Finding {
                 f,
                 "the signed record claims {signed} identification but the authorisation path supports at most {ceiling}"
             ),
-            Self::CostEnergyMismatch { priced, total } => write!(
+            Self::CostEnergyMismatch {
+                priced,
+                accounted,
+                total,
+            } => write!(
                 f,
-                "the price was computed for {priced} kWh but the record claims {total}"
+                "the price was computed for {priced} kWh — {accounted} kWh once its own block rounding and unpriced quantity are put back — and the record claims {total}"
             ),
             Self::EnergyNotPriced { total } => write!(
                 f,
@@ -442,10 +460,11 @@ impl core::fmt::Display for Finding {
             Self::CostDurationExceedsRecord {
                 dimension,
                 priced_seconds,
+                accounted_seconds,
                 record_seconds,
             } => write!(
                 f,
-                "the price charges {priced_seconds} s of {dimension} and the record's own periods account for {record_seconds} s"
+                "the price charges {priced_seconds} s of {dimension} — {accounted_seconds} s once its own block rounding and unpriced quantity are put back — and the record's own periods account for {record_seconds} s"
             ),
             Self::DirectionMismatch { claimed, signed } => write!(
                 f,
@@ -626,23 +645,37 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
     // kWh" as "this price was computed for 0 kWh" and refused every lawful
     // per-minute tariff below 50 kW as a blocking arithmetic fault.
     //
-    // A block rounding legitimately bills more than was delivered, and says
-    // so in a note, so it is not a mismatch — anything else is.
+    // # What stands lawfully between a billed quantity and a measured one
     //
-    // The note has to be **this dimension's**. Read as "any block rounding
-    // anywhere", a `step_size` on an occupancy fee excused an energy quantity
-    // that did not match the record — which is the one blocking finding here
-    // that catches a partner pricing a different session's kilowatt-hours, and
-    // the time half of this function already scopes its own excuse per
-    // dimension. Two readings of one rule in one function is one of them wrong.
+    // Two things, and the rating states both on the record:
+    //
+    // - a `step_size` bills up to one block **more** than was delivered
+    //   `[OCPI 2.3.0 §mod_cdrs_step_size]`;
+    // - a dimension no element matched is charged **nothing** — *"there will be
+    //   no costs for that Tariff Dimension"* `[OCPI 2.3.0 §Tariff]` — which is
+    //   how a promotional first tier and a night-only energy price are written.
+    //
+    // Comparing the billed figure against the record read the second as an
+    // arithmetic fault: a lawful "the first 10 kWh are free" tariff priced 20 of
+    // a 30 kWh session, and this **blocked the record** — so the builder emitted
+    // a document its own validator refused, `emob-billing` declined to invoice a
+    // session that had been delivered and charged for, and the whole month
+    // stopped. The first excuse was the mirror image: any block note at all
+    // waved through *any* excess, so a partner declaring a `step_size` could
+    // over-bill without bound (D258).
+    //
+    // So the comparison is against the rating's own account of what was
+    // delivered — `emob_tariff::Rated::accounted_quantity_for`, which is the
+    // billed quantity less the block it declared plus the quantity it reported
+    // unpriced. Exact, and what is left over is a price computed for a different
+    // session, which is the one thing this finding is for.
     match cost.rated.amount_for(Dimension::Energy) {
         Some(_) => {
-            let priced = cost.rated.quantity_for(Dimension::Energy);
-            let rounded_up = rounded_to_block(cost, Dimension::Energy);
-            if priced != cdr.total_energy.kwh() && !(rounded_up && priced > cdr.total_energy.kwh())
-            {
+            let accounted = cost.rated.accounted_quantity_for(Dimension::Energy);
+            if accounted != cdr.total_energy.kwh() {
                 findings.push(Finding::CostEnergyMismatch {
-                    priced,
+                    priced: cost.rated.base_quantity_for(Dimension::Energy),
+                    accounted,
                     total: cdr.total_energy,
                 });
             }
@@ -694,7 +727,12 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
     // piece absorbs the remainder), so this is an exact comparison rather than
     // an approximate one.
     for dimension in [Dimension::Time, Dimension::ParkingTime] {
-        let priced = cost.rated.base_quantity_for(dimension);
+        // The same account the energy check reads, and for the same reason: a
+        // block rounding is an excess the rating declares, so it is subtracted
+        // rather than treated as a blanket excuse. The excuse used to be the
+        // mere *presence* of a note, which let a partner declaring a `step_size`
+        // bill any number of minutes it liked (D258).
+        let accounted_by_the_price = cost.rated.accounted_quantity_for(dimension);
         // Which activity a dimension may be charged against — and the third
         // one, which may be charged against neither `[OCPI 2.3.0
         // §mod_cdrs_chargingperiod_class]`. A partner pricing occupancy over
@@ -703,10 +741,15 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
         let accounted = seconds_of(cdr, |activity| {
             Dimension::pricing(activity) == Some(dimension)
         });
-        if priced > accounted && !rounded_to_block(cost, dimension) {
+        // One-sided. Charging for fewer minutes than the record accounts for is
+        // the payer's gain and the specification's own answer to a dimension
+        // nothing matched; charging for more is money the record does not
+        // support.
+        if accounted_by_the_price > accounted {
             findings.push(Finding::CostDurationExceedsRecord {
                 dimension,
-                priced_seconds: priced,
+                priced_seconds: cost.rated.base_quantity_for(dimension),
+                accounted_seconds: accounted_by_the_price,
                 record_seconds: accounted,
             });
         }
@@ -810,21 +853,6 @@ fn check_rating(rated: &Rated, part: CostPart, findings: &mut Vec<Finding>) {
     }
 }
 
-/// Whether the rating rounded **this dimension** up to a block size.
-///
-/// The one excess a quantity check must not report: `step_size` bills up to one
-/// block more than was delivered, lawfully, and says so in a note. Asked per
-/// dimension, because a block on the occupancy fee says nothing about the
-/// kilowatt-hours.
-fn rounded_to_block(cost: &crate::cdr::Cost, dimension: Dimension) -> bool {
-    cost.rated.notes.iter().any(|note| {
-        matches!(
-            note,
-            RatingNote::RoundedToBlock { dimension: rounded, .. } if *rounded == dimension
-        )
-    })
-}
-
 /// The whole seconds the record's own periods spend in activities `keep`
 /// admits.
 ///
@@ -889,6 +917,7 @@ mod tests {
     use emob_core::{Currency, Direction, IdentificationStrength, PartyId};
     use emob_session::{AuthPath, Provenance, QuarterHour};
     use emob_tariff::PriceLimit;
+    use emob_tariff::RatingNote;
     use emob_tariff::{PriceComponent, Tariff, TariffKind};
     use std::str::FromStr;
     use time::macros::datetime;
@@ -1393,6 +1422,107 @@ mod tests {
                 .any(|f| matches!(f, Finding::CostEnergyMismatch { .. })),
             "{:?}",
             report.findings
+        );
+    }
+
+    #[test]
+    fn a_quantity_the_rating_gave_away_is_not_a_quantity_it_got_wrong() {
+        // "The first 10 kWh are free, then 0.49" — written the way `[OCPI 2.3.0
+        // §Tariff]`'s per-dimension rule invites, with the energy element
+        // restricted and nothing behind it. The specification answers a
+        // dimension nothing matched with *"there will be no costs for that
+        // Tariff Dimension"*, so this is a price, not a fault.
+        //
+        // Comparing the billed quantity against the record read it as one and
+        // **blocked** the record. `CdrBuilder` has no such gate, so the builder
+        // emitted a document its own validator refused — and `emob-billing`
+        // refuses to invoice what `validate` blocks, so a delivered, charged
+        // session stopped a whole month's billing over a promotional tariff
+        // (D258).
+        let mut cdr = good_cdr();
+        let mut promo = energy_tariff("0.49");
+        promo.elements[0].restrictions.min_kwh = Some(dec("10"));
+        cdr.cost = Some(rated(&cdr, &promo));
+
+        let priced = &cdr.cost.as_ref().unwrap().rated;
+        assert_eq!(priced.base_quantity_for(Dimension::Energy), dec("8.000"));
+        assert_eq!(priced.unpriced_for(Dimension::Energy), dec("10.000"));
+
+        let report = validate(&cdr);
+        assert!(
+            report.is_settleable(),
+            "a promotional first tier is a price: {:?}",
+            report.reasons().collect::<Vec<_>>()
+        );
+        // …and the quantity nobody was charged for still travels, as the
+        // warning it is.
+        assert!(report.warnings().any(|f| matches!(
+            f,
+            Finding::RatingNote { note, .. } if note.contains("10.000 kWh was not charged")
+        )));
+    }
+
+    #[test]
+    fn a_declared_block_excuses_the_block_and_not_whatever_sits_beside_it() {
+        // The mirror of the case above. A `step_size` bills up to one block
+        // more than was delivered, lawfully — and the excuse used to be the
+        // mere *presence* of the note, so a partner declaring a block on the
+        // dimension could over-bill it without bound. The block a rating
+        // declares is now subtracted, exactly, and the remainder is the fault
+        // (D258).
+        let mut cdr = good_cdr();
+        let mut tariff = energy_tariff("0.49");
+        tariff.elements[0]
+            .components
+            .push(PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_step_size(3600));
+        cdr.periods.push(ChargingPeriod {
+            quarter_hour: QuarterHour::containing(at(30)),
+            start: at(30),
+            end: at(40),
+            energy: Energy::ZERO,
+            activity: Activity::Parked,
+            provenance: Provenance::Measured,
+        });
+        cdr.ended_at = at(40);
+        cdr.cost = Some(rated(&cdr, &tariff));
+
+        // Ten minutes of occupancy, rounded up to the hour: lawful, and stated.
+        let priced = &cdr.cost.as_ref().unwrap().rated;
+        assert_eq!(
+            priced.base_quantity_for(Dimension::ParkingTime),
+            dec("3600")
+        );
+        assert_eq!(
+            priced.block_surplus_for(Dimension::ParkingTime),
+            dec("3000")
+        );
+        assert!(validate(&cdr).is_settleable());
+
+        // Now a partner bills four hours behind the same one-hour block.
+        let mut over = cdr.cost.take().unwrap();
+        let line = over
+            .rated
+            .lines
+            .iter_mut()
+            .find(|l| l.dimension == Dimension::ParkingTime)
+            .unwrap();
+        line.base_quantity = dec("14400");
+        line.quantity = dec("4");
+        line.amount = dec("24.00");
+        cdr.cost = Some(over);
+
+        let report = validate(&cdr);
+        assert!(!report.is_settleable());
+        assert!(
+            report.findings.iter().any(|f| matches!(
+                f,
+                Finding::CostDurationExceedsRecord {
+                    dimension: Dimension::ParkingTime,
+                    ..
+                }
+            )),
+            "{:?}",
+            report.reasons().collect::<Vec<_>>()
         );
     }
 

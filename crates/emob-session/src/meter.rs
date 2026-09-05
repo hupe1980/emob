@@ -142,10 +142,34 @@ impl MeterReading {
 /// their supplier's balance group unaccounted for — the same rule
 /// `mako-emob` enforces on the market side `[A6 §IV.1]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct MeterSeries {
     direction: Direction,
     readings: Vec<MeterReading>,
+}
+
+/// Read back through [`MeterSeries::new`], because the ordering, the single
+/// direction and the register that never runs backwards are what the type
+/// **is**.
+///
+/// A derived `Deserialize` restored the fields and asked none of it, so a series
+/// read from a store could interleave two directions, contradict itself about
+/// one instant, or run its register backwards — and every consumer downstream
+/// takes differences of exactly those numbers (D264).
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for MeterSeries {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        #[derive(serde::Deserialize)]
+        struct AsSent {
+            direction: Direction,
+            readings: Vec<MeterReading>,
+        }
+
+        let sent = AsSent::deserialize(deserializer)?;
+        Self::new(sent.direction, sent.readings).map_err(D::Error::custom)
+    }
 }
 
 impl MeterSeries {
@@ -336,6 +360,29 @@ mod tests {
             Direction::Import,
             context,
         )
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_series_arrives_through_the_constructor_that_orders_it() {
+        // The ordering, the single direction and the register that never runs
+        // backwards are what the type is. A derived `Deserialize` restored the
+        // fields and asked none of it, and every consumer downstream takes
+        // differences of exactly those numbers (D264).
+        let backwards = r#"{"direction":"import","readings":[
+            {"at":"2026-01-02T10:00:00+01:00","register":"110.000","direction":"import","context":"TransactionBegin","signed":false},
+            {"at":"2026-01-02T10:15:00+01:00","register":"100.000","direction":"import","context":"TransactionEnd","signed":false}]}"#;
+        assert!(serde_json::from_str::<MeterSeries>(backwards).is_err());
+
+        let mixed = r#"{"direction":"import","readings":[
+            {"at":"2026-01-02T10:00:00+01:00","register":"100.000","direction":"export","context":"TransactionBegin","signed":false}]}"#;
+        assert!(serde_json::from_str::<MeterSeries>(mixed).is_err());
+
+        let ordinary = r#"{"direction":"import","readings":[
+            {"at":"2026-01-02T10:00:00+01:00","register":"100.000","direction":"import","context":"TransactionBegin","signed":false},
+            {"at":"2026-01-02T10:15:00+01:00","register":"110.000","direction":"import","context":"TransactionEnd","signed":false}]}"#;
+        let series: MeterSeries = serde_json::from_str(ordinary).unwrap();
+        assert_eq!(series.total().unwrap().to_string(), "10.000 kWh");
     }
 
     #[test]

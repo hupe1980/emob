@@ -60,6 +60,62 @@ pub enum BillingError {
         reasons: Vec<String>,
     },
 
+    /// A bound is deeper than everything charged at the category it lands in,
+    /// so one allowance cannot express it without stating a negative taxable
+    /// amount.
+    ///
+    /// # Why this is a refusal rather than a sign
+    ///
+    /// `emob_tariff::Adjustment` carries **one** VAT category — the largest
+    /// line's — and EN 16931 gives one allowance one category and one rate
+    /// (BT-95, BT-96). `BR-S-08` then makes a category's taxable amount its
+    /// lines minus its allowances, so a cap of € 3.00 on a session made of
+    /// € 5.00 of energy at 19 % beside a € 20.00 fee at 7 % states
+    /// **BT-116 = −2.00** in the 7 % category.
+    ///
+    /// Nothing objects. The document reconciles, the totals chain holds, and
+    /// **all 317 of the standard's own rules pass**, because none of them
+    /// forbids a negative category on a positive invoice — while no partner and
+    /// no tax office accepts one. `emob_tariff` reports it as
+    /// `RatingNote::AdjustmentExceedsCategory` on the record, and the note alone
+    /// was never going to stop a document being sent.
+    ///
+    /// # …and why the refusal is here rather than a split
+    ///
+    /// EN 16931 has the room — BG-20 is repeatable, so several allowances in
+    /// several categories would express it. What it costs is the *rating*: a
+    /// bound is solved against the total in **both** bases
+    /// `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]`, and reaching the gross
+    /// limb from the net one needs one factor. Spread the cut across two rates
+    /// and that factor is a function of how it was spread, so the tariff's own
+    /// gross ceiling stops being met — which is a worse failure than the one
+    /// being fixed, and it is a decision about *which supplies a cap reduces*
+    /// rather than an arithmetic gap (see `R13`).
+    ///
+    /// So the document refuses and names the shortfall. The remedy is the
+    /// operator's: state the maximum after taxes as well, or price the session
+    /// so the cap falls inside one category.
+    #[error(
+        "the record {cdr} is capped by {amount} and only {available} is charged at the {} the \
+         bound falls in, so that category's taxable amount would be {shortfall} — a negative \
+         BT-116 under a positive invoice, which EN 16931's own rules do not forbid and no tax \
+         office accepts. State the tariff's maximum after taxes as well, or price the session so \
+         the cap falls inside one VAT category",
+        vat.map_or_else(|| "category that states no rate".to_owned(), |rate| format!("{rate} % rate"))
+    )]
+    AdjustmentExceedsCategory {
+        /// Which record.
+        cdr: String,
+        /// The category the bound falls in, as a percentage.
+        vat: Option<Decimal>,
+        /// The signed amount of the bound.
+        amount: Decimal,
+        /// What the record charges in that category.
+        available: Decimal,
+        /// What the category's taxable amount would come to.
+        shortfall: Decimal,
+    },
+
     /// The record carries energy that flowed **out** of the vehicle.
     ///
     /// A V2G discharge is a supply in the other direction — the driver supplies,

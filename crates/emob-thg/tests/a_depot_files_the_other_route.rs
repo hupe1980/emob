@@ -304,3 +304,25 @@ fn the_route_a_claim_is_filed_under_decides_its_deadline() {
         date!(2027 - 11 - 15)
     );
 }
+
+#[test]
+fn a_published_estimate_arrives_through_its_own_constructor() {
+    // `Estimate::announced` refuses a negative, because the figure multiplies
+    // into `[38k §5(3)]`'s reference value and out the other side as an
+    // emissions saving. A derived `Deserialize` restored it from a store
+    // without asking, which is the one path a value in a filing arrives by
+    // (D264).
+    let announced =
+        Estimate::announced(dec("2000"), VehicleClass::Other, "BAnz AT 31.10.2026 B5").unwrap();
+    let json = serde_json::to_string(&announced).expect("a published estimate serialises");
+    assert_eq!(
+        serde_json::from_str::<Estimate>(&json).expect("and reads back"),
+        announced
+    );
+
+    let negative = json.replace("2000", "-2000");
+    assert!(
+        serde_json::from_str::<Estimate>(&negative).is_err(),
+        "a negative published estimate is not one"
+    );
+}

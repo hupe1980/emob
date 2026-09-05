@@ -1,0 +1,38 @@
+[package]
+name        = "billd"
+description = "The service that closes a month: it decides when an invoice is issued, what number it carries, which one it supersedes, and which account each posting lands in — and never what a document says"
+publish     = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-billing = { workspace = true }
+emob-cdr     = { workspace = true }
+emob-core    = { workspace = true }
+emob-service = { workspace = true }
+
+# The journal. **The only manifest in this workspace that may declare it**: it
+# takes `uuid`/`v7`, and therefore a clock, so no crate promising replay may
+# carry it in its graph — which `cargo xtask check-graph` enforces (D181).
+doubleentry  = { workspace = true }
+
+anyhow       = { workspace = true }
+rust_decimal = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+emob-eichrecht = { workspace = true }
+emob-session   = { workspace = true }
+emob-tariff    = { workspace = true }
+hex            = { workspace = true }
+ocmf           = { workspace = true }
+p256           = { workspace = true }
+sha2           = { workspace = true }
+time           = { workspace = true, features = ["macros"] }

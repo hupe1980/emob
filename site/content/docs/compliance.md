@@ -1,13 +1,12 @@
 +++
 title = "The obligation calendar"
 weight = 8
-description = "AFIR, DA-656, LSV 2026, MessEG, the THG preconditions and the NIS2/CRA cybersecurity regime as dated, cited, executable rules over three subjects — why applicability and satisfaction stay separate questions, and why a duty has to know who it binds."
+description = "AFIR, DA-656, LSV 2026, PAngV, MessEG, THG and NIS2 as dated, cited, executable rules over three subjects — charge point, provider and undertaking."
 
 [extra]
+state = "built"
 nav = "Compliance"
 +++
-
-# The obligation calendar ✅
 
 European charging regulation is a set of duties with dates attached. Most of
 them arrive between 2024 and 2028, several bind only some points, some bind the
@@ -44,7 +43,7 @@ a provider, and in breach again as a company.
 
 ## What is in it
 
-Forty duties over three subjects.
+**47 duties** over three subjects.
 
 | Duty | Source | From | Reads |
 |---|---|---|---|
@@ -56,6 +55,10 @@ Forty duties over three subjects.
 | At ≥ 50 kW the ad-hoc price is **based on a price per kWh** | `[AFIR Art. 5(4)]` | 13.04.2024 | deployed ≥ 13.04.2024 |
 | At ≥ 50 kW the €/kWh and any occupancy fee shown at the station | `[AFIR Art. 5(4)]` | 13.04.2024 | deployed ≥ 13.04.2024 |
 | Below 50 kW every component available, **in the prescribed order** | `[AFIR Art. 5(4)]` | 13.04.2024 | **no deployment-date limit** |
+| The **Arbeitspreis** at or beside the point, by one of three named media | `[PAngV §14(2)]` | **28.05.2022** | public ∧ paid ∧ an ad-hoc payment method is in use — **at any power** |
+| …and, where a **web-based** system is used, through it before the session starts | `[PAngV §14(2)]` | 28.05.2022 | a second duty, not a fourth medium |
+| …and every further price completely, **in immediate vicinity** | `[PAngV §14(3)]` | 28.05.2022 | arises only where such a price is charged |
+| **The interface Annex II names** — AC ⇒ Type 2, DC ⇒ CCS Combo 2, *"at least"* | `[AFIR Art. 21(1)]` | 13.04.2024 | public — read off the inventory's own connector list; `[DA-656]` replaced points 1.1–1.4 and excepts two bands at 3.7 kW |
 | Provider: disclose every component, e-roaming costs included | `[AFIR Art. 5(5)]` | 13.04.2024 | the provider profile |
 | Provider: **no** extra charge for cross-border e-roaming | `[AFIR Art. 5(5)]` | 13.04.2024 | the provider profile |
 | Every public point is a **digitally-connected** recharging point | `[AFIR Art. 5(7)]` | 14.10.2024 | public |
@@ -75,13 +78,16 @@ Forty duties over three subjects.
 | Commissioning notified **within two weeks** | `[LSV26 §4]` | 01.01.2026 | a date compared to a date — § 4(3) runs it from the day a point *became* public |
 | Decommissioning notified **unverzüglich** | `[LSV26 §4]` | 01.01.2026 | § 4(1) Nr. 2 |
 | An operator change notified by **both** operators | `[LSV26 §4]` | 01.01.2026 | § 4(1) S. 2 — one notice is not enough |
-| Conformity-assessed meter for energy billing | `[MessEG §33]` | standing | bills by energy |
-| Verifiable measured values | `[PTB-A 50.7]` | standing | bills by energy |
+| Conformity-assessed meter for energy billing | `[MessEG §33]` | 01.04.2019 | bills by energy |
+| …on a meter whose **verification period has not expired** | `[MessEG §37(1)]` | 01.04.2019 | bills by energy — eight years `[MessEV Anl. 7 Nr. 6.7]` from the placing on the market, ending with the calendar year `[MessEV §34(2)]` |
+| …and every intervention on it recorded, firmware pushes included | `[MessEG §31(2)]` | 01.04.2019 | bills by energy — the one retention figure the German metrology texts give |
+| A **provider** billing on somebody else's meter owes a confirmation from its operator | `[MessEG §33(2)]` | 01.04.2019 | the provider profile — derived from the operators it holds a markup for |
+| Verifiable measured values | `[PTB-A 50.7]` | 01.04.2019 | bills by energy |
 | AC metering before the rectifier only in DC stations placed on the market before 2018 and **at most** 50 kW | `[REA 6-A]` | 16.03.2017 | the same number as AFIR's threshold, pointing the other way |
 | …and only where the rectification belongs to **one** session | `[REA 6-A]` | 16.03.2017 | a shared rectifier fails it |
 | …and the customer must be told the rectification loss is inside the value | `[REA 6-A]` | 16.03.2017 | a value nobody can interpret is one nobody can check |
 | THG-Quote: publishable register entry, lawful metering, issued operator code | `[38k §6(3)]` | standing | public |
-| The undertaking gives the authority its details | `[NIS2 Art. 3(4)]` | 06.12.2025 | `UndertakingProfile` — an Annex I type of at least medium size |
+| The undertaking gives the authority its details | `[NIS2 Art. 3(4)]` | 06.03.2026 | `UndertakingProfile` — an Annex I type of at least medium size; the German law gives the registration three months from the day it comes into scope |
 | …and takes **all ten** risk-management measures | `[NIS2 Art. 21(2)]` | 06.12.2025 | a conjunction, not a score |
 | …and can warn the CSIRT **within 24 h** | `[NIS2 Art. 23(4)]` | 06.12.2025 | then 72 h, then a report within a month |
 | The **management body** approves and oversees the measures | `[NIS2 Art. 20(1)]` | 06.12.2025 | the same paragraph makes its members liable |
@@ -164,7 +170,7 @@ conditions between a public kilowatt-hour and the German greenhouse-gas quota ar
 worth money and break no law when unmet — the entry's own remedy ends *"…or forgo
 the quota"*. In one bucket, an estate that meets every legal duty in Europe and
 declines a subsidy reads as non-compliant. So each entry carries what failing it
-costs (D219):
+costs:
 
 ```rust
 report.verdict();      // Compliant — nothing unlawful
@@ -255,6 +261,15 @@ nobody directly: Germany's NIS2UmsuCG came into force on 06.12.2025, with no
 general transitional period, and that is the day the calendar uses. Dating the
 duties from the Directive would report every German operator in breach for
 fourteen months in which no German authority could act.
+
+**And a window the statute grants is part of the duty.** The German law gives the
+*registration* three months from the day an undertaking first comes into scope,
+so one already in scope when the law applied had until 06.03.2026. That duty is
+dated from the day its window closes; the four beside it, which carry no
+transitional provision, are dated from the day the law applies. A report that
+calls an operator non-compliant inside a period the statute gave it is making the
+same false statement as one that dates the duties from the Directive, three
+months instead of fourteen.
 
 The Cyber Resilience Act beside it is a **Regulation**, so `[CRA Art. 71]`'s own
 dates are the dates in every Member State — 11.09.2026 for the reporting duty,
@@ -464,7 +479,7 @@ one — which, in a compliant estate, is every point.
 
 Nr. 2 wants the quantity determined in conformity with the measuring and
 calibration law, which is what `emob-eichrecht` decides per record — so
-`emob-thg` refuses a record with no evidence rather than summing it — and one whose evidence is *there and failed*, which is the worse of the two and the one a presence check lets through (D231). Nr. 3
+`emob-thg` refuses a record with no evidence rather than summing it — and one whose evidence is *there and failed*, which is the worse of the two and the one a presence check lets through. Nr. 3
 wants an identification code **issued** to the operator by an ID registration
 organisation `[AFIR Art. 20(1)]`; a well-formed `EvseId` says the operator
 *uses* a code, not that a registered organisation issued it.

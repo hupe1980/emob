@@ -1,13 +1,12 @@
 +++
 title = "Sessions and settlement"
 weight = 4
-description = "The quarter-hour split that conserves energy exactly, why interpolated slots say so, how a CDR is accepted once without letting a partner restate a settled number, and the EN 16931 invoice it becomes."
+description = "The quarter-hour split that conserves exactly, the CDR two companies settle against, and the EN 16931 invoice and SEPA collection it becomes."
 
 [extra]
+state = "built"
 nav = "Settlement"
 +++
-
-# Sessions and settlement ✅
 
 A session is what happened. A CDR is a claim about it, sent to somebody who was
 not there and who will pay against it. Between the two sits arithmetic that has
@@ -683,10 +682,33 @@ rate**. An allowance carries one VAT rate — BT-95 and BT-96 — so the bound i
 converted on its own and added to the lines' own nets, rather than the record's
 whole total being divided by one factor. On a €100.00 session made of energy at
 19 % beside a session fee at 7 %, the single-factor reading divided the 7 % half
-by 1.19 as well and billed €98.80. An adjustment larger than everything charged
-at its rate is named by the rating before the document is built, because a
-negative taxable amount under a positive invoice is not a document anybody
-accepts.
+by 1.19 as well and billed €98.80.
+
+An adjustment larger than everything charged at its rate is a different matter,
+and it is the one document in this workspace that passed every check and was
+still unacceptable. `BR-S-08` makes a category's taxable amount its lines minus
+its allowances, so a cap of €3.00 on €5.00 of energy at 19 % beside a €20.00 fee
+at 7 % states **BT-116 = −2.00**. The invoice reconciles, the totals chain holds,
+and **all 317 of the standard's own rules accept it** — none of them forbids a
+negative category under a positive invoice, and no tax office accepts one. The
+rating had named it for two passes as a note beside the record, which is not a
+refusal.
+
+The standard's own answer is that **BG-20 is repeatable**: a bound deeper than
+one category is several allowances, one per category it is drawn from.
+
+What that costs is the *price*. Reaching a gross ceiling from net lines needs to
+know what a unit of movement does to the gross, and that is a property of the
+category the movement lands in — so a cut spanning two rates makes the gross a
+**piecewise-linear** function of how deep it goes, and dividing by one factor
+answers the ceiling with a movement that does not reach it. Splitting the
+allowance without rewriting the solve trades a document a tax office rejects for
+a price above a maximum the operator published, which is worse.
+
+So the solve is the inversion of that piecewise function, walking the categories
+in the order the split then draws from, and the two read **one** order rather
+than two that agree until they do not. With a single VAT rate the walk has one
+segment and the arithmetic is the division it always was.
 
 BT-146 is likewise the item price **excluding VAT**, so a gross tariff's own
 figure does not belong there: `29.500 × 0.49` is `14.455` where the line says
@@ -832,6 +854,8 @@ let rates = VatRates::new().at("DE", dec("19"));
 let treatment = TaxTreatment::decide(&cpo.tax, &emsp.tax, "DE", &rates)?;
 assert_eq!(treatment.category, VatCategory::ReverseCharge);
 assert_eq!(treatment.place_of_supply, "FR");
+// …and the second supply asks a different question of the same two parties.
+let fee = TaxTreatment::decide_service(&cpo.tax, &emsp.tax, &rates)?;
 ```
 
 Putting 19 % on that invoice charges tax that may not be charged and that the
@@ -890,14 +914,47 @@ naming the party that has none: EN 16931's `BR-AE-2` and `BR-AE-3` refuse that
 document anyway, and refusing it where the rule lives means the message names the
 missing identifier instead of a rule id.
 
+Where a tariff states its **own** rate and the place of supply asks for another,
+the tariff's rate governs the line and the disagreement is reported as a note. The
+gross price is never moved: `[PAngV]` and `[AFIR Art. 5(4)]` entitle the driver to
+the figure they were quoted. A tariff published for one country and charged in
+another is a pricing error, and the invoice says so rather than picking a side.
+
 ### The fee that is not electricity
 
 The same judgment treats a **periodic subscription** an eMSP charges its driver —
-one that buys access rather than kilowatt-hours — as consideration for a separate
-supply of *services*, under its own place-of-supply rule. Nothing in `emob-billing`
-builds such a line: an invoice is assembled from rated CDRs and every one of them
-is electricity. A document carrying both would need a VAT **category** per line
-where this crate has one per document, so that is `empd`'s document.
+one that buys access rather than kilowatt-hours — as a separate and independent
+supply of *services*. The Court's reason is the fee itself: it is charged
+*"regardless of whether the user actually purchased electricity during the
+relevant period"*.
+
+Separate means it does not follow the electricity anywhere. `[UStG §3g]` leaves a
+private customer's electricity at the charge point; `[UStG §3a(1)]` puts a service
+to a private person where the **supplier** sits. A German provider billing a Dutch
+driver who charged in France owes French VAT on the kilowatt-hours and German VAT
+on the subscription, on one document, in one month.
+
+```rust
+let invoice = InvoiceBuilder::new(number, issued_on, period, cpo, driver)
+    .supplied_from("FR", dec("20"))     // where the electricity was drawn
+    .vat_rate_in("DE", dec("19"))       // where the supplier sits
+    .subscription(Subscription::new("network access", dec("4.99"), from, to))
+    .ledger(&ledger)
+    .build()?;
+invoice.tax.len();                      // two subtotals, two places of supply
+```
+
+That is why the VAT category is a **line** field: BT-151 and BT-152 belong to the
+line and BG-23 repeats, one entry per category and rate. What is a property of
+the whole document is which categories may share it — `BR-O-11` … `BR-O-14` forbid
+the outside-scope category to sit beside any other, and `exclusive_category`
+records it.
+
+**The line comes from `empd`**, not from the ledger. An invoice is assembled from
+rated CDRs, and a contract whose driver charged nothing all month contributes
+none — so the fee owed *precisely because* nothing was charged is invisible to
+everything downstream of the records. `Empd::fees_for` derives it from the
+contracts in force.
 
 ### …and the books agree with the document
 

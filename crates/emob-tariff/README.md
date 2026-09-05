@@ -369,10 +369,22 @@ the movement closest to zero inside the interval they leave. An empty interval i
 published ceiling is what the driver was shown.
 
 A maximum deeper than the session's own total is held at zero — a cap below
-nothing is a payment to the driver — and an adjustment larger than everything
-charged at its own VAT rate is `RatingNote::AdjustmentExceedsCategory`, because
-EN 16931 gives an allowance one category and that category's taxable amount would
-go negative.
+nothing is a payment to the driver.
+
+And a maximum deeper than the **category** it is attributed to is drawn from the
+next one. EN 16931 gives an allowance one category, so a single allowance would
+state a negative taxable amount — a document that reconciles and that all 317 of
+the standard's own rules accept, and that no tax office does. BG-20 is
+repeatable, so `Rated::adjustment_parts` draws the bound from as many categories
+as it needs, largest first, and `RatingNote::AdjustmentSpread` says how many it
+reached.
+
+The **price** is solved along that same walk. Reaching the gross limb of a bound
+from the net one needs to know what a unit of movement does to the gross, and
+that is a property of the category the movement lands in — so a cut spanning two
+rates makes the gross a piecewise-linear function of how deep it goes, and one
+factor answers the wrong question. One walk, read by the solve and by the
+split, rather than two that agree until they do not.
 
 ### …and it is decided on the exact total
 
@@ -416,7 +428,7 @@ The cost travels in `total_reservation_cost` and inside `total_cost`, which is
 what makes a partner's own sum of the parts close, and it becomes its own group
 of lines on the EN 16931 invoice `emob-billing` builds — the seam it was missing
 from, and the one place a missing term is silent, because a document that omits
-it still adds up to itself (D250). It reaches no document that has no reservation
+it still adds up to itself. It reaches no document that has no reservation
 in it: OCPP 2.1's *Tariff and Cost* block refuses the element by name,
 `[DATEX-II-Profil]`'s `EnergyRate` omits it with a note, the
 `[AFIR Art. 5(4)]` shape check reads only the session elements, and
@@ -428,6 +440,16 @@ and it refuses it by **collapsing** rather than by returning nothing: no minutes
 are priced, a `FLAT` fee with no duration in it is still owed, and
 `RatingNote::ReservationWindowReversed` travels with the record. A silent zero on
 a visibly broken document is the answer nobody queries.
+
+And the one gate a reservation is **not** subject to is the metrology one.
+`[REA 6-A §3.1]` bounds a *measured value*, and the instrument that measures it
+is the station's clock: a session duration under the clock's shortest resolvable
+span is not a number an invoice may use. A reservation's window ran before the
+cable went in and no meter observed it — what stands behind it is the operator's
+own record of when the point was held, which is why `emob-cdr` does not gate it
+on the signed evidence either. Applying the sixty-second floor to it charged
+nothing for a reservation the driver used for forty-five seconds, and told them
+the station's clock was why.
 
 ## A tariff can be unlawful on its own
 
@@ -441,6 +463,11 @@ let by_the_minute = Tariff::simple(/* … */ vec![
 
 assert!(check_afir(&by_the_minute, dec("22")).is_lawful());   // fine on a 22 kW post
 assert!(!check_afir(&by_the_minute, dec("150")).is_lawful()); // unlawful beside it
+
+// …and unlawful on the 22 kW post too, in Germany: `[PAngV §14(2)]` wants an
+// Arbeitspreis per kilowatt-hour `[PAngV §14(4)]` at **any** power, and it has
+// wanted one since 28.05.2022.
+assert!(!check_pangv(&by_the_minute).is_lawful());
 ```
 
 `check_afir` also catches the subtler shape: an energy price *plus* a charge for
@@ -479,6 +506,41 @@ price; a provider's own contract price falls under Art. 5(5), which is a
 disclosure duty rather than a shape duty — and `emob-core` assesses that one
 against a `ProviderProfile`.
 
+## …and unlawful in Germany where it is lawful in Europe
+
+`check_pangv` is the second entry point, and the document behind it is the older
+and the wider one. `[PAngV §14(2)]` has bound every publicly accessible point
+taking an ad-hoc payment since **28.05.2022**, with no 50 kW limb, and
+`[PAngV §14(4)]` fixes the unit of the *Arbeitspreis* at one kilowatt-hour. It
+also refuses a price list that has no `Gesamtpreis` at all — `[PAngV §2 Nr. 1]`
+defines the Arbeitspreis tax-inclusive, so a net tariff whose component states no
+VAT rate cannot lawfully be shown to a consumer.
+
+Two functions rather than one branch: the objections travel to different
+authorities, and an operator answering a letter needs to know which is which.
+
+## The price a consumer is shown is the *Gesamtpreis*
+
+```rust
+let mut tariff = Tariff::simple(/* … */ vec![
+    PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+]);
+tariff.tax_included = TaxIncluded::No;
+
+// What a settlement partner reads — and what a driver may not be shown.
+assert!(!describe(&tariff, at).is_gesamtpreis());
+assert_eq!(describe(&tariff, at).one_line(), "0.49 EUR / kWh");
+
+// What `[PAngV §14(2)]` asks for, exactly.
+assert_eq!(describe_gross(&tariff, at)?.one_line(), "0.5831 EUR / kWh");
+```
+
+Exact rather than rounded, for the reason everything else here is: the rounded
+figure is a price the operator does not charge. The VAT rate sits on the
+`DisplayLine`, so a tariff whose energy and whose service fee are in different
+categories is grossed **per component** — which is what `[PAngV §3(3)]` asks for
+when a price is broken out — rather than refused for want of one rate.
+
 ## Every term of the total is a line
 
 ```rust
@@ -497,6 +559,22 @@ against the customer — and OCPI 3.0 removes the field, advising `step_size = 1
 so a tariff relying on it is one that will have to change. The rounding applies
 once, to what was billed for a price, not once per period: rounding every
 quarter hour up to a block would bill a two-hour session eight times over.
+
+The note states its two figures in the dimension's **base** unit — kilowatt-hours,
+whole seconds — rather than in the unit it prints. Its one consumer subtracts
+them to find out what was delivered, and 2100 seconds is `0.5833…` hours in every
+scale there is; the division to the unit a driver reads happens in `Display`,
+which is the only place it is a rendering rather than an input.
+
+### What the rating says was delivered
+
+`Rated::accounted_quantity_for` is that figure: what a dimension was **billed**
+for, less the block a `step_size` added, plus the quantity nothing priced. Two
+lawful things stand between a billed quantity and a measured one and this is both
+of them, in one exact identity — so a receiving party can ask whether a price was
+computed for the session in front of it without treating a discount as an
+arithmetic fault, or a declared block as a licence to bill any quantity at all.
+`emob_cdr::validate` is the caller.
 
 Notes serialise, deliberately. "This total was rounded up to a block" and "this
 element could not be evaluated" are exactly the facts a settlement dispute turns

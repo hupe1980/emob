@@ -33,9 +33,14 @@
 <meta property="og:url" content="{{ meta_url }}">
 <meta property="og:title" content="{{ meta_title }}">
 <meta property="og:description" content="{{ meta_desc }}">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="{{ get_url(path='og.png') }}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="emob — the open-source e-mobility operating stack">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{{ meta_title }}">
 <meta name="twitter:description" content="{{ meta_desc }}">
+<meta name="twitter:image" content="{{ get_url(path='og.png') }}">
 
 <link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml">
 <link rel="sitemap" type="application/xml" href="{{ get_url(path='sitemap.xml') }}">
@@ -44,15 +49,42 @@
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "SoftwareSourceCode",
-  "name": "{{ config.title }}",
-  "description": "{{ config.description }}",
-  "url": "{{ config.base_url }}",
-  "codeRepository": "{{ config.extra.repository }}",
-  "programmingLanguage": "Rust",
-  "license": "https://spdx.org/licenses/MIT.html",
-  "applicationCategory": "Home energy management",
-  "keywords": "{{ config.extra.keywords }}"
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "{{ config.base_url }}/#website",
+      "name": "{{ config.title }}",
+      "alternateName": "emob — open-source EV charging operations",
+      "url": "{{ config.base_url }}/",
+      "description": {{ config.description | json_encode | safe }},
+      "inLanguage": "en",
+      "publisher": { "@id": "{{ config.base_url }}/#org" }
+    },
+    {
+      "@type": "Organization",
+      "@id": "{{ config.base_url }}/#org",
+      "name": "emob",
+      "url": "{{ config.base_url }}/",
+      "logo": "{{ get_url(path='favicon.svg') }}",
+      "sameAs": ["{{ config.extra.repository }}"]
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "name": "{{ config.title }}",
+      "description": {{ config.description | json_encode | safe }},
+      "url": "{{ config.base_url }}/",
+      "codeRepository": "{{ config.extra.repository }}",
+      "programmingLanguage": "Rust",
+      "runtimePlatform": "Rust {{ config.extra.msrv }}",
+      "license": "https://spdx.org/licenses/Apache-2.0.html",
+      "applicationCategory": "BusinessApplication",
+      "applicationSubCategory": "Electric vehicle charging operations (CPO / eMSP)",
+      "operatingSystem": "Linux, macOS, Windows",
+      "keywords": "{{ config.extra.keywords }}",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" }
+    }
+  ]
 }
 </script>
 {% endblock %}
@@ -90,6 +122,10 @@ footer nav{padding:0 0 .8rem;max-width:none}
 .card:has(a){transition:border-color .12s ease,transform .12s ease}
 .card:has(a):hover{border-color:var(--accent);transform:translateY(-1px)}
 .card p{margin:0;color:var(--muted);font-size:.92rem}
+.crumbs{font-size:.84rem;color:var(--muted);margin:0 0 1rem}
+.crumbs a{color:var(--muted)}
+.crumbs span[aria-hidden]{opacity:.5;padding:0 .15rem}
+.state{font-size:.7em;vertical-align:middle}
 .docnav{display:flex;flex-wrap:wrap;gap:.4rem;margin:0 0 1.8rem;font-size:.86rem}
 .docnav a{display:inline-block;padding:.28rem .7rem;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--soft);white-space:nowrap}
 .docnav a:hover{text-decoration:none;border-color:var(--accent);color:var(--accent)}

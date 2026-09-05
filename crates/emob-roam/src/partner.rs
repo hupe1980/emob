@@ -35,6 +35,14 @@
 
 use emob_core::{ContractId, PartyId, Role};
 
+/// The settlement window a partner is assumed to have agreed to until it says
+/// otherwise.
+///
+/// A day: short enough that a queue nobody is draining is noticed, and short
+/// enough that it is obviously not a figure anybody negotiated. See
+/// [`Partner::settles_within`].
+pub const DEFAULT_SETTLEMENT_WINDOW: time::Duration = time::Duration::days(1);
+
 /// Which OCPI version a partner speaks.
 ///
 /// The canonical model is 2.3.0 — the richest of the three, and the one
@@ -62,6 +70,39 @@ impl OcpiVersion {
 }
 
 impl core::fmt::Display for OcpiVersion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which roaming protocol a partner is reached on.
+///
+/// Not derivable from the role, which is why it is a field. Hubject is a hub
+/// **and** speaks OICP; GIREVE is a hub and speaks eMIP and OCPI; an ordinary
+/// peer is neither a hub nor on OICP. A service that inferred the wire from
+/// `Role::Hub` would send an OCPI document to a broker that parses none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum Wire {
+    /// Peer to peer, or to a hub that speaks it.
+    #[default]
+    Ocpi,
+    /// Hubject, over mutual TLS — where the record carries no money and the
+    /// price crosses separately as a pricing product.
+    Oicp,
+}
+
+impl Wire {
+    /// The name the protocol goes by.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ocpi => "OCPI",
+            Self::Oicp => "OICP",
+        }
+    }
+}
+
+impl core::fmt::Display for Wire {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -104,6 +145,26 @@ pub struct Partner {
     pub roles: Vec<Role>,
     /// Which OCPI version it speaks.
     pub version: OcpiVersion,
+    /// Which roaming protocol it is reached on.
+    pub wire: Wire,
+    /// How long after a session this partner has agreed to be sent its record.
+    ///
+    /// # Why this is contractual and not a constant
+    ///
+    /// `[OCPI 2.3.0 §mod_cdrs]` is explicit that the cadence is an agreement
+    /// rather than a protocol rule: *"there is no requirement to send CDRs in
+    /// (semi-) realtime, it is seen as good practice to send them as soon as
+    /// possible. But if there is an agreement between parties to send them, for
+    /// example, once a month, that is also allowed by OCPI."*
+    ///
+    /// So a record that has not been accepted is only **late** against the
+    /// window this peer agreed to, and a node peering with a partner on monthly
+    /// settlement and one on same-day settlement has two answers to one
+    /// question. A single constant would report the first in breach every day.
+    ///
+    /// The default is a day: short enough that a stuck queue is noticed, and
+    /// nothing anybody agreed to.
+    pub settles_within: time::Duration,
     /// The contract namespaces it issues under, where they differ from its own
     /// `party_id`.
     ///
@@ -127,6 +188,8 @@ impl Partner {
             party,
             roles: vec![Role::Emsp],
             version: OcpiVersion::V2_3_0,
+            wire: Wire::Ocpi,
+            settles_within: DEFAULT_SETTLEMENT_WINDOW,
             issues: Vec::new(),
             requires_signed_data: false,
         }
@@ -139,6 +202,8 @@ impl Partner {
             party,
             roles: vec![Role::Hub],
             version: OcpiVersion::V2_3_0,
+            wire: Wire::Ocpi,
+            settles_within: DEFAULT_SETTLEMENT_WINDOW,
             issues: Vec::new(),
             requires_signed_data: false,
         }
@@ -162,6 +227,24 @@ impl Partner {
     #[must_use]
     pub const fn on_signed_data(mut self) -> Self {
         self.requires_signed_data = true;
+        self
+    }
+
+    /// Reach this partner on a wire other than OCPI.
+    #[must_use]
+    pub const fn over(mut self, wire: Wire) -> Self {
+        self.wire = wire;
+        self
+    }
+
+    /// The window this partner agreed a record would reach it in.
+    ///
+    /// See [`Self::settles_within`]: `[OCPI 2.3.0 §mod_cdrs]` makes the cadence
+    /// an agreement between the two parties, so it is stated per partner rather
+    /// than assumed once.
+    #[must_use]
+    pub const fn settling_within(mut self, window: time::Duration) -> Self {
+        self.settles_within = window;
         self
     }
 

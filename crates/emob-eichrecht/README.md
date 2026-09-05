@@ -99,6 +99,21 @@ evidence.direction();                // Import, off the OBIS code the meter sign
 that crate adds must not be able to widen what this build bills by being
 unrecognised.
 
+The mapping reads in both directions, and the second one is what a dispute needs:
+
+```rust
+evidence.reasons();                                 // everything wrong with these records
+evidence.reasons_for(Disqualifies::Duration);       // …and which of it took the minutes
+evidence.reasons_for(Disqualifies::Energy);         // empty — the register held up
+```
+
+`reasons` was the only list there was for a long time, which meant a caller could
+ask *whether* the minutes were billable and never *why not* — so an operator
+answering a driver's dispute about an occupancy fee got handed everything the
+chain found, including the parts that took nothing away from it. A signature
+failure is in every answer, because it stops the chain being validated at all and
+there is then no finding to attribute.
+
 ### …and five rules that are about billing rather than about the format
 
 | Rule | Source | Disqualifies |
@@ -188,6 +203,16 @@ in force when that session started `[AFIR Art. 5(4)]`, and carries the cable los
 onto the record so a partner disputing the energy — and a customer
 `[REA 6-A §3.2]` entitles to know what is inside a measured value — can be told.
 Each of the three was computed here and consulted nowhere until it was.
+
+## …and the half of the Eichrecht no signature answers
+
+This crate decides what a set of signed records proves. `[MessEG §31(2)]` and
+`[MessEG §33(2)]` ask something else entirely — whether the **meter** may still
+be used, whether the record of the last firmware push was kept, and whether the
+party billing on somebody else's meter holds that operator's confirmation. None
+of those is a fact about a record, so they are duties in
+`emob_core::obligation` rather than checks here. An estate can verify
+every record this crate is given and be in breach of all of them.
 
 ## Scope
 

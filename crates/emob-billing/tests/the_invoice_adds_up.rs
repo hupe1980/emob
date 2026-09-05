@@ -77,7 +77,13 @@ fn party() -> PartyId {
 /// lines.
 fn tariff(rng: &mut Rng, basis: TaxIncluded) -> Tariff {
     let electricity = dec(19, 0);
-    let service = if rng.chance(20) {
+    // A second VAT category on the service half, and often rather than rarely.
+    // Every hard question about the tax on one of these documents lives in the
+    // two-rate space — the bound stripped at one factor (D248), the breakdown
+    // grouped on the rate as well as the category (D269), and the cap deeper
+    // than the category it lands in (D283) — and at one case in five the
+    // generated months barely visited it.
+    let service = if rng.chance(40) {
         dec(7, 0)
     } else {
         electricity
@@ -115,12 +121,41 @@ fn tariff(rng: &mut Rng, basis: TaxIncluded) -> Tariff {
             },
         });
     }
-    elements.push(TariffElement::unrestricted(vec![
-        PriceComponent::new(Dimension::Energy, dec(rng.between(20, 60), 2)).with_vat(electricity),
+    // A promotional first tier — *the first n kWh are free* — which is a price
+    // rather than a fault `[OCPI 2.3.0 §Tariff]`, and a block size on the
+    // occupancy fee. Both are shapes an operator writes on purpose, and neither
+    // was reachable: every generated tariff priced energy unconditionally in one
+    // step, so the two lawful ways a billed quantity differs from a measured one
+    // never reached a document. One of them blocked the invoice outright (D258).
+    let gives_away = rng.chance(25);
+    if gives_away {
+        elements.push(TariffElement {
+            components: vec![
+                PriceComponent::new(Dimension::Energy, dec(rng.between(20, 60), 2))
+                    .with_vat(electricity),
+            ],
+            restrictions: Restrictions {
+                min_kwh: Some(dec(rng.between(1, 20), 0)),
+                ..Restrictions::default()
+            },
+        });
+    }
+    let mut fallback = vec![
         PriceComponent::new(Dimension::ParkingTime, dec(rng.between(100, 600), 2))
             .with_vat(service),
         PriceComponent::new(Dimension::Flat, dec(rng.between(0, 150), 2)).with_vat(service),
-    ]));
+    ];
+    if rng.chance(25) {
+        fallback[0] = fallback[0].clone().with_step_size(60 * 15);
+    }
+    if !gives_away {
+        fallback.insert(
+            0,
+            PriceComponent::new(Dimension::Energy, dec(rng.between(20, 60), 2))
+                .with_vat(electricity),
+        );
+    }
+    elements.push(TariffElement::unrestricted(fallback));
 
     Tariff {
         id: "prop".parse().expect("a valid tariff id"),
@@ -136,9 +171,17 @@ fn tariff(rng: &mut Rng, basis: TaxIncluded) -> Tariff {
             let amount = dec(rng.between(0, 1500), 2);
             take.then(|| PriceLimit::net(amount))
         },
+        // The ceiling reaches **below** what a session's non-energy lines come
+        // to. It used to start at €15.00, and the occupancy fee and session fee
+        // together cannot exceed about €13.50 — so a cap deeper than the
+        // category it is attributed to was **structurally unreachable**, and the
+        // property that catches a negative taxable amount was asserted over a
+        // space that could not break it. Zero of 250 months reached the shape,
+        // which is how a document all 317 rules accept and no tax office does
+        // survived two audit passes (D284).
         max_price: {
-            let take = rng.chance(15);
-            let amount = dec(rng.between(1500, 6000), 2);
+            let take = rng.chance(25);
+            let amount = dec(rng.between(50, 6000), 2);
             take.then(|| PriceLimit::net(amount))
         },
         valid_from: None,
@@ -279,6 +322,140 @@ fn driver() -> Counterparty {
     .at("Nebenweg 7", "54321")
 }
 
+/// A tariff whose cap is deeper than the category the bound lands in.
+///
+/// A € 20.00 session fee at 7 % beside energy at one cent a kilowatt-hour at
+/// 19 %, capped at € 0.50 net. The fee is the largest line for every session
+/// `record` can generate — at most 80 kWh, so at most € 0.80 of energy — so the
+/// bound lands in the 7 % category whatever the seed, and it is deeper than the
+/// € 20.00 that category holds.
+fn tariff_whose_cap_outruns_its_category() -> Tariff {
+    Tariff {
+        id: "capped".parse().expect("a valid tariff id"),
+        currency: Currency::EUR,
+        kind: TariffKind::Contract,
+        time_zone: TimeZone::new("Europe/Berlin").expect("a valid zone"),
+        tax_included: TaxIncluded::No,
+        elements: vec![TariffElement::unrestricted(vec![
+            PriceComponent::new(Dimension::Energy, dec(1, 2)).with_vat(dec(19, 0)),
+            PriceComponent::new(Dimension::Flat, dec(2000, 2)).with_vat(dec(7, 0)),
+        ])],
+        min_price: None,
+        max_price: Some(emob_tariff::PriceLimit {
+            before_taxes: Some(dec(50, 2)),
+            after_taxes: None,
+        }),
+        valid_from: None,
+        valid_until: None,
+    }
+}
+
+#[test]
+fn a_bound_deeper_than_its_own_category_is_drawn_from_the_next() {
+    // The document this is about passed **every** check the workspace and the
+    // standard have: it reconciled, its totals chain held, and all 317 of
+    // EN 16931's own rules accepted it — while stating BT-116 = −2.00 in the
+    // 7 % category, which no tax office accepts (D283).
+    //
+    // The fix is the standard's own: BG-20 is repeatable, so a bound deeper
+    // than one category is several allowances — and the *price* is solved
+    // against the same walk the split uses, so the gross ceiling the tariff
+    // publishes is still met (D284).
+    let mut rng = Rng(0xB111_1AB1_0000_0002);
+    let t = tariff_whose_cap_outruns_its_category();
+    let cdr = record(&mut rng, 1, &t);
+
+    // The rating says the bound reached past its own category, and how far.
+    let cost = cdr.cost.as_ref().expect("a rated record");
+    let spread = cost
+        .rated
+        .notes
+        .iter()
+        .find_map(|note| match note {
+            emob_tariff::RatingNote::AdjustmentSpread { categories, .. } => Some(*categories),
+            _ => None,
+        })
+        .expect("the bound outran the 7 % category");
+    assert_eq!(
+        spread, 2,
+        "drawn from the fee's category and then the energy's"
+    );
+
+    // …and the parts sum to the bound exactly, with none deeper than its own
+    // category.
+    let adjustment = cost.rated.adjustment.expect("a capped record");
+    let parts = cost.rated.adjustment_parts();
+    assert_eq!(
+        parts.iter().map(|p| p.amount).sum::<Decimal>(),
+        adjustment.amount,
+        "a term of the total went missing in the split"
+    );
+    for part in &parts {
+        let held: Decimal = cost
+            .rated
+            .lines
+            .iter()
+            .filter(|line| line.vat == part.vat)
+            .map(|line| line.amount)
+            .sum();
+        assert!(
+            (held + part.amount) >= Decimal::ZERO,
+            "the {:?} category holds {held} and the part takes {}",
+            part.vat,
+            part.amount
+        );
+    }
+
+    let invoice = InvoiceBuilder::new(
+        "R-9001",
+        date!(2026 - 07 - 01),
+        (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),
+        cpo(),
+        driver(),
+    )
+    .supplied_from("DE", dec(19, 0))
+    .due_on(date!(2026 - 07 - 15))
+    .record(&cdr)
+    .build()
+    .expect("a bound drawn from two categories is two allowances")
+    .value;
+
+    // One allowance per category, and **no category states a negative taxable
+    // amount** — which is the whole of it.
+    assert_eq!(invoice.adjustments.len(), 2, "{:#?}", invoice.adjustments);
+    assert!(
+        invoice.tax.iter().all(|t| !t.taxable.is_sign_negative()),
+        "a category states a negative taxable amount: {:#?}",
+        invoice.tax
+    );
+    assert!(invoice.reconciles(), "{:#?}", invoice.tax);
+
+    // …and the standard still accepts it, now for the right reason.
+    let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core)
+        .expect("every figure fits an EN 16931 amount");
+    assert!(
+        crossed.value.is_valid(),
+        "{:?}",
+        crossed.value.reasons().collect::<Vec<_>>()
+    );
+
+    // The mirror: a cap the chosen category *can* hold is one allowance, as it
+    // always was. The split changes nothing outside the case it exists for.
+    let mut inside = tariff_whose_cap_outruns_its_category();
+    inside.max_price = Some(emob_tariff::PriceLimit {
+        before_taxes: Some(dec(1500, 2)),
+        after_taxes: None,
+    });
+    let ordinary = record(&mut rng, 2, &inside);
+    let one = ordinary
+        .cost
+        .as_ref()
+        .expect("a rated record")
+        .rated
+        .adjustment_parts();
+    assert_eq!(one.len(), 1, "one category had room for the whole bound");
+}
+
 #[test]
 fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
     let mut rng = Rng(0xB111_1AB1_0000_0001);
@@ -286,6 +463,9 @@ fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
     let mut built = 0usize;
     let mut with_reservation = 0usize;
     let mut disclosed = 0usize;
+    let mut gave_energy_away = 0usize;
+    let mut rounded_to_a_block = 0usize;
+    let mut bound_spread = 0usize;
     for case in 0..250 {
         let basis = if case % 2 == 0 {
             TaxIncluded::Yes
@@ -387,6 +567,41 @@ fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
             with_reservation += 1;
         }
 
+        for cdr in &records {
+            let Some(cost) = &cdr.cost else { continue };
+            if !cost
+                .rated
+                .unpriced_for(emob_tariff::Dimension::Energy)
+                .is_zero()
+            {
+                gave_energy_away += 1;
+            }
+            if !cost
+                .rated
+                .block_surplus_for(emob_tariff::Dimension::ParkingTime)
+                .is_zero()
+            {
+                rounded_to_a_block += 1;
+            }
+            if cost.rated.adjustment_parts().len() > 1 {
+                bound_spread += 1;
+            }
+        }
+
+        // 7. **No VAT category states a negative taxable amount.** The document
+        //    that failed this reconciled, chained and passed all 317 of the
+        //    standard's own rules, because none of them forbids it — so the
+        //    only place it can be caught is here (D283, D284).
+        for subtotal in &invoice.tax {
+            assert!(
+                !subtotal.taxable.is_sign_negative(),
+                "case {case}: the {:?} category at {:?} states a taxable amount of {}",
+                subtotal.category,
+                subtotal.rate,
+                subtotal.taxable
+            );
+        }
+
         // 6. **Every measured value that contains compensated loss says so, on
         //    the document.** `[REA 6-A §3.2]` names the invoice, and the figure
         //    used to reach a roaming partner and stop there (D253).
@@ -426,5 +641,21 @@ fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
     assert!(
         disclosed > 25,
         "only {disclosed} lines disclosed what their measured value contains"
+    );
+    assert!(
+        gave_energy_away > 25,
+        "only {gave_energy_away} records were priced under a tariff that gives kilowatt-hours \
+         away, which is the shape that blocked a lawful invoice outright (D258)"
+    );
+    assert!(
+        rounded_to_a_block > 25,
+        "only {rounded_to_a_block} records rounded a duration to a block, so the other lawful \
+         difference between a billed quantity and a measured one never reached a document"
+    );
+    assert!(
+        bound_spread > 5,
+        "only {bound_spread} records had a bound deeper than the category it is attributed to, \
+         so property 7 above was asserted over a space that cannot break it — the shape that \
+         produced an invoice all 317 rules accept and no tax office does (D283)"
     );
 }

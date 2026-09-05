@@ -14,8 +14,9 @@
 //! Those two facts do not compose, and the resolution is not to weaken either.
 //! A [`RoamingToken`] is **presented to the crossing** by the party that holds
 //! the mapping — the token store, which is a service with a key and a database
-//! and no place in a domain crate. So the UID appears exactly at the edge that
-//! has to send it, on exactly the records that are leaving, and nowhere else.
+//! and no place in a domain crate; `empd` is where it belongs here. So the UID
+//! appears exactly at the edge that has to send it, on exactly the records that
+//! are leaving, and nowhere else.
 //!
 //! The shape of the argument is the one used throughout this workspace, in the
 //! other direction: an [`EvidenceRef`](emob_cdr::EvidenceRef) is *read off*

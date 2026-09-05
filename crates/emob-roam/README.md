@@ -51,6 +51,46 @@ of what reaching them cost, rather than two half-reports that only mean
 something read together. That fold is the one part of it that is OCPI's alone,
 so it is an extension trait here rather than a method on the shared type.
 
+### …and the rating's own account is part of it
+
+`emob_tariff::RatingNote` is serialisable because it is meant to travel. OCPI
+states a quantity and a cost **per dimension** and has no field for the distance
+between them, so a partner receiving `total_energy: 30` beside a
+`total_energy_cost` computed for twenty kilowatt-hours reads a document that does
+not multiply out — usually over a discount the operator gave on purpose: a
+promotional first tier, a night-only energy price, any tariff whose energy
+element is conditional. A `step_size` produces the same shape pointing the other
+way.
+
+`RatingNote::concerns_the_payer` already answers *is this a term of the price, or
+a fault in a document the payer did not write* — it is what `emob-billing` asks
+before putting a note on an invoice. It is asked here too, for the party that
+settles rather than the party that pays, and each note is pointed at the
+dimension's own total. The rest stay with the operator: a partner cannot act on a
+fault in this side's tariff.
+
+## The version the registry records is the version that goes out
+
+`Partner::version` is what a peer is registered as speaking. Nothing read it:
+`to_ocpi` produced a 2.3.0 document for every partner and `downgrade` was a
+second call a sender had to remember — so a peer on 2.2.1, which is the ordinary
+case in this market rather than the exceptional one, was one forgotten step away
+from being handed a document it cannot parse.
+
+```rust
+let outbound = emob_roam::ocpi::cdr::for_partner(&cdr, &partner, &context)?;
+match outbound.value {
+    Outbound::V2_3_0(cdr) => /* … */,
+    Outbound::V2_2_1(cdr) => /* … */,
+}
+```
+
+Every refusal `to_ocpi` applies still applies, and the account of what the
+downgrade cost is folded into the same `Crossing` as everything else. `downgrade`
+stays public for a caller that already knows the version — a re-send, a test —
+because building a `Partner` to say so would be worse than the two-step call this
+replaces.
+
 ## Two `PARKING_TIME`s, and the specification defines both
 
 `[OCPI 2.3.0]` uses the words twice with two definitions, and they are not the
@@ -285,9 +325,10 @@ the broker never opened is refused, and so is the same record submitted twice.
 
 Both roaming wires, at the model layer. OCPI 2.3.0 and 2.2.1 in **both**
 directions — CDRs, tariffs and locations — and OICP 2.3 outbound: the charge
-detail record and the pricing product the price crosses as. eMIP (GIREVE legacy)
-is 📐, and so is `roamd`, the daemon that owns the transport, the partner
-registry and the queues.
+detail record and the pricing product the price crosses as. The transport and the
+queues belong to [`roamd`](../../services/roamd), which routes a record out of the
+contract identifier's own issuer and holds the ledger of what was sent to whom.
+eMIP (GIREVE legacy) is 📐.
 
 ## License
 

@@ -299,11 +299,37 @@ pub enum BasisKind {
 /// document somebody checks two years later, and *which* Bundesanzeiger notice
 /// a figure came from is the first thing they will ask.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct EmissionsBasis {
     grams_co2e_per_mj: Decimal,
     kind: BasisKind,
     announcement: String,
+}
+
+/// Read back through the same check the constructors run, because a negative
+/// emissions value is a filing that claims a saving from having emitted.
+///
+/// The renewable *proof* is not re-run: `[38k §5(5)]`'s conditions are facts
+/// about a supply arrangement rather than about this value, and
+/// [`Self::renewable`] is where they are established. What survives the wire is
+/// the figure and the announcement it came from, and the figure is checked
+/// (D264).
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for EmissionsBasis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        #[derive(serde::Deserialize)]
+        struct AsSent {
+            grams_co2e_per_mj: Decimal,
+            kind: BasisKind,
+            announcement: String,
+        }
+
+        let sent = AsSent::deserialize(deserializer)?;
+        Self::checked(sent.grams_co2e_per_mj, sent.kind, sent.announcement)
+            .map_err(D::Error::custom)
+    }
 }
 
 impl EmissionsBasis {
@@ -409,6 +435,24 @@ mod tests {
 
     fn dec(s: &str) -> Decimal {
         Decimal::from_str(s).unwrap()
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn an_announced_basis_arrives_through_the_check_its_constructors_run() {
+        // A negative emissions value is a filing that claims a saving from
+        // having emitted, and it multiplies into `[38k §5(3)]`'s reference
+        // value. A derived `Deserialize` restored it from a store without
+        // asking (D264).
+        let negative = r#"{"grams_co2e_per_mj":"-1","kind":"grid_average","announcement":"BAnz"}"#;
+        assert!(serde_json::from_str::<EmissionsBasis>(negative).is_err());
+
+        let announced = EmissionsBasis::grid_average(Decimal::from(96), "BAnz").unwrap();
+        let json = serde_json::to_string(&announced).unwrap();
+        assert_eq!(
+            serde_json::from_str::<EmissionsBasis>(&json).unwrap(),
+            announced
+        );
     }
 
     #[test]

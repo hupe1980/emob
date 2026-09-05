@@ -759,6 +759,23 @@ fn an_unsynchronised_clock_bills_the_energy_and_refuses_the_occupancy_fee() {
     );
     assert!(!evidence.is_billable_for_time());
 
+    // …and the record says which quantity the fault took away, not merely that
+    // something is wrong. The four questions this chain answers are the whole
+    // claim of `emob-eichrecht`, and until `reasons_for` existed a caller
+    // holding an `Evidence` could ask *whether* the minutes were billable and
+    // never *why not* (D265).
+    let why = evidence.reasons_for(emob_eichrecht::Disqualifies::Duration);
+    assert!(
+        why.iter().any(|reason| reason.contains("clock")),
+        "the clock is why the duration is refused: {why:?}"
+    );
+    assert!(
+        evidence
+            .reasons_for(emob_eichrecht::Disqualifies::Energy)
+            .is_empty(),
+        "and the register is untouched by it"
+    );
+
     let session = occupied_session();
     let occupancy = fast_charger_tariff();
     let err = CdrBuilder::from_session(&session, Direction::Import)

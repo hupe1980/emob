@@ -41,7 +41,18 @@ use rust_decimal::Decimal;
 use time::macros::datetime;
 
 /// How far apart two slicings of one session may state its exact total.
-const PLACES: u32 = 9;
+///
+/// A **tolerance**, compared against a difference, for the reason the sibling
+/// file states: rounding both figures first is a step function, and two totals
+/// a few units in `Decimal`'s last place apart can straddle a half at the ninth
+/// decimal and round to different figures — the failure this whole file is
+/// about, in the assertion written to catch it (D286).
+const TOLERANCE: Decimal = Decimal::from_parts(1, 0, 0, false, 9);
+
+/// Whether two exact totals agree to within [`TOLERANCE`].
+fn agree(left: Decimal, right: Decimal) -> bool {
+    (left - right).abs() <= TOLERANCE
+}
 
 /// A seeded `SplitMix64`, as the sibling property file uses: the workspace
 /// takes no `rand`, and a replayable property test wants a pure sequence.
@@ -227,8 +238,24 @@ fn sliced(stretches: &[Stretch], start: time::OffsetDateTime, pieces: u64) -> Ch
     Chargeable::new(periods).expect("the stretches are ordered and do not overlap")
 }
 
-/// A Saturday evening in the German winter, as the sibling property file uses.
-const START: time::OffsetDateTime = datetime!(2026-01-03 21:30 +1);
+/// The instant the generated sessions are anchored to — a Saturday evening in
+/// the German winter, as the sibling property file uses.
+const ANCHOR: time::OffsetDateTime = datetime!(2026-01-03 21:30 +1);
+
+/// A start instant for one case, drawn across the whole week and the whole
+/// clock.
+///
+/// The same correction as the sibling file's, for the same reason: a fixed
+/// Saturday evening puts every generated session inside Saturday and Sunday, so
+/// a weekend restriction never changes its answer mid-session and two thirds of
+/// the clock is never covered at all (D285).
+fn start_at(rng: &mut Rng) -> time::OffsetDateTime {
+    let day = i64::try_from(rng.between(0, 6)).expect("in range");
+    let minute = i64::try_from(rng.between(0, 24 * 60 - 1)).expect("in range");
+    ANCHOR.replace_time(time::Time::MIDNIGHT)
+        + time::Duration::days(day)
+        + time::Duration::minutes(minute)
+}
 
 /// How many cases each property runs per seed.
 const CASES: u32 = 2_000;
@@ -262,18 +289,17 @@ fn a_block_size_and_a_second_vat_rate_do_not_make_the_price_a_function_of_the_sl
         for case in 0..CASES {
             let tariff = tariff(&mut rng);
             let stretches = session(&mut rng);
-            let coarse = rate(&tariff, &sliced(&stretches, START, 1)).exact_total();
-            let middle = rate(&tariff, &sliced(&stretches, START, 7)).exact_total();
-            let fine = rate(&tariff, &sliced(&stretches, START, 37)).exact_total();
-            assert_eq!(
-                coarse.amount().round_dp(PLACES),
-                middle.amount().round_dp(PLACES),
-                "seed {seed:#x} case {case}: one period per stretch and sevenths priced differently"
+            let start = start_at(&mut rng);
+            let coarse = rate(&tariff, &sliced(&stretches, start, 1)).exact_total();
+            let middle = rate(&tariff, &sliced(&stretches, start, 7)).exact_total();
+            let fine = rate(&tariff, &sliced(&stretches, start, 37)).exact_total();
+            assert!(
+                agree(coarse.amount(), middle.amount()),
+                "seed {seed:#x} case {case}: one period per stretch and sevenths priced differently ({coarse} vs {middle})"
             );
-            assert_eq!(
-                coarse.amount().round_dp(PLACES),
-                fine.amount().round_dp(PLACES),
-                "seed {seed:#x} case {case}: one period per stretch and thirty-sevenths priced differently"
+            assert!(
+                agree(coarse.amount(), fine.amount()),
+                "seed {seed:#x} case {case}: one period per stretch and thirty-sevenths priced differently ({coarse} vs {fine})"
             );
         }
     }
@@ -287,8 +313,9 @@ fn neither_bound_is_broken_by_the_one_that_was_answered_first() {
         for case in 0..CASES {
             let tariff = tariff(&mut rng);
             let stretches = session(&mut rng);
+            let start = start_at(&mut rng);
             for pieces in [1, 7, 37] {
-                let rated = rate(&tariff, &sliced(&stretches, START, pieces));
+                let rated = rate(&tariff, &sliced(&stretches, start, pieces));
                 if contradicts(&rated) {
                     continue;
                 }
@@ -331,13 +358,23 @@ fn neither_bound_is_broken_by_the_one_that_was_answered_first() {
 
 #[test]
 fn a_session_never_costs_less_than_nothing_and_the_breakdown_adds_up() {
+    // The shapes this file exists for, counted. A property asserted over a
+    // space that cannot break it is not a property: the generated-month suite
+    // added exactly this statement and passed it over **zero** cases, because
+    // its own ceiling floor put the shape out of reach (D285).
+    let mut bounds_bound = 0usize;
+    let mut bounds_spread = 0usize;
+    let mut blocks_rounded = 0usize;
+    let mut two_categories = 0usize;
+
     for seed in SEEDS {
         let mut rng = Rng(seed);
         for case in 0..CASES {
             let tariff = tariff(&mut rng);
             let stretches = session(&mut rng);
+            let start = start_at(&mut rng);
             for pieces in [1, 7, 37] {
-                let rated = rate(&tariff, &sliced(&stretches, START, pieces));
+                let rated = rate(&tariff, &sliced(&stretches, start, pieces));
                 assert!(
                     rated.total().amount() >= Decimal::ZERO,
                     "case {case}/{pieces}: a maximum turned the session into a payment to the driver"
@@ -351,7 +388,72 @@ fn a_session_never_costs_less_than_nothing_and_the_breakdown_adds_up() {
                     rated.net().amount() + rated.tax().amount(),
                     "case {case}/{pieces}: the VAT breakdown does not add up"
                 );
+
+                // **No VAT category is owed a negative amount.** A bound is
+                // attributed to one category and can be deeper than that
+                // category holds; expressed as one allowance the document then
+                // states a negative BT-116, which reconciles, which all 317 of
+                // EN 16931's own rules accept, and which no tax office does
+                // (D283). Stated here rather than only on the invoice, because
+                // the breakdown crosses a roaming wire too — a partner was
+                // being sent the negative as well.
+                for line in rated.tax_summary() {
+                    assert!(
+                        !line.net.is_sign_negative(),
+                        "case {case}/{pieces}: the {} % category is owed {} — a negative taxable \
+                         amount under a positive total",
+                        line.rate,
+                        line.net
+                    );
+                }
+
+                if pieces == 1 {
+                    if rated.adjustment.is_some() {
+                        bounds_bound += 1;
+                    }
+                    if rated.adjustment_parts().len() > 1 {
+                        bounds_spread += 1;
+                    }
+                    if [Dimension::Energy, Dimension::Time, Dimension::ParkingTime]
+                        .into_iter()
+                        .any(|d| !rated.block_surplus_for(d).is_zero())
+                    {
+                        blocks_rounded += 1;
+                    }
+                    let mut rates: Vec<Option<Decimal>> =
+                        rated.lines.iter().map(|line| line.vat).collect();
+                    rates.sort_unstable();
+                    rates.dedup();
+                    if rates.len() > 1 {
+                        two_categories += 1;
+                    }
+                }
             }
         }
     }
+
+    // A generator that cannot reach a shape is a generator whose properties say
+    // nothing about it.
+    let cases = SEEDS.len() * CASES as usize;
+    assert!(
+        bounds_bound * 20 > cases,
+        "only {bounds_bound} of {cases} sessions had a bound that bound, so the limit properties \
+         above ran on sessions no limit touched"
+    );
+    assert!(
+        bounds_spread > 50,
+        "only {bounds_spread} sessions had a bound deeper than the category it is attributed to, \
+         which is the shape that produced an invoice all 317 rules accept and no tax office does"
+    );
+    assert!(
+        blocks_rounded > 50,
+        "only {blocks_rounded} sessions rounded a quantity up to a block, so the step function \
+         this file is named after was barely exercised"
+    );
+    assert!(
+        two_categories * 4 > cases,
+        "only {two_categories} of {cases} sessions were priced in more than one VAT category, and \
+         one rate makes the net and the gross proportional — every question here becomes the same \
+         question asked twice"
+    );
 }

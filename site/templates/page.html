@@ -3,24 +3,44 @@
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "TechArticle",
-  "headline": {{ page.title | json_encode | safe }},
-  "description": {{ page.description | default(value=config.description) | json_encode | safe }},
-  "url": "{{ page.permalink }}",
-  "inLanguage": "en",
-  "isPartOf": { "@type": "WebSite", "name": "{{ config.title }}", "url": "{{ config.base_url }}" },
-  "license": "https://spdx.org/licenses/MIT.html"
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "headline": {{ page.title | json_encode | safe }},
+      "description": {{ page.description | default(value=config.description) | json_encode | safe }},
+      "url": "{{ page.permalink }}",
+      "inLanguage": "en",
+      "isPartOf": { "@id": "{{ config.base_url }}/#website" },
+      "publisher": { "@id": "{{ config.base_url }}/#org" },
+      "license": "https://spdx.org/licenses/Apache-2.0.html",
+      "proficiencyLevel": "Expert",
+      "about": {{ config.extra.keywords | split(pat=", ") | json_encode | safe }}
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "emob", "item": "{{ config.base_url }}/" },
+        { "@type": "ListItem", "position": 2, "name": "Documentation", "item": "{{ get_url(path='@/docs/_index.md') }}" },
+        { "@type": "ListItem", "position": 3, "name": {{ page.title | json_encode | safe }} }
+      ]
+    }
+  ]
 }
 </script>
 {% endblock %}
 {% block content %}
+<nav class="crumbs" aria-label="Breadcrumb">
+  <a href="{{ get_url(path='@/_index.md') }}">emob</a> <span aria-hidden="true">/</span>
+  <a href="{{ get_url(path='@/docs/_index.md') }}">Documentation</a> <span aria-hidden="true">/</span>
+  <span aria-current="page">{{ page.title }}</span>
+</nav>
 {%- set docs = get_section(path="docs/_index.md") %}
 <nav class="docnav" aria-label="Documentation sections">
   {%- for p in docs.pages %}
   <a href="{{ p.permalink }}"{% if p.permalink == page.permalink %} aria-current="page"{% endif %}>{{ p.extra.nav | default(value=p.title) }}</a>
   {%- endfor %}
 </nav>
-<h1>{{ page.title }}</h1>
+<h1>{{ page.title }}{% if page.extra.state == "built" %} <span class="state" title="Built and tested">✅</span>{% endif %}</h1>
 {% if page.description %}<p class="lead">{{ page.description }}</p>{% endif %}
 {% if page.toc | length > 2 %}
 <nav class="toc" aria-label="On this page">

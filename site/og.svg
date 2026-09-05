@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The social preview card, 1200×630 — the image every link to this site renders
+  as on X, LinkedIn, Slack and Discord.
+
+  Kept as SVG because it is the source: a card is text and rules, and a binary
+  is not reviewable. `just og` renders it to `static/og.png`, which is what ships
+  — Open Graph consumers do not accept SVG, so the raster is the deliverable and
+  this is the thing it is generated from.
+
+  The palette is the site's own dark theme, because a card is read on a dark
+  chrome in most clients and a white one flares.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#12161c"/>
+      <stop offset="1" stop-color="#0b0e12"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff8a4c"/>
+      <stop offset="1" stop-color="#ff8a4c" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1200" height="6" fill="#ff8a4c"/>
+
+  <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+    <text x="80" y="132" font-size="30" font-weight="700" fill="#ff8a4c" letter-spacing="1">emob</text>
+    <text x="176" y="132" font-size="21" fill="#8b95a5" letter-spacing="2.2">OPEN SOURCE · RUST</text>
+
+    <text x="80" y="252" font-size="62" font-weight="700" fill="#f2f5f9" letter-spacing="-1.6">A value that does not verify</text>
+    <text x="80" y="326" font-size="62" font-weight="700" fill="#f2f5f9" letter-spacing="-1.6">does not bill.</text>
+
+    <rect x="80" y="366" width="420" height="3" fill="url(#rule)"/>
+
+    <text x="80" y="424" font-size="27" fill="#aab4c3">The e-mobility operating stack for European charging —</text>
+    <text x="80" y="464" font-size="27" fill="#aab4c3">CPO and eMSP, metering to money, in one workspace.</text>
+
+    <g font-size="20" fill="#7f8a99" letter-spacing="0.4">
+      <text x="80" y="556">Eichrecht / OCMF</text>
+      <text x="288" y="556">OCPP 2.1</text>
+      <text x="416" y="556">OCPI 2.3.0</text>
+      <text x="562" y="556">OICP</text>
+      <text x="642" y="556">ISO 15118</text>
+      <text x="776" y="556">AFIR</text>
+      <text x="852" y="556">EN 16931</text>
+      <text x="980" y="556">NIS2</text>
+    </g>
+    <text x="80" y="596" font-size="19" fill="#5d6675">hupe1980.github.io/emob</text>
+  </g>
+</svg>

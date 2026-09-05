@@ -7,8 +7,6 @@ description = "What is built, what is designed, how emob sits beside the protoco
 nav = "Architecture"
 +++
 
-# Architecture
-
 ## Two roles, one platform
 
 A German charging business usually wears both hats at once: it **operates**
@@ -31,14 +29,15 @@ flowchart TB
         POI -->|"DATEX II"| NAP["national access point"]
     end
 
-    subgraph roam["roaming"]
+    subgraph roam["roaming — roamd"]
         P2P["OCPI peers"]
         HUB["Hubject · GIREVE"]
     end
 
     subgraph emp["EMP — holding the driver contract"]
-        TOK["contracts · tokens · eMAIDs"]
-        INV["invoicing"]
+        TOK["empd<br/>contracts · tokens · quotes"]
+        INV["billd<br/>invoices · books"]
+        PNC["pncd<br/>contract certificates"]
     end
 
     CDR --> P2P & HUB
@@ -46,11 +45,12 @@ flowchart TB
     P2P & HUB --> TOK
     TOK --> INV
     CSMS <-->|authorize| TOK
+    PNC -.->|"OPCP"| TOK
 
     classDef built fill:#0a7d3322,stroke:#0a7d33
     classDef planned fill:#88888818,stroke:#888,stroke-dasharray:4 3
-    class CS,CSMS,SES,EICH,CDR,POI,P2P built
-    class HUB,TOK,INV planned
+    class CS,CSMS,SES,EICH,CDR,POI,P2P,HUB,TOK,INV built
+    class PNC planned
 ```
 
 Solid is built; dashed is designed and not yet written.
@@ -76,9 +76,12 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `emob-thg` | The greenhouse-gas quota: `[38k §6(3)]`'s **four** conditions as four fields in the paragraph's own order, a notification built only from energy a meter signed, and no factor held as a constant — the emissions value is announced annually in the Bundesanzeiger, so it is an argument carried with the notice |
 | `emob-service` | The shell every daemon shares, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature |
 | `agentd` | The advisory plane on `agentplane`: specialists that correlate across many exact answers, and cannot move money by construction. Three — evidence triage, the tariff sweep, and a compliance sweep that judges duties which have not started binding yet against the estate as it stands |
+| `billd` | The service that closes a month: what number an invoice carries, that a period closes once, which document supersedes which, and which account each posting lands in |
+| `empd` | The provider side: the token store two crates refuse to be, whether a contract authorises a session now, and what the driver is quoted before it starts |
+| `roamd` | The roaming node: who a record goes to, whether it may go at all, when it is late, and what to do with one that arrives. Every document is `emob-roam`'s; what is here is the ledger of what was sent to whom — the one thing no crate can hold, because `[OCPI 2.3.0 §mod_cdrs]` seals a record once the eMSP has it and gives a correction an order, and neither rule is a property of a document |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-**842 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
+**913 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
 `emob-service` is the one shared place that stops being true, and everything
 above it is a daemon. `just ci` green.
 
@@ -255,8 +258,8 @@ instead of an argument.
 | `emob-smart` | Site load management, OCPP charging profiles, DER control, the § 14a guard, V2G |
 | `emob-sim` (the rest) | Virtual EVs with 15118 PnC handshakes, MockHubject, an OCPI peer-in-a-process |
 
-Services — `csmsd`, `agentd`, `poid` and `tarifd` are built; `roamd`, `empd`,
-`pncd`, `billd`, `opsd` and an optional edge `sited` are 📐.
+Services — `csmsd`, `agentd`, `poid`, `tarifd`, `roamd`, `billd` and `empd` are
+built; `pncd`, `opsd` and an optional edge `sited` are 📐.
 
 ## One inventory, three audiences
 
@@ -467,7 +470,7 @@ One canonical model; every wire native; translation cost recorded.
 | Wire | Partner | Via | State |
 |---|---|---|---|
 | OCPI 2.3.0 (2.2.1 translated at the edge) | peers, most hubs | `ocpi-kit` | ✅ |
-| OICP 2.3 | Hubject | `oicp-kit` | ✅ out — the transport is `roamd`'s |
+| OICP 2.3 | Hubject | `oicp-kit` | ✅ out; `roamd` chooses the wire off the partner and owns the transport |
 | eMIP | GIREVE legacy | only if a partner forces it — GIREVE speaks OCPI | 📐 |
 | OCHP | e-clearing.net | not planned; the spec froze in 2016 | ✖ |
 
@@ -518,7 +521,9 @@ reaches for one.
 | `check-citations` | a rule citing a document nobody can produce — in the prose as well as the code: the READMEs, this site, and every comment that names a paragraph. The documents themselves are third-party and not in this repository, so on a clone the guard cannot ask whether each is *indexed* and says so — while the half that asks whether a citation is a form the workspace recognises at all runs from a table compiled into the binary, and therefore runs in CI |
 | `check-manifests` | a `cargo publish` that fails after the version is spent |
 | `purity` | a domain crate that reaches for a clock, a socket or the filesystem in **its own** source |
+| `check-constructors` | a rule with a door around it. `Energy::from_kwh` refuses a negative so a discharge can never cancel a draw; `TokenRef::new` refuses anything that is not a keyed digest so a raw RFID UID is never stored; `PartyId::new` upper-cases so `DE*ABC` and `DEABC` are not two entries in one routing table. A `derive(Deserialize)` restores the value and asks none of it — and that is the path values arrive by, out of a store, an outbox or a partner's document. So a type whose fields are **private** and whose construction can **refuse** may not derive it. Both halves matter: a bag of public fields has no door to guard, and "can refuse" is recognised by shape rather than by a list of names, because a search for `new` and `parse` walks past `Energy::from_kwh` |
+| `check-reach` | a rule with no caller. `dead_code` sees an unused private item and `cargo tree --invert` sees an unused crate; neither sees a `pub fn`, because `pub` is a promise to a downstream and the compiler takes it at face value — and here the downstream is this workspace. A public function whose name appears nowhere but its own definition, in no other crate, no test, no doc comment and nowhere on this site, is a rule stated and not enforced. A textual search rather than a call graph, deliberately: it over-approximates reachability, so it can miss a dead function and can never invent one |
 | `check-graph` | the other half: a clock, a socket or a database reaching a domain crate through a **dependency**, which `purity` greps past — a `uuid`/`v7` identifier is `SystemTime::now` behind a manifest line |
 | `check-prose` | a sentence a person reads with a hole in it. Rust joins a `\`-continued string literal with no separator, so dropping the backslash moves the continuation's indentation *inside* the string: it still compiles, every test matching a substring still passes, and the message reaches an operator with a run of spaces in the middle of it. The six that had accumulated were all in refusal texts — the longest strings here, and the only thing a person sees when the platform says no |
 | `check-wire` | a date or an instant in a serialisable type going out as `time`'s derived **nine-element array** instead of RFC 3339. Nothing fails when it does — a round trip through the same library succeeds either way — so every such field has to name the module it writes with |
-| `check-concepts` | a design document that states a count it does not hold — how many decisions the log records, how many rules the README heads, how big the test suite is, and how many tests each crate's own row claims — and a `D` number that repeats or leaves a gap. Prose has no test, and a claim nothing holds drifts one-directionally and silently. The per-crate column is the lesson: a guard on a total is not a guard on the figures that make it up. It also checks the **shape** of every Markdown table, because Markdown drops a surplus cell and blanks a missing one without complaining, and a paragraph that moves one row down a table is simply gone. The internal notes it is named for are not in this repository, so the half that reads them skips **by name** and the half over published prose runs anyway: a guard that skips in silence reads exactly like one that passed |
+| `check-concepts` | a design document that states a count it does not hold — how many decisions the log records, how many rules the README heads, how big the test suite is, how many properties this repository's own first sentence counts, and how many tests each crate's own row claims — and a `D` number that repeats or leaves a gap. Prose has no test, and a claim nothing holds drifts one-directionally and silently. The per-crate column is the lesson: a guard on a total is not a guard on the figures that make it up. It also checks the **shape** of every Markdown table, because Markdown drops a surplus cell and blanks a missing one without complaining, and a paragraph that moves one row down a table is simply gone. The internal notes it is named for are not in this repository, so the half that reads them skips **by name** and the half over published prose runs anyway: a guard that skips in silence reads exactly like one that passed |

@@ -66,8 +66,8 @@ use time::Date;
 use time::macros::date;
 
 use crate::station::{
-    AdHocPayment, ChargePointProfile, ChargingMode, CurrentType, EnergyMeasurementPoint, Ownership,
-    ProviderProfile, Registration, UndertakingProfile,
+    AdHocPayment, AdditionalPrices, ChargePointProfile, ChargingMode, CurrentType,
+    EnergyMeasurementPoint, Ownership, ProviderProfile, Registration, UndertakingProfile,
 };
 
 /// A stable identifier for one obligation.
@@ -114,6 +114,9 @@ pub enum ObligationId {
     AfirFixedCableOnDc,
     /// A third-party owner must supply hardware the operator can comply on.
     AfirOwnerEnablesCompliance,
+    /// A point must carry the interface Annex II names for its current and
+    /// power class.
+    AfirAnnexIiConnector,
     /// Static data must be available, free of charge.
     AfirStaticData,
     /// Dynamic data must be available, free of charge.
@@ -145,6 +148,13 @@ pub enum ObligationId {
     EichrechtConformityAssessedMeter,
     /// …and measured values the customer can verify.
     EichrechtVerifiableValues,
+    /// …on a meter whose verification period has not expired.
+    EichrechtVerificationPeriod,
+    /// …with the records of every intervention on it kept.
+    EichrechtInterventionRecords,
+    /// Whoever *uses* measured values owes a confirmation from whoever operates
+    /// the meter.
+    EichrechtValueUserConfirmation,
     /// AC metering in a DC station is only permitted on legacy sub-50 kW
     /// hardware.
     ReaAcMeteringOnLegacyDcOnly,
@@ -152,6 +162,13 @@ pub enum ObligationId {
     ReaRectificationAttributable,
     /// …and the customer must be told the rectification loss is in the value.
     ReaRectificationLossDisclosed,
+    /// The Arbeitspreis must be indicated at or beside the point.
+    PangvArbeitspreisAtThePoint,
+    /// …and, where a web-based system is used, through it before the session
+    /// starts.
+    PangvArbeitspreisBeforeStart,
+    /// …and any further prices completely, in immediate vicinity.
+    PangvAdditionalPricesAdjacent,
     /// THG-Quote requires a register entry and third-party access.
     ThgEligibility,
     /// An undertaking in scope must give the competent authority its details.
@@ -189,6 +206,7 @@ impl ObligationId {
             Self::AfirSmartRecharging => "afir-smart-recharging",
             Self::AfirFixedCableOnDc => "afir-fixed-cable-on-dc",
             Self::AfirOwnerEnablesCompliance => "afir-owner-enables-compliance",
+            Self::AfirAnnexIiConnector => "afir-annex-ii-connector",
             Self::AfirStaticData => "afir-static-data",
             Self::AfirDynamicData => "afir-dynamic-data",
             Self::AfirDataApi => "afir-data-api",
@@ -204,9 +222,15 @@ impl ObligationId {
             Self::Lsv2026OperatorChangeNotice => "lsv2026-operator-change-notice",
             Self::EichrechtConformityAssessedMeter => "eichrecht-conformity-assessed-meter",
             Self::EichrechtVerifiableValues => "eichrecht-verifiable-values",
+            Self::EichrechtVerificationPeriod => "eichrecht-verification-period",
+            Self::EichrechtInterventionRecords => "eichrecht-intervention-records",
+            Self::EichrechtValueUserConfirmation => "eichrecht-value-user-confirmation",
             Self::ReaAcMeteringOnLegacyDcOnly => "rea-ac-metering-on-legacy-dc-only",
             Self::ReaRectificationAttributable => "rea-rectification-attributable",
             Self::ReaRectificationLossDisclosed => "rea-rectification-loss-disclosed",
+            Self::PangvArbeitspreisAtThePoint => "pangv-arbeitspreis-at-the-point",
+            Self::PangvArbeitspreisBeforeStart => "pangv-arbeitspreis-before-start",
+            Self::PangvAdditionalPricesAdjacent => "pangv-additional-prices-adjacent",
             Self::ThgEligibility => "thg-eligibility",
             Self::Nis2Registration => "nis2-registration",
             Self::Nis2RiskManagement => "nis2-risk-management",
@@ -240,15 +264,15 @@ pub enum Rule {
     ChargePoint {
         /// Whether the duty binds this point at all.
         applicable: fn(&ChargePointProfile) -> bool,
-        /// Whether the point meets it.
-        satisfied: fn(&ChargePointProfile) -> bool,
+        /// Whether the point meets it, **on the day asked about**.
+        satisfied: fn(&ChargePointProfile, Date) -> bool,
     },
     /// The duty binds a mobility service provider.
     Provider {
         /// Whether the duty binds this provider at all.
         applicable: fn(&ProviderProfile) -> bool,
-        /// Whether the provider meets it.
-        satisfied: fn(&ProviderProfile) -> bool,
+        /// Whether the provider meets it, on the day asked about.
+        satisfied: fn(&ProviderProfile, Date) -> bool,
     },
     /// The duty binds the **undertaking** — the company rather than one of its
     /// points or one of the roles it plays.
@@ -259,8 +283,8 @@ pub enum Rule {
     Undertaking {
         /// Whether the duty binds this undertaking at all.
         applicable: fn(&UndertakingProfile) -> bool,
-        /// Whether it meets it.
-        satisfied: fn(&UndertakingProfile) -> bool,
+        /// Whether it meets it, on the day asked about.
+        satisfied: fn(&UndertakingProfile, Date) -> bool,
     },
 }
 
@@ -482,11 +506,39 @@ const AFIR_DATA_AND_CABLES: Date = date!(2025 - 04 - 14);
 /// `[DATEX-II-Profil]` — the German national access point's mandatory format.
 const DATEX2_MANDATORY: Date = date!(2026 - 04 - 14);
 /// `[DA-656 Art. 2]` — the delegated regulation applies.
-const DA656_APPLIES: Date = date!(2026 - 01 - 08);
+///
+/// Declared in [`crate::station`] because the interface rule turns on it as well
+/// as this calendar does, and one date with two spellings is one date that can
+/// be changed in one of them.
+use crate::station::DA656_APPLIES;
 /// `[DA-656 Anh. 2.1.2, 2.1.3]` — the EN ISO 15118-20 generation.
 const DA656_ISO20: Date = date!(2027 - 01 - 01);
 /// `[LSV26]` — the Ladesäulenverordnung 2026 in force.
 const LSV26_IN_FORCE: Date = date!(2026 - 01 - 01);
+/// `[PAngV]` — the Preisangabenverordnung of 12.11.2021 entered into force.
+///
+/// **The earliest date in this calendar, and it is German rather than
+/// European.** `[PAngV §14(2)]` has required the Arbeitspreis at a publicly
+/// accessible charge point since this day — two years before `[AFIR Art. 5(4)]`
+/// applied, at every power rather than only at 50 kW and above, and with
+/// `[PAngV §20]` behind it. The paragraph's cross-reference to the
+/// Ladesäulenverordnung has since been renumbered to the 2025 version; the duty
+/// itself has run from here.
+const PANGV_IN_FORCE: Date = date!(2022 - 05 - 28);
+
+/// The day the Eichrecht duties began being enforced against German charging
+/// infrastructure.
+///
+/// `[MessEG]` itself has bound since 01.01.2015, but the Eichbehörden granted
+/// the sector a transition that ran to this date, and a calendar that dated
+/// these rows from the statute would report every point in the country in
+/// breach for four years in which no authority acted — the failure the NIS2
+/// rows avoid one instrument further on (D259).
+///
+/// One constant rather than a literal on each row: five duties read it, and a
+/// date with five spellings is a date that can be changed in four of them.
+const EICHRECHT_ENFORCED: Date = date!(2019 - 04 - 01);
+
 /// `[REA 6-A]` — the date the Regelermittlungsausschuss published the
 /// e-mobility rules under `[MessEG §46]`.
 const REA_6A_PUBLISHED: Date = date!(2017 - 03 - 16);
@@ -515,6 +567,33 @@ const AC_METERING_CUTOFF: Date = date!(2018 - 01 - 01);
 /// directly in every Member State on the days it names.
 const NIS2_DE_IN_FORCE: Date = date!(2025 - 12 - 06);
 
+/// The first day an undertaking already in scope is **in breach** for not having
+/// registered.
+///
+/// # Why this is not [`NIS2_DE_IN_FORCE`]
+///
+/// The duty attaches when the law comes into force; the *breach* does not. The
+/// German transposition gives the registration its own clock — "spätestens drei
+/// Monate, nachdem sie erstmals oder erneut als eine der vorgenannten
+/// Einrichtungen gelten" — so an undertaking that was already in scope on
+/// 06.12.2025 had until 06.03.2026, and one assessed in January 2026 with no
+/// registration was doing exactly what the law told it it could.
+///
+/// This is the same correction as [`NIS2_DE_IN_FORCE`] itself, one level in.
+/// That one refused to report a breach during the fourteen months no German
+/// authority could act; this one refuses to report it during the three months
+/// the German authority itself gave. A window a statute grants is part of the
+/// duty, not a grace period somebody may choose to ignore — and the calendar
+/// already models the `[LSV26 §4(1)]` two-week notice that way, through
+/// `Registration::is_timely_for`, so a registration duty with no window at all
+/// was the odd one out (D259).
+///
+/// Only the registration carries one. The risk-management, incident-warning and
+/// governance duties beside it bind from the day the law applies, with no
+/// transitional provision — which is what makes the distinction worth a constant
+/// rather than a blanket offset.
+const NIS2_DE_REGISTRATION_DUE: Date = date!(2026 - 03 - 06);
+
 /// `[CRA Art. 71(2)]` — the reporting duties of Article 14 apply from this day,
 /// fifteen months before the rest of the Regulation.
 const CRA_REPORTING_APPLIES: Date = date!(2026 - 09 - 11);
@@ -542,7 +621,7 @@ pub const CALENDAR: &[Obligation] = &[
             // last subparagraph of Art. 5(1) takes the whole paragraph off it,
             // and demanding a payment instrument of a free charger reports a
             // breach where the article grants an exemption.
-            satisfied: |p| !p.requires_payment || p.ad_hoc_payment != AdHocPayment::None,
+            satisfied: |p, _| !p.requires_payment || p.ad_hoc_payment != AdHocPayment::None,
         },
         remedy: "offer a contract-free path at the point, or make the point free of charge",
     },
@@ -562,7 +641,7 @@ pub const CALENDAR: &[Obligation] = &[
             },
             // A QR-code device satisfies (c) only below 50 kW; at or above it,
             // only (a) a card reader or (b) a contactless device does.
-            satisfied: |p| p.ad_hoc_payment.satisfies_afir_at(p.rated_power_kw),
+            satisfied: |p, _| p.ad_hoc_payment.satisfies_afir_at(p.rated_power_kw),
         },
         remedy: "fit a card reader or contactless device (a QR flow only qualifies below 50 kW)",
     },
@@ -595,7 +674,7 @@ pub const CALENDAR: &[Obligation] = &[
             },
             // Points (a) or (b) only: at 50 kW and above a QR flow never
             // qualified, so this is the same test as everywhere else.
-            satisfied: |p| p.ad_hoc_payment.satisfies_afir_at(p.rated_power_kw),
+            satisfied: |p, _| p.ad_hoc_payment.satisfies_afir_at(p.rated_power_kw),
         },
         remedy: "retrofit a card reader or contactless device before 01.01.2027",
     },
@@ -609,7 +688,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public() && p.offers_automatic_authentication,
-            satisfied: |p| p.automatic_authentication_opt_out_offered,
+            satisfied: |p, _| p.automatic_authentication_opt_out_offered,
         },
         remedy: "show the ad-hoc and contract alternatives clearly, and offer them conveniently",
     },
@@ -634,7 +713,7 @@ pub const CALENDAR: &[Obligation] = &[
             // the differentiation is proportionate and objectively justified."
             // So differentiation is not itself the breach — unjustified
             // differentiation is, and the two are different findings.
-            satisfied: |p| p.price_conduct.is_non_discriminatory(),
+            satisfied: |p, _| p.price_conduct.is_non_discriminatory(),
         },
         remedy: "charge providers and end users alike, or record the proportionate, objectively justified reason the article requires",
     },
@@ -671,7 +750,7 @@ pub const CALENDAR: &[Obligation] = &[
             // A purely per-minute tariff on a fast charger is unlawful. An
             // occupancy fee per minute is permitted *in addition* to the kWh
             // price, never instead of it.
-            satisfied: |p| p.price_transparency.energy_based,
+            satisfied: |p, _| p.price_transparency.energy_based,
         },
         remedy: "price the ad-hoc tariff per kWh; an occupancy fee per minute may only be added to it",
     },
@@ -689,7 +768,7 @@ pub const CALENDAR: &[Obligation] = &[
                     && p.is_at_least_50_kw()
                     && p.commissioned_on >= AFIR_APPLIES
             },
-            satisfied: |p| p.price_transparency.shown_at_station,
+            satisfied: |p, _| p.price_transparency.shown_at_station,
         },
         remedy: "show the price before the session starts, derived from the tariff that rates it",
     },
@@ -706,7 +785,7 @@ pub const CALENDAR: &[Obligation] = &[
             // installed base below 50 kW. The article prescribes the *order*:
             // per kWh, per minute, per session, then anything else.
             applicable: |p| p.is_public() && p.requires_payment && !p.is_at_least_50_kw(),
-            satisfied: |p| p.price_transparency.components_in_prescribed_order,
+            satisfied: |p, _| p.price_transparency.components_in_prescribed_order,
         },
         remedy: "present the components as kWh, then minute, then session, then the rest",
     },
@@ -720,7 +799,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::Provider {
             applicable: |_| true,
-            satisfied: |p| {
+            satisfied: |p, _| {
                 p.discloses_all_price_components
                     && p.discloses_e_roaming_costs
                     && p.discloses_electronically
@@ -739,14 +818,36 @@ pub const CALENDAR: &[Obligation] = &[
             applicable: |_| true,
             // The article does not ask for this to be reasonable and
             // transparent; it forbids it outright.
-            satisfied: |p| !p.surcharges_cross_border_roaming,
+            satisfied: |p, _| !p.surcharges_cross_border_roaming,
         },
         remedy: "remove the cross-border surcharge: the article forbids it outright, not merely caps it",
     },
+    Obligation {
+        id: ObligationId::EichrechtValueUserConfirmation,
+        consequence: Consequence::Breach,
+        title: "A provider billing on somebody else's meter owes a confirmation from its operator",
+        citation: "[MessEG §33(2)]",
+        applies_from: EICHRECHT_ENFORCED,
+        applies_until: None,
+        rule: Rule::Provider {
+            // "Wer Messwerte verwendet" — every provider does, on every
+            // roaming session it re-bills. The statute does not excuse the
+            // party that did not measure: it asks for a confirmation *from the
+            // operator*, which lives in a roaming agreement rather than in
+            // anything a CDR carries.
+            applicable: |_| true,
+            satisfied: |p, _| p.holds_meter_operator_confirmation,
+        },
+        remedy: "put the [MessEG §33(2)] confirmation in the roaming agreement: verifying every signed record proves the values are the meter's and says nothing about whether that meter's operator is meeting its own duties",
+    },
     // ── AFIR Art. 5(7), (8), (10): the duties the BNetzA actually audits ────
     //
-    // `[LSV26 §5]` names Art. 5(1), (2), (7), (8) and (10) as the paragraphs
-    // the regulator may inspect, demand a retrofit for, and close a point over.
+    // `[LSV26 §5]` names Art. 5(1), (2), (7), (8) and (10) — **and Anhang II**
+    // — as the requirements the regulator may inspect, demand a retrofit for,
+    // and close a point over. The Annex is the limb every summary drops, and
+    // dropping it here dropped a duty: `AfirAnnexIiConnector`, below, is that
+    // half.
+    //
     // These three are the ones almost no compliance model carries.
     Obligation {
         id: ObligationId::AfirDigitallyConnected,
@@ -757,7 +858,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public(),
-            satisfied: |p| p.digitally_connected,
+            satisfied: |p, _| p.digitally_connected,
         },
         remedy: "connect the point to a CSMS: without it neither the data nor the smart-charging duties can be met",
     },
@@ -779,7 +880,7 @@ pub const CALENDAR: &[Obligation] = &[
                         || p.renovated_on
                             .is_some_and(|on| on > AFIR_DIGITAL_CONNECTION))
             },
-            satisfied: |p| p.smart_recharging_capable,
+            satisfied: |p, _| p.smart_recharging_capable,
         },
         remedy: "accept and follow charging profiles (OCPP smart charging); a fixed-current point does not qualify",
     },
@@ -792,7 +893,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public() && p.current_type == CurrentType::Dc,
-            satisfied: |p| p.fixed_cable,
+            satisfied: |p, _| p.fixed_cable,
         },
         remedy: "fit a tethered cable: a DC point with a socket only is out of compliance",
     },
@@ -810,9 +911,47 @@ pub const CALENDAR: &[Obligation] = &[
             // it cannot change. The article puts that on the owner, which is
             // only any use to an operator that wrote it into the contract.
             applicable: |p| p.is_public() && p.ownership.is_third_party(),
-            satisfied: |p| p.ownership == Ownership::ThirdPartyEnabling,
+            satisfied: |p, _| p.ownership == Ownership::ThirdPartyEnabling,
         },
         remedy: "write the Art. 5(11) characteristics into the arrangement with the owner: the duties are still enforced against the operator",
+    },
+    // ── AFIR Art. 21(1) + Annex II: the interface, which is a duty ─────────
+    //
+    // "The technical specifications set out in Annex II shall apply." One
+    // sentence, and it turns the connector list from a description into a
+    // requirement — the one `[LSV26 §5]` names beside Article 5 and the one
+    // `[LSV26 §5(3)]` lets the regulator **forbid the operation of a point**
+    // over. A compliance model that carries Article 5 and stops has left out
+    // the half that closes stations.
+    //
+    // One row rather than two, and the reason is where the amendment put its
+    // own date. `[DA-656]` replaces Annex II points 1.1 to 1.4 from 08.01.2026,
+    // and the two things it changes — the Mode 2 exemption and the L-category
+    // power split — are written into limbs reading "installed or renovated from
+    // 8 January 2026". So the population, not the assessment date, decides which
+    // sentence a point answers to, and that is a fact about the profile:
+    // `afir_annex_ii_satisfied` reads `installed_or_renovated_on`, exactly as
+    // the DA-656 vehicle-communication duties below do.
+    Obligation {
+        id: ObligationId::AfirAnnexIiConnector,
+        consequence: Consequence::Breach,
+        title: "A point must carry the interface Annex II names for its current, power and vehicle class",
+        citation: "[AFIR Art. 21(1)]",
+        applies_from: AFIR_APPLIES,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            // Annex II states no accessibility limb of its own — it is a
+            // technical specification, not an operator duty — so what decides
+            // the population here is the route by which it is enforced.
+            // `[LSV26 §1(1)]` scopes the German regime to publicly accessible
+            // points for class M and N vehicles, and `[LSV26 §5]` is the power
+            // exercised over them. A private wall box is outside that, and
+            // reporting it as in breach would be a finding no authority can act
+            // on.
+            applicable: |p| p.is_public(),
+            satisfied: |p, _| p.afir_annex_ii_satisfied(),
+        },
+        remedy: "fit the Annex II interface for the point's current — Type 2 on AC, CCS Combo 2 on DC — or one of the two the Annex admits in its own bands: Type 3A or an IEC 60884-1 socket on an L-category point up to 3.7 kW [DA-656 Anh. 1.3.1], and an IEC 60884-1 socket on a Mode 2 point up to 3.7 kW installed or renovated from 08.01.2026 [DA-656 Anh. 1.1]. A CHAdeMO-only DC post does not qualify however many vehicles it serves",
     },
     // ── AFIR Art. 20: the data duties, kept apart ──────────────────────────
     Obligation {
@@ -824,7 +963,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public(),
-            satisfied: |p| p.data.static_data,
+            satisfied: |p, _| p.data.static_data,
         },
         remedy: "publish location, connectors, current type, power, opening hours and contact",
     },
@@ -841,7 +980,7 @@ pub const CALENDAR: &[Obligation] = &[
             // for the recharging service." The static duty has no such
             // exemption, which is why the two are separate obligations.
             applicable: |p| p.is_public() && p.requires_payment,
-            satisfied: |p| p.data.dynamic_data,
+            satisfied: |p, _| p.data.dynamic_data,
         },
         remedy: "publish operational status, availability, the ad-hoc price and the renewable flag",
     },
@@ -854,7 +993,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public(),
-            satisfied: |p| p.data.open_api,
+            satisfied: |p, _| p.data.open_api,
         },
         remedy: "stand up the API and submit it to the national access point — publishing the data is not enough",
     },
@@ -867,7 +1006,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public(),
-            satisfied: |p| p.data.datex2,
+            satisfied: |p, _| p.data.datex2,
         },
         remedy: "switch the Mobilithek feed to the DATEX II Recharging profile",
     },
@@ -886,7 +1025,7 @@ pub const CALENDAR: &[Obligation] = &[
             // which this calendar once did — would exempt a point *because* it
             // fails the duty, which is exactly backwards.
             applicable: |p| p.is_public() && p.installed_or_renovated_on() >= DA656_APPLIES,
-            satisfied: |p| p.v2g.iso15118_2,
+            satisfied: |p, _| p.v2g.iso15118_2,
         },
         remedy: "deploy firmware implementing EN ISO 15118-1…-5",
     },
@@ -899,7 +1038,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public() && p.installed_or_renovated_on() >= DA656_ISO20,
-            satisfied: |p| p.v2g.iso15118_20,
+            satisfied: |p, _| p.v2g.iso15118_20,
         },
         remedy: "TLS 1.3 and the larger certificates of -20 usually mean a hardware refresh",
     },
@@ -919,7 +1058,7 @@ pub const CALENDAR: &[Obligation] = &[
                     && p.mode() != ChargingMode::Mode2
                     && p.installed_or_renovated_on() >= DA656_ISO20
             },
-            satisfied: |p| p.v2g.iso15118_20,
+            satisfied: |p, _| p.v2g.iso15118_20,
         },
         remedy: "a depot or workplace wall box installed from 2027 is in scope: plan the firmware generation now",
     },
@@ -941,7 +1080,7 @@ pub const CALENDAR: &[Obligation] = &[
                     && p.offers_automatic_authentication
                     && p.installed_or_renovated_on() >= DA656_ISO20
             },
-            satisfied: |p| p.v2g.iso15118_2 && p.v2g.iso15118_20,
+            satisfied: |p, _| p.v2g.iso15118_2 && p.v2g.iso15118_20,
         },
         remedy: "a point doing automatic authentication may not drop -2: vehicles on both generations must be served",
     },
@@ -963,7 +1102,7 @@ pub const CALENDAR: &[Obligation] = &[
             // § 1(1): the Verordnung governs publicly accessible points for
             // class M and N vehicles.
             applicable: |p| p.is_public(),
-            satisfied: |p| p.meets_technical_requirements,
+            satisfied: |p, _| p.meets_technical_requirements,
         },
         remedy: "meet § 49(1) EnWG and the applicable technical rules; § 5(2) lets the regulator demand the retrofit and § 5(3) lets it close the point",
     },
@@ -979,7 +1118,7 @@ pub const CALENDAR: &[Obligation] = &[
             // § 4(2). A duty to *be able to prove* is failed quietly: nothing
             // goes wrong until the request arrives, and by then the documents
             // either exist or they do not.
-            satisfied: |p| p.registration.technical_documentation_available,
+            satisfied: |p, _| p.registration.technical_documentation_available,
         },
         remedy: "keep the § 3 conformity documentation retrievable per point; § 5(3) closes a point whose compliance is not evidenced",
     },
@@ -999,7 +1138,7 @@ pub const CALENDAR: &[Obligation] = &[
             // applies the régime afresh to an existing point that opens to the
             // public, which a rule reading `commissioned_on` alone reports as
             // years late on its first day.
-            satisfied: |p| {
+            satisfied: |p, _| {
                 p.registration
                     .is_timely_for(p.notifiable_commissioning_date())
             },
@@ -1018,7 +1157,7 @@ pub const CALENDAR: &[Obligation] = &[
             // service owes this, which is why the applicability reads the
             // event rather than a flag.
             applicable: |p| p.is_public() && p.registration.decommissioning.is_some(),
-            satisfied: |p| {
+            satisfied: |p, _| {
                 p.registration
                     .decommissioning
                     .is_some_and(|notice| notice.is_timely(Registration::PROMPT_NOTIFICATION_DAYS))
@@ -1040,7 +1179,7 @@ pub const CALENDAR: &[Obligation] = &[
             // and an incoming operator that files its own and assumes the
             // outgoing one did the same has a point the regulator may forbid
             // the operation of, over a notice it never saw and did not owe.
-            satisfied: |p| {
+            satisfied: |p, _| {
                 p.registration.operator_change.is_some_and(|change| {
                     change.both_filed_timely(Registration::PROMPT_NOTIFICATION_DAYS)
                 })
@@ -1053,11 +1192,11 @@ pub const CALENDAR: &[Obligation] = &[
         consequence: Consequence::Breach,
         title: "Billing by energy requires a conformity-assessed meter",
         citation: "[MessEG §33]",
-        applies_from: date!(2019 - 04 - 01),
+        applies_from: EICHRECHT_ENFORCED,
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.metering.bills_by_energy,
-            satisfied: |p| p.metering.mid_conformity_assessed,
+            satisfied: |p, _| p.metering.mid_conformity_assessed,
         },
         remedy: "a point without an assessed meter may not bill by kWh at all",
     },
@@ -1066,13 +1205,62 @@ pub const CALENDAR: &[Obligation] = &[
         consequence: Consequence::Breach,
         title: "The customer must be able to verify the billed measured value",
         citation: "[PTB-A 50.7]",
-        applies_from: date!(2019 - 04 - 01),
+        applies_from: EICHRECHT_ENFORCED,
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.metering.bills_by_energy,
-            satisfied: |p| p.metering.signed_values,
+            satisfied: |p, _| p.metering.signed_values,
         },
         remedy: "emit OCMF-signed values and retain them with the session",
+    },
+    // ── MessEG § 31 and § 33: the duties of the parties, not of the device ──
+    //
+    // `[MessEG §31(2)]` puts four duties on whoever **uses** a meter and
+    // `[MessEG §33(2)]` one on whoever uses its **values**. Between them they
+    // are the half of the Eichrecht that is about dates and paperwork rather
+    // than about signatures, and it is the half a platform that verifies every
+    // record can still fail completely.
+    Obligation {
+        id: ObligationId::EichrechtVerificationPeriod,
+        consequence: Consequence::Breach,
+        title: "The meter's verification period must not have expired",
+        citation: "[MessEG §37(1)]",
+        applies_from: EICHRECHT_ENFORCED,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            // "Messgeräte dürfen nicht ungeeicht verwendet werden, nachdem die
+            // … bestimmte Eichfrist abgelaufen ist." The duty is about using
+            // the meter, so it binds any point that bills by energy — the same
+            // population `[MessEG §33]` reaches.
+            applicable: |p| p.metering.bills_by_energy,
+            // **The one duty in this calendar that is a fact about the day it
+            // is asked on.** Everything else is a property of the point; this
+            // is a date passing. See `ChargePointProfile::verification_expires_on`
+            // for the three sentences that decide it — where the clock starts
+            // `[MessEG §37(1) S. 2]`, the eight years
+            // `[MessEV Anl. 7 Nr. 6.7]` gives charging equipment, and the end
+            // of the calendar year `[MessEV §34(2)]` adds to it.
+            satisfied: ChargePointProfile::verification_valid_on,
+        },
+        remedy: "have the meter re-verified, or replace it: every kilowatt-hour billed after the period expires is a measured value used without a properly used meter [MessEG §33(1)], whatever else the record carries",
+    },
+    Obligation {
+        id: ObligationId::EichrechtInterventionRecords,
+        consequence: Consequence::Breach,
+        title: "Records of every intervention on the meter — firmware included — must be kept",
+        citation: "[MessEG §31(2)]",
+        applies_from: EICHRECHT_ENFORCED,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            // Nr. 4 binds whoever uses the meter, which is any point metering
+            // for money. The clause that reaches a *platform* is its last:
+            // "einschließlich solcher durch elektronisch vorgenommene
+            // Maßnahmen" — a remote firmware push is an Eingriff whose record
+            // the operator owes, and a CSMS is what performs it.
+            applicable: |p| p.metering.bills_by_energy,
+            satisfied: |p, _| p.metering.intervention_records_retained,
+        },
+        remedy: "keep the maintenance, repair and firmware-update record for three months past the verification period and at most five years — the one retention figure the German metrology texts actually give",
     },
     // ── REA 6-A: AC metering inside a DC station ───────────────────────────
     //
@@ -1098,7 +1286,9 @@ pub const CALENDAR: &[Obligation] = &[
             // fast-charger duties begin at the same number counting the other
             // way, so a 50 kW station is on the strict side of one rule and the
             // permissive side of this one.
-            satisfied: |p| p.placed_on_market_date() < AC_METERING_CUTOFF && p.is_at_most_50_kw(),
+            satisfied: |p, _| {
+                p.placed_on_market_date() < AC_METERING_CUTOFF && p.is_at_most_50_kw()
+            },
         },
         remedy: "meter after the rectifier: on anything newer or larger, the AC-side allowance does not exist",
     },
@@ -1117,7 +1307,7 @@ pub const CALENDAR: &[Obligation] = &[
             // The condition an operator is most likely to be quietly in breach
             // of: a multi-outlet DC cabinet sharing one rectifier fails it, and
             // shared rectifiers are the normal way such cabinets are built.
-            satisfied: |p| p.metering.rectification_attributable_to_one_session,
+            satisfied: |p, _| p.metering.rectification_attributable_to_one_session,
         },
         remedy: "a shared rectifier cannot be attributed to one session: meter after it, per outlet",
     },
@@ -1140,9 +1330,106 @@ pub const CALENDAR: &[Obligation] = &[
                 p.current_type == CurrentType::Dc
                     && p.metering.measurement_point == EnergyMeasurementPoint::AcBeforeRectifier
             },
-            satisfied: |p| p.metering.rectification_loss_disclosed,
+            satisfied: |p, _| p.metering.rectification_loss_disclosed,
         },
         remedy: "state on the receipt and at the point that the value includes the energy the rectification consumed: a value the customer cannot interpret is one they cannot check",
+    },
+    // ── PAngV § 14: the German price indication, older and wider than AFIR ──
+    //
+    // `[AFIR Art. 5(4)]` splits at 50 kW and dates from 13.04.2024.
+    // `[PAngV §14(2)]` has bound every publicly accessible point that takes an
+    // ad-hoc payment since **28.05.2022**, at any power, and `[PAngV §20]`
+    // makes a failure an Ordnungswidrigkeit under the Wirtschaftsstrafgesetz.
+    //
+    // The two are not the same duty said twice. AFIR asks that the price be
+    // *shown* and, above 50 kW, that it be *per kWh*; PAngV asks for a
+    // particular figure — the **Arbeitspreis**, which `[PAngV §2 Nr. 1]`
+    // defines as the consumption-dependent price per unit *"einschließlich der
+    // Umsatzsteuer"* and `[PAngV §14(4)]` fixes at one kilowatt-hour — by one
+    // of three named media, at or beside the point. A German 22 kW post priced
+    // by the minute alone satisfies AFIR and breaches this, and a post quoting
+    // a net price satisfies neither `[PAngV §3(1)]` nor this.
+    //
+    // The tariff half of that — whether a tariff *has* an Arbeitspreis and
+    // whether it has a Gesamtpreis at all — is `emob_tariff::check_pangv`,
+    // because it is a property of a price list rather than of a point. What is
+    // here is the half that is a fact about the post.
+    Obligation {
+        id: ObligationId::PangvArbeitspreisAtThePoint,
+        consequence: Consequence::Breach,
+        title: "The Arbeitspreis must be indicated at or beside every public point taking an ad-hoc payment",
+        citation: "[PAngV §14(2)]",
+        applies_from: PANGV_IN_FORCE,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            // "Wer an einem öffentlich zugänglichen Ladepunkt Verbrauchern das
+            // punktuelle Aufladen … anbietet, hat **beim Einsatz eines für das
+            // punktuelle Aufladen vorgesehenen Bezahlverfahrens** den … für den
+            // jeweiligen Ladepunkt geltenden Arbeitspreis … anzugeben."
+            //
+            // Three limbs, and the third is the one that keeps this off a free
+            // charger and off a contract-only post: there has to *be* an ad-hoc
+            // payment method in use. `[PAngV §1(1)]` narrows it once more —
+            // the whole Verordnung governs prices stated to **consumers**.
+            applicable: |p| {
+                p.is_public() && p.requires_payment && p.ad_hoc_payment != AdHocPayment::None
+            },
+            satisfied: |p, _| p.price_transparency.arbeitspreis.is_indicated(),
+        },
+        remedy: "print the price per kWh on the post, put it on the point's own display, or signpost a registration-free, free-of-charge mobile page from the post — any one of the three answers § 14(2)",
+    },
+    Obligation {
+        id: ObligationId::PangvArbeitspreisBeforeStart,
+        consequence: Consequence::Breach,
+        title: "A web-based ad-hoc system must state the Arbeitspreis before the session starts",
+        citation: "[PAngV §14(2)]",
+        applies_from: PANGV_IN_FORCE,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            // The paragraph's last sentence, and a **second** duty rather than
+            // a fourth medium: "Wird für das punktuelle Aufladen von
+            // Verbrauchern ein webbasiertes System verwendet, so hat der
+            // Anbieter den Arbeitspreis … über dieses webbasierte System
+            // spätestens vor dem Start des Ladevorgangs anzugeben."
+            //
+            // So an app or a QR-code checkout owes the figure *through that
+            // system*, whatever is printed on the post — and a point that
+            // satisfies the sentence above by a sticker can still fail this one.
+            applicable: |p| {
+                p.is_public() && p.requires_payment && p.price_transparency.web_based_ad_hoc
+            },
+            satisfied: |p, _| p.price_transparency.arbeitspreis_stated_before_start,
+        },
+        remedy: "state the price per kWh in the app or web checkout before the driver can start the session, derived from the tariff that rates it",
+    },
+    Obligation {
+        id: ObligationId::PangvAdditionalPricesAdjacent,
+        consequence: Consequence::Breach,
+        title: "Any further prices must be stated completely, in immediate vicinity of the Arbeitspreis",
+        citation: "[PAngV §14(3)]",
+        applies_from: PANGV_IN_FORCE,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            // "Wer in den Fällen des Absatzes 1 oder 2 **zusätzlich**
+            // leistungsabhängige oder nicht verbrauchsabhängige Preise fordert,
+            // hat diese **vollständig in unmittelbarer Nähe** der Angabe des
+            // Arbeits- oder Mengenpreises oder des Ladepunktes anzugeben."
+            //
+            // A blocking fee, a session fee or a power-band surcharge. The duty
+            // arises only where such a price is actually charged, which is why
+            // `AdditionalPrices` has three answers and not two: "none" and
+            // "stated" are both compliant and they are different facts.
+            applicable: |p| {
+                p.is_public()
+                    && p.requires_payment
+                    && p.ad_hoc_payment != AdHocPayment::None
+                    && p.price_transparency.additional_prices.are_charged()
+            },
+            satisfied: |p, _| {
+                p.price_transparency.additional_prices == AdditionalPrices::StatedAdjacent
+            },
+        },
+        remedy: "put every further price — blocking fee, session fee, power surcharge — beside the price per kWh, in full: a component the driver finds only on the invoice is not indicated",
     },
     Obligation {
         id: ObligationId::ThgEligibility,
@@ -1161,7 +1448,7 @@ pub const CALENDAR: &[Obligation] = &[
             // asks whether the *notified* point is published or publishable, so
             // the Anzeige is a premise of the paragraph rather than a fifth
             // condition — but a point with no notice has nothing to publish.
-            satisfied: |p| {
+            satisfied: |p, _| {
                 p.registration.commissioning_notified_on.is_some() && p.quota.is_eligible()
             },
         },
@@ -1183,11 +1470,14 @@ pub const CALENDAR: &[Obligation] = &[
         consequence: Consequence::Breach,
         title: "An undertaking in scope must give the competent authority its details",
         citation: "[NIS2 Art. 3(4)]",
-        applies_from: NIS2_DE_IN_FORCE,
+        // The duty attaches when the law applies and the breach begins three
+        // months later, because the German transposition says so in as many
+        // words. See `NIS2_DE_REGISTRATION_DUE`.
+        applies_from: NIS2_DE_REGISTRATION_DUE,
         applies_until: None,
         rule: Rule::Undertaking {
             applicable: UndertakingProfile::is_in_nis2_scope,
-            satisfied: |u| u.registered_with_the_authority,
+            satisfied: |u, _| u.registered_with_the_authority,
         },
         remedy: "submit name, address, contact details, sector and the Member States served to the competent authority; changes follow within two weeks",
     },
@@ -1202,7 +1492,7 @@ pub const CALENDAR: &[Obligation] = &[
             applicable: UndertakingProfile::is_in_nis2_scope,
             // "shall include **at least** the following" — a conjunction, not a
             // score. Nine of ten is not ninety per cent of a duty.
-            satisfied: |u| u.risk_management.is_complete(),
+            satisfied: |u, _| u.risk_management.is_complete(),
         },
         remedy: "close the measures RiskManagement::missing() names: the article lists them as a floor, so each one absent is the duty unmet",
     },
@@ -1215,7 +1505,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::Undertaking {
             applicable: UndertakingProfile::is_in_nis2_scope,
-            satisfied: |u| u.can_warn_within_24_hours,
+            satisfied: |u, _| u.can_warn_within_24_hours,
         },
         remedy: "stand up the three-step path the article prescribes: an early warning within 24 h, an incident notification within 72 h, and a final report within a month of it",
     },
@@ -1228,7 +1518,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::Undertaking {
             applicable: UndertakingProfile::is_in_nis2_scope,
-            satisfied: |u| u.management_approved_measures,
+            satisfied: |u, _| u.management_approved_measures,
         },
         remedy: "put the measures to the management body: the same paragraph makes its members liable for infringements of the article",
     },
@@ -1241,7 +1531,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::Undertaking {
             applicable: UndertakingProfile::is_in_nis2_scope,
-            satisfied: |u| u.management_trained,
+            satisfied: |u, _| u.management_trained,
         },
         remedy: "train the management body, and offer the same regularly to all employees — the article requires the first and calls for the second",
     },
@@ -1263,7 +1553,7 @@ pub const CALENDAR: &[Obligation] = &[
         applies_until: None,
         rule: Rule::Undertaking {
             applicable: |u| u.places_digital_products_on_the_market,
-            satisfied: |u| u.can_report_exploited_vulnerabilities,
+            satisfied: |u, _| u.can_report_exploited_vulnerabilities,
         },
         remedy: "open the path to the coordinator CSIRT and ENISA on the single reporting platform: an early warning within 24 h, a vulnerability notification within 72 h, and a final report within 14 days of a corrective measure",
     },
@@ -1279,7 +1569,9 @@ pub const CALENDAR: &[Obligation] = &[
             // Two halves of one duty: the product meets the essential
             // requirements of Annex I Part I, and the vulnerability handling of
             // Part II is in place for as long as it is supported.
-            satisfied: |u| u.products_conformity_assessed && u.coordinated_vulnerability_disclosure,
+            satisfied: |u, _| {
+                u.products_conformity_assessed && u.coordinated_vulnerability_disclosure
+            },
         },
         remedy: "assess the product against Annex I Part I, put the Part II vulnerability handling and a coordinated disclosure policy in place, and carry the CE marking",
     },
@@ -1423,7 +1715,7 @@ fn judge<P>(
     on: Date,
     subject: &P,
     applicable: fn(&P) -> bool,
-    satisfied: fn(&P) -> bool,
+    satisfied: fn(&P, Date) -> bool,
 ) -> Status {
     if on < obligation.applies_from {
         Status::NotYetInForce
@@ -1431,7 +1723,7 @@ fn judge<P>(
         Status::NoLongerInForce
     } else if !applicable(subject) {
         Status::NotApplicable
-    } else if satisfied(subject) {
+    } else if satisfied(subject, on) {
         Status::Satisfied
     } else {
         Status::Failing
@@ -1470,10 +1762,11 @@ mod tests {
     use super::*;
     use crate::ids::{EvseId, PartyId};
     use crate::station::{
-        Accessibility, AdHocPayment, ChargePointProfile, CurrentType, DataPublication,
-        EnergyMeasurementPoint, FurtherIdentifiers, MeteringPosture, Nis2Class, Notice,
-        OperatorChange, Ownership, PriceTransparency, ProviderProfile, QuotaPosture,
-        RegisterPublication, Registration, RiskManagement, UndertakingProfile, V2gCommunication,
+        Accessibility, AdHocPayment, AdditionalPrices, ArbeitspreisIndication, ChargePointProfile,
+        ConnectorType, CurrentType, DataPublication, EnergyMeasurementPoint, FurtherIdentifiers,
+        MeteringPosture, Nis2Class, Notice, OperatorChange, Ownership, PriceTransparency,
+        ProviderProfile, QuotaPosture, RegisterPublication, Registration, RiskManagement,
+        UndertakingProfile, V2gCommunication,
     };
     use rust_decimal::Decimal;
 
@@ -1501,7 +1794,12 @@ mod tests {
             energy_based: true,
             shown_at_station: true,
             components_in_prescribed_order: true,
+            arbeitspreis: ArbeitspreisIndication::PointDisplay,
+            web_based_ad_hoc: true,
+            arbeitspreis_stated_before_start: true,
+            additional_prices: AdditionalPrices::StatedAdjacent,
         };
+        point.connectors = vec![ConnectorType::Iec62196T2Combo];
         point.v2g = V2gCommunication::both_generations();
         point.offers_automatic_authentication = true;
         point.automatic_authentication_opt_out_offered = true;
@@ -1520,6 +1818,7 @@ mod tests {
             mid_conformity_assessed: true,
             signed_values: true,
             bills_by_energy: true,
+            intervention_records_retained: true,
             ..MeteringPosture::default()
         };
         point.quota = QuotaPosture {
@@ -1610,6 +1909,7 @@ mod tests {
         p.discloses_e_roaming_costs = true;
         p.discloses_electronically = true;
         p.surcharges_cross_border_roaming = false;
+        p.holds_meter_operator_confirmation = true;
         p
     }
 
@@ -1720,6 +2020,26 @@ mod tests {
         let mut private = ChargePointProfile::bare(evse(), date!(2027 - 06 - 01));
         private.accessibility = Accessibility::Private;
 
+        // …and a point whose meter has simply aged out. No other subject here
+        // reaches it: `bare` commissions the point on the day it is judged, and
+        // an eight-year verification period `[MessEV Anl. 7 Nr. 6.7]` cannot
+        // have expired on a meter that new.
+        let mut aged = compliant_point(date!(2027 - 06 - 01));
+        aged.placed_on_market_on = Some(date!(2010 - 01 - 01));
+
+        // …and the post `[PAngV §14]` is about, which no other subject here
+        // reaches: one that *does* take a card and *does* charge a blocking
+        // fee, and states neither price anywhere. `fast` cannot stand in for
+        // it, because a point with no ad-hoc payment method at all is outside
+        // § 14(2)'s third limb and the duty never binds it.
+        let mut silent = ChargePointProfile::bare(evse(), date!(2027 - 06 - 01));
+        silent.ad_hoc_payment = AdHocPayment::CardReader;
+        silent.price_transparency = PriceTransparency {
+            web_based_ad_hoc: true,
+            additional_prices: AdditionalPrices::NotStated,
+            ..PriceTransparency::default()
+        };
+
         let mut surcharging = ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap());
         surcharging.surcharges_cross_border_roaming = true;
 
@@ -1728,6 +2048,8 @@ mod tests {
             assess(&fast, on),
             assess(&legacy, on),
             assess(&private, on),
+            assess(&silent, on),
+            assess(&aged, on),
             assess_provider(
                 &ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap()),
                 on,
@@ -1821,7 +2143,7 @@ mod tests {
             applies_until: Some(date!(2026 - 12 - 31)),
             rule: Rule::ChargePoint {
                 applicable: |_| true,
-                satisfied: |_| false,
+                satisfied: |_, _| false,
             },
             remedy: "none",
         };
@@ -2635,12 +2957,417 @@ mod tests {
     }
 
     #[test]
+    fn the_annex_the_regulator_can_close_a_point_over_is_in_the_table() {
+        // `[LSV26 §5]` names "Artikel 5 Absatz 1, 2, 7, 8 und 10 **und Anhang
+        // II**" three times over — inspection, retrofit order, and the power to
+        // forbid the operation of a point. The calendar carried Article 5 and
+        // not the Annex, so the one requirement that can shut a station was the
+        // one nothing judged.
+        let on = date!(2026 - 06 - 01);
+
+        // A DC post that serves every Japanese vehicle on the road and no
+        // European one. Lawful hardware, unlawful as the *only* interface:
+        // Annex II says "at least … Combo 2".
+        let mut chademo_only = compliant_point(date!(2025 - 01 - 01));
+        chademo_only.connectors = vec![ConnectorType::Chademo];
+        assert_eq!(
+            status_of(
+                &assess(&chademo_only, on),
+                ObligationId::AfirAnnexIiConnector
+            ),
+            Status::Failing
+        );
+
+        // The same post with CCS2 beside it: "at least" is a floor, so the
+        // extra interface is not an objection.
+        chademo_only.connectors = vec![ConnectorType::Chademo, ConnectorType::Iec62196T2Combo];
+        assert_eq!(
+            status_of(
+                &assess(&chademo_only, on),
+                ObligationId::AfirAnnexIiConnector
+            ),
+            Status::Satisfied
+        );
+
+        // An AC post with a Schuko and nothing else — the shape a great many
+        // older German kerbside points have.
+        let mut schuko = compliant_point(date!(2025 - 01 - 01));
+        schuko.current_type = CurrentType::Ac;
+        schuko.rated_power_kw = Decimal::from(11);
+        schuko.connectors = vec![ConnectorType::DomesticF];
+        assert_eq!(
+            status_of(&assess(&schuko, on), ObligationId::AfirAnnexIiConnector),
+            Status::Failing
+        );
+
+        // …and the same socket on a 3.7 kW post **reserved for** L-category
+        // vehicles is `[AFIR Anh. II 1.3]`'s own answer, not a breach. Without
+        // the applicability limb this row would report a lawful scooter post as
+        // failing a rule written for cars.
+        let mut scooter = schuko.clone();
+        scooter.reserved_for_l_category = true;
+        scooter.rated_power_kw = Decimal::from_str_exact("3.7").unwrap();
+        assert_eq!(
+            status_of(&assess(&scooter, on), ObligationId::AfirAnnexIiConnector),
+            Status::Satisfied
+        );
+
+        // The ceiling in that sentence is load-bearing: an 11 kW post is not an
+        // L-category post however it is reserved, and falls back to Type 2.
+        scooter.rated_power_kw = Decimal::from(11);
+        assert_eq!(
+            status_of(&assess(&scooter, on), ObligationId::AfirAnnexIiConnector),
+            Status::Failing
+        );
+
+        // An inventory that recorded no interface at all cannot be shown to the
+        // regulator `[LSV26 §5(1)]`, so it is unmet rather than vacuously met.
+        let mut unrecorded = compliant_point(date!(2025 - 01 - 01));
+        unrecorded.connectors.clear();
+        assert_eq!(
+            status_of(&assess(&unrecorded, on), ObligationId::AfirAnnexIiConnector),
+            Status::Failing
+        );
+    }
+
+    #[test]
+    fn the_annex_was_replaced_and_the_replacement_carries_its_own_population() {
+        // `[DA-656]` replaces Annex II points 1.1 to 1.4 from 08.01.2026, and
+        // the two things it changes are written into limbs reading "installed
+        // or renovated from 8 January 2026". Reading the consolidated 2023 text
+        // alone gets both wrong, and reading the amended one over the whole
+        // estate grants an exemption to a population it does not reach.
+        let on = date!(2026 - 06 - 01);
+
+        // A 3 kW public post that is an ordinary household socket with an
+        // in-cable control box — Mode 2, the shape a great many kerbside and
+        // workplace points have.
+        let mut socket = compliant_point(date!(2024 - 06 - 01));
+        socket.current_type = CurrentType::Ac;
+        socket.domestic_socket = true;
+        socket.rated_power_kw = Decimal::from(3);
+        socket.connectors = vec![ConnectorType::DomesticF];
+        assert_eq!(socket.mode(), ChargingMode::Mode2);
+
+        // Installed in 2024, so the 2023 sentence still governs it: AC points
+        // "shall be equipped at least with socket outlets or vehicle connectors
+        // of Type 2", with no Mode 2 carve-out anywhere in the text.
+        assert_eq!(
+            status_of(&assess(&socket, on), ObligationId::AfirAnnexIiConnector),
+            Status::Failing
+        );
+
+        // The same hardware installed after the amendment applies takes
+        // `[DA-656 Anh. 1.1]`'s own exemption — "if their power is less than or
+        // equal to 3,7 kW and their primary purpose is the recharging of
+        // electric vehicles in Mode 2, with socket-outlets compliant with
+        // standard IEC 60884-1:2022".
+        socket.commissioned_on = date!(2026 - 03 - 01);
+        assert_eq!(
+            status_of(&assess(&socket, on), ObligationId::AfirAnnexIiConnector),
+            Status::Satisfied
+        );
+
+        // …and a renovation reaches it too, because the limb says "installed
+        // **or renovated** from" and `[DA-656 Anh. 0(b)]` defines a renovation
+        // as "a major or complete replacement of relevant recharging point
+        // equipment".
+        socket.commissioned_on = date!(2024 - 06 - 01);
+        socket.renovated_on = Some(date!(2026 - 03 - 01));
+        assert_eq!(
+            status_of(&assess(&socket, on), ObligationId::AfirAnnexIiConnector),
+            Status::Satisfied
+        );
+
+        // The exemption is bounded by its own power band and by its own mode.
+        // A 7 kW wall box is a dedicated EVSE in Mode 3 and owes Type 2
+        // whatever it was installed with.
+        let mut wall_box = socket.clone();
+        wall_box.domestic_socket = false;
+        wall_box.rated_power_kw = Decimal::from(7);
+        assert_eq!(
+            status_of(&assess(&wall_box, on), ObligationId::AfirAnnexIiConnector),
+            Status::Failing
+        );
+
+        // `[DA-656 Anh. 1.3.2]`: an L-category point **above** 3.7 kW is back on
+        // Type 2, so the exception is a power band and not a vehicle class.
+        let mut scooter = compliant_point(date!(2026 - 03 - 01));
+        scooter.current_type = CurrentType::Ac;
+        scooter.reserved_for_l_category = true;
+        scooter.rated_power_kw = Decimal::from(11);
+        scooter.connectors = vec![ConnectorType::Iec62196T3A];
+        assert_eq!(
+            status_of(&assess(&scooter, on), ObligationId::AfirAnnexIiConnector),
+            Status::Failing
+        );
+        scooter.connectors = vec![ConnectorType::Iec62196T2];
+        assert_eq!(
+            status_of(&assess(&scooter, on), ObligationId::AfirAnnexIiConnector),
+            Status::Satisfied
+        );
+
+        // `[DA-656 Anh. 1.3.3]`: a DC L-category point is Combo 2 like every
+        // other DC point, so the L-category branch never reaches direct current.
+        let mut dc_scooter = compliant_point(date!(2026 - 03 - 01));
+        dc_scooter.reserved_for_l_category = true;
+        dc_scooter.rated_power_kw = Decimal::from(3);
+        dc_scooter.connectors = vec![ConnectorType::DomesticF];
+        assert_eq!(
+            status_of(&assess(&dc_scooter, on), ObligationId::AfirAnnexIiConnector),
+            Status::Failing
+        );
+    }
+
+    #[test]
+    fn the_german_price_indication_is_older_and_wider_than_the_european_one() {
+        // The claim this row exists to make: on the day AFIR's price duties did
+        // not yet exist, `[PAngV §14(2)]` already bound the same post — and it
+        // binds it at 11 kW, where `[AFIR Art. 5(4)]`'s first two subparagraphs
+        // never reach.
+        let before_afir = date!(2023 - 06 - 01);
+
+        let mut post = compliant_point(date!(2022 - 06 - 01));
+        post.current_type = CurrentType::Ac;
+        post.rated_power_kw = Decimal::from(11);
+        post.connectors = vec![ConnectorType::Iec62196T2];
+        post.price_transparency.arbeitspreis = ArbeitspreisIndication::NotIndicated;
+
+        let report = assess(&post, before_afir);
+        assert_eq!(
+            status_of(&report, ObligationId::PangvArbeitspreisAtThePoint),
+            Status::Failing,
+            "the Arbeitspreis duty binds an 11 kW post from 28.05.2022"
+        );
+        // …and the European duty that looks like it does not, on either limb.
+        assert_eq!(
+            status_of(&report, ObligationId::AfirEnergyBasedAdHocPrice),
+            Status::NotYetInForce
+        );
+
+        // Any one of the three media answers it. None of them is "better".
+        for medium in [
+            ArbeitspreisIndication::Printed,
+            ArbeitspreisIndication::PointDisplay,
+            ArbeitspreisIndication::SignpostedMobilePage,
+        ] {
+            post.price_transparency.arbeitspreis = medium;
+            assert_eq!(
+                status_of(
+                    &assess(&post, before_afir),
+                    ObligationId::PangvArbeitspreisAtThePoint
+                ),
+                Status::Satisfied,
+                "{medium:?} is one of § 14(2)'s three"
+            );
+        }
+
+        // A point that takes no ad-hoc payment at all is outside the third limb
+        // — the duty arises "beim Einsatz eines für das punktuelle Aufladen
+        // vorgesehenen Bezahlverfahrens" — and so is a free one `[PAngV §1(1)]`.
+        post.price_transparency.arbeitspreis = ArbeitspreisIndication::NotIndicated;
+        let mut contract_only = post.clone();
+        contract_only.ad_hoc_payment = AdHocPayment::None;
+        assert_eq!(
+            status_of(
+                &assess(&contract_only, before_afir),
+                ObligationId::PangvArbeitspreisAtThePoint
+            ),
+            Status::NotApplicable
+        );
+        let mut free = post.clone();
+        free.requires_payment = false;
+        assert_eq!(
+            status_of(
+                &assess(&free, before_afir),
+                ObligationId::PangvArbeitspreisAtThePoint
+            ),
+            Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn a_sticker_on_the_post_does_not_answer_the_app() {
+        // § 14(2)'s last sentence is a **second** duty, not a fourth medium: a
+        // point whose price is printed on it still owes the figure through the
+        // web system a driver actually pays with, before the session starts.
+        let on = date!(2026 - 06 - 01);
+        let mut post = compliant_point(date!(2025 - 01 - 01));
+        post.price_transparency.arbeitspreis = ArbeitspreisIndication::Printed;
+        post.price_transparency.web_based_ad_hoc = true;
+        post.price_transparency.arbeitspreis_stated_before_start = false;
+
+        let report = assess(&post, on);
+        assert_eq!(
+            status_of(&report, ObligationId::PangvArbeitspreisAtThePoint),
+            Status::Satisfied,
+            "the sticker answers the first sentence"
+        );
+        assert_eq!(
+            status_of(&report, ObligationId::PangvArbeitspreisBeforeStart),
+            Status::Failing,
+            "…and says nothing about the last one"
+        );
+
+        // A post with no web checkout does not owe it.
+        post.price_transparency.web_based_ad_hoc = false;
+        assert_eq!(
+            status_of(
+                &assess(&post, on),
+                ObligationId::PangvArbeitspreisBeforeStart
+            ),
+            Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn a_blocking_fee_nobody_displays_is_the_case_the_paragraph_is_about() {
+        // § 14(3) has three answers and not two. "No further prices" and "further
+        // prices, stated" are both compliant and they are different facts, and
+        // an entitlement-shaped `bool` would have collapsed them.
+        let on = date!(2026 - 06 - 01);
+        let mut post = compliant_point(date!(2025 - 01 - 01));
+
+        post.price_transparency.additional_prices = AdditionalPrices::None;
+        assert_eq!(
+            status_of(
+                &assess(&post, on),
+                ObligationId::PangvAdditionalPricesAdjacent
+            ),
+            Status::NotApplicable,
+            "a point charging nothing beyond the Arbeitspreis owes nothing here"
+        );
+
+        post.price_transparency.additional_prices = AdditionalPrices::StatedAdjacent;
+        assert_eq!(
+            status_of(
+                &assess(&post, on),
+                ObligationId::PangvAdditionalPricesAdjacent
+            ),
+            Status::Satisfied
+        );
+
+        post.price_transparency.additional_prices = AdditionalPrices::NotStated;
+        assert_eq!(
+            status_of(
+                &assess(&post, on),
+                ObligationId::PangvAdditionalPricesAdjacent
+            ),
+            Status::Failing
+        );
+    }
+
+    #[test]
     fn a_point_that_does_not_bill_by_energy_is_outside_eichrecht() {
         let point = ChargePointProfile::bare(evse(), date!(2026 - 01 - 01));
         let report = assess(&point, date!(2026 - 09 - 01));
         assert_eq!(
             status_of(&report, ObligationId::EichrechtVerifiableValues),
             Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn the_verification_period_is_eight_years_and_ends_with_the_calendar_year() {
+        // `[MessEV Anl. 7 Nr. 6.7]` gives charging equipment **eight** years
+        // where `[MessEV §34(1)]`'s default is two; `[MessEG §37(1) S. 2]`
+        // starts the clock at the placing on the market rather than at any
+        // Eichung; and `[MessEV §34(2)]` runs it to the end of the year it
+        // arithmetically ends in. Each of the three moves the answer, and the
+        // third moves it by up to a year.
+        let mut point = compliant_point(date!(2019 - 06 - 01));
+        point.placed_on_market_on = Some(date!(2018 - 03 - 15));
+
+        assert_eq!(
+            point.verification_expires_on(),
+            date!(2026 - 12 - 31),
+            "eight years from March 2018 is March 2026, and § 34(2) carries it to the year's end"
+        );
+        assert!(point.verification_valid_on(date!(2026 - 12 - 31)));
+        assert!(!point.verification_valid_on(date!(2027 - 01 - 01)));
+
+        // The duty follows the date rather than the point: nothing about the
+        // hardware changes between these two assessments.
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2026 - 12 - 31)),
+                ObligationId::EichrechtVerificationPeriod
+            ),
+            Status::Satisfied
+        );
+        assert_eq!(
+            status_of(
+                &assess(&point, date!(2027 - 01 - 01)),
+                ObligationId::EichrechtVerificationPeriod
+            ),
+            Status::Failing
+        );
+
+        // **Calendar years, not 365-day blocks.** Two leap days inside eight
+        // years put a day-arithmetic answer on 30 December 2025 where the
+        // calendar says 1 January 2026 — and § 34(2) then turns those two days
+        // into a whole year.
+        let mut new_year = point.clone();
+        new_year.placed_on_market_on = Some(date!(2018 - 01 - 01));
+        assert_eq!(new_year.verification_expires_on(), date!(2026 - 12 - 31));
+
+        // Commissioning is not the placing on the market, and the fallback is
+        // the later of the two — which makes the period end later and is the
+        // wrong direction for a permission, so a caller that knows the real
+        // date owes it. Stated so the fallback is a decision rather than an
+        // accident.
+        let mut unknown = point.clone();
+        unknown.placed_on_market_on = None;
+        assert_eq!(unknown.verification_expires_on(), date!(2027 - 12 - 31));
+
+        // A meter that was actually verified starts its period there
+        // `[MessEV §34(1) S. 2]`.
+        let mut verified = point.clone();
+        verified.metering.last_verified_on = Some(date!(2024 - 05 - 02));
+        assert_eq!(verified.verification_expires_on(), date!(2032 - 12 - 31));
+
+        // …and an authority that extended the period for a lot under
+        // `[MessEV §35]` is a fact the profile can state rather than a rule
+        // this calendar has to invent.
+        verified.metering.verification_period_years = Some(12);
+        assert_eq!(verified.verification_expires_on(), date!(2036 - 12 - 31));
+
+        // A point that does not bill by energy is outside it, like the rest of
+        // the Eichrecht rows.
+        let mut by_the_minute = point.clone();
+        by_the_minute.metering.bills_by_energy = false;
+        assert_eq!(
+            status_of(
+                &assess(&by_the_minute, date!(2027 - 01 - 01)),
+                ObligationId::EichrechtVerificationPeriod
+            ),
+            Status::NotApplicable
+        );
+    }
+
+    #[test]
+    fn a_firmware_push_is_an_intervention_somebody_has_to_have_recorded() {
+        // `[MessEG §31(2) Nr. 4]`'s last clause is the one that reaches a
+        // platform: records of interventions "einschließlich solcher durch
+        // **elektronisch vorgenommene Maßnahmen**". A CSMS pushing firmware to
+        // a charge point is performing one.
+        let on = date!(2026 - 06 - 01);
+        let mut point = compliant_point(date!(2025 - 01 - 01));
+        assert_eq!(
+            status_of(
+                &assess(&point, on),
+                ObligationId::EichrechtInterventionRecords
+            ),
+            Status::Satisfied
+        );
+
+        point.metering.intervention_records_retained = false;
+        assert_eq!(
+            status_of(
+                &assess(&point, on),
+                ObligationId::EichrechtInterventionRecords
+            ),
+            Status::Failing
         );
     }
 
@@ -2818,6 +3545,17 @@ mod tests {
         );
 
         provider.discloses_e_roaming_costs = true;
+        // …and the duty that has nothing to do with Article 5: a provider bills
+        // on measured values it did not produce, and `[MessEG §33(2)]` wants a
+        // confirmation from whoever operates the meter.
+        assert_eq!(
+            status_of(
+                &assess_provider(&provider, date!(2026 - 09 - 01)),
+                ObligationId::EichrechtValueUserConfirmation
+            ),
+            Status::Failing
+        );
+        provider.holds_meter_operator_confirmation = true;
         assert_eq!(
             assess_provider(&provider, date!(2026 - 09 - 01)).verdict(),
             Verdict::Compliant
@@ -3022,6 +3760,47 @@ mod tests {
             assess_undertaking(&u, date!(2025 - 12 - 06))
                 .status_of(ObligationId::Nis2RiskManagement),
             Some(Status::Failing)
+        );
+    }
+
+    #[test]
+    fn a_window_a_statute_grants_is_part_of_the_duty_rather_than_a_grace_period() {
+        // The same correction as the transposition date, one level in. The duty
+        // attaches when the law applies; the *breach* does not. The German
+        // transposition gives the registration three months — "spätestens drei
+        // Monate, nachdem sie erstmals … als eine der vorgenannten Einrichtungen
+        // gelten" — so an operator already in scope on 06.12.2025 had until
+        // 06.03.2026, and reporting it in breach in January named a breach the
+        // statute itself said was not one (D259).
+        let mut u = operator();
+        u.employees = 300;
+        u.registered_with_the_authority = false;
+
+        assert_eq!(
+            assess_undertaking(&u, date!(2026 - 01 - 15)).status_of(ObligationId::Nis2Registration),
+            Some(Status::NotYetInForce),
+            "inside the window the statute grants"
+        );
+        assert_eq!(
+            assess_undertaking(&u, date!(2026 - 03 - 06)).status_of(ObligationId::Nis2Registration),
+            Some(Status::Failing),
+            "and a breach on the day it closes"
+        );
+
+        // The duties beside it carry no such window and bind from the day the
+        // law applies, which is what makes the distinction worth stating rather
+        // than applying as a blanket offset.
+        assert_eq!(
+            assess_undertaking(&u, date!(2026 - 01 - 15))
+                .status_of(ObligationId::Nis2RiskManagement),
+            Some(Status::Failing)
+        );
+
+        // A registered operator is not failing it on any date.
+        u.registered_with_the_authority = true;
+        assert_eq!(
+            assess_undertaking(&u, date!(2026 - 03 - 06)).status_of(ObligationId::Nis2Registration),
+            Some(Status::Satisfied)
         );
     }
 

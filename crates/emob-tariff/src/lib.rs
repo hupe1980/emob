@@ -105,12 +105,15 @@ pub mod rating;
 pub mod tariff;
 pub mod version;
 
-pub use conformance::{Conformance, Objection, check_afir};
-pub use display::{DisplayLine, PriceDescription, Tier, describe, price_per_minute};
+pub use conformance::{Conformance, Objection, check_afir, check_pangv};
+pub use display::{
+    Bound, DisplayLine, NoGesamtpreis, PriceDescription, Tier, describe, describe_gross,
+    price_per_minute,
+};
 pub use rating::{
-    Adjustment, AdjustmentKind, Chargeable, ChargeableError, Line, Period, Rated, RatingNote,
-    Reservation, ReservationOutcome, SessionState, TaxLine, element_matches, matching_component,
-    rate, rate_reservation,
+    Adjustment, AdjustmentKind, AdjustmentPart, Chargeable, ChargeableError, Line, Period, Rated,
+    RatingNote, Reservation, ReservationOutcome, SessionState, TaxLine, element_matches,
+    matching_component, rate, rate_reservation,
 };
 pub use tariff::{
     Dimension, PriceComponent, PriceLimit, ReservationRestriction, Restrictions, Tariff,

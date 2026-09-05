@@ -29,7 +29,7 @@
 
 use rust_decimal::Decimal;
 
-use crate::tariff::{Dimension, Tariff, TariffKind};
+use crate::tariff::{Dimension, Tariff, TariffKind, TaxIncluded};
 
 /// Something about a tariff that a regulator would object to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +130,34 @@ pub enum Objection {
         /// The dimensions that are already answered unconditionally.
         dimensions: Vec<Dimension>,
     },
+    /// An ad-hoc tariff states no price per kilowatt-hour at all.
+    ///
+    /// `[PAngV §14(2)]` obliges an operator offering ad-hoc charging at a
+    /// publicly accessible point to state *"den für den jeweiligen Ladepunkt
+    /// geltenden **Arbeitspreis**"*, and `[PAngV §14(4)]` fixes its unit at one
+    /// kilowatt-hour. A tariff with no energy component has no such price, so
+    /// there is nothing lawful to indicate — and `[PAngV §14(3)]` confirms the
+    /// reading by calling every other price *"zusätzlich"*.
+    ///
+    /// # This is where German law is stricter than European
+    ///
+    /// [`Objection::NotEnergyBased`] says the same thing under
+    /// `[AFIR Art. 5(4)]` and says it **only at 50 kW and above**. This one has
+    /// no power limb: a 22 kW post priced by the minute alone is lawful in the
+    /// Regulation and an Ordnungswidrigkeit here `[PAngV §20]`. Every stack
+    /// that models Article 5 and stops reports it as compliant.
+    NoArbeitspreis,
+    /// A component of a consumer-facing tariff has no gross figure.
+    ///
+    /// `[PAngV §3(1)]` obliges an operator to state *Gesamtpreise*, and
+    /// `[PAngV §2 Nr. 1]` defines the Arbeitspreis as a price *"einschließlich
+    /// der Umsatzsteuer"*. A tariff quoted net whose component states no rate
+    /// cannot be turned into one — see [`crate::describe_gross`], which is the
+    /// same refusal at the moment of display.
+    NoGesamtpreis {
+        /// Which component.
+        dimension: Dimension,
+    },
     /// A component would round a quantity up against the customer.
     ///
     /// Lawful, and worth saying: OCPI 3.0 removes `step_size` and advises
@@ -156,7 +184,9 @@ impl Objection {
             | Self::MinimumAboveMaximum { .. }
             | Self::NotShowablePerMinute { .. }
             | Self::ImpossibleVatRate { .. }
-            | Self::CannotBeEvaluated { .. } => true,
+            | Self::CannotBeEvaluated { .. }
+            | Self::NoArbeitspreis
+            | Self::NoGesamtpreis { .. } => true,
             Self::RoundsAgainstTheCustomer { .. } | Self::UnreachableElement { .. } => false,
         }
     }
@@ -210,6 +240,14 @@ impl core::fmt::Display for Objection {
             } => write!(
                 f,
                 "element {index} prices only {dimensions:?}, which the unrestricted element {shadowed_by} already prices unconditionally, so it can never apply"
+            ),
+            Self::NoArbeitspreis => write!(
+                f,
+                "the tariff states no price per kWh: [PAngV §14(2)] wants the Arbeitspreis at the point and [PAngV §14(4)] fixes its unit at one kilowatt-hour, at every power and not only at 50 kW"
+            ),
+            Self::NoGesamtpreis { dimension } => write!(
+                f,
+                "{dimension:?} is quoted net and states no VAT rate, so it has no Gesamtpreis a consumer may be shown [PAngV §3(1)], and the Arbeitspreis is defined tax-inclusive [PAngV §2 Nr. 1]"
             ),
             Self::RoundsAgainstTheCustomer {
                 dimension,
@@ -438,11 +476,102 @@ pub fn check_afir(tariff: &Tariff, rated_power_kw: Decimal) -> Conformance {
     Conformance { objections }
 }
 
+/// Check a tariff against the **German** price-indication rules `[PAngV §14]`.
+///
+/// # Why this is not part of [`check_afir`]
+///
+/// They are different documents with different scopes and different dates, and
+/// folding them together would lose the fact that matters most about them: the
+/// German one is **older and wider**. `[PAngV §14(2)]` has bound every publicly
+/// accessible point taking an ad-hoc payment since 28.05.2022, at any power;
+/// `[AFIR Art. 5(4)]`'s first two subparagraphs reach points deployed from
+/// 13.04.2024 and only at 50 kW and above. An operator asking "may I offer this
+/// tariff" needs both answers and needs to know which is which — the AFIR
+/// objection travels to a European regulator and this one to a
+/// Landesordnungsbehörde `[PAngV §20]`.
+///
+/// A tariff that is not [`TariffKind::AdHoc`] is outside it: `[PAngV §1(1)]`
+/// governs prices stated *"gegenüber Verbrauchern"*, and a contract tariff
+/// between a provider and its customer is `[AFIR Art. 5(5)]`'s disclosure duty
+/// instead.
+///
+/// # What it checks
+///
+/// - **There is an Arbeitspreis.** A price per kilowatt-hour, at any power
+///   `[PAngV §14(2)]`, in the unit `[PAngV §14(4)]` fixes.
+/// - **Every price has a Gesamtpreis.** A net tariff whose component states no
+///   VAT rate cannot be shown to a consumer at all `[PAngV §3(1)]`.
+///
+/// What it does *not* check is where the figure is indicated and by which
+/// medium — that is a fact about the post rather than about the price list, and
+/// it is `emob_core::obligation`'s three `[PAngV §14]` rows.
+///
+/// ```
+/// use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+/// use emob_tariff::{check_afir, check_pangv};
+/// use emob_core::{Currency, TimeZone};
+/// use rust_decimal::Decimal;
+/// use std::str::FromStr;
+///
+/// # let dec = |s: &str| Decimal::from_str(s).unwrap();
+/// // 6.00 an hour on a 22 kW post: lawful under the Regulation…
+/// let by_the_minute = Tariff::simple(
+///     "t".parse()?,
+///     Currency::EUR,
+///     TariffKind::AdHoc,
+///     TimeZone::new("Europe/Berlin")?,
+///     vec![PriceComponent::new(Dimension::Time, dec("6.00"))],
+/// );
+/// assert!(check_afir(&by_the_minute, dec("22")).is_lawful());
+/// // …and an Ordnungswidrigkeit in Germany, because there is no Arbeitspreis.
+/// assert!(!check_pangv(&by_the_minute).is_lawful());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn check_pangv(tariff: &Tariff) -> Conformance {
+    let mut objections = Vec::new();
+    if tariff.kind != TariffKind::AdHoc {
+        return Conformance { objections };
+    }
+
+    // The session's own elements, for the reason `check_afir` reads them:
+    // a reservation is a different service over a window that ran before any
+    // electricity moved, and it has no Arbeitspreis to state.
+    let prices_energy = tariff
+        .elements
+        .iter()
+        .filter(|element| element.restrictions.reservation.is_none())
+        .flat_map(|element| element.components.iter())
+        .any(|component| component.dimension.is_energy());
+    if !prices_energy && !tariff.elements.is_empty() {
+        objections.push(Objection::NoArbeitspreis);
+    }
+
+    // `[PAngV §2 Nr. 1]`'s Arbeitspreis is tax-inclusive, so a net tariff owes
+    // a rate per component before it can be shown at all. A gross tariff
+    // already states the figure payable, and outside a tax regime there is
+    // nothing to add — the same three answers `describe_gross` acts on.
+    if tariff.tax_included == TaxIncluded::No {
+        let mut named: Vec<Dimension> = Vec::new();
+        for component in tariff.elements.iter().flat_map(|e| e.components.iter()) {
+            if component.vat.is_none() && !named.contains(&component.dimension) {
+                named.push(component.dimension);
+                objections.push(Objection::NoGesamtpreis {
+                    dimension: component.dimension,
+                });
+            }
+        }
+    }
+
+    objections.sort_by_key(|o| !o.is_breach());
+    Conformance { objections }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tariff::PriceLimit;
-    use crate::tariff::{PriceComponent, TariffElement, TaxIncluded};
+    use crate::tariff::{PriceComponent, TariffElement};
     use emob_core::Currency;
     use emob_core::TimeZone;
     use rust_decimal::prelude::FromStr;
@@ -848,5 +977,77 @@ mod tests {
             valid_until: None,
         };
         assert!(!check_afir(&t, dec("22")).is_lawful());
+    }
+
+    #[test]
+    fn the_german_rule_reaches_the_slow_post_the_regulation_does_not() {
+        // The whole reason `check_pangv` is a second entry point rather than a
+        // branch inside `check_afir`: the two disagree about a 22 kW post, and
+        // both are right about their own document.
+        let by_the_minute = ad_hoc(vec![PriceComponent::new(Dimension::Time, dec("6.00"))]);
+
+        assert!(
+            check_afir(&by_the_minute, dec("22")).is_lawful(),
+            "[AFIR Art. 5(4)] first two subparagraphs do not reach below 50 kW"
+        );
+        let german = check_pangv(&by_the_minute);
+        assert!(!german.is_lawful());
+        assert!(german.objections.contains(&Objection::NoArbeitspreis));
+
+        // …and at 150 kW both documents object, for two different reasons that
+        // an operator has to answer to two different authorities.
+        assert!(
+            check_afir(&by_the_minute, dec("150"))
+                .objections
+                .contains(&Objection::NotEnergyBased)
+        );
+
+        // An energy price answers it at any power.
+        let per_kwh = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        assert!(check_pangv(&per_kwh).is_lawful());
+    }
+
+    #[test]
+    fn a_net_ad_hoc_price_is_not_a_gesamtpreis() {
+        // `[PAngV §2 Nr. 1]` defines the Arbeitspreis tax-inclusive and
+        // `[PAngV §3(1)]` wants Gesamtpreise. A tariff quoted net that states
+        // no rate cannot be turned into one — and until now the only place that
+        // was noticed was a wire crossing, never the screen the driver reads.
+        let mut net = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        net.tax_included = TaxIncluded::No;
+
+        let objections = check_pangv(&net).objections;
+        assert!(objections.contains(&Objection::NoGesamtpreis {
+            dimension: Dimension::Energy
+        }));
+
+        // Stating the rate is what makes it showable, and the display module
+        // agrees with this function about which tariffs those are.
+        let mut with_rate = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
+        ]);
+        with_rate.tax_included = TaxIncluded::No;
+        assert!(check_pangv(&with_rate).is_lawful());
+        assert!(
+            crate::describe_gross(&with_rate, time::macros::datetime!(2026-01-02 10:00 +1)).is_ok()
+        );
+        assert!(
+            crate::describe_gross(&net, time::macros::datetime!(2026-01-02 10:00 +1)).is_err(),
+            "the two answers are one answer: what cannot be shown cannot be offered"
+        );
+
+        // A gross tariff already states the figure payable.
+        let gross = ad_hoc(vec![PriceComponent::new(Dimension::Energy, dec("0.49"))]);
+        assert!(check_pangv(&gross).is_lawful());
+    }
+
+    #[test]
+    fn a_contract_tariff_is_not_a_consumer_price_indication() {
+        // `[PAngV §1(1)]` governs prices stated to consumers. A provider's own
+        // contract tariff is `[AFIR Art. 5(5)]`'s disclosure duty instead, and
+        // objecting here would report a lawful B2B price list as unlawful.
+        let mut contract = ad_hoc(vec![PriceComponent::new(Dimension::Time, dec("6.00"))]);
+        contract.kind = TariffKind::Contract;
+        assert!(check_pangv(&contract).is_lawful());
     }
 }

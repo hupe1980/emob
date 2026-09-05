@@ -19,6 +19,8 @@ fn main() -> Result<()> {
         Some("check-wire") => check_wire(&root),
         Some("check-prose") => check_prose(&root),
         Some("check-concepts") => check_concepts(&root),
+        Some("check-reach") => check_reach(&root),
+        Some("check-constructors") => check_constructors(&root),
         Some("check-all") => {
             no_floats(&root)?;
             check_citations(&root)?;
@@ -26,6 +28,8 @@ fn main() -> Result<()> {
             check_wire(&root)?;
             check_prose(&root)?;
             check_concepts(&root)?;
+            check_reach(&root)?;
+            check_constructors(&root)?;
             check_graph(&root)
         }
         Some("help" | "--help" | "-h") | None => {
@@ -66,11 +70,22 @@ cargo xtask <task>
                     count something holds: the decision log's own total, the
                     numbered list of rules concepts/README.md says how many of
                     there are, the size of the test suite four documents open
-                    by quoting, and the per-crate column beside that total —
+                    by quoting, the count the root README opens by stating,
+                    and the per-crate column beside the suite total —
                     because a guard on a sum is not a guard on its terms. Also
                     that every Markdown table row has its header's columns:
                     a surplus cell is dropped and a missing one is blanked,
                     silently, so a sentence moves rows and disappears
+  check-reach       every public function in a crate's source is named
+                    somewhere other than its own definition: `pub` tells the
+                    compiler a downstream may call it, and in this workspace
+                    the downstream is this workspace — a rule with no caller
+                    is a rule that is not enforced
+  check-constructors
+                    no type with a fallible `new` derives `Deserialize`: a
+                    constructor that states a rule has to be the door the wire
+                    comes through, or the rule is enforced everywhere except
+                    where the values arrive from
   check-all         all of the above
 "
     );
@@ -209,11 +224,20 @@ fn check_concepts(root: &Path) -> Result<()> {
         rules_held = items.len();
     }
 
+    // ── The count the root README opens with ────────────────────────────────
+    let properties = check_property_count(root, &mut problems)?;
+
     // ── The tables, which lose content without failing anything ─────────────
     let tables = check_table_shapes(root, &mut problems)?;
 
     // ── The suite every document opens by counting ──────────────────────────
     let suite = check_test_count(root, &mut problems, internal)?;
+
+    // ── …and the calendar, which is the same drift one document further in ──
+    let duties = check_duty_count(root, &mut problems, internal)?;
+
+    // ── …and the five numbers on the landing page, which is further out still
+    check_site_stats(root, &mut problems, duties, suite)?;
 
     if !problems.is_empty() {
         for problem in &problems {
@@ -229,18 +253,301 @@ fn check_concepts(root: &Path) -> Result<()> {
     if internal {
         println!(
             "✅ check-concepts: {decisions_held} decisions, {rules_held} rules, {suite} tests, \
-             {tables} tables, each the number stated"
+             {duties} duties, {properties} properties, {tables} tables, each the number stated"
         );
     } else {
         // Named rather than silent: this is the shape the whole guard had, and
         // it read as a pass (D228).
         println!(
-            "✅ check-concepts: {suite} tests, {tables} tables, each the number stated \
-             (concepts/ is absent, so the decision log, the rule list and the per-crate column \
-             were not read)"
+            "✅ check-concepts: {suite} tests, {properties} properties, {tables} tables, each \
+             the number stated (concepts/ is absent, so the decision log, the rule list and the \
+             per-crate column were not read)"
         );
     }
     Ok(())
+}
+
+/// The root README opens by counting the properties it then lists, and nothing
+/// held it to the number.
+///
+/// # Why this one is worth a guard on its own
+///
+/// It is the first sentence of the first document anybody reads, it is
+/// **tracked** — unlike `concepts/`, so it is the count a stranger checks — and
+/// it drifts one-directionally, because a property is added by writing a section
+/// and a section is written a long way below the heading. It was two out.
+///
+/// A property is a `### ` heading under the `## The <n> properties …` one. A
+/// heading opening with `…` continues the property above it — *"…and the law
+/// binds a third subject nobody models"* is the second half of a sentence, not a
+/// second property — and is not counted, which is exactly how a reader counts
+/// them.
+fn check_property_count(root: &Path, problems: &mut Vec<String>) -> Result<usize> {
+    let readme = std::fs::read_to_string(root.join("README.md")).context("reading README.md")?;
+    let (stated, held) = property_count(&readme);
+    match stated {
+        Some(stated) if stated == held => {}
+        Some(stated) => problems.push(format!(
+            "README.md opens by counting {stated} properties and lists {held}: the first sentence \
+             of the first document anybody reads"
+        )),
+        None => problems.push(
+            "README.md has no '## The <spelled-out> properties that decide quality' heading"
+                .to_owned(),
+        ),
+    }
+    Ok(held)
+}
+
+/// The landing page's five headline numbers, against the things that produced
+/// them.
+///
+/// # Why the site needed its own guard
+///
+/// `check-concepts` holds every *prose* claim: the suite total four documents
+/// open by quoting, the decision log's own count, the size of the calendar. The
+/// landing page states five numbers and states them in **TOML**, as
+/// `stat_tests = "662"` rather than as `**662 tests**` — so every one of those
+/// checks walked straight past them, and three of the five were wrong for four
+/// milestones: forty duties against forty-seven, six hundred and sixty-two tests
+/// against nine hundred, nine crates against twelve.
+///
+/// They are the first thing a visitor sees, above the fold, before a word of
+/// prose. The config's own comment said *"a number here that no longer matches
+/// its source is worse than no number"*, and nothing enforced it (D288).
+///
+/// Two of the five are not checked here and say so: `stat_floats` is `no-floats`'
+/// own answer, which is a guard rather than a count, and `stat_curves` is a fact
+/// about the `ocmf` crate's pure-Rust backend rather than about this workspace.
+fn check_site_stats(
+    root: &Path,
+    problems: &mut Vec<String>,
+    duties: usize,
+    tests: usize,
+) -> Result<()> {
+    let path = root.join("site/config.toml");
+    let config = std::fs::read_to_string(&path).context("reading site/config.toml")?;
+
+    // One entry per publishable crate, which is what the landing page counts.
+    let crates = std::fs::read_dir(root.join("crates"))
+        .context("reading crates/")?
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.path().join("Cargo.toml").is_file())
+        .count();
+
+    // Every page's `description` is its meta description, and a search engine
+    // truncates one past about 160 characters — so the half a reader is meant to
+    // be persuaded by is the half that gets cut. It is also the on-page lead
+    // paragraph, where 400 characters is a wall rather than a summary. Nine of
+    // the ten were over, one of them at 424 (D288).
+    for entry in std::fs::read_dir(root.join("site/content"))?
+        .chain(std::fs::read_dir(root.join("site/content/docs"))?)
+    {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)?;
+        let Some(description) = front_matter_description(&text) else {
+            problems.push(format!(
+                "{} states no description, so it inherits the site's and shares a snippet with \
+                 every other page",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            ));
+            continue;
+        };
+        if description.chars().count() > SERP_DESCRIPTION_LIMIT {
+            problems.push(format!(
+                "{} has a {}-character description: a search engine shows about {}",
+                path.strip_prefix(root).unwrap_or(&path).display(),
+                description.chars().count(),
+                SERP_DESCRIPTION_LIMIT
+            ));
+        }
+    }
+
+    for (key, held) in [
+        ("stat_obligations", duties),
+        ("stat_tests", tests),
+        ("stat_crates", crates),
+    ] {
+        match stated_stat(&config, key) {
+            Some(stated) if stated == held => {}
+            Some(stated) => problems.push(format!(
+                "site/config.toml states {key} = \"{stated}\" and the workspace holds {held}: it \
+                 is the first number a visitor reads"
+            )),
+            None => problems.push(format!("site/config.toml states no {key}")),
+        }
+    }
+    Ok(())
+}
+
+/// What a search engine shows of a meta description before it truncates.
+///
+/// Google's is closer to 155 on a phone and a little more on a desktop; 160 is
+/// the figure every style guide settles on, and the point is that a description
+/// written past it has a tail nobody reads.
+const SERP_DESCRIPTION_LIMIT: usize = 160;
+
+/// The `description = "…"` of a page's TOML front matter.
+///
+/// Read from the front matter only — a `description = ` inside the body is prose
+/// about the field rather than the field.
+fn front_matter_description(page: &str) -> Option<String> {
+    let body = page.strip_prefix("+++\n")?;
+    let (front, _) = body.split_once("\n+++")?;
+    front.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("description")?
+            .trim_start()
+            .strip_prefix('=')
+            .map(|rest| rest.trim().trim_matches('"').to_owned())
+    })
+}
+
+/// The value of a `stat_* = "<n>"` line in the site configuration.
+fn stated_stat(config: &str, key: &str) -> Option<usize> {
+    config.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix(key)?;
+        rest.trim_start()
+            .strip_prefix('=')?
+            .trim()
+            .trim_matches('"')
+            .parse()
+            .ok()
+    })
+}
+
+/// The obligation calendar's size, against the figure `COMPLIANCE.md` states.
+///
+/// # Why this is the same guard as the test count and not a new idea
+///
+/// `check-concepts` exists because prose has no test, and the figure a document
+/// opens with is the sentence a reader trusts furthest and nothing checks. The
+/// suite total was one such figure (D225). The calendar's is another, and it is
+/// the one a *regulator* would read: `COMPLIANCE.md` opens its table with "Forty
+/// duties", and adding a duty to `CALENDAR` moved nothing in that sentence.
+///
+/// Counted off the source rather than off the built binary, for the reason the
+/// test count is: this guard is a text check over documents, and running the
+/// calendar would make it a dependency of the crate it is auditing.
+fn check_duty_count(root: &Path, problems: &mut Vec<String>, internal: bool) -> Result<usize> {
+    let calendar = std::fs::read_to_string(root.join("crates/emob-core/src/obligation.rs"))
+        .context("reading crates/emob-core/src/obligation.rs")?;
+    // Sliced to the `CALENDAR` literal rather than grepped over the file: the
+    // test module builds an `Obligation` of its own to exercise `applies_until`
+    // with, and counting that would report forty-six duties in a calendar of
+    // forty-five — a guard about a number being wrong by one.
+    let Some(from) = calendar.find("pub const CALENDAR:") else {
+        bail!("crates/emob-core/src/obligation.rs declares no `pub const CALENDAR`");
+    };
+    let body = &calendar[from..];
+    let end = body.find("\n];").unwrap_or(body.len());
+    let held = body[..end]
+        .lines()
+        .filter(|line| line.trim_start().starts_with("id: ObligationId::"))
+        .count();
+    if held == 0 {
+        bail!("crates/emob-core/src/obligation.rs holds no `id: ObligationId::…` calendar entries");
+    }
+
+    // Wherever the figure is written it is written **bold**, the convention the
+    // test count already uses — and it is checked in Rust doc comments as well
+    // as in prose, because the sentence that had drifted was `agentd`'s module
+    // documentation rather than a design note. A specialist telling a reader it
+    // sweeps forty duties while sweeping forty-four is the same untruth in a
+    // place nobody thinks to re-read.
+    let mut sources = prose_sources(root)?;
+    sources.extend(rust_sources(root)?);
+    for file in sources {
+        if file.ends_with("xtask/src/main.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file)
+            .with_context(|| format!("reading {}", file.display()))?;
+        for stated in stated_duty_counts(&text) {
+            if stated != held {
+                problems.push(format!(
+                    "{} states **{stated} duties** and `obligation::CALENDAR` holds {held}",
+                    file.strip_prefix(root).unwrap_or(&file).display(),
+                ));
+            }
+        }
+    }
+
+    // …and `COMPLIANCE.md` is the document that has to state it at all. A count
+    // nobody writes down cannot drift, and a calendar whose own design note
+    // does not say how big it is has stopped being a map.
+    if internal {
+        let compliance = std::fs::read_to_string(root.join("concepts/COMPLIANCE.md"))
+            .context("reading concepts/COMPLIANCE.md")?;
+        if stated_duty_counts(&compliance).is_empty() {
+            problems.push(
+                "concepts/COMPLIANCE.md states no **<n> duties** count for the calendar".to_owned(),
+            );
+        }
+    }
+    Ok(held)
+}
+
+/// Every `**<n> duties**` a document states, spelled in words or in digits.
+///
+/// Both spellings, because prose here writes "**Forty-four duties**" at the head
+/// of a table and "the **44 duties**" inside a sentence, and a guard that read
+/// one of them would pass the other by.
+fn stated_duty_counts(text: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(index) = rest.find("**") {
+        rest = &rest[index + 2..];
+        let Some(end) = rest.find("**") else { break };
+        let phrase = &rest[..end];
+        let Some(head) = phrase.strip_suffix(" duties") else {
+            continue;
+        };
+        let head = head.trim();
+        if let Ok(count) = head.parse() {
+            out.push(count);
+        } else if let Some(count) = words_to_number(head) {
+            out.push(count);
+        }
+    }
+    out
+}
+
+/// The heading's spelled-out count, and the properties the table under it holds.
+///
+/// # Why it counts rows and no longer sections
+///
+/// The list used to be twenty-seven `###` sections with their own code — fifteen
+/// hundred lines, four fifths of a README nobody scrolls, restating what the
+/// documentation site already says at more length and better. It is now an index:
+/// one numbered row per property, each linking to the page that explains it, so
+/// the front door is scannable and the depth lives in one place (D289).
+///
+/// The guard is the same guard. A document that states how many of something it
+/// holds is one that can be wrong about it, and this one was.
+fn property_count(readme: &str) -> (Option<usize>, usize) {
+    let Some(start) = readme.find(" properties that decide quality") else {
+        return (None, 0);
+    };
+    let line_start = readme[..start].rfind('\n').map_or(0, |i| i + 1);
+    let stated = words_to_number(&readme[line_start..start]);
+
+    let body = &readme[start..];
+    let end = body[1..].find("\n## ").map_or(body.len(), |i| i + 1);
+    // A numbered row: `| 12 | … | … |`. The header and the delimiter row are not
+    // numbered, so nothing else in the table counts.
+    let held = body[..end]
+        .lines()
+        .filter(|line| {
+            line.strip_prefix('|')
+                .map(str::trim_start)
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .count();
+    (stated, held)
 }
 
 /// Every row of every Markdown table has the columns its header does.
@@ -1447,6 +1754,16 @@ fn check_prose(root: &Path) -> Result<()> {
         let text = std::fs::read_to_string(&file)
             .with_context(|| format!("reading {}", file.display()))?;
         scanned += 1;
+        // The literals this is about are the ones a **person** reads — a
+        // refusal, a note, a diagnostic — and those live in a crate's own
+        // source. A test's literals are fixtures: `"   "` is the blank id a
+        // constructor has to refuse, not a sentence with a hole in it, and
+        // failing the build over one teaches a reader to reach for the allow.
+        // `check-reach` and `check-constructors` cut at the same line, for the
+        // same reason.
+        let text = text
+            .split_once("\n#[cfg(test)]")
+            .map_or(text.as_str(), |(head, _)| head);
         for (number, line) in text.lines().enumerate() {
             if line.trim_start().starts_with("//") {
                 continue;
@@ -1474,7 +1791,7 @@ fn check_prose(root: &Path) -> Result<()> {
         }
         bail!("{} broken string(s)", problems.len());
     }
-    println!("✍️  check-prose: {scanned} files, every sentence in one piece");
+    println!("✍️  check-prose: {scanned} files, every sentence a person reads in one piece");
     Ok(())
 }
 
@@ -1529,6 +1846,428 @@ fn lost_continuation(literal: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Names this guard does not ask about, because the answer is never
+/// interesting.
+///
+/// Trait methods reached through a trait — `Display::fmt`, `FromStr::from_str`,
+/// `Default::default` — and the constructors every type has. Each is called
+/// through the trait or through inference, so the textual search below cannot
+/// see the caller and the finding would be noise a reader learns to skip.
+const REACHED_BY_INFERENCE: &[&str] = &[
+    "new",
+    "default",
+    "fmt",
+    "from",
+    "from_str",
+    "clone",
+    "eq",
+    "cmp",
+    "hash",
+    "next",
+    "serialize",
+    "deserialize",
+    "main",
+    "drop",
+    "into",
+    "try_from",
+    "as_ref",
+    "add",
+    "sub",
+    "sum",
+    "extend",
+];
+
+/// Every `pub fn` a domain crate exports is named somewhere other than its own
+/// definition.
+///
+/// # The half of rule 1 nothing looked for
+///
+/// *"A field that is parsed and never consulted is a rule that is not
+/// enforced."* Three separate audit passes in this workspace each found the same
+/// shape — a specification semantic modelled faithfully and no caller — and each
+/// found it by reading. `cargo tree --invert` finds an unused crate and `dead_code`
+/// finds an unused private item; **neither sees a `pub fn`**, because `pub` is a
+/// promise to a downstream that may not exist yet, and the compiler takes the
+/// promise at face value.
+///
+/// Here it should not be taken at face value. Every crate in this workspace is
+/// consumed inside it, and a method nothing calls is a rule nothing enforces
+/// however carefully its documentation states the rule. `Chargeable::untransferred_seconds`
+/// was the finding that motivated this: it named a real distinction — OCPI defines
+/// `total_parking_time` on energy transfer and the priced `PARKING_TIME` dimension
+/// on the vehicle's demand — carried the sentence that says so, and had no caller
+/// anywhere, while `emob-roam` computed the same figure from the same predicate
+/// in its own loop. Two spellings of one rule, one of them enforced (D261).
+///
+/// A textual search rather than a call graph: it over-approximates reachability,
+/// so it can only ever *miss* a dead function, never invent one. Doc comments and
+/// Markdown count as references, deliberately — a function named only in prose is
+/// documented API, which is a different conversation from a function named
+/// nowhere at all.
+///
+/// The prose it reads is the **tracked** prose. `concepts/` is gitignored and CI
+/// builds a clone, so reading it would make this guard stricter where a change
+/// merges than where it was written — D228's failure with the sign flipped, and
+/// just as hard to act on.
+fn check_reach(root: &Path) -> Result<()> {
+    let sources = rust_sources(root)?;
+    let mut haystack = String::new();
+    for file in &sources {
+        haystack.push_str(&code_and_quoted(&std::fs::read_to_string(file)?));
+    }
+    // The **tracked** prose only, and only the part of it that is quoting code.
+    //
+    // Tracked, because `concepts/` is gitignored and CI builds a clone: reading
+    // it would make the guard stricter where a change merges than where it was
+    // written — D228's failure with the sign flipped.
+    //
+    // Backticked, because a function name is also an English word. The partner
+    // registry's version setter had no caller anywhere and passed this check on
+    // an unrelated doc comment that happened to use its name as a verb — so a
+    // registry recorded which OCPI version a peer speaks and nothing read it
+    // (D265). A reference to an API in this workspace's prose is written in
+    // backticks; a bare word is prose.
+    for file in prose_sources(root)? {
+        if file.starts_with(root.join("concepts")) {
+            continue;
+        }
+        haystack.push_str(&quoted_spans(&std::fs::read_to_string(&file)?));
+    }
+
+    let mut unreached = Vec::new();
+    let mut checked = 0usize;
+    for file in &sources {
+        let relative = file
+            .strip_prefix(root)
+            .unwrap_or(file)
+            .display()
+            .to_string();
+        if !relative.contains("/src/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(file)?;
+        // The definitions inside a `#[cfg(test)]` module are the tests' own, and
+        // a test helper nothing else calls is exactly what a test helper is.
+        let body = text
+            .split_once("\n#[cfg(test)]")
+            .map_or(text.as_str(), |(head, _)| head);
+        for (number, line) in body.lines().enumerate() {
+            let Some(name) = public_fn_name(line) else {
+                continue;
+            };
+            if REACHED_BY_INFERENCE.contains(&name) {
+                continue;
+            }
+            checked += 1;
+            if mentions(&haystack, name) <= 1 {
+                unreached.push(format!(
+                    "{relative}:{}: `{name}` is public and named nowhere but its own definition — \
+                     a rule with no caller is a rule that is not enforced. Give it the caller it \
+                     was written for, or delete it",
+                    number + 1,
+                ));
+            }
+        }
+    }
+
+    if !unreached.is_empty() {
+        eprintln!("❌ public functions nothing reaches:");
+        for problem in &unreached {
+            eprintln!("   {problem}");
+        }
+        bail!("{} unreached public function(s)", unreached.len());
+    }
+    println!("🔗 check-reach: {checked} public functions, every one of them called");
+    Ok(())
+}
+
+/// Rust source with its comments reduced to the parts that quote code.
+///
+/// A name in running prose is an English word; a name in backticks or an
+/// intra-doc link is a reference. The partner registry's version setter passed
+/// this guard on an unrelated doc comment that used its name as an ordinary
+/// verb, while having no caller at all (D265).
+fn code_and_quoted(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            out.push_str(&quoted_spans(line));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Only what a text puts in backticks.
+fn quoted_spans(text: &str) -> String {
+    let mut out = String::new();
+    for quoted in text.split('`').skip(1).step_by(2) {
+        out.push_str(quoted);
+        out.push('\n');
+    }
+    out
+}
+
+/// The name a line defines, when the line defines a public function.
+fn public_fn_name(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("pub ")?;
+    let rest = rest.strip_prefix("const ").unwrap_or(rest);
+    let rest = rest.strip_prefix("async ").unwrap_or(rest);
+    let rest = rest.strip_prefix("unsafe ").unwrap_or(rest);
+    let rest = rest.strip_prefix("fn ")?;
+    let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')?;
+    Some(&rest[..end])
+}
+
+/// How many times a name appears as a whole word.
+fn mentions(haystack: &str, name: &str) -> usize {
+    let mut count = 0;
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(at) = haystack[from..].find(name) {
+        let start = from + at;
+        let end = start + name.len();
+        let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_word_byte(bytes[end]);
+        if before_ok && after_ok {
+            count += 1;
+        }
+        from = end;
+    }
+    count
+}
+
+const fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// The constructors that state a rule are the constructors the **wire** goes
+/// through.
+///
+/// # A validating constructor beside a derived `Deserialize` is a rule with a
+/// door around it
+///
+/// `Energy::from_kwh` refuses a negative, because a magnitude and a `Direction`
+/// are two fields precisely so a V2G discharge can never cancel a draw.
+/// `TokenRef::new` refuses anything that is not a keyed digest, because storing
+/// a raw RFID UID is a privacy incident. `PartyId::new` upper-cases, because
+/// `DE*ABC` and `deabc` becoming two entries in one routing table is the failure
+/// its own documentation names. Every one of them was derived past: a
+/// `#[serde(transparent)]` or a field-by-field derive restores the value without
+/// asking the type anything, and **that is the path values actually arrive by**
+/// — a store, an outbox, a partner's document.
+///
+/// A charge detail record carrying a period of `-10.000` kWh deserialised,
+/// conserved, and validated as settleable (D264). The workspace had already
+/// learned this three times — `Currency`, `ClockResolution` and `QuarterHour`
+/// each carry a hand-written pair with a comment saying why — and had not
+/// generalised it.
+///
+/// So: a type with a fallible `new`/`parse` may not **derive** `Deserialize`.
+/// It may still derive `Serialize`, which asserts nothing.
+///
+/// The search is textual and deliberately narrow — a derive attribute
+/// immediately above a `pub struct`/`pub enum`, and a brace-matched `impl` block
+/// for that name holding a `pub fn new(..) -> Result`. It cannot invent a
+/// finding: both halves have to be there in the same file.
+fn check_constructors(root: &Path) -> Result<()> {
+    let mut problems = Vec::new();
+    let mut checked = 0usize;
+
+    for file in rust_sources(root)? {
+        let relative = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        if !relative.contains("/src/") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file)?;
+        let head = text
+            .split_once("\n#[cfg(test)]")
+            .map_or(text.as_str(), |(head, _)| head);
+        for name in derived_deserialize_types(head) {
+            checked += 1;
+            // A type whose fields are all public can be built field by field
+            // anyway, so a validating deserialiser would be a check the caller
+            // walks around — which is not a check (rule 3). The rule is about
+            // the types whose constructor is the **only** door.
+            if has_private_field(head, &name) && has_fallible_constructor(head, &name) {
+                problems.push(format!(
+                    "{relative}: `{name}` has a fallible constructor and **derives** \
+                     `Deserialize`, so the rule the constructor states is not asked of a value \
+                     that arrives from a store, an outbox or a partner. Write the impl and go \
+                     through the constructor, as `Currency` and `ClockResolution` do"
+                ));
+            }
+        }
+    }
+
+    if !problems.is_empty() {
+        eprintln!("❌ constructors the wire walks past:");
+        for problem in &problems {
+            eprintln!("   {problem}");
+        }
+        bail!("{} derived deserialiser(s) past a rule", problems.len());
+    }
+    println!("🚪 check-constructors: {checked} derived deserialiser(s), none of them past a rule");
+    Ok(())
+}
+
+/// Every type whose `Deserialize` is derived rather than written.
+///
+/// A derive attribute and the item it applies to, with only further attributes
+/// and comments between them — anything else means the attribute belongs to
+/// something the search is not looking at.
+fn derived_deserialize_types(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for (index, line) in src.lines().enumerate() {
+        if !line.contains("derive(") || !line.contains("Deserialize") {
+            continue;
+        }
+        for following in src.lines().skip(index + 1) {
+            let trimmed = following.trim_start();
+            if trimmed.starts_with("#[") || trimmed.starts_with("//") || trimmed.is_empty() {
+                continue;
+            }
+            if let Some(rest) = trimmed
+                .strip_prefix("pub struct ")
+                .or_else(|| trimmed.strip_prefix("pub enum "))
+            {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Whether a type declares a field the outside cannot set.
+///
+/// The test that separates a value with an invariant from a bag of fields. A
+/// tuple struct's field is private unless it says otherwise; a named field is
+/// private unless it opens with `pub`. Where every field is public the
+/// constructor is one door among many, and a rule enforced at one of several
+/// doors is not enforced.
+fn has_private_field(src: &str, name: &str) -> bool {
+    for opener in [
+        format!("pub struct {name} {{"),
+        format!("pub struct {name}("),
+    ] {
+        let Some(at) = src.find(&opener) else {
+            continue;
+        };
+        let body_start = at + opener.len();
+        let close = if opener.ends_with('(') { ')' } else { '}' };
+        let Some(end) = src[body_start..].find(close) else {
+            continue;
+        };
+        let body = &src[body_start..body_start + end];
+        if opener.ends_with('(') {
+            return !body.trim_start().starts_with("pub ");
+        }
+        return body
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| {
+                !line.is_empty()
+                    && !line.starts_with("//")
+                    && !line.starts_with("#[")
+                    && !line.starts_with("///")
+            })
+            .any(|line| !line.starts_with("pub "));
+    }
+    false
+}
+
+/// Whether a type's own `impl` block states a constructor that can refuse.
+///
+/// A **constructor** is an associated function that does not take `self`; one
+/// that can **refuse** returns `Result`. Named by shape rather than by a list of
+/// names, because the list is what a guard gets wrong: `Energy`'s is
+/// `from_kwh`, `ClockResolution`'s is `stated`, and a search for `new` and
+/// `parse` walks past both — which it did, on the type this whole check was
+/// written for.
+fn has_fallible_constructor(src: &str, name: &str) -> bool {
+    for body in impl_bodies(src, name) {
+        for (at, _) in body.match_indices("pub ") {
+            let rest = &body[at..];
+            let Some(after_fn) = signature_after_fn(rest) else {
+                continue;
+            };
+            let Some(open) = after_fn.find('(') else {
+                continue;
+            };
+            // A method, not a constructor.
+            if after_fn[open + 1..].trim_start().starts_with("self")
+                || after_fn[open + 1..].trim_start().starts_with("&self")
+                || after_fn[open + 1..].trim_start().starts_with("&mut self")
+                || after_fn[open + 1..].trim_start().starts_with("mut self")
+            {
+                continue;
+            }
+            // …and one that can refuse says so in the arrow, which may sit a few
+            // lines down on a wrapped signature.
+            let head: String = after_fn.lines().take(8).collect::<Vec<_>>().join(" ");
+            let Some(arrow) = head.find("->") else {
+                continue;
+            };
+            if head[arrow..].trim_start().starts_with("-> Result") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The text of every `impl <name>` block in a file, brace-matched.
+fn impl_bodies<'a>(src: &'a str, name: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let needle = format!("impl {name} ");
+    let mut from = 0;
+    while let Some(at) = src[from..].find(&needle) {
+        let start = from + at;
+        let Some(open) = src[start..].find('{') else {
+            break;
+        };
+        let body_start = start + open + 1;
+        let mut depth = 1usize;
+        let mut end = body_start;
+        for byte in src[body_start..].bytes() {
+            if byte == b'{' {
+                depth += 1;
+            } else if byte == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        out.push(&src[body_start..end.min(src.len())]);
+        from = end.max(start + needle.len());
+    }
+    out
+}
+
+/// What follows `fn` in a `pub [const] [async] fn …` signature, if this is one.
+fn signature_after_fn(rest: &str) -> Option<&str> {
+    let rest = rest.strip_prefix("pub ")?;
+    let rest = rest.strip_prefix("const ").unwrap_or(rest);
+    let rest = rest.strip_prefix("async ").unwrap_or(rest);
+    rest.strip_prefix("fn ")
 }
 
 fn check_graph(root: &Path) -> Result<()> {
@@ -1826,6 +2565,124 @@ Some prose.
         assert_eq!(code_part("    /// f64 is forbidden"), "");
         assert_eq!(code_part("let x = 1; // f64"), "let x = 1; ");
         assert_eq!(code_part("let x: u8 = 1;"), "let x: u8 = 1;");
+    }
+
+    #[test]
+    fn only_the_numbered_rows_of_the_property_index_are_counted() {
+        // The index is a table now, so the header and the delimiter row are the
+        // shapes that must not count — and neither must a table further down the
+        // document. A row counts when it opens with its own number, which is how
+        // a reader counts the list and therefore how the guard has to.
+        let readme = "\n## The three properties that decide quality\n\n\
+                      | # | Property | Where |\n\
+                      |---|---|---|\n\
+                      | 1 | One | [Eichrecht](x) |\n\
+                      | 2 | Two | [Tariffs](y) |\n\
+                      | 3 | Three | [Roaming](z) |\n\
+                      \n## Layout\n| 9 | Not counted | here |\n";
+        assert_eq!(property_count(readme), (Some(3), 3));
+        assert_eq!(property_count("no heading here"), (None, 0));
+    }
+
+    #[test]
+    fn a_constructor_is_told_apart_from_a_method_by_its_first_parameter() {
+        // The distinction the whole check turns on: a function that takes
+        // `self` cannot be the door a value arrives through, and one that
+        // returns `Result` without taking `self` is exactly that door — whatever
+        // it is called. Naming it by shape rather than by a list of names is why
+        // this finds `Energy::from_kwh` and `ClockResolution::stated`, neither
+        // of which is called `new`.
+        let src = "\
+impl Energy {
+    pub fn from_kwh(kwh: Decimal) -> Result<Self, QuantityError> { }
+}
+impl Money {
+    pub fn checked_add(self, rhs: Self) -> Result<Self, QuantityError> { }
+}
+impl Plain {
+    pub fn new(v: u8) -> Self { }
+}
+";
+        assert!(has_fallible_constructor(src, "Energy"));
+        assert!(
+            !has_fallible_constructor(src, "Money"),
+            "a method that can fail is not a constructor"
+        );
+        assert!(
+            !has_fallible_constructor(src, "Plain"),
+            "a constructor that cannot refuse states no rule"
+        );
+    }
+
+    #[test]
+    fn a_bag_of_public_fields_has_no_door_to_guard() {
+        // A type anybody can build field by field gains nothing from a
+        // validating deserialiser, because the caller walks around it — which is
+        // not a check (rule 3). So the guard asks only about types whose
+        // constructor is the only way in.
+        let src = "\
+pub struct Energy(Decimal);
+pub struct Wrapper(pub Decimal);
+pub struct Hidden {
+    /// A doc comment.
+    #[serde(default)]
+    inner: u8,
+    pub shown: u8,
+}
+pub struct Open {
+    pub a: u8,
+    pub b: u8,
+}
+";
+        assert!(has_private_field(src, "Energy"));
+        assert!(!has_private_field(src, "Wrapper"));
+        assert!(has_private_field(src, "Hidden"));
+        assert!(!has_private_field(src, "Open"));
+    }
+
+    #[test]
+    fn a_derive_names_the_item_it_sits_above() {
+        let src = "\
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = \"snake_case\")]
+pub enum Kind { A }
+
+#[derive(Debug, Clone)]
+pub struct NotDeserialised;
+
+#[derive(serde::Deserialize)]
+fn not_an_item() {}
+";
+        assert_eq!(derived_deserialize_types(src), vec!["Kind".to_owned()]);
+    }
+
+    #[test]
+    fn a_public_function_is_recognised_however_it_is_qualified() {
+        assert_eq!(
+            public_fn_name("    pub fn split(&self) -> u8 {"),
+            Some("split")
+        );
+        assert_eq!(
+            public_fn_name("    pub const fn is_zero(self) -> bool {"),
+            Some("is_zero")
+        );
+        assert_eq!(public_fn_name("pub async fn serve() {"), Some("serve"));
+        // Not a definition, not a `pub fn`, and not this guard's business.
+        assert_eq!(public_fn_name("    fn seconds_where(&self) -> u64 {"), None);
+        assert_eq!(public_fn_name("    pub(crate) fn hidden() {"), None);
+        assert_eq!(public_fn_name("    pub struct Thing {"), None);
+        assert_eq!(public_fn_name("// pub fn in a comment"), None);
+    }
+
+    #[test]
+    fn a_name_is_reached_only_as_a_whole_word() {
+        // The failure a substring search would produce is the wrong direction:
+        // `split` inside `splitter` would report a caller that is not one, and
+        // the guard would pass over a function nothing calls.
+        assert_eq!(mentions("fn split(); split(); splitter();", "split"), 2);
+        assert_eq!(mentions("resplit(); split_at();", "split"), 0);
+        assert_eq!(mentions("`split`", "split"), 1, "prose counts");
+        assert_eq!(mentions("", "split"), 0);
     }
 
     #[test]

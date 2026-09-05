@@ -36,7 +36,7 @@ decision rather than a mapping.
 
 A CDR carries **two** ratings: the charging session, and the reservation that ran
 before it `[OCPI 2.3.0 §mod_cdrs_cdr_object]`. Both reach the document through
-one function (D250):
+one function:
 
 ```rust
 invoice.lines[0].description;  // "… — reservation"    — it ran first
@@ -68,7 +68,7 @@ layer sees it.
 on the AC side of its rectifier and then obliges the operator to tell *"die von
 einem Messwert **oder einer Rechnung** Betroffenen"* that the losses are part of
 the number — the invoice, in as many words. So the figure goes in BT-127, on the
-line carrying the measured value, from the record's own signed evidence (D253):
+line carrying the measured value, from the record's own signed evidence:
 
 ```rust
 line.compensated_loss;   // Some(0.150 kWh) — from `EvidenceRef`, not from a flag
@@ -123,16 +123,30 @@ whole total being put through one factor. On a €100.00 session made of energy 
 19 % beside a session fee at 7 %, the single-factor reading divided the 7 % half
 by 1.19 as well and billed **€98.80**.
 
-One shape this cannot carry: an adjustment larger than everything charged at its
-rate would state a negative taxable amount under a positive invoice.
-`emob-tariff` names it as `RatingNote::AdjustmentExceedsCategory` before the
-document is built, so the sign never reaches a document unexplained.
+**And a bound is not always one allowance.** A cut deeper than the category it is
+attributed to states a negative BT-116 under a positive invoice — a document that
+reconciles, whose totals chain holds, and which **all 317 of EN 16931's own rules
+accept**, because none of them forbids it. BG-20 is repeatable, so the
+bound becomes one allowance per category it is drawn from,
+`emob_tariff::Rated::adjustment_parts` states the split, and the rating solved the
+price along the same walk — so the document and the total agree by construction
+rather than by a second reading here.
+
+The rounded total is still the document's own: `signed` is a difference of two
+figures the invoice already prints, which is what makes it reach the tariff's
+figure exactly, so it is **shared out** across the parts and the largest carries
+whatever the rounding leaves — the part with the most room under it.
+
+`BillingError::AdjustmentExceedsCategory` did not go away, it moved to the door:
+a `Rated` deserialised from a partner went through no rating and no clamp, so its
+adjustment can exceed everything the record charges, and that record is refused
+by name.
 
 The books move the revenue that bound belongs to, chosen from the largest line
 **of that record** — the same scope `emob_tariff::Adjustment::vat` uses for the
 rate. Asked of the whole document instead, a month of energy sessions plus one
 capped occupancy session books the cap against energy revenue for a session that
-delivered none (D214).
+delivered none.
 
 ## The item price is the net one
 
@@ -245,7 +259,7 @@ Article 195 shifts the liability to the recipient — the reverse charge
 established within that Member State**". A CPO with a branch or a VAT
 registration in the buyer's country is making an ordinary **local** supply there,
 at that country's rate, and a reverse charge on it drops tax that was due. So
-establishment is stated rather than inferred from the two countries (D211):
+establishment is stated rather than inferred from the two countries:
 
 ```rust
 let cpo = TaxStatus::business("DE", "DE123456789");
@@ -269,6 +283,8 @@ let rates = VatRates::new().at("DE", dec("19"));
 let treatment = TaxTreatment::decide(&seller.tax, &buyer.tax, "DE", &rates)?;
 assert_eq!(treatment.category, VatCategory::ReverseCharge);
 assert_eq!(treatment.place_of_supply, "FR");
+// …and the second supply asks a different question of the same two parties.
+let fee = TaxTreatment::decide_service(&seller.tax, &buyer.tax, &rates)?;
 ```
 
 ### The rate belongs to the place of supply, not to the charge point
@@ -329,11 +345,35 @@ part `en16931` cannot know — which category two *parties* produce.
 ### The fee that is not electricity
 
 C‑60/23 also holds that a **periodic subscription** an eMSP charges its driver —
-one that buys access rather than kilowatt-hours — is a *separate supply of
-services*, under its own place-of-supply rule rather than Article 38 or 39.
-Nothing here builds such a line: an invoice is assembled from rated CDRs and
-every one of them is electricity. A document carrying both needs a VAT
-**category** per line where this crate has one per document, so it is `empd`'s.
+one that buys access rather than kilowatt-hours — is a *separate and independent
+supply of services*, under its own place-of-supply rule rather than Article 38 or
+39. The Court's reason is the fee itself: it is charged *"regardless of whether
+the user actually purchased electricity during the relevant period"*.
+
+Separate means it does not follow the electricity anywhere, so one document can
+be taxed in two places at once — `[UStG §3g]` leaves a private customer's
+electricity at the charge point, `[UStG §3a(1)]` puts a service to a private
+person where the **supplier** sits.
+
+```rust
+let invoice = InvoiceBuilder::new(number, issued_on, period, cpo, driver)
+    .supplied_from("FR", dec("20"))   // where the electricity was drawn
+    .vat_rate_in("DE", dec("19"))     // where the supplier sits
+    .subscription(Subscription::new("network access", dec("4.99"), from, to))
+    .ledger(&ledger)
+    .build()?;
+invoice.tax.len();                    // two subtotals, two places of supply
+```
+
+That is why the VAT category is a **line** field, which is where EN 16931 has it:
+BT-151 and BT-152 belong to the line and BG-23 repeats, one entry per category and
+rate. What is a property of the whole document is which categories may
+share it — `BR-O-11` … `BR-O-14` forbid the outside-scope category to sit beside
+any other, and `exclusive_category` records it.
+
+The **line** comes from `empd`, because a contract whose driver charged nothing
+all month contributes no records — and the fee owed precisely because nothing was
+charged is invisible to everything downstream of the ledger.
 
 And the books agree with the document: under a reverse charge there is **no VAT
 posting**, because the liability is the recipient's. A platform that posts 19 %

@@ -1,15 +1,13 @@
 +++
 title = "Getting started"
 weight = 1
-description = "Install the crates that exist, verify a charging session under German calibration law, split it across quarter hours, build a CDR, price it, publish that price to a roaming partner, to the national access point and to the charge point's own screen, close a month into an e-invoice and a SEPA collection, ask the obligation calendar whether you are ready for 2027, and run a hundred-station fleet that reconciles exactly."
+description = "Install the crates, verify a charging session under German calibration law, price it, publish that price to three audiences, close a month into an e-invoice."
 
 [extra]
 nav = "Getting started"
 +++
 
-# Getting started
-
-Twelve crates are built from this workspace today, with four daemons on top of
+Twelve crates are built from this workspace today, with seven daemons on top of
 them. Everything on this page runs. ✅
 
 ```console
@@ -574,7 +572,8 @@ See [Sessions and settlement](@/docs/settlement.md).
 just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs
 just guards     # no-floats, check-citations, check-manifests, check-wire,
-                # check-prose, check-concepts, check-graph
+                # check-prose, check-concepts, check-reach,
+                # check-constructors, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
 ```

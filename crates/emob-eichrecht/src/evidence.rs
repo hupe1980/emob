@@ -24,7 +24,7 @@ use emob_core::{Energy, IdentificationStrength};
 
 use ocmf::{PublicKey, Record, RecordBuf};
 
-use crate::chain::{self, ChainFinding, ChainReport};
+use crate::chain::{self, ChainFinding, ChainReport, Disqualifies};
 use crate::error::EichrechtError;
 use crate::registry::KeyRegistry;
 
@@ -268,6 +268,35 @@ impl Evidence {
     /// A one-line reason per problem, for an operator queue.
     pub fn reasons(&self) -> impl Iterator<Item = String> + '_ {
         self.problems.iter().map(ToString::to_string)
+    }
+
+    /// The reasons one **quantity** may not be billed.
+    ///
+    /// The whole claim of this crate is that a chain answers four questions and
+    /// a fault takes away only what it disqualifies: an unsynchronised clock
+    /// leaves the energy billable and takes the duration `[OCMF Tab. 19]`, a
+    /// failed assignment takes the payer and leaves both. [`Self::reasons`] is
+    /// the undifferentiated list — everything wrong with these records — and
+    /// until now it was the only list a caller could get, so *"why can I not
+    /// bill the minutes"* had no answer sharper than *"here is everything"*.
+    ///
+    /// A **signature** failure is in every answer. It stops the chain from being
+    /// validated at all, so there is no finding to attribute and nothing about
+    /// these records may be billed.
+    ///
+    /// Empty is the ordinary case, and it means the quantity is billable.
+    pub fn reasons_for(&self, what: Disqualifies) -> Vec<String> {
+        // No chain means the signatures did not hold, and a record nobody could
+        // verify disqualifies everything.
+        let Some(chain) = &self.chain else {
+            return self.reasons().collect();
+        };
+        self.problems
+            .iter()
+            .filter(|problem| matches!(problem, EvidenceProblem::Signature { .. }))
+            .map(ToString::to_string)
+            .chain(chain.disqualifying(what).map(ToString::to_string))
+            .collect()
     }
 }
 

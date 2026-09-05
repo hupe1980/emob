@@ -83,9 +83,33 @@ impl fmt::Display for Direction {
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 pub struct Energy(Decimal);
+
+/// Read back through [`Energy::from_kwh`], because a derived `Deserialize` is a
+/// constructor nothing wrote.
+///
+/// # The invariant this exists to keep
+///
+/// [`Energy`] is a non-negative magnitude and [`Direction`] is a separate field,
+/// so that a V2G discharge can never cancel a draw inside one billing period.
+/// `from_kwh` refuses a negative and every arithmetic operator here is fallible
+/// for the same reason — and a `#[serde(transparent)]` derive walked past all of
+/// it. A charge detail record carrying a period of `-10.000` kWh deserialised,
+/// **conserved**, and validated as settleable: import and export netted inside
+/// one record, through the one door nobody had put a check on (D264).
+///
+/// Serialisation stays transparent: the decimal goes out with the scale the
+/// meter stated, which is the other half of what this type is for.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Energy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let kwh = <Decimal as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_kwh(kwh).map_err(D::Error::custom)
+    }
+}
 
 impl Energy {
     /// No energy at all.
@@ -559,6 +583,28 @@ mod tests {
         // And a value that already has decimals keeps them all.
         let f = Energy::from_wh(dec("1234.5")).unwrap();
         assert_eq!(f.kwh().to_string(), "1.2345");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_negative_energy_cannot_arrive_over_the_wire_either() {
+        // The invariant the whole workspace rests on, at the one door that had
+        // no check on it: `Direction` is a field so that a discharge can never
+        // cancel a draw, and a derived `Deserialize` restored the decimal
+        // without asking `from_kwh` anything (D264).
+        let refused = serde_json::from_str::<Energy>("\"-5.000\"");
+        assert!(refused.is_err(), "{refused:?}");
+        assert!(refused.unwrap_err().to_string().contains("energy"));
+
+        // …and the scale a meter stated still survives the round trip, which is
+        // the other half of what this type is for.
+        let stated = Energy::from_kwh(dec("2935.600")).unwrap();
+        let json = serde_json::to_string(&stated).unwrap();
+        assert_eq!(serde_json::from_str::<Energy>(&json).unwrap(), stated);
+        assert_eq!(
+            serde_json::from_str::<Energy>(&json).unwrap().to_string(),
+            "2935.600 kWh"
+        );
     }
 
     #[test]

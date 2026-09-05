@@ -1,0 +1,39 @@
+[package]
+name        = "roamd"
+description = "The roaming node: it decides who a record goes to, when it is late, and what to do with one that arrives — and never what a record says"
+publish     = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-cdr     = { workspace = true }
+emob-core    = { workspace = true }
+emob-roam    = { workspace = true }
+emob-service = { workspace = true }
+emob-tariff  = { workspace = true }
+
+# Only to name the payload types the daemon puts on a socket. Nothing here
+# builds one: every document is `emob-roam`'s.
+ocpi-kit     = { workspace = true }
+oicp-kit     = { workspace = true }
+
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+emob-eichrecht = { workspace = true }
+emob-poi       = { workspace = true }
+emob-session   = { workspace = true }
+hex            = { workspace = true }
+ocmf           = { workspace = true }
+p256           = { workspace = true }
+rust_decimal   = { workspace = true }
+sha2           = { workspace = true }
+time           = { workspace = true, features = ["macros"] }

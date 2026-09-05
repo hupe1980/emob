@@ -1,13 +1,12 @@
 +++
 title = "Tariffs and price transparency"
 weight = 5
-description = "Why the price a driver is shown, the price a partner settles against, the price in the national access point feed and the price they are charged all come from one object, why rating has to walk the session's periods for tiers to mean anything, and why a per-minute-only tariff is unlawful above 50 kW."
+description = "One tariff object that rates a session and displays it — period-based rating so tiers tier, the VAT breakdown an invoice needs, and AFIR price transparency."
 
 [extra]
+state = "built"
 nav = "Tariffs"
 +++
-
-# Tariffs and price transparency ✅
 
 `[AFIR Art. 5(4)]` regulates the ad-hoc price at a public charge point more
 tightly than most implementations realise. Four rules, each a checkable property
@@ -234,8 +233,8 @@ assert_eq!(rate(&night, &coarse).exact_total(), rate(&night, &fine).exact_total(
 ```
 
 The pieces are differences of cumulative values, so they telescope back to the
-period's own total to the last digit — the same construction, and since D222 the
-same *function*, the quarter-hour split uses.
+period's own total to the last digit — the same construction, and by now the
+same *function*, that the quarter-hour split uses.
 
 And the claim is stated as a property rather than only as examples: two thousand
 generated tariffs and sessions, each rated at three resolutions, asserting one
@@ -381,6 +380,24 @@ about, while the invoice's gross rounds per VAT category and can sit a minor uni
 above it. Closing that last cent would mean deciding the cap from rounded
 categories again.
 
+### …and a bound deeper than its own category is drawn from the next
+
+A cap of €3.00 on a session made of €5.00 of energy at 19 % and a €20.00 fee at
+7 % takes €22.00 out of a category holding €20.00. As one allowance the document
+states **BT-116 = −2.00** — and it reconciles, its totals chain holds, and **all
+317 of the standard's own rules accept it**, because none of them forbids a
+negative category under a positive invoice. No tax office accepts one.
+
+`BG-20` is repeatable, so the bound is drawn from as many categories as it needs
+— the chosen one first, then the rest largest first — and the **price is solved
+along that same walk**. Reaching a gross ceiling from net lines needs to know
+what a unit of movement does to the gross, which is a property of the category it
+lands in; a cut spanning two rates makes the gross a piecewise-linear function of
+how deep it goes, and one factor answers the wrong question.
+
+With a single VAT rate the walk has one segment and the arithmetic is the
+division it always was.
+
 ## A reservation is priced, and it is not a period of the session
 
 `[OCPI 2.3.0]` prices a reservation through a **restriction** rather than a
@@ -510,6 +527,46 @@ price; a provider's own contract price falls under Art. 5(5), which is a
 disclosure duty rather than a shape duty, and which the [obligation
 calendar](@/docs/compliance.md) assesses against a provider profile.
 
+### …and unlawful in Germany where it is lawful in Europe
+
+`check_afir` answers one document. `check_pangv` answers the other, and the
+German one is **older and wider**: `[PAngV §14(2)]` has bound every publicly
+accessible point taking an ad-hoc payment since **28.05.2022**, at any power,
+and `[PAngV §14(4)]` fixes the unit of the *Arbeitspreis* at one kilowatt-hour.
+
+```rust
+// 6.00 an hour on a 22 kW post.
+assert!(check_afir(&by_the_minute, dec("22")).is_lawful());   // lawful in the Regulation
+assert!(!check_pangv(&by_the_minute).is_lawful());            // an Ordnungswidrigkeit here
+```
+
+That is the case every stack modelling Article 5 and stopping reports as
+compliant. Two entry points rather than one branch, because the objections travel
+to different authorities.
+
+## The price a consumer is shown is the *Gesamtpreis*
+
+`describe` hands out the tariff's own figures with a `TaxIncluded` beside them —
+right for a partner reconciling a settlement, wrong for the audience whose law
+names the number. `[PAngV §2 Nr. 1]` defines the Arbeitspreis as a price
+*"einschließlich der Umsatzsteuer"*, and the driver reads the number rather than
+the flag.
+
+```rust
+// What a settlement partner reads — and what a driver may not be shown.
+assert!(!describe(&tariff, at).is_gesamtpreis());
+assert_eq!(describe(&tariff, at).one_line(), "0.49 EUR / kWh");
+
+// What `[PAngV §14(2)]` asks for, exactly.
+assert_eq!(describe_gross(&tariff, at)?.one_line(), "0.5831 EUR / kWh");
+```
+
+Exact rather than rounded, for the reason everything here is: a rounded figure is
+a price the operator does not charge. The VAT rate sits on the `DisplayLine`, so
+a tariff whose energy and whose service fee are in different categories is
+grossed **per component** — what `[PAngV §3(3)]` asks for when a price is broken
+out — rather than refused for want of one rate.
+
 ## Every term of the total is a line
 
 ```rust
@@ -531,7 +588,38 @@ without calling it unlawful.
 
 Notes serialise. "This total was rounded up to a block" and "this element could
 not be evaluated" are exactly the facts a settlement dispute turns on, and a note
-that stays behind in the process that produced it is a note nobody can invoke.
+that stays behind in the process that produced it is a note nobody can invoke —
+so the half of them that are terms of the price the payer is asked to pay reach
+both audiences that settle against the record: the driver, on the EN 16931
+invoice, and the roaming partner, as a `Crossing` note pointed at the dimension's
+own total.
+
+### What the rating says was delivered
+
+Two lawful things stand between the quantity a price was computed for and the
+quantity a meter measured. A `step_size` bills up to one block **more**; a
+dimension no element matched is charged **nothing at all** — *"there will be no
+costs for that Tariff Dimension"*, which is how *the first 10 kWh are free* is
+written. Both are stated on the record, so the figure a receiving party checks
+against is neither of the two obvious ones:
+
+```rust
+// what it charged for, less the block it added, plus what it gave away
+rated.accounted_quantity_for(Dimension::Energy) == cdr.total_energy.kwh()
+```
+
+Comparing the *billed* figure alone is wrong in both directions at once. It reads
+a promotional first tier as an arithmetic fault and blocks a record that was
+delivered, charged and paid for; and it lets the mere presence of a block note
+excuse an over-charge of any size on that dimension. Every term of the identity
+is in the dimension's base unit — kilowatt-hours, whole seconds — because an hour
+is 3600 seconds and the subtraction has to be exact.
+
+And the metrology floor bounds a **measured value**, so it reaches what the
+station's clock saw and nothing else: a reservation's window ran before the cable
+went in, no meter observed it, and charging nothing for a forty-five-second hold
+because of the station's clock was a regulation applied to a quantity it does not
+govern.
 
 ### The specification's own answers, as a test file
 

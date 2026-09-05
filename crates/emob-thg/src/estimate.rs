@@ -55,11 +55,35 @@ use crate::factors::{DriveEfficiency, EmissionsBasis, MJ_PER_KWH, VehicleClass};
 /// eigener Schätzwert nach Absatz 3 bekannt gegeben wurde"* — and a bus does not
 /// consume what a car does.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Estimate {
     kwh: Decimal,
     class: VehicleClass,
     announcement: String,
+}
+
+/// Read back through [`Estimate::announced`], because a published estimate that
+/// is negative is a quota claim in the wrong direction.
+///
+/// The figure multiplies into `[38k §5(3)]`'s reference value and out the other
+/// side as an emissions saving. A derived `Deserialize` restored it from a store
+/// without asking, which is the one path a value in a filing actually arrives by
+/// (D264).
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Estimate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        #[derive(serde::Deserialize)]
+        struct AsSent {
+            kwh: Decimal,
+            class: VehicleClass,
+            announcement: String,
+        }
+
+        let sent = AsSent::deserialize(deserializer)?;
+        Self::announced(sent.kwh, sent.class, sent.announcement).map_err(D::Error::custom)
+    }
 }
 
 impl Estimate {

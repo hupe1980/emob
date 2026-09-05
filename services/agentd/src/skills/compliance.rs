@@ -4,14 +4,14 @@
 //! # The rule is `emob-core`'s; the sweep is the agent's
 //!
 //! `emob_core::obligation::assess` judges **one** charge point against the
-//! forty duties on one date. It is the only implementation of those rules and
+//! **47 duties** on one date. It is the only implementation of those rules and
 //! this specialist does not have a second one — it calls it, once per point.
 //!
 //! What it adds is the two things a single assessment cannot say.
 //!
 //! **Which duty, across how many points.** An operator with four hundred posts
 //! does not have four hundred compliance questions; it has the handful of duties
-//! its estate fails and the list of posts under each. Forty findings per point
+//! its estate fails and the list of posts under each. Forty-seven findings per point
 //! is a report nobody reads.
 //!
 //! **And the breaches that have not started.** Every duty carries the date it
@@ -254,7 +254,13 @@ mod tests {
             energy_based: true,
             shown_at_station: true,
             components_in_prescribed_order: true,
+            arbeitspreis: emob_core::ArbeitspreisIndication::PointDisplay,
+            web_based_ad_hoc: false,
+            arbeitspreis_stated_before_start: false,
+            additional_prices: emob_core::AdditionalPrices::None,
         };
+        point.connectors = vec![emob_core::ConnectorType::Iec62196T2Combo];
+        point.current_type = emob_core::CurrentType::Dc;
         point.registration.technical_documentation_available = true;
         point.registration.commissioning_notified_on = Some(commissioned);
         point.metering.bills_by_energy = false;
@@ -284,7 +290,7 @@ mod tests {
         // The question an operator has is never "what is wrong with post 217".
         // It is "which duties does my estate fail, and how many posts under
         // each" — one firmware programme, one contract clause, one retrofit.
-        // Forty findings per point is a report nobody reads.
+        // Forty-seven findings per point is a report nobody reads.
         let mut points = Vec::new();
         for n in 1..=400 {
             let mut point = compliant(&format!("DE*ABC*E{n:05}"), date!(2025 - 06 - 01));

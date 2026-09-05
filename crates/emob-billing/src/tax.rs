@@ -51,13 +51,27 @@
 //!
 //! **The fee that is not electricity.** The same judgment treats a periodic
 //! subscription an eMSP charges its driver — one that buys access rather than
-//! kilowatt-hours — as consideration for a **separate supply of services**, under
-//! its own place-of-supply rule rather than under Article 38 or 39. Nothing here
-//! builds such a line: an invoice is assembled from rated CDRs and every one of
-//! them is electricity. A document carrying both would need a VAT *category* per
-//! line, and this crate gives it one per document. That is a service's document
-//! rather than this crate's, and it is written down here so the boundary is a
-//! decision rather than an oversight.
+//! kilowatt-hours — as consideration for a **separate supply of services**. The
+//! Court is explicit about the facts: the provider *"bills the card users, first
+//! for the quantity of electricity supplied on a monthly basis, and second for
+//! access to the network and adjacent services"*, and the fixed fee is charged
+//! *"regardless of whether the user actually purchased electricity during the
+//! relevant period"*. Access to the network is **separate and independent** from
+//! the delivery of the electricity.
+//!
+//! Two supplies on one document, and they do not share a place of supply.
+//! Electricity is a good and follows Article 38 or 39; a service follows the
+//! general rule, which is **two rules**: `[UStG §3a(2)]` puts a supply to a
+//! taxable person where the *customer* is established, and `[UStG §3a(1)]` puts
+//! one to a private driver where the *supplier* is. So the same subscription,
+//! sold by a German provider to a Dutch fleet and to a Dutch driver, is taxed in
+//! two different countries at two different rates — beside electricity taxed in a
+//! third.
+//!
+//! [`TaxTreatment::decide`] answers the goods question and
+//! [`TaxTreatment::decide_service`] the services one. A document carrying both
+//! needs a VAT **category per line**, which is what [`crate::InvoiceLine`] now
+//! states.
 //!
 //! # The rule the roaming model runs into
 //!
@@ -468,6 +482,110 @@ impl TaxTreatment {
         })
     }
 
+    /// Decide the treatment of a **service** — the subscription C-60/23 keeps
+    /// apart from the electricity.
+    ///
+    /// # Two general rules, not one
+    ///
+    /// A supply of goods has its own place-of-supply article and
+    /// [`Self::decide`] applies it. A service has the *general* rule, and the
+    /// general rule branches on what the customer is:
+    ///
+    /// - `[UStG §3a(2)]` — Article 44 — a service to a **taxable person** is
+    ///   supplied where that person is established. Cross-border inside the
+    ///   Union the recipient accounts for the tax `[UStG §13b]`, which is the
+    ///   same reverse charge the electricity leg reaches by a different route.
+    /// - `[UStG §3a(1)]` — Article 45 — a service to anybody else is supplied
+    ///   where the **supplier** is. A German provider's monthly fee to a Dutch
+    ///   driver is a German supply at the German rate, and no amount of the
+    ///   driver's own geography moves it.
+    ///
+    /// The two are decided by whether the customer holds a VAT identifier,
+    /// because that is the fact a supplier actually has and the one Article 44
+    /// turns on in practice. It is [`TaxStatus::vat_identifier`], stated by the
+    /// caller from a customer master, exactly as every other fact this type
+    /// carries.
+    ///
+    /// # This is not the reseller question
+    ///
+    /// [`TaxStatus::reseller`] decides where **electricity** is taxed and says
+    /// nothing here: an eMSP buying sessions to sell on is a reseller of goods
+    /// and an ordinary business customer for a service. Reading one field for
+    /// both questions is how a subscription ends up taxed where a kilowatt-hour
+    /// is.
+    ///
+    /// # Errors
+    ///
+    /// [`BillingError::NoTaxTreatment`] for a cross-border business supply with
+    /// no VAT identifier on the seller — `BR-AE-2` refuses that document — and
+    /// [`BillingError::NoVatRate`] where `rates` states no rate for the place
+    /// this concludes the service is taxed in.
+    pub fn decide_service(
+        seller: &TaxStatus,
+        buyer: &TaxStatus,
+        rates: &VatRates,
+    ) -> Result<Self, BillingError> {
+        let seller_country = seller.country.to_ascii_uppercase();
+        let buyer_country = buyer.country.to_ascii_uppercase();
+
+        // `[UStG §3a(1)]` — a service to a non-taxable person is supplied where
+        // the supplier is. The driver's own country never enters into it.
+        let Some(buyer_vat) = buyer.vat_identifier.as_ref() else {
+            return Ok(Self {
+                rate: standard_rate(rates, &seller_country, &seller_country)?,
+                category: VatCategory::Standard,
+                place_of_supply: seller_country,
+                reason: None,
+            });
+        };
+
+        // `[UStG §3a(2)]` — to a taxable person, where that person is. At home
+        // that is an ordinary domestic supply; the seller being established
+        // there makes it one too, for Article 195's reason.
+        if seller.established_in(&buyer_country) {
+            return Ok(Self {
+                rate: standard_rate(rates, &buyer_country, &seller_country)?,
+                category: VatCategory::Standard,
+                place_of_supply: buyer_country,
+                reason: None,
+            });
+        }
+
+        if !buyer.in_the_union() {
+            return Ok(Self {
+                category: VatCategory::OutOfScope,
+                rate: Decimal::ZERO,
+                place_of_supply: buyer_country.clone(),
+                reason: Some(format!(
+                    "Place of supply {buyer_country} under [UStG §3a(2)] (a service supplied to a \
+                     taxable person established outside the Union): outside the scope of EU VAT"
+                )),
+            });
+        }
+
+        let Some(seller_vat) = seller.vat_identifier.as_ref() else {
+            return Err(BillingError::NoTaxTreatment {
+                reason: format!(
+                    "a service supplied to a taxable person established in {buyer_country} is \
+                     taxed there [UStG §3a(2)] and the recipient accounts for the tax \
+                     [UStG §13b], which requires a VAT identifier on both parties: the seller \
+                     {} and the buyer has {buyer_vat}",
+                    described(seller.vat_identifier.as_deref()),
+                ),
+            });
+        };
+        Ok(Self {
+            category: VatCategory::ReverseCharge,
+            rate: Decimal::ZERO,
+            place_of_supply: buyer_country.clone(),
+            reason: Some(format!(
+                "Reverse charge — place of supply {buyer_country} under [UStG §3a(2)] (a service \
+                 supplied to a taxable person); the recipient {buyer_vat} accounts for the VAT \
+                 [UStG §13b]. Supplier {seller_vat}"
+            )),
+        })
+    }
+
     /// A treatment stated outright, for a caller whose tax engine already
     /// decided.
     ///
@@ -651,6 +769,84 @@ mod tests {
         assert!(!seller.established_in("NL"));
         // The ordinary case states nothing and answers only its own country.
         assert!(!TaxStatus::business("DE", "DE123456789").established_in("FR"));
+    }
+
+    #[test]
+    fn a_subscription_is_a_service_and_does_not_follow_the_electricity() {
+        // C-60/23: the fixed fee for access to the network is *"separate and
+        // independent"* from the electricity, and a service has the general
+        // place-of-supply rule rather than Article 38 or 39. So the same monthly
+        // fee is taxed in three different places depending on who buys it —
+        // beside kilowatt-hours taxed in a fourth.
+        let cpo = TaxStatus::business("DE", "DE123456789");
+        let rates = VatRates::new()
+            .at("DE", dec("19"))
+            .at("NL", dec("21"))
+            .at("FR", dec("20"));
+
+        // `[UStG §3a(1)]` — to a private driver, where the **supplier** is. The
+        // driver's own country never enters into it, which is the opposite of
+        // what the electricity beside it does.
+        let dutch_driver = TaxStatus::consumer("NL");
+        let fee = TaxTreatment::decide_service(&cpo, &dutch_driver, &rates).unwrap();
+        assert_eq!(fee.place_of_supply, "DE");
+        assert_eq!(fee.rate, dec("19"));
+        assert_eq!(fee.category, VatCategory::Standard);
+
+        // …while the same driver's electricity is taxed where it was drawn.
+        let energy = TaxTreatment::decide(&cpo, &dutch_driver, "FR", &rates).unwrap();
+        assert_eq!(energy.place_of_supply, "FR");
+        assert_eq!(energy.rate, dec("20"));
+
+        // `[UStG §3a(2)]` — to a taxable person, where **that person** is, and
+        // cross-border inside the Union the recipient accounts for it.
+        let dutch_fleet = TaxStatus::business("NL", "NL123456789B01");
+        let fee = TaxTreatment::decide_service(&cpo, &dutch_fleet, &rates).unwrap();
+        assert_eq!(fee.place_of_supply, "NL");
+        assert_eq!(fee.category, VatCategory::ReverseCharge);
+        assert_eq!(fee.rate, Decimal::ZERO);
+        assert!(fee.reason.unwrap().contains("[UStG §3a(2)]"));
+
+        // …and at home it is an ordinary domestic supply.
+        let german_fleet = TaxStatus::business("DE", "DE987654321");
+        let fee = TaxTreatment::decide_service(&cpo, &german_fleet, &rates).unwrap();
+        assert_eq!(fee.place_of_supply, "DE");
+        assert_eq!(fee.category, VatCategory::Standard);
+        assert_eq!(fee.rate, dec("19"));
+    }
+
+    #[test]
+    fn the_reseller_flag_decides_electricity_and_says_nothing_about_a_service() {
+        // Reading one field for both questions is how a subscription ends up
+        // taxed where a kilowatt-hour is. An eMSP is a reseller of **goods** and
+        // an ordinary business customer for a **service**, and the two answers
+        // differ even when the parties do not.
+        let cpo = TaxStatus::business("DE", "DE123456789");
+        let emsp = TaxStatus::reseller("DE", "DE987654321");
+        let rates = VatRates::new().at("DE", dec("19"));
+
+        // Electricity: `[UStG §3g]` moves it to where the reseller is — which
+        // here is home, so nothing moves and it is standard-rated.
+        let energy = TaxTreatment::decide(&cpo, &emsp, "FR", &rates).unwrap();
+        assert_eq!(energy.place_of_supply, "DE");
+
+        // A service to the same party: the general rule, and the same answer by
+        // a different article — which is the point. Move the party and the two
+        // diverge.
+        let fee = TaxTreatment::decide_service(&cpo, &emsp, &rates).unwrap();
+        assert_eq!(fee.place_of_supply, "DE");
+
+        let french_emsp = TaxStatus::reseller("FR", "FR12345678901");
+        let rates = rates.at("FR", dec("20"));
+        let energy = TaxTreatment::decide(&cpo, &french_emsp, "DE", &rates).unwrap();
+        let fee = TaxTreatment::decide_service(&cpo, &french_emsp, &rates).unwrap();
+        assert_eq!(energy.category, VatCategory::ReverseCharge);
+        assert_eq!(fee.category, VatCategory::ReverseCharge);
+        assert!(energy.reason.unwrap().contains("[UStG §3g]"));
+        assert!(
+            fee.reason.unwrap().contains("[UStG §3a(2)]"),
+            "the same category, reached by the article that governs a service"
+        );
     }
 
     #[test]

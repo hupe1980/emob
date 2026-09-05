@@ -126,8 +126,13 @@ pub mod rate;
 pub mod site;
 pub mod status;
 
+// The connector vocabulary is `emob-core`'s: one inventory, two audiences —
+// the compliance profile `[AFIR Anh. II 1.1]` judges and the feed that
+// publishes it. Re-exported so a reader of this crate finds it where the rest
+// of the location model is.
+pub use emob_core::ConnectorType;
 pub use error::{PoiError, Result};
 pub use feed::Feed;
 pub use rate::{Rate, RateNote};
-pub use site::{ChargingPoint, Connector, ConnectorType, Facility, Site, Station};
+pub use site::{ChargingPoint, Connector, Facility, Site, Station};
 pub use status::{Lifecycle, PointStatus, Report};

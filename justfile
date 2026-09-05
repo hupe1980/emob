@@ -69,7 +69,8 @@ test-crate crate:
     cargo test -p {{ crate }} --all-features
 
 # 🛡️ Workspace guards: no floats, citations, publishable manifests, wire
-# spellings, unbroken sentences, self-consistent documents, clean graphs
+# spellings, unbroken sentences, self-consistent documents, public functions
+# something calls, constructors the wire goes through, clean graphs
 guards:
     cargo run -q -p xtask -- check-all
 
@@ -102,6 +103,15 @@ msrv:
 release-check:
     cargo publish --workspace --locked --dry-run
     @echo "🚢 verified — tag it with: git tag v{{ version }} && git push origin v{{ version }}"
+
+# The social card every link to the site renders as. The SVG is the source —
+# a card is text and rules, and a binary is not reviewable — and Open Graph
+# consumers take no SVG, so the PNG beside it is the deliverable.
+#
+# 🖼️  Re-render the site's social preview image
+og:
+    rsvg-convert -w 1200 -h 630 -f png -o site/static/og.png site/og.svg
+    @echo "🖼️  site/static/og.png re-rendered from site/og.svg"
 
 # 🌐 Serve the documentation site locally
 site:

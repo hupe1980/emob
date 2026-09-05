@@ -67,6 +67,150 @@ pub enum CurrentType {
     Dc,
 }
 
+/// A charging interface a point offers.
+///
+/// # Why this is `emob-core`'s and not the location crate's
+///
+/// A connector type is stated twice about one point: to the national access
+/// point in `[DATEX-II-Profil Tab. A.88]`'s own spelling, and to the regulator,
+/// because `[AFIR Anh. II 1.1]` and `[AFIR Anh. II 1.2]` make the interface a
+/// **duty** rather than a description — one `[LSV26 §5(3)]` can close a point
+/// over. Two inventories drift, so there is one, and it is here beside the
+/// profile the calendar judges.
+///
+/// `[DATEX-II-Profil Tab. A.88]` enumerates about forty; these are the ones a
+/// European public point can carry. The variants are named for what they are
+/// rather than for the profile's spelling — [`ConnectorType::as_profile_str`]
+/// does the translation, and it is the only place the wire spelling appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+#[non_exhaustive]
+pub enum ConnectorType {
+    /// IEC 62196 Type 2, the European AC socket.
+    Iec62196T2,
+    /// IEC 62196 Type 2 with the DC pins — CCS2, the European DC standard.
+    Iec62196T2Combo,
+    /// IEC 62196 Type 1, the North American and Japanese AC plug.
+    Iec62196T1,
+    /// IEC 62196 Type 1 with DC pins — CCS1.
+    Iec62196T1Combo,
+    /// `CHAdeMO`.
+    Chademo,
+    /// IEC 62196 Type 3A — the interface `[AFIR Anh. II 1.3]` names for
+    /// L-category vehicles, and the reason that point is not held to Type 2.
+    Iec62196T3A,
+    /// A domestic socket of type F — the German *Schuko*.
+    ///
+    /// Compliant with IEC 60884-1, which is the other interface
+    /// `[AFIR Anh. II 1.3]` admits on an L-category point in Mode 1 or 2.
+    DomesticF,
+    /// CEE 400 V industrial, three phase, 16 A.
+    Cee5,
+}
+
+impl ConnectorType {
+    /// The spelling `[DATEX-II-Profil Tab. A.88]` uses.
+    #[must_use]
+    pub const fn as_profile_str(self) -> &'static str {
+        match self {
+            Self::Iec62196T2 => "iec62196T2",
+            Self::Iec62196T2Combo => "iec62196T2COMBO",
+            Self::Iec62196T1 => "iec62196T1",
+            Self::Iec62196T1Combo => "iec62196T1COMBO",
+            Self::Chademo => "chademo",
+            Self::Iec62196T3A => "iec62196T3A",
+            Self::DomesticF => "domesticF",
+            Self::Cee5 => "cee5",
+        }
+    }
+
+    /// Whether this interface carries direct current.
+    #[must_use]
+    pub const fn is_dc(self) -> bool {
+        matches!(
+            self,
+            Self::Iec62196T2Combo | Self::Iec62196T1Combo | Self::Chademo
+        )
+    }
+
+    /// Whether this is the interface `[AFIR Anh. II 1.1]` and
+    /// `[AFIR Anh. II 1.2]` require of an **AC** point for motor vehicles:
+    /// *"socket outlets or vehicle connectors of Type 2 as described in
+    /// standard EN 62196-2:2017"*.
+    ///
+    /// Type 2 with the DC pins is a Type 2 socket with more in it, so a CCS2
+    /// cable on a combined post satisfies the AC limb as well.
+    #[must_use]
+    pub const fn is_afir_ac_interface(self) -> bool {
+        matches!(self, Self::Iec62196T2 | Self::Iec62196T2Combo)
+    }
+
+    /// Whether this is the interface `[AFIR Anh. II 1.2]` requires of a **DC**
+    /// point: *"connectors of the combined charging system 'Combo 2' as
+    /// described in standard EN 62196-3:2014"*.
+    ///
+    /// `CHAdeMO` and CCS1 are lawful **in addition** — the Annex says "at
+    /// least" — and neither answers the duty on its own.
+    #[must_use]
+    pub const fn is_afir_dc_interface(self) -> bool {
+        matches!(self, Self::Iec62196T2Combo)
+    }
+
+    /// Whether this is one of the two interfaces `[DA-656 Anh. 1.3.1]` admits on
+    /// a publicly accessible AC point **reserved for L-category vehicles** up
+    /// to 3.7 kW: Type 3A for Mode 3, or an IEC 60884-1 socket for Mode 1/2.
+    ///
+    /// Only up to 3.7 kW. `[DA-656 Anh. 1.3.2]` puts an L-category point *above*
+    /// that back on Type 2, and `[DA-656 Anh. 1.3.3]` puts a DC one on Combo 2 —
+    /// so the exception is a power band rather than a vehicle class.
+    #[must_use]
+    pub const fn is_afir_l_category_interface(self) -> bool {
+        matches!(self, Self::Iec62196T3A | Self::DomesticF)
+    }
+
+    /// Whether this is a socket-outlet compliant with IEC 60884-1 — the
+    /// household socket.
+    ///
+    /// `[DA-656 Anh. 1.1]` admits one on an AC normal-power point of at most
+    /// 3.7 kW *"if their primary purpose is the recharging of electric vehicles
+    /// in Mode 2"*, which is an exemption the 2023 text did not have. A CEE
+    /// industrial socket is IEC 60309 and is not one.
+    #[must_use]
+    pub const fn is_iec60884_socket(self) -> bool {
+        matches!(self, Self::DomesticF)
+    }
+}
+
+/// The power ceiling `[AFIR Anh. II 1.3]` puts on the L-category exception:
+/// *"reserved for L-category electric vehicles **up to 3,7 kW**"*.
+///
+/// A named constant rather than a literal because it is the third power
+/// threshold in this module — 22 kW splits normal from high power, 50 kW
+/// carries AFIR's payment and price duties, and this one decides which Annex
+/// point a scooter post answers to.
+const L_CATEGORY_CEILING_KW: Decimal = Decimal::from_parts(37, 0, 0, false, 1);
+
+/// `[DA-656 Art. 2]` — the day the delegated regulation applies, and with it the
+/// **replaced** points 1.1 to 1.4 of `[AFIR Anh. II]`.
+///
+/// Declared here rather than only beside the other dates in
+/// [`crate::obligation`], because the interface rule turns on it: the amended
+/// 1.1 carries an exemption the 2023 text did not, and it reaches only points
+/// *"installed or renovated from 8 January 2026"*. A rule that read the amended
+/// text over the whole estate would grant that exemption to a population the
+/// Annex leaves under the older sentence.
+pub(crate) const DA656_APPLIES: Date = time::macros::date!(2026 - 01 - 08);
+
+/// The verification period `[MessEV Anl. 7 Nr. 6.7]` gives charging equipment,
+/// in years.
+///
+/// *"Messgeräte und Zusatzeinrichtungen bei der Lieferung von Elektrizität für
+/// Elektrofahrzeuge und an Ladepunkten"* — eight, where `[MessEV §34(1)]`'s
+/// default is two. Getting this from the general default rather than from the
+/// Annex would retire every meter in a German estate six years early.
+const CHARGING_VERIFICATION_YEARS: u16 = 8;
+
 /// The IEC 61851-1 charging mode a point offers.
 ///
 /// Derived rather than stored, because a mode field beside a current-type field
@@ -458,12 +602,27 @@ impl Registration {
     }
 }
 
-/// How the ad-hoc price is built and shown.
+/// How the ad-hoc price is indicated at a point.
+///
+/// # Two regulations, and the German one is older and stricter
 ///
 /// `[AFIR Art. 5(4)]` says two different things depending on power, and both
 /// are checkable facts about a point rather than opinions about a tariff.
+///
+/// `[PAngV §14(2)]` has bound the same point since **28.05.2022** — two years
+/// before AFIR applied — and it does not split at 50 kW. It asks for the
+/// *Arbeitspreis* at or beside every publicly accessible point that takes an
+/// ad-hoc payment, by one of three named media, and `[PAngV §14(4)]` fixes its
+/// unit at one kilowatt-hour. `[PAngV §20]` makes a failure an
+/// Ordnungswidrigkeit. A model that carries only the European half reports a
+/// 22 kW post priced by the minute as compliant, which is true of AFIR and
+/// false in Germany.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one regulatory fact"
+)]
 pub struct PriceTransparency {
     /// The ad-hoc price is based on a price per kWh for the electricity
     /// delivered.
@@ -479,6 +638,90 @@ pub struct PriceTransparency {
     /// order `[AFIR Art. 5(4)]` prescribes — per kWh, per minute, per session,
     /// then anything else.
     pub components_in_prescribed_order: bool,
+    /// How the *Arbeitspreis* is indicated at or beside the point
+    /// `[PAngV §14(2)]`.
+    pub arbeitspreis: ArbeitspreisIndication,
+    /// Whether a **web-based system** is used for ad-hoc charging here.
+    ///
+    /// The applicability limb of `[PAngV §14(2)]`'s last sentence, which is a
+    /// second duty rather than a fourth medium: an app or a QR-code checkout
+    /// owes the Arbeitspreis *"spätestens vor dem Start des Ladevorgangs"*
+    /// **through that system**, whatever is printed on the post.
+    pub web_based_ad_hoc: bool,
+    /// …and whether it states the Arbeitspreis before the session starts.
+    pub arbeitspreis_stated_before_start: bool,
+    /// Whether prices beyond the Arbeitspreis are charged, and whether they are
+    /// stated where `[PAngV §14(3)]` requires.
+    pub additional_prices: AdditionalPrices,
+}
+
+/// How the *Arbeitspreis* reaches the driver at the point `[PAngV §14(2)]`.
+///
+/// The paragraph enumerates the media and admits any one of them — *"Die
+/// Preisangabe hat mindestens zu erfolgen mittels"* — so this is one answer
+/// with four values rather than three independent flags: a point indicating
+/// its price two ways is no more compliant than one indicating it once, and a
+/// point indicating it none is in breach `[PAngV §20]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum ArbeitspreisIndication {
+    /// Not indicated at or beside the point at all.
+    #[default]
+    NotIndicated,
+    /// Nr. 1 — *"eines Aufdrucks, Aufklebers oder Preisaushangs"*.
+    Printed,
+    /// Nr. 2 — *"einer Anzeige auf einem Display des Ladepunktes"*.
+    PointDisplay,
+    /// Nr. 3 — a registration-free, free-of-charge mobile page, **signposted at
+    /// or beside the point**.
+    ///
+    /// The signposting is part of the medium rather than a separate duty: the
+    /// paragraph reads *"auf die am Ladepunkt oder in dessen unmittelbarer Nähe
+    /// hingewiesen wird"*, so a price page nothing at the post points to is not
+    /// this answer.
+    SignpostedMobilePage,
+}
+
+impl ArbeitspreisIndication {
+    /// Whether the Arbeitspreis reaches the driver by one of the three media.
+    #[must_use]
+    pub const fn is_indicated(self) -> bool {
+        !matches!(self, Self::NotIndicated)
+    }
+}
+
+/// Whether anything is charged beyond the Arbeitspreis, and where it is stated.
+///
+/// `[PAngV §14(3)]`: *"Wer … **zusätzlich** leistungsabhängige oder nicht
+/// verbrauchsabhängige Preise fordert, hat diese **vollständig in unmittelbarer
+/// Nähe** der Angabe des Arbeits- oder Mengenpreises oder des Ladepunktes
+/// anzugeben."*
+///
+/// Three answers rather than a pair of booleans, for the reason
+/// [`Ownership`] is: "there are none" and "there are some and they are stated"
+/// are both compliant and they are not the same fact, and an operator that
+/// charges a blocking fee it does not display is the one case the paragraph is
+/// about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum AdditionalPrices {
+    /// Nothing is charged beyond the Arbeitspreis, so the duty does not arise.
+    #[default]
+    None,
+    /// There are some, stated completely and beside the Arbeitspreis.
+    StatedAdjacent,
+    /// There are some, and they are not.
+    NotStated,
+}
+
+impl AdditionalPrices {
+    /// Whether `[PAngV §14(3)]` binds this point at all.
+    #[must_use]
+    pub const fn are_charged(self) -> bool {
+        !matches!(self, Self::None)
+    }
 }
 
 /// Who owns the hardware, and whether the arrangement lets the operator comply.
@@ -640,6 +883,40 @@ pub struct MeteringPosture {
     /// covered both halves reported the whole duty satisfied on the strength of
     /// the half nobody could check.
     pub rectification_loss_disclosed: bool,
+    /// When the meter was last **verified** — geeicht — where it was.
+    ///
+    /// `None` is the ordinary case for charging hardware: `[MessEG §37(1) S. 2]`
+    /// says an instrument placed on the market under the MID *"entspricht
+    /// geeichten Messgeräten"* for the whole of a verification period that
+    /// **begins with the placing on the market**, and needs no Eichung at all
+    /// inside it. So the clock starts at
+    /// [`ChargePointProfile::placed_on_market_date`] unless somebody had the
+    /// meter verified, and then it starts here `[MessEV §34(1) S. 2]`.
+    #[cfg_attr(feature = "serde", serde(with = "crate::wire::date::option"))]
+    pub last_verified_on: Option<Date>,
+    /// The verification period in whole years, where it is not the eight
+    /// `[MessEV Anl. 7 Nr. 6.7]` gives charging equipment.
+    ///
+    /// `None` means that row: *"Messgeräte und Zusatzeinrichtungen bei der
+    /// Lieferung von Elektrizität für Elektrofahrzeuge und an Ladepunkten"*,
+    /// eight years. An override is not a convenience — `[MessEV §34(1) Nr. 2]`
+    /// lets a Bauartzulassung issued before 2015 state a different one, and
+    /// `[MessEV §35]` lets the authority **extend** it for a lot on the strength
+    /// of a sampling procedure, which is the ordinary way a large estate avoids
+    /// replacing every meter in the same year.
+    pub verification_period_years: Option<u16>,
+    /// Whether the records `[MessEG §31(2) Nr. 4]` asks for are kept:
+    /// *"Nachweise über erfolgte Wartungen, Reparaturen oder sonstige Eingriffe
+    /// am Messgerät, einschließlich solcher durch **elektronisch vorgenommene
+    /// Maßnahmen**"*.
+    ///
+    /// The software-update clause is the one that reaches a platform: a remote
+    /// firmware push to a charge point is an *Eingriff* whose record the
+    /// operator owes, for up to three months past the verification period and at
+    /// most five years. It is also the one **number** the German metrology
+    /// texts give for retention, where `[PTB-A 50.7 §3.1.5]` deliberately gives
+    /// none (R15).
+    pub intervention_records_retained: bool,
 }
 
 /// Whether the register entry is **public** — `[38k §6(3) Nr. 1]`.
@@ -773,6 +1050,30 @@ pub struct ChargePointProfile {
     pub accessibility: Accessibility,
     /// AC or DC.
     pub current_type: CurrentType,
+    /// The interfaces this point offers.
+    ///
+    /// `[AFIR Art. 21(1)]` — *"The technical specifications set out in Annex II
+    /// shall apply"* — turns this from a description into a duty, and
+    /// `[LSV26 §5]` names Annex II beside Article 5 among the requirements the
+    /// regulator may inspect, order a retrofit for, and **close a point over**.
+    /// A point may carry several: `[AFIR Art. 2(48)]` allows *"one or several
+    /// connectors to accommodate different connector types"*, and the Annex
+    /// asks for one of them *"at least"*.
+    ///
+    /// Empty means the inventory did not state any, which is not the same as a
+    /// point with none — [`Self::afir_annex_ii_satisfied`] reports it as unmet
+    /// rather than vacuously met, because an interface nobody recorded is one
+    /// nobody can show the regulator.
+    pub connectors: Vec<ConnectorType>,
+    /// Whether this AC point is **reserved for** L-category vehicles — mopeds,
+    /// motorcycles, quadricycles.
+    ///
+    /// The applicability limb of `[AFIR Anh. II 1.3]`, and it is load-bearing
+    /// in the direction that matters: without it a lawful 3.7 kW scooter post
+    /// with a Type 3A socket reads as failing the Type 2 duty
+    /// `[AFIR Anh. II 1.1]` puts on points for motor vehicles, which is a
+    /// finding about a rule that does not bind it.
+    pub reserved_for_l_category: bool,
     /// An ordinary socket with an in-cable control box rather than a dedicated
     /// EVSE — IEC 61851-1 Mode 2. Only meaningful for AC.
     pub domestic_socket: bool,
@@ -925,6 +1226,183 @@ impl ChargePointProfile {
             .unwrap_or(self.commissioned_on)
     }
 
+    /// Whether the point carries the interface `[AFIR Anh. II]` requires of it.
+    ///
+    /// # The rule is one instrument amending another
+    ///
+    /// `[AFIR Art. 21(1)]` is one line — *"The technical specifications set out
+    /// in Annex II shall apply"* — and `[LSV26 §5]` names that Annex beside
+    /// Article 5 among the requirements the regulator may inspect, order a
+    /// retrofit for, and **forbid the operation of a point** over.
+    ///
+    /// `[DA-656]` then **replaces** Annex II points 1.1 to 1.4 with effect from
+    /// 08.01.2026, which is why reading the consolidated 2023 text alone gets
+    /// two of the answers below wrong.
+    ///
+    /// # What both texts say, and what only the amended one does
+    ///
+    /// The interface *family* is the same in both and at every power — the
+    /// amendment moves the standard **edition** (EN IEC 62196-2:2017 → :2022,
+    /// -3:2014 → :2022) rather than the plug:
+    ///
+    /// - AC ⇒ *"at least … socket-outlets or vehicle connectors of Type 2"*;
+    /// - DC ⇒ *"at least … the combined charging system 'Combo 2'"*.
+    ///
+    /// Point 1.2 of the 2023 text is headed *"High-power recharging points"* and
+    /// opens with a bullet about **normal** power DC points; that is the
+    /// Official Journal's own text, and it is why the four bullets collapse into
+    /// one rule rather than two with a 22 kW seam. `[DA-656 Anh. 1.4]` restates
+    /// the pair for electric buses — class M3, and inside `[LSV26 §1(1)]`'s own
+    /// scope — so no separate limb is needed.
+    ///
+    /// Two things are the **amendment's** and reach only the population its own
+    /// limb names, *"installed or renovated from 8 January 2026"*:
+    ///
+    /// - **The Mode 2 exemption.** An AC point of at most 3.7 kW *"whose primary
+    ///   purpose is the recharging of electric vehicles in Mode 2"* may carry an
+    ///   IEC 60884-1 socket instead `[DA-656 Anh. 1.1]`. The 2023 text has no
+    ///   such carve-out, so a household socket on a public post commissioned in
+    ///   2024 fails and the same socket installed in 2026 does not — which is
+    ///   the sentence, and not an oversight in it.
+    /// - **The L-category split.** `[DA-656 Anh. 1.3.1]` keeps Type 3A or an
+    ///   IEC 60884-1 socket up to 3.7 kW, `[DA-656 Anh. 1.3.2]` puts an
+    ///   L-category point above that on Type 2, and `[DA-656 Anh. 1.3.3]` puts a
+    ///   DC one on Combo 2. The exception is a power band, not a vehicle class.
+    ///
+    /// # "At least" is a floor, not an equality
+    ///
+    /// A CCS2 post that also offers `CHAdeMO` satisfies it; one that offers
+    /// `CHAdeMO` alone does not, however many vehicles it serves.
+    ///
+    /// # An empty list is unmet
+    ///
+    /// A point whose interfaces nobody recorded cannot be shown to a regulator
+    /// `[LSV26 §5(1)]`, so the absence answers `false` rather than passing for
+    /// want of a counter-example.
+    ///
+    /// # What it does not judge
+    ///
+    /// `[AFIR Anh. II 1.5]`, the automated connection device an
+    /// opportunity-charged bus takes in Mode 4: a pantograph is not a connector
+    /// type, EN 50696 names four mounting arrangements rather than a socket, and
+    /// a rule reading this list for it would report every such installation as
+    /// failing Type 2.
+    ///
+    /// And the socket-versus-tether distinction inside the AC limb. Point 1.1
+    /// admits *"socket-outlets **or** vehicle connectors"* and point 1.2, for
+    /// high power, names only *"vehicle connectors"* — so a 43 kW AC post with a
+    /// Type 2 socket and no tethered cable is outside the sentence. Judging it
+    /// needs a fact about each connector that no inventory in this workspace
+    /// carries, and a predicate that guessed would refuse lawful hardware.
+    #[must_use]
+    pub fn afir_annex_ii_satisfied(&self) -> bool {
+        let amended = self.installed_or_renovated_on() >= DA656_APPLIES;
+        let has =
+            |predicate: fn(ConnectorType) -> bool| self.connectors.iter().copied().any(predicate);
+
+        // DC is one answer at every power, for every vehicle class the Annex
+        // names — light-duty, L-category and buses alike.
+        if self.current_type == CurrentType::Dc {
+            return has(ConnectorType::is_afir_dc_interface);
+        }
+
+        // `[DA-656 Anh. 1.3.1]`, and the 2023 text's 1.3 before it: an AC point
+        // reserved for L-category vehicles up to 3.7 kW takes either of two
+        // interfaces. Above that band 1.3.2 sends it back to Type 2, which is
+        // the fall-through below.
+        if self.reserved_for_l_category && self.rated_power_kw <= L_CATEGORY_CEILING_KW {
+            return has(ConnectorType::is_afir_l_category_interface);
+        }
+
+        // `[DA-656 Anh. 1.1]`'s Mode 2 exemption, and only for the population
+        // the amendment reaches.
+        if amended
+            && self.mode() == ChargingMode::Mode2
+            && self.rated_power_kw <= L_CATEGORY_CEILING_KW
+        {
+            return has(ConnectorType::is_iec60884_socket);
+        }
+
+        has(ConnectorType::is_afir_ac_interface)
+    }
+
+    /// The last day the meter's verification period runs, computed the way
+    /// `[MessEV §34]` computes it.
+    ///
+    /// # Three sentences, and every one of them moves the answer
+    ///
+    /// **Where the clock starts.** `[MessEG §37(1) S. 2]`: an instrument placed
+    /// on the market under the MID counts as verified for a period that begins
+    /// *with the placing on the market* and needs no Eichung inside it. So the
+    /// start is [`Self::placed_on_market_date`] — the field this profile already
+    /// carries for `[REA 6-A §3.2]` — unless the meter was actually verified,
+    /// and then it is that day `[MessEV §34(1) S. 2]`.
+    ///
+    /// **How long it runs.** `[MessEV Anl. 7 Nr. 6.7]` gives *"Messgeräte und
+    /// Zusatzeinrichtungen bei der Lieferung von Elektrizität für
+    /// Elektrofahrzeuge und an Ladepunkten"* **eight years** — not the two
+    /// `[MessEV §34(1)]` gives by default, and not the eight of an ordinary
+    /// electronic electricity meter under Nr. 6.3, which is a different row that
+    /// happens to agree.
+    ///
+    /// **When it ends.** `[MessEV §34(2)]`: for a period of a year or more the
+    /// end is *"erst mit dem Ende des Jahres, in dem die Frist rechnerisch
+    /// endet"*. A meter placed on the market in March 2018 therefore runs to
+    /// **31 December 2026**, not to March 2026 — nine months an operator reading
+    /// the arithmetic alone would throw away, or, computing the other way, nine
+    /// months of kilowatt-hours billed off an unverified meter.
+    ///
+    /// # What this does not model
+    ///
+    /// `[MessEV §34(1) S. 3]`: a meter verified **after** its period has expired
+    /// starts its new one at the *end of the previous* period rather than at the
+    /// day of verification — so a late verification buys less than eight years —
+    /// unless it demonstrably went unused for more than a year (S. 4). Both need
+    /// the previous period's own end, which is a chain this profile does not
+    /// carry. A caller that knows it states the resulting start in
+    /// [`MeteringPosture::last_verified_on`] itself; what this must not do is
+    /// assume the generous reading of a rule that decides whether energy may be
+    /// billed at all.
+    #[must_use]
+    pub fn verification_expires_on(&self) -> Date {
+        let from = self
+            .metering
+            .last_verified_on
+            .unwrap_or_else(|| self.placed_on_market_date());
+        let years = self
+            .metering
+            .verification_period_years
+            .unwrap_or(CHARGING_VERIFICATION_YEARS);
+        // **Calendar years, not 365-day blocks.** Two leap days inside eight
+        // years put a day arithmetic's answer on 30 December where the calendar
+        // says 1 January — and because the next line rounds to the end of the
+        // year that day falls in, a two-day error becomes a **whole year** of
+        // kilowatt-hours billed off a meter that may not be used.
+        let target = from.year().saturating_add(i32::from(years));
+        let arithmetic_end = from.replace_year(target).unwrap_or_else(|_| {
+            // The one day that has no counterpart in a non-leap year. The
+            // conservative reading is the earlier date: a period that ends
+            // sooner cannot let an unverified meter bill.
+            Date::from_calendar_date(target, time::Month::February, 28).unwrap_or(from)
+        });
+        // `[MessEV §34(2)]` — the end of the year the period arithmetically ends
+        // in. It applies to every period of a year or more, which is every
+        // period a charge point's meter can carry; a shorter one would end with
+        // its own calendar month instead `[MessEV §34(3)]`, and no row of
+        // Anlage 7 gives charging equipment one.
+        if years == 0 {
+            return arithmetic_end;
+        }
+        Date::from_calendar_date(arithmetic_end.year(), time::Month::December, 31)
+            .unwrap_or(arithmetic_end)
+    }
+
+    /// Whether the meter may lawfully be used on `on` `[MessEG §37(1)]`.
+    #[must_use]
+    pub fn verification_valid_on(&self, on: Date) -> bool {
+        on <= self.verification_expires_on()
+    }
+
     /// `true` when the point is publicly accessible.
     #[must_use]
     pub fn is_public(&self) -> bool {
@@ -959,6 +1437,8 @@ impl ChargePointProfile {
             evse_id,
             accessibility: Accessibility::Public,
             current_type: CurrentType::Ac,
+            connectors: Vec::new(),
+            reserved_for_l_category: false,
             domestic_socket: false,
             rated_power_kw: Decimal::from(11),
             commissioned_on,
@@ -1024,6 +1504,27 @@ pub struct ProviderProfile {
     /// The article does not permit this to be "reasonable and transparent": it
     /// forbids it outright, so the compliant value is `false`.
     pub surcharges_cross_border_roaming: bool,
+    /// Whether the provider holds, from the operator of every meter whose
+    /// values it bills on, the confirmation `[MessEG §33(2)]` requires.
+    ///
+    /// # The duty that binds the party which did not measure anything
+    ///
+    /// *"Wer Messwerte verwendet, hat sich im Rahmen seiner Möglichkeiten zu
+    /// vergewissern, dass das Messgerät die gesetzlichen Anforderungen erfüllt
+    /// und hat sich von der Person, die das Messgerät verwendet, **bestätigen
+    /// zu lassen**, dass sie ihre Verpflichtungen erfüllt."*
+    ///
+    /// A provider re-billing a roaming session uses measured values it did not
+    /// produce, on a meter it does not operate and cannot inspect. The statute
+    /// does not excuse it: it asks for a confirmation *from the operator*, which
+    /// is a document in a roaming agreement rather than anything a CDR carries.
+    ///
+    /// It is on this profile and not on a charge point because the subject is
+    /// *"wer Messwerte verwendet"*. An operator billing its own sessions is both
+    /// parties and confirms to itself, which is why the duty is invisible to a
+    /// single-hat model and why this workspace — which wears both hats on
+    /// purpose — is the place it becomes checkable.
+    pub holds_meter_operator_confirmation: bool,
 }
 
 impl ProviderProfile {
@@ -1037,6 +1538,7 @@ impl ProviderProfile {
             discloses_e_roaming_costs: false,
             discloses_electronically: false,
             surcharges_cross_border_roaming: false,
+            holds_meter_operator_confirmation: false,
         }
     }
 }

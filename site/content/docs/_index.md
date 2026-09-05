@@ -1,6 +1,6 @@
 +++
 title = "Documentation"
-description = "How emob is put together: the Eichrecht evidence chain, the OCPP seam, the quarter-hour split, tariffs that rate what they display, the location feed, the roaming edge, and the obligation calendar."
+description = "How emob works: the Eichrecht evidence chain, the OCPP seam, the quarter-hour split, tariffs that rate what they display, roaming, and the obligation calendar."
 sort_by = "weight"
 template = "section.html"
 +++

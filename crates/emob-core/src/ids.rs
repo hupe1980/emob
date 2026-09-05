@@ -764,10 +764,47 @@ serde_via_string!(Emaid, "a contract id such as NL-TNM-000122045-U");
 /// The pair is the routing key for every roaming message, so it is one value
 /// rather than two fields that can drift apart.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PartyId {
     country_code: String,
     party_id: String,
+}
+
+/// On the wire as the one string it is written as — `DE*ABC` — and read back
+/// through [`FromStr`], which is where the shape and the case are decided.
+///
+/// # Why not a derive
+///
+/// A derived pair emitted `{"country_code":"DE","party_id":"ABC"}` and read one
+/// back **without touching [`PartyId::new`]**. Two things followed, on the
+/// routing key for every roaming message and the tenancy key in
+/// `emob_service::authority`:
+///
+/// - `{"country_code":"Deutschland","party_id":"!"}` deserialised. It is not a
+///   party and there is no party it routes to.
+/// - `{"country_code":"de","party_id":"abc"}` deserialised to a value that
+///   compares **unequal** to `PartyId::new("DE", "ABC")`, because `new`
+///   upper-cases and a derive does not. A scope holding one reaches nothing, a
+///   routing table holding one matches nothing, and neither fails — which is
+///   the failure [`PartyId::from_str`]'s own documentation names: *"which is how
+///   `DE*ABC` and `DEABC` come to be two entries in one routing table"* (D264).
+///
+/// This is the same correction [`crate::Currency`] carries, generalised: a
+/// constructor that states a rule is one the wire has to go through, or the rule
+/// is enforced everywhere except where the values come from.
+#[cfg(feature = "serde")]
+impl serde::Serialize for PartyId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for PartyId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let raw = <std::borrow::Cow<'_, str> as serde::Deserialize>::deserialize(deserializer)?;
+        raw.parse().map_err(D::Error::custom)
+    }
 }
 
 impl PartyId {
@@ -839,9 +876,27 @@ macro_rules! opaque_id {
     ($(#[$meta:meta])* $name:ident, $label:literal) => {
         $(#[$meta])*
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize))]
         #[cfg_attr(feature = "serde", serde(transparent))]
         pub struct $name(String);
+
+        /// Read back through `new`, which refuses a blank id.
+        ///
+        /// A `#[serde(transparent)]` derive walked past it, so `""` and `"   "`
+        /// arrived as ids from any store or wire that round-trips the canonical
+        /// model — and an empty `CdrId` is a ledger key that collides with every
+        /// other empty one (D264).
+        #[cfg(feature = "serde")]
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<Self, D::Error> {
+                use serde::de::Error as _;
+                let raw =
+                    <std::borrow::Cow<'_, str> as serde::Deserialize>::deserialize(deserializer)?;
+                Self::new(raw.into_owned()).map_err(D::Error::custom)
+            }
+        }
 
         impl $name {
             #[doc = concat!("Build a ", $label, " from a non-empty string.")]
@@ -1149,6 +1204,38 @@ mod tests {
         for spelling in ["DE*ABC", "DE-ABC", "DEABC", "de*abc", "  DE*ABC  "] {
             assert_eq!(spelling.parse::<PartyId>().unwrap(), party, "{spelling}");
         }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn an_identifier_arrives_through_its_own_constructor() {
+        // The routing key for every roaming message. A derived pair wrote two
+        // members and read them back **without touching `new`**, so a
+        // lower-case party compared unequal to the same party, and
+        // `{"country_code":"Deutschland","party_id":"!"}` compared equal to
+        // nothing at all (D264).
+        let canonical = PartyId::new("DE", "ABC").unwrap();
+        assert_eq!(serde_json::to_string(&canonical).unwrap(), "\"DE*ABC\"");
+        for spelling in ["\"DE*ABC\"", "\"deabc\"", "\"DE-ABC\"", "\" de*abc \""] {
+            assert_eq!(
+                serde_json::from_str::<PartyId>(spelling).unwrap(),
+                canonical,
+                "{spelling}"
+            );
+        }
+        assert!(serde_json::from_str::<PartyId>("\"Deutschland\"").is_err());
+        assert!(
+            serde_json::from_str::<PartyId>(r#"{"country_code":"DE","party_id":"ABC"}"#).is_err(),
+            "the two-member form is not the string this id is written as"
+        );
+
+        // …and an opaque id refuses the blank its own constructor refuses.
+        assert!(serde_json::from_str::<CdrId>("\"\"").is_err());
+        assert!(serde_json::from_str::<SessionId>("\"   \"").is_err());
+        assert_eq!(
+            serde_json::from_str::<CdrId>("\"c-1\"").unwrap(),
+            "c-1".parse::<CdrId>().unwrap()
+        );
     }
 
     #[test]

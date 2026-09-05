@@ -215,9 +215,26 @@ impl Authorization {
 /// from something that merely *looks* like a hash: a caller who passes a raw
 /// UID gets a refusal rather than a privacy incident.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(transparent))]
 pub struct TokenRef(String);
+
+/// Read back through [`TokenRef::new`], because the refusal is the whole type.
+///
+/// *"A caller who passes a raw UID gets a refusal rather than a privacy
+/// incident"* — and a `#[serde(transparent)]` derive is a caller that never
+/// asked. An RFID UID or an eMAID arriving from a store, an outbox or a
+/// partner's document went straight into the field the platform stores instead
+/// of the driver's identity, which is the incident the type exists to prevent
+/// (D264).
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for TokenRef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let raw = <std::borrow::Cow<'_, str> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(raw.into_owned()).map_err(D::Error::custom)
+    }
+}
 
 impl TokenRef {
     /// The length a reference must have: 64 lowercase hex characters, i.e. a
@@ -268,6 +285,23 @@ pub enum AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_raw_uid_cannot_arrive_as_a_token_reference() {
+        // The refusal is the whole type: *"a caller who passes a raw UID gets a
+        // refusal rather than a privacy incident"* — and a
+        // `#[serde(transparent)]` derive was a caller that never asked (D264).
+        assert!(serde_json::from_str::<TokenRef>("\"04A1B2C3D4E5F6\"").is_err());
+        assert!(serde_json::from_str::<TokenRef>("\"DE-8AA-CA2E4XY9-4\"").is_err());
+        let digest = "a".repeat(TokenRef::HEX_LEN);
+        assert_eq!(
+            serde_json::from_str::<TokenRef>(&format!("\"{digest}\""))
+                .unwrap()
+                .as_str(),
+            digest
+        );
+    }
 
     #[test]
     fn only_ad_hoc_is_contract_free() {

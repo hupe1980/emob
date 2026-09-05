@@ -255,22 +255,39 @@ pub enum RateNote {
     ///
     /// `[AFIR Art. 5(4)]` permits it by name; `[DATEX-II-Profil Tab. A.116]`
     /// cannot express it. A consumer reading `other` learns that there is a
-    /// further charge and not what it is for.
+    /// further charge and not what it is for, which is why the sentence beside
+    /// it names both the unit and the figure.
     OccupancyFeeHasNoPriceType {
-        /// The fee, per minute, as published.
-        per_minute: Decimal,
-    },
-    /// An hourly price does not divide exactly into a per-minute one.
-    ///
-    /// The published number is the nearest the currency's own scale allows, so
-    /// it is not the price the session is rated at. The exact hourly price goes
-    /// into `additionalInformation` beside it, because a consumer that can read
-    /// only the number should at least be able to find the truth next to it.
-    HourlyPriceIsNotExactPerMinute {
         /// What the tariff charges per hour.
         hourly: Decimal,
-        /// What the feed states per minute.
-        published: Decimal,
+    },
+    /// An hourly price does not divide exactly into a per-minute one, so the
+    /// **hourly** figure is what the feed states.
+    ///
+    /// `[AFIR Art. 5(4)]` asks for a price per minute and the profile's only
+    /// time literal is `pricePerMinute`, so an hourly rate is divided by sixty
+    /// — where sixty divides it. Where it does not, the quotient is not a price:
+    /// `2.50` an hour is `0.041666…`, `Decimal` states twenty-eight places of
+    /// it, and that is the figure a route planner would render as the cost of a
+    /// minute. Rounding it to the currency's own two places is worse, because
+    /// then the feed states a price the operator does not charge — which is the
+    /// `[PAngV]` failure the whole of this workspace's price path is built to
+    /// make unrepresentable.
+    ///
+    /// So the price is published as `other`, at the figure the tariff actually
+    /// states, with the unit in `additionalInformation`. It is the same answer
+    /// [`emob_ocpp::to_ocpp`] gives by refusing and
+    /// [`emob_tariff::check_afir`] gives by calling such a tariff unlawful
+    /// ad-hoc: a wire that cannot refuse says what the price *is* instead of
+    /// approximating it (D263).
+    ///
+    /// [`emob_ocpp::to_ocpp`]: https://docs.rs/emob-ocpp
+    /// [`emob_tariff::check_afir`]: emob_tariff::check_afir
+    HourlyPriceHasNoExactMinute {
+        /// Which time dimension.
+        dimension: Dimension,
+        /// What the tariff charges per hour, which is what the feed states.
+        hourly: Decimal,
     },
     /// A tier boundary had to be narrowed to reach a whole unit.
     ///
@@ -388,13 +405,13 @@ impl core::fmt::Display for RateNote {
     /// in a published price and a gap in a rated one land in the same inbox.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::OccupancyFeeHasNoPriceType { per_minute } => write!(
+            Self::OccupancyFeeHasNoPriceType { hourly } => write!(
                 f,
-                "the occupancy fee of {per_minute} per minute is published as `other`: [AFIR Art. 5(4)] permits it by name and [DATEX-II-Profil Tab. A.116] has no price type for parking"
+                "the occupancy fee of {hourly} per hour is published as `other`: [AFIR Art. 5(4)] permits it by name and [DATEX-II-Profil Tab. A.116] has no price type for parking, so the unit is in `additionalInformation` beside the figure"
             ),
-            Self::HourlyPriceIsNotExactPerMinute { hourly, published } => write!(
+            Self::HourlyPriceHasNoExactMinute { dimension, hourly } => write!(
                 f,
-                "{hourly} per hour has no exact price per minute; the feed states {published} and the exact hourly figure is in `additionalInformation` beside it"
+                "{dimension} is priced at {hourly} per hour, which has no exact price per minute: the feed states the hourly figure as `other` rather than twenty-eight decimal places of a minute, or a rounded price the operator does not charge [PAngV]"
             ),
             Self::BoundNarrowedToWholeUnits {
                 field,
@@ -553,6 +570,74 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
     (rate, notes)
 }
 
+/// An hourly price as a price per minute, when sixty divides it exactly.
+///
+/// `None` is an answer rather than a failure: it says the profile's only time
+/// literal cannot state this price, and the caller publishes the hourly figure
+/// instead. Neither of the two alternatives is publishable — `Decimal`'s
+/// twenty-eight places of `0.041666…` is not an amount of money, and rounding to
+/// the currency's own two is a price the operator does not charge `[PAngV]`.
+///
+/// The same factor of three that makes `[AFIR Art. 5(4)]`'s per-minute display
+/// duty bite, met once more: `60 = 2² · 3 · 5`, so a price divides exactly
+/// exactly when three divides it in the currency's minor unit.
+fn exact_per_minute(hourly: Decimal) -> Option<Decimal> {
+    let per_minute = hourly / MINUTES_PER_HOUR;
+    (per_minute * MINUTES_PER_HOUR == hourly).then_some(per_minute)
+}
+
+/// A time price, in the terms `[DATEX-II-Profil Tab. A.116]` has for one.
+///
+/// Two facts decide it, and they are independent. **Which literal** applies is a
+/// property of the dimension: charging time has `pricePerMinute` and occupancy
+/// has nothing, so an occupancy fee is `other` however the arithmetic comes out.
+/// **Which figure** goes under it is a property of the price: where sixty
+/// divides the hour there is an exact price per minute and it is published, and
+/// where it does not there is none — so the hourly figure is published instead,
+/// with the unit in the sentence, rather than a quotient nobody quoted (D263).
+fn time_price(
+    dimension: Dimension,
+    hourly: Decimal,
+    currency: Currency,
+    notes: &mut Vec<RateNote>,
+) -> (PriceType, Decimal, Option<String>) {
+    // The one surcharge `[AFIR Art. 5(4)]` names, and the one the profile has no
+    // literal for — true of every occupancy fee, exact or not.
+    let occupancy = dimension == Dimension::ParkingTime;
+    if occupancy {
+        notes.push(RateNote::OccupancyFeeHasNoPriceType { hourly });
+    }
+
+    let Some(per_minute) = exact_per_minute(hourly) else {
+        notes.push(RateNote::HourlyPriceHasNoExactMinute { dimension, hourly });
+        let sentence = if occupancy {
+            format!(
+                "occupancy fee for time connected and not charging, {hourly} {currency} per \
+                 hour, which has no exact price per minute [AFIR Art. 5(4)]"
+            )
+        } else {
+            format!(
+                "charging time is priced at {hourly} {currency} per hour, which has no exact \
+                 price per minute"
+            )
+        };
+        return (PriceType::Other, hourly, Some(sentence));
+    };
+
+    if occupancy {
+        (
+            PriceType::Other,
+            per_minute,
+            Some(format!(
+                "occupancy fee for time connected and not charging, {per_minute} {currency} per \
+                 minute ({hourly} per hour) [AFIR Art. 5(4)]"
+            )),
+        )
+    } else {
+        (PriceType::PricePerMinute, per_minute, None)
+    }
+}
+
 /// One component, in the profile's vocabulary.
 fn price_of(
     component: &PriceComponent,
@@ -563,40 +648,16 @@ fn price_of(
     time_applicability: Option<TimeApplicability>,
     notes: &mut Vec<RateNote>,
 ) -> Price {
+    let hourly = component.price;
     let (price_type, value, additional_information) = match component.dimension {
-        Dimension::Energy => (PriceType::PricePerKwh, component.price, None),
-        Dimension::Flat => (PriceType::FlatRate, component.price, None),
-        Dimension::Time => {
-            let per_minute = component.price / MINUTES_PER_HOUR;
-            let information = if per_minute * MINUTES_PER_HOUR == component.price {
-                None
-            } else {
-                notes.push(RateNote::HourlyPriceIsNotExactPerMinute {
-                    hourly: component.price,
-                    published: per_minute,
-                });
-                Some(format!(
-                    "charging time is priced at {} per hour",
-                    component.price
-                ))
-            };
-            (PriceType::PricePerMinute, per_minute, information)
-        }
-        // The one surcharge `[AFIR Art. 5(4)]` names, and the one the profile
-        // has no literal for. `other` plus a sentence is the whole truth this
-        // vocabulary can carry.
-        Dimension::ParkingTime => {
-            let per_minute = component.price / MINUTES_PER_HOUR;
-            notes.push(RateNote::OccupancyFeeHasNoPriceType { per_minute });
-            (
-                PriceType::Other,
-                per_minute,
-                Some(format!(
-                    "occupancy fee for time connected and not charging, \
-                     {} {currency} per hour [AFIR Art. 5(4)]",
-                    component.price
-                )),
-            )
+        Dimension::Energy => (PriceType::PricePerKwh, hourly, None),
+        Dimension::Flat => (PriceType::FlatRate, hourly, None),
+        // Both time dimensions ask the same question of the same arithmetic, so
+        // they ask it once. What differs is the literal the profile has for the
+        // answer — `pricePerMinute` for charging time, nothing at all for
+        // occupancy.
+        Dimension::Time | Dimension::ParkingTime => {
+            time_price(component.dimension, hourly, currency, notes)
         }
     };
 
@@ -815,22 +876,43 @@ mod tests {
     }
 
     #[test]
-    fn an_hourly_price_that_does_not_divide_says_so_next_to_the_number() {
+    fn an_hourly_price_that_does_not_divide_publishes_the_hour_rather_than_the_minute() {
+        // The national access point gets a number a route planner renders. The
+        // quotient is `0.0041666666666666666666666667` — twenty-eight places of
+        // a euro, which is not an amount of money — and rounding it to the
+        // currency's own two states a price the operator does not charge
+        // `[PAngV]`. So the feed states what the tariff states, under `other`,
+        // with the unit beside it (D263).
         let (rate, notes) = publish(
             &tariff_of(vec![PriceComponent::new(Dimension::Time, dec("0.25"))]),
             "r",
         );
         assert!(matches!(
             notes.as_slice(),
-            [RateNote::HourlyPriceIsNotExactPerMinute { .. }]
+            [RateNote::HourlyPriceHasNoExactMinute {
+                dimension: Dimension::Time,
+                ..
+            }]
         ));
+        assert_eq!(rate.prices[0].price_type, PriceType::Other);
+        assert_eq!(rate.prices[0].value, dec("0.25"), "the hourly figure");
         assert!(
             rate.prices[0]
                 .additional_information
                 .as_deref()
-                .is_some_and(|text| text.contains("0.25")),
-            "the exact hourly price has to be findable beside the rounded one"
+                .is_some_and(|text| text.contains("per hour")),
+            "`other` says nothing about the unit, so the sentence has to"
         );
+    }
+
+    #[test]
+    fn a_price_per_minute_exists_exactly_when_sixty_divides_the_hour() {
+        // `60 = 2² · 3 · 5`, so the threes decide — the same factor that makes
+        // the `[AFIR Art. 5(4)]` display duty bite one layer out.
+        assert_eq!(exact_per_minute(dec("6.00")), Some(dec("0.10")));
+        assert_eq!(exact_per_minute(dec("0.60")), Some(dec("0.01")));
+        assert_eq!(exact_per_minute(dec("2.50")), None, "0.041666…");
+        assert_eq!(exact_per_minute(dec("0.25")), None);
     }
 
     #[test]

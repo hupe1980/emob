@@ -1,13 +1,12 @@
 +++
 title = "Locations and the national access point"
 weight = 6
-description = "The charge point register, and the DATEX II feed a regulator and every route planner read — generated from the same inventory a roaming partner sees and priced with the same tariff that rates the session."
+description = "The charge point register and the DATEX II feed regulators and route planners read — one inventory, priced with the same tariff that rates the session."
 
 [extra]
+state = "built"
 nav = "Locations"
 +++
-
-# Locations and the national access point ✅
 
 A charge point is described to the outside world three times: to a roaming
 partner, to the public through the national access point, and — since OCPP 2.1 —
@@ -54,6 +53,33 @@ let (rate, notes) = emob_poi::rate::publish(&tariff, "rate-1");
 // …reaches the feed as `"value": 0.49`, not 0.49000000000000000222.
 ```
 
+## …and one inventory, two audiences
+
+The same argument reaches the *connectors*. A point states its interfaces to the
+national access point in `[DATEX-II-Profil Tab. A.88]`'s spelling, and to the
+regulator, because `[AFIR Art. 21(1)]` — *"The technical specifications set out
+in Annex II shall apply"* — makes the interface a duty: at least Type 2 on AC, at
+least CCS Combo 2 on DC `[AFIR Anh. II 1.1]`, at every power. `[LSV26 §5(3)]`
+lets the Bundesnetzagentur forbid the operation of a point over it.
+
+So `ConnectorType` is `emob-core`'s, and `ChargingPoint::profile` builds the
+compliance profile the calendar judges out of the inventory's own connector list
+rather than out of a flag somebody set:
+
+```rust
+let profile = point.profile(commissioned_on, Accessibility::Public);
+// A CHAdeMO-only DC post: ordinary hardware, and a closable breach.
+assert_eq!(
+    assess(&profile, on).status_of(ObligationId::AfirAnnexIiConnector),
+    Some(Status::Failing),
+);
+```
+
+The bridge carries what the inventory knows and nothing else. Notice dates,
+metering posture and the ownership arrangement live in a register export, a type
+approval and a contract, and a bridge that guessed one would put the fault it
+exists to remove one layer further in.
+
 ## What the profile cannot say, and is told to say anyway
 
 The profile offers six price types: `basePrice`, `flatRate`, `free`, `other`,
@@ -63,12 +89,18 @@ are reported rather than papered over.
 **There is no per-hour price type.** A tariff is written and displayed per hour;
 the profile only counts minutes. The conversion is a division by sixty, and
 publishing the hourly number under `pricePerMinute` overstates the price
-sixtyfold. Where the division does not terminate — €2.50 an hour is €0.041666… a
-minute — the exact hourly figure goes into `additionalInformation` beside the
-rounded one and a note says so. It is the same factor of three that makes such a
-fee unlawful under `[AFIR Art. 5(4)]` and unrepresentable on
-[OCPP 2.1](@/docs/ocpp.md#what-the-wire-cannot-say-is-a-refusal-not-a-note),
-met from a third direction.
+sixtyfold.
+
+Where the division does not terminate there is no per-minute price to publish at
+all. €2.50 an hour is €0.041666… a minute; `Decimal` states twenty-eight places
+of it, which is not an amount of money, and rounding to the currency's own two is
+a price the operator does not charge `[PAngV]`. It is the same factor of three
+that makes such a fee unlawful under `[AFIR Art. 5(4)]` and a **refusal** on
+[OCPP 2.1](@/docs/ocpp.md#what-the-wire-cannot-say-is-a-refusal-not-a-note) — but
+a feed cannot refuse, because publishing *is* the duty under Art. 20(2)(c). So it
+states what the price is: the hourly figure, under `other`, with the unit in
+`additionalInformation` and a note naming the dimension. That is the same answer
+the occupancy fee below already gives, for the same reason.
 
 **There is no occupancy price type.** The Regulation explicitly permits a fee per
 minute for time connected and *not* charging, at points of 50 kW and above. The
@@ -134,7 +166,7 @@ point.report(PointStatus::Removed)        // Ok — the register's own answer
 `ChargingPoint::report` is the only constructor, and it reads the lifecycle off
 the point rather than taking it beside the status — a constructor given both is
 one a caller satisfies by handing over the lifecycle that makes the status legal
-(D217). The document cannot be built.
+. The document cannot be built.
 
 ## The silence between the two publications
 

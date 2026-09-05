@@ -1,13 +1,12 @@
 +++
 title = "Roaming"
 weight = 7
-description = "One canonical model, every wire native, and translation cost recorded rather than absorbed: OCPI 2.3.0 and 2.2.1, the crossings that are refusals, and the pre-flight an eMSP owes itself before paying a partner's record."
+description = "One canonical record, every roaming wire native — OCPI 2.3.0 and 2.2.1 both ways, OICP 2.3 through Hubject, translation cost recorded rather than absorbed."
 
 [extra]
+state = "built"
 nav = "Roaming"
 +++
-
-# Roaming ✅
 
 A driver plugs into somebody else's charger. The operator issues a record, the
 driver's provider pays it, and the two companies have to agree on a number
@@ -76,6 +75,35 @@ for reason in crossing.reasons() {
     //              figure will not reproduce it
 }
 ```
+
+### …and the rating's own account crosses with it
+
+`RatingNote` is serialisable because it is meant to travel: *"a note that stays
+behind in the process that produced it is a note nobody can invoke."* The invoice
+has read it since it was written, and the wire did not.
+
+OCPI states a quantity and a cost **per dimension** and has no field for the
+distance between them. A partner receiving `total_energy: 30` beside a
+`total_energy_cost` computed for twenty kilowatt-hours reads a document that does
+not multiply out — and the reason is almost always a discount the operator gave
+on purpose: a promotional first tier, a night-only energy price, any tariff whose
+energy element is conditional. A `step_size` produces the same shape in the other
+direction.
+
+So the half of the notes that are *terms of the price the payer is being asked to
+pay* — the same half `emob-billing` puts on the invoice, selected by the same
+predicate — crosses as `Crossing` notes, each pointed at the dimension's own
+total. The rest stay with the operator: a fault in this side's tariff is not
+something a partner can act on.
+
+### The version the registry records is the version that goes out
+
+A `Partner` carries which OCPI version the peer speaks. Nothing read it: the
+canonical crossing produced 2.3.0 for everybody and the downgrade was a second
+call a sender had to remember, so a peer on 2.2.1 — the ordinary case in this
+market — was one forgotten step from a document it cannot parse. `for_partner`
+applies every refusal and then the recorded version, and returns a value that
+names which one it wrote.
 
 ### The note nobody else reports
 
@@ -283,7 +311,47 @@ partner, to the driver at the point and to the national access point — see
 
 eMIP (GIREVE legacy) is 📐: designed, not written. So are OCPI's Sessions and
 Tokens modules, which are a service's publishing surface rather than a settlement
-question, and `roamd` — the daemon that owns the transport for both wires.
+question.
+
+## …and the half a crossing cannot decide
+
+`roamd` is the node around the two wires, and everything in it is about a
+**ledger of what was sent to whom**. A document is what a domain crate says it
+is; who is owed it, whether it may go at all, when it is late and what to do with
+one that arrives are not properties of any document.
+
+**A record the partner has taken is sealed.** `[OCPI 2.3.0 §mod_cdrs]`: *"Because
+a CDR is for billing purposes, it cannot be changed or replaced once sent to the
+eMSP. Changes are simply not allowed. Instead, a Credit CDR can be sent."* And the
+repair has an order — the reversal, then the replacement. Every piece of that was
+already built: the Credit CDR the specification spells out, the `supersedes` link
+on the record, a ledger that refuses to bill both halves. None of them knows
+whether the original ever left the building, which is the one fact both rules turn
+on.
+
+**Late is per partner, not per node.** The same paragraph makes the cadence a
+contract: *"if there is an agreement between parties to send them, for example,
+once a month, that is also allowed by OCPI."* So a node peering with a monthly
+settler and a same-day settler has two answers to one question, and a single
+constant would report the first in breach every day.
+
+**And a document that is wrong is a different answer from a claim that does not
+hold.** Three checks run in the order that makes them mean something — the
+document, the conversion, the record — and the verdict has five values rather
+than one error:
+
+| Verdict | Means | What the sender does |
+|---|---|---|
+| `Accepted` | the document holds up and the record is new | nothing; it is settled |
+| `Disputed` | the document is fine, the claim does not hold here | talks to you |
+| `Duplicate` | already held, unchanged | nothing; the retry was harmless |
+| `Conflicted` | already held, and this one differs | a human answers |
+| `Rejected` | it does not answer OCPI's own questions | fixes it and re-sends |
+
+A partner told *"rejected"* when the truth is *"disputed"* retries something no
+retry fixes. And a disputed record is deliberately not in the ledger: it has not
+been settled, and putting it there would make the dispute look like an
+acceptance.
 
 ## The second wire settles a different thing
 

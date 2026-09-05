@@ -221,7 +221,7 @@ impl Period {
 /// What a session did, period by period — and how finely its clock could
 /// tell.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Chargeable {
     periods: Vec<Period>,
     /// The shortest span the station's clock may be billed for.
@@ -235,6 +235,31 @@ pub struct Chargeable {
     /// device is better than the worst case the regulation permits.
     #[cfg_attr(feature = "serde", serde(default))]
     clock: ClockResolution,
+}
+
+/// Read back through [`Chargeable::new`], because the ordering and the absence
+/// of overlap are what stop a minute being charged twice.
+///
+/// A derived `Deserialize` restored the periods and asked neither question, so a
+/// session read from a store or a partner's document could overlap itself — and
+/// [`rate`] prices every period it is given (D264).
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Chargeable {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        #[derive(serde::Deserialize)]
+        struct AsSent {
+            periods: Vec<Period>,
+            #[serde(default)]
+            clock: ClockResolution,
+        }
+
+        let sent = AsSent::deserialize(deserializer)?;
+        Self::new(sent.periods)
+            .map(|chargeable| chargeable.with_clock(sent.clock))
+            .map_err(D::Error::custom)
+    }
 }
 
 impl Chargeable {
@@ -341,19 +366,6 @@ impl Chargeable {
     #[must_use]
     pub fn withheld_seconds(&self) -> u64 {
         self.seconds_where(|a| a == Activity::Withheld)
-    }
-
-    /// Seconds in which no energy crossed the meter — [`Self::parking_seconds`]
-    /// and [`Self::withheld_seconds`] together.
-    ///
-    /// The quantity a CDR's `total_parking_time` states, which
-    /// `[OCPI 2.3.0 §mod_cdrs_cdr_object]` defines on energy transfer while it
-    /// defines the *priced* `PARKING_TIME` dimension on the vehicle's demand.
-    /// Two fields, two definitions, and a stack that computes one from the other
-    /// is wrong in one of them.
-    #[must_use]
-    pub fn untransferred_seconds(&self) -> u64 {
-        self.seconds_where(|a| !a.transfers_energy())
     }
 
     fn seconds_where(&self, keep: impl Fn(Activity) -> bool) -> u64 {
@@ -622,6 +634,19 @@ pub struct Adjustment {
     pub vat: Option<Decimal>,
 }
 
+/// One part of an [`Adjustment`], as it lands in a single VAT category.
+///
+/// See [`Rated::adjustment_parts`], the only thing that produces one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct AdjustmentPart {
+    /// The category this part falls in.
+    pub vat: Option<Decimal>,
+    /// The signed amount in it, in the tariff's own basis. Same sign as
+    /// [`Adjustment::amount`], and the parts sum to it exactly.
+    pub amount: Decimal,
+}
+
 /// Which bound moved the total.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -740,12 +765,27 @@ pub enum RatingNote {
         periods: usize,
     },
     /// A quantity was rounded up to the component's block size.
+    ///
+    /// # The figures are in the dimension's **base** unit
+    ///
+    /// kWh for energy, whole seconds for the two time dimensions — the unit
+    /// [`Line::base_quantity`] is stated in, and the one the difference between
+    /// them is exact in. Quoted in the *displayed* unit they were not: a block of
+    /// 2100 seconds is `0.5833…` hours, no scale states it, and a reader
+    /// reconciling "what was billed" against "what was delivered" was subtracting
+    /// two rounded quotients. The one consumer of this note does exactly that
+    /// subtraction — `emob_cdr::validate` asks whether the excess over the
+    /// record's own quantity is the block this note declares — and an
+    /// approximate answer there is a settlement dispute waved through.
+    ///
+    /// [`Display`](core::fmt::Display) converts to the unit a driver reads, which
+    /// is where the division belongs.
     RoundedToBlock {
         /// Which dimension.
         dimension: Dimension,
-        /// What was actually used.
+        /// What was actually used, in the dimension's base unit.
         actual: Decimal,
-        /// What was billed.
+        /// What was billed, in the same unit. Never below `actual`.
         billed: Decimal,
     },
     /// The total was moved by a minimum or maximum.
@@ -785,27 +825,30 @@ pub enum RatingNote {
         /// The movement the bound asked for.
         asked: Decimal,
     },
-    /// The adjustment is larger than everything charged at the VAT rate it was
-    /// attributed to.
+    /// The bound was deeper than the category it is attributed to, so it is
+    /// drawn from more than one.
     ///
-    /// A minimum or a maximum is **one** document-level allowance or charge, and
-    /// EN 16931 gives it **one** tax category — BT-95 and BT-96. So the whole of
-    /// it is subtracted from that category's taxable amount `[BR-S-08]`, and
-    /// where the cut is deeper than the category holds, the amount goes
-    /// negative: a document that states a negative taxable amount under a
-    /// positive invoice, which no partner and no tax office accepts.
+    /// EN 16931 gives **one** allowance one tax category — BT-95 and BT-96 —
+    /// and `[BR-S-08]` subtracts the whole of it from that category's taxable
+    /// amount. A cut deeper than the category holds would take that amount
+    /// negative, which no partner and no tax office accepts, so the bound
+    /// continues into the next category: BG-20 is repeatable, and
+    /// [`Rated::adjustment_parts`] is where the split is stated.
     ///
-    /// The total is right; what it is not is a total one allowance can carry.
-    /// Reported rather than refused, because the price a driver pays is not
-    /// wrong — and named here rather than discovered in `emob-billing`, where
-    /// there is nothing left to say it about.
-    AdjustmentExceedsCategory {
-        /// The rate the adjustment was attributed to.
+    /// Reported because it is a **settlement** fact rather than a fault. Which
+    /// supplies a cap reduces decides how much tax is due, so a partner
+    /// reconciling the record — and an accountant reading the invoice — is
+    /// entitled to see that the tariff's own category could not hold it and
+    /// which order the rest was drawn in.
+    AdjustmentSpread {
+        /// The rate the bound is attributed to — the one drawn from first.
         vat: Option<Decimal>,
         /// What the lines at that rate came to.
         in_category: Decimal,
-        /// The adjustment.
+        /// The bound.
         amount: Decimal,
+        /// How many categories it was drawn from, this one included.
+        categories: usize,
     },
     /// A reservation's window ends before it starts.
     ///
@@ -873,6 +916,13 @@ impl RatingNote {
 }
 
 impl core::fmt::Display for RatingNote {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per variant, and a note's sentence is the whole of \
+                  what a settlement dispute is conducted with — splitting the \
+                  table by group would hide which variants have a sentence and \
+                  which do not"
+    )]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Unpriced {
@@ -922,11 +972,19 @@ impl core::fmt::Display for RatingNote {
                 dimension,
                 actual,
                 billed,
-            } => write!(
-                f,
-                "{dimension:?} rounded up from {actual} to {billed} {}",
-                dimension.unit()
-            ),
+            } => {
+                // The note carries base units because that is where the
+                // difference is exact; a driver reads hours and kilowatt-hours,
+                // so the division happens here and nowhere else.
+                let per_unit = Line::base_units_per_unit(*dimension);
+                write!(
+                    f,
+                    "{dimension:?} rounded up from {} to {} {}",
+                    actual / per_unit,
+                    billed / per_unit,
+                    dimension.unit()
+                )
+            }
             Self::ReservationWindowReversed { from, to } => write!(
                 f,
                 "the reservation is recorded as running from {from} to {to}, which ends before it starts: no minutes were priced and the window was collapsed to its start"
@@ -959,13 +1017,14 @@ impl core::fmt::Display for RatingNote {
                 f,
                 "the tariff maximum asked for {asked} against lines of {lines_total}, which is a total below zero: the adjustment was held at -{lines_total}"
             ),
-            Self::AdjustmentExceedsCategory {
+            Self::AdjustmentSpread {
                 vat,
                 in_category,
                 amount,
+                categories,
             } => write!(
                 f,
-                "the adjustment of {amount} is larger than the {in_category} charged at {}, so the category's taxable amount is negative and it cannot be stated as one EN 16931 allowance",
+                "the bound of {amount} is deeper than the {in_category} charged at {}, so it is drawn from {categories} VAT categories in the order the largest is drawn from first: one EN 16931 allowance per category (BG-20 is repeatable), rather than one category stating a negative taxable amount",
                 match vat {
                     Some(rate) => format!("{rate} % VAT"),
                     None => "no stated VAT rate".to_owned(),
@@ -1099,6 +1158,77 @@ impl Rated {
             .sum()
     }
 
+    /// What this rating says was **delivered** in one dimension, in the
+    /// dimension's base unit — kWh, whole seconds, one session.
+    ///
+    /// # The identity a price is checked against its record with
+    ///
+    /// A rating charges for a quantity, and two lawful things stand between that
+    /// quantity and the one the meter measured:
+    ///
+    /// - a `step_size` bills **up to one block more** than was delivered
+    ///   `[OCPI 2.3.0 §mod_cdrs_step_size]`, and says so in
+    ///   [`RatingNote::RoundedToBlock`];
+    /// - a dimension nothing matched is charged **nothing at all** — *"there
+    ///   will be no costs for that Tariff Dimension"* `[OCPI 2.3.0 §Tariff]` —
+    ///   and says so in [`RatingNote::Unpriced`].
+    ///
+    /// So the quantity a record has to agree with is neither the billed one nor
+    /// the priced one. It is
+    /// `base_quantity − block surplus + unpriced`, and this is that figure.
+    /// A promotional first tier gives ten kilowatt-hours away and a block size
+    /// rounds fifty watt-hours up; both are stated on the record, both are in
+    /// this sum, and what is left over is a price computed for a **different
+    /// session** — which is what `emob_cdr::validate` blocks and the only thing
+    /// it should (D258).
+    ///
+    /// Exact, because every term is in the base unit: an hour is 3600 seconds
+    /// and most durations have no decimal in hours at all.
+    #[must_use]
+    pub fn accounted_quantity_for(&self, dimension: Dimension) -> Decimal {
+        self.base_quantity_for(dimension) - self.block_surplus_for(dimension)
+            + self.unpriced_for(dimension)
+    }
+
+    /// How much a `step_size` added to one dimension's billed quantity, in the
+    /// dimension's base unit. Zero where no block applied.
+    ///
+    /// Read off [`RatingNote::RoundedToBlock`], which is where the rating states
+    /// it — rather than re-derived from the tariff, because the block that
+    /// applied is the last relevant component's and a reader of the record does
+    /// not have the tariff.
+    #[must_use]
+    pub fn block_surplus_for(&self, dimension: Dimension) -> Decimal {
+        self.notes
+            .iter()
+            .filter_map(|note| match note {
+                RatingNote::RoundedToBlock {
+                    dimension: rounded,
+                    actual,
+                    billed,
+                } if *rounded == dimension => Some(billed - actual),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// How much of one dimension no element priced, in the dimension's base
+    /// unit. Zero where everything was priced.
+    #[must_use]
+    pub fn unpriced_for(&self, dimension: Dimension) -> Decimal {
+        self.notes
+            .iter()
+            .filter_map(|note| match note {
+                RatingNote::Unpriced {
+                    dimension: unpriced,
+                    base_quantity,
+                    ..
+                } if *unpriced == dimension => Some(*base_quantity),
+                _ => None,
+            })
+            .sum()
+    }
+
     /// Whether every line reproduces its own amount from its own numbers.
     ///
     /// True by construction. Re-checkable, because a [`Rated`] can arrive over
@@ -1118,10 +1248,11 @@ impl Rated {
     #[must_use]
     pub fn tax_summary(&self) -> Vec<TaxLine> {
         self.grouped_by_rate(
-            self.lines
-                .iter()
-                .map(|line| (line.vat, line.amount))
-                .chain(self.adjustment.map(|a| (a.vat, a.amount))),
+            self.lines.iter().map(|line| (line.vat, line.amount)).chain(
+                self.adjustment_parts()
+                    .into_iter()
+                    .map(|part| (part.vat, part.amount)),
+            ),
         )
     }
 
@@ -1148,6 +1279,119 @@ impl Rated {
                 .filter(|line| line.dimension == dimension)
                 .map(|line| (line.vat, line.amount)),
         )
+    }
+
+    /// Where the [`Adjustment`] lands, category by category.
+    ///
+    /// # A bound is not always one amount in one category
+    ///
+    /// [`Adjustment::vat`] answers *which* category a bound belongs to — the
+    /// largest line's, because a bound is economically more of whatever the
+    /// session mostly was. That holds wherever the category has room for it,
+    /// which is every single-rate tariff and most others.
+    ///
+    /// A **maximum** need not have room. A cap of € 3.00 on a session made of
+    /// € 5.00 of energy at 19 % and a € 20.00 fee at 7 % takes € 22.00 out of a
+    /// category holding € 20.00. As one allowance that category's taxable
+    /// amount is **−2.00** — a negative BT-116 under a positive invoice, which
+    /// every one of EN 16931's 317 rules accepts and no tax office does (D283).
+    ///
+    /// The standard's own answer is that BG-20 is **repeatable**: each allowance
+    /// carries one category and one rate (BT-95, BT-96), so a bound deeper than
+    /// one category is several allowances. This is that split.
+    ///
+    /// # It is the same order the price was computed against
+    ///
+    /// The chosen category takes as much as it holds, then the rest in
+    /// descending order of what they hold — the same walk the rating solves the
+    /// movement along in the first place. A split that used a different order
+    /// would state a document the price does not match (D284).
+    ///
+    /// A **minimum** is always one part: adding to a category cannot drive it
+    /// negative.
+    ///
+    /// ```
+    /// # use emob_tariff::{Chargeable, Dimension, Period, PriceComponent, PriceLimit};
+    /// # use emob_tariff::{Tariff, TariffElement, TariffKind, TaxIncluded, rate};
+    /// # use emob_core::{Currency, Energy, TimeZone};
+    /// # use rust_decimal::Decimal;
+    /// # use std::str::FromStr;
+    /// # use time::macros::datetime;
+    /// # let dec = |s: &str| Decimal::from_str(s).unwrap();
+    /// # let tariff = Tariff {
+    /// #     id: "capped".parse()?,
+    /// #     currency: Currency::EUR,
+    /// #     kind: TariffKind::Contract,
+    /// #     time_zone: TimeZone::new("Europe/Berlin")?,
+    /// #     tax_included: TaxIncluded::No,
+    /// #     elements: vec![TariffElement::unrestricted(vec![
+    /// #         PriceComponent::new(Dimension::Energy, dec("0.50")).with_vat(dec("19")),
+    /// #         PriceComponent::new(Dimension::Flat, dec("20.00")).with_vat(dec("7")),
+    /// #     ])],
+    /// #     min_price: None,
+    /// #     max_price: Some(PriceLimit { before_taxes: Some(dec("3.00")), after_taxes: None }),
+    /// #     valid_from: None,
+    /// #     valid_until: None,
+    /// # };
+    /// # let session = Chargeable::new(vec![Period::charging(
+    /// #     datetime!(2026-06-01 10:00 +2),
+    /// #     datetime!(2026-06-01 11:00 +2),
+    /// #     Energy::from_kwh(dec("10"))?,
+    /// # )])?;
+    /// let rated = rate(&tariff, &session);
+    /// // € 22.00 off a € 20.00 fee at 7 % and € 5.00 of energy at 19 %.
+    /// let parts = rated.adjustment_parts();
+    /// assert_eq!(parts.len(), 2);
+    /// assert_eq!((parts[0].vat, parts[0].amount), (Some(dec("7")), dec("-20.00")));
+    /// assert_eq!((parts[1].vat, parts[1].amount), (Some(dec("19")), dec("-2.00")));
+    /// // …and no category is left owing a negative taxable amount.
+    /// assert!(rated.tax_summary().iter().all(|t| !t.net.is_sign_negative()));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn adjustment_parts(&self) -> Vec<AdjustmentPart> {
+        let Some(adjustment) = self.adjustment else {
+            return Vec::new();
+        };
+        // A minimum only adds, and adding to a category never drives it
+        // negative. It is also the one case that arrives with no lines at all,
+        // which the walk below would answer with an empty list.
+        if !adjustment.amount.is_sign_negative() {
+            return vec![AdjustmentPart {
+                vat: adjustment.vat,
+                amount: adjustment.amount,
+            }];
+        }
+
+        let mut remaining = -adjustment.amount;
+        let mut parts: Vec<AdjustmentPart> = Vec::new();
+        for (vat, available) in categories_for_bound(&self.lines, adjustment.vat) {
+            if remaining <= Decimal::ZERO {
+                break;
+            }
+            let take = remaining.min(available.max(Decimal::ZERO));
+            if take.is_zero() {
+                continue;
+            }
+            parts.push(AdjustmentPart { vat, amount: -take });
+            remaining -= take;
+        }
+        // `bound` clamps a cut at the lines' own total, so nothing is left over
+        // for any rating this crate produces. A `Rated` **deserialised** from a
+        // partner went through no such clamp (rule 13), and a term that went
+        // missing would be a document quietly charging more than it says — so
+        // the remainder stays with the category the adjustment names, where
+        // `emob-billing` refuses it by name.
+        if remaining > Decimal::ZERO {
+            match parts.first_mut() {
+                Some(first) => first.amount -= remaining,
+                None => parts.push(AdjustmentPart {
+                    vat: adjustment.vat,
+                    amount: -remaining,
+                }),
+            }
+        }
+        parts
     }
 
     /// Group amounts by VAT rate and split each group, in ascending rate order.
@@ -1537,18 +1781,40 @@ fn rate_with(
 
     // The minutes the operator withheld. Named rather than absent: see
     // `RatingNote::WithheldNotPriced`.
-    let withheld: Vec<&Period> = periods
+    //
+    // Counted off the session's **own** periods rather than off the subdivided
+    // ones, and through `Chargeable::withheld_seconds` rather than beside it. A
+    // threshold cut divides a period; it does not change what the record says
+    // happened in it, so "across how many periods" is a fact about the record
+    // and not about this function's working list. The figure had two spellings
+    // — the method, which said what it meant and had no caller, and this loop,
+    // which had the caller and said it again — and two spellings of one rule is
+    // the drift the whole crate exists to prevent (D261).
+    let withheld_periods = session
+        .periods()
         .iter()
         .filter(|p| p.activity == Activity::Withheld && p.seconds() > 0)
-        .collect();
-    if !withheld.is_empty() {
+        .count();
+    if withheld_periods > 0 {
         notes.push(RatingNote::WithheldNotPriced {
-            seconds: withheld.iter().map(|p| Decimal::from(p.seconds())).sum(),
-            periods: withheld.len(),
+            seconds: Decimal::from(session.withheld_seconds()),
+            periods: withheld_periods,
         });
     }
 
-    drop_durations_below_resolution(&mut accumulators, session.clock, &mut notes);
+    // `[REA 6-A §3.1]` bounds a **measured value**, and the instrument that
+    // measures it is the station's clock. A reservation's window is not one: it
+    // ran before the cable went in, no meter observed it, and what stands behind
+    // it is the operator's own record of when the point was held. `emob_cdr`
+    // already says so where it declines to gate the reservation on the evidence
+    // — *"no meter measured it, and the Eichrecht gates are about measured
+    // values"* — and this is the same sentence, kept here rather than
+    // contradicted: a two-minute reservation was losing its `TIME` line to a
+    // sixty-second floor, over a regulation that does not reach it, with a note
+    // telling the payer the station's clock was why (D257).
+    if reserving.is_none() {
+        drop_durations_below_resolution(&mut accumulators, session.clock, &mut notes);
+    }
 
     // `step_size` is a property of the **session**, once per family, and it is
     // applied here rather than per line for that reason
@@ -2238,6 +2504,120 @@ fn adjustment_vat(tariff: &Tariff, lines: &[Line]) -> Option<Decimal> {
     tariff.vat_basis().stated()
 }
 
+/// The categories a bound is drawn from, **largest first**, with the one
+/// [`adjustment_vat`] chose at the front.
+///
+/// One walk, shared by the two things that must agree about it: [`bound`], which
+/// solves how far a limit moves the total, and [`Rated::adjustment_parts`],
+/// which says where the movement lands. Two spellings of this order would be a
+/// document that states a different split from the one the price was computed
+/// against — the drift this crate exists to prevent, at the last seam it has
+/// left (D284).
+fn categories_for_bound(
+    lines: &[Line],
+    chosen: Option<Decimal>,
+) -> Vec<(Option<Decimal>, Decimal)> {
+    let mut held: Vec<(Option<Decimal>, Decimal)> = Vec::new();
+    for line in lines {
+        match held.iter_mut().find(|(vat, _)| *vat == line.vat) {
+            Some((_, total)) => *total += line.amount,
+            None => held.push((line.vat, line.amount)),
+        }
+    }
+    // Descending by what each holds, then the chosen one to the front. A
+    // category holding nothing is left in: it contributes no room and taking
+    // it out would make the order depend on the amounts twice.
+    held.sort_by(|(_, left), (_, right)| right.cmp(left));
+    if let Some(index) = held.iter().position(|(vat, _)| *vat == chosen) {
+        let front = held.remove(index);
+        held.insert(0, front);
+    }
+    held
+}
+
+/// What one unit of movement in the lines' own basis does to the **other**
+/// basis, for a movement that lands in the category `vat` names.
+///
+/// `None` where the question has no answer: a gross amount is
+/// `net × (1 + rate/100)`, so at exactly −100 % the factor is zero and no net
+/// grosses up to it. The limb that needed it does not bind, which is what this
+/// function returning `None` makes the caller do — the same hole
+/// [`Rated::split_tax`] reports rather than dividing into.
+fn per_unit_in_other_basis(basis: TaxIncluded, vat: Option<Decimal>) -> Option<Decimal> {
+    let factor = Decimal::ONE + vat.unwrap_or(Decimal::ZERO) / HUNDRED;
+    match basis {
+        // Net lines: one net unit moves the gross by the factor.
+        TaxIncluded::No => (factor > Decimal::ZERO).then_some(factor),
+        // Gross lines: one gross unit moves the net by its reciprocal.
+        TaxIncluded::Yes => (factor > Decimal::ZERO).then(|| Decimal::ONE / factor),
+        // Outside a tax regime the two totals are one figure.
+        TaxIncluded::NotApplicable => Some(Decimal::ONE),
+    }
+}
+
+/// How far the total has to move, in the lines' **own** basis, to move the
+/// *other* basis by `wanted`.
+///
+/// Signed the way the movement is: a lift is positive, a cut negative.
+///
+/// # A lift is one factor and a cut is a walk
+///
+/// A lift lands entirely in the category the bound is attributed to
+/// ([`adjustment_vat`]), because adding to a category can never take it below
+/// zero — so one factor answers it, which is the division this used to be.
+///
+/// A cut deeper than that category's own lines continues into the next, and the
+/// next has a different rate. The other basis is therefore **piecewise-linear**
+/// in how deep the cut goes, with a slope change at each category boundary, and
+/// the inversion walks [`categories_for_bound`] spending each category's room
+/// until the remainder fits inside the one it has reached. That is the same
+/// walk [`Rated::adjustment_parts`] then places the movement along, so the
+/// price and the document are computed against one order (D284).
+///
+/// `None` where the other basis has no answer at all: a rate of exactly −100 %
+/// makes the gross-to-net factor zero, the hole [`Rated::split_tax`] reports
+/// rather than dividing into. Asked of **every** category rather than of the
+/// one a solve happens to stop in, because which it stops in is what the solve
+/// is for.
+fn movement_reaching(
+    wanted: Decimal,
+    basis: TaxIncluded,
+    categories: &[(Option<Decimal>, Decimal)],
+    chosen: Option<Decimal>,
+) -> Option<Decimal> {
+    if !wanted.is_sign_negative() {
+        let per = per_unit_in_other_basis(basis, chosen)?;
+        return (!per.is_zero()).then(|| wanted / per);
+    }
+    if !categories
+        .iter()
+        .all(|(vat, _)| per_unit_in_other_basis(basis, *vat).is_some())
+    {
+        return None;
+    }
+
+    let mut remaining = -wanted;
+    let mut movement = Decimal::ZERO;
+    for (vat, available) in categories {
+        let available = (*available).max(Decimal::ZERO);
+        if available.is_zero() {
+            continue;
+        }
+        let per = per_unit_in_other_basis(basis, *vat)?;
+        let segment = available * per;
+        if remaining <= segment {
+            // `per` is strictly positive here: a zero factor would have failed
+            // the check above.
+            return Some(-(movement + remaining / per));
+        }
+        movement += available;
+        remaining -= segment;
+    }
+    // Cutting everything does not reach the target. The deepest cut there is,
+    // which the caller's clamp then reads as "the whole of the lines".
+    Some(-movement)
+}
+
 /// Apply the tariff's minimum and maximum, **in both bases**.
 ///
 /// # Two ceilings, not one ceiling in two spellings
@@ -2259,13 +2639,31 @@ fn adjustment_vat(tariff: &Tariff, lines: &[Line]) -> Option<Decimal> {
 /// So each limb is turned into the movement it needs **in the basis the lines
 /// are quoted in**, and the binding one is the largest movement for a minimum
 /// and the smallest for a maximum. The limb that matches the tariff's own basis
-/// is exact, because it is a subtraction; the other one divides by the rate the
-/// adjustment lands in, which is [`adjustment_vat`]'s answer and a field a
-/// reader can see.
+/// is exact, because it is a subtraction.
+///
+/// # …and the other limb is a *piecewise* conversion, not a division
+///
+/// Reaching the other basis needs to know what a unit of movement does to it,
+/// and that is a property of the **category the movement lands in**. A lift
+/// lands in one — [`adjustment_vat`]'s answer, a field a reader can see — so
+/// one factor answers it.
+///
+/// A **cut** need not. Where it is deeper than that category's own lines it
+/// continues into the next, and the next one has a different rate: the gross
+/// effect of a net cut is piecewise-linear in how deep the cut goes, with a
+/// slope change at each category boundary. Dividing by one factor there answers
+/// a gross ceiling with a movement that does not reach it — a price above a
+/// maximum the operator published, which is the failure this whole function
+/// exists to prevent, one layer down (D284).
+///
+/// So the other limb is **inverted along [`categories_for_bound`]** — the same
+/// walk [`Rated::adjustment_parts`] then uses to place the movement, so the
+/// price and the document are computed against one order rather than two. With
+/// a single VAT rate, or a cut that fits in its own category, the walk has one
+/// segment and the arithmetic is the division it always was.
 fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<Adjustment> {
     let lines_total = rated.lines_total();
     let vat = adjustment_vat(tariff, &rated.lines);
-    let factor = Decimal::ONE + vat.unwrap_or(Decimal::ZERO) / HUNDRED;
 
     // The totals the two limbs are read against, before any adjustment.
     // `rated.adjustment` is `None` here by construction.
@@ -2276,23 +2674,17 @@ fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<
     let (net, gross) = rated.exact_bases();
 
     // Which limb the lines are already quoted in — that one is exact, because
-    // reaching it is a subtraction — and what one unit of movement in that
-    // basis does to the *other* total.
-    let (own_is_net, other_total, per_other) = match tariff.tax_included {
-        // Net lines: one net unit moves the gross by the factor.
-        TaxIncluded::No => (true, gross, Some(factor)),
-        // Gross lines: one gross unit moves the net by its reciprocal — which
-        // has no value at a rate of exactly −100 %, the same hole `split_tax`
-        // reports rather than dividing into. There the other limb simply does
-        // not bind, and the note beside it already says why.
-        TaxIncluded::Yes => (
-            false,
-            net,
-            (!factor.is_zero()).then(|| Decimal::ONE / factor),
-        ),
+    // reaching it is a subtraction.
+    let (own_is_net, other_total) = match tariff.tax_included {
+        TaxIncluded::No => (true, gross),
+        TaxIncluded::Yes => (false, net),
         // Outside a tax regime the two totals are one figure.
-        TaxIncluded::NotApplicable => (true, lines_total, Some(Decimal::ONE)),
+        TaxIncluded::NotApplicable => (true, lines_total),
     };
+
+    // The order a cut is drawn in, and what each category holds. Computed once:
+    // it is a fact about the lines, and both limbs of both limits read it.
+    let categories = categories_for_bound(&rated.lines, vat);
 
     // What each limb asks for, in the lines' own basis.
     let movements = |limit: crate::tariff::PriceLimit| -> Vec<Decimal> {
@@ -2306,10 +2698,10 @@ fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<
             out.push(target - lines_total);
         }
         if let Some(target) = other_target
-            && let Some(per) = per_other
-            && !per.is_zero()
+            && let Some(movement) =
+                movement_reaching(target - other_total, tariff.tax_included, &categories, vat)
         {
-            out.push((target - other_total) / per);
+            out.push(movement);
         }
         out
     };
@@ -2379,13 +2771,11 @@ fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<
         return None;
     }
 
-    // The category the adjustment lands in has to be able to hold it. Where it
-    // cannot — the cut is deeper than everything charged at that one rate — the
-    // category's taxable amount goes negative, and a document stating a
-    // negative taxable amount under a positive invoice is one no partner and no
-    // tax office accepts. It is still the right total; what it is not is a
-    // total one allowance can express, so the fact travels with the record
-    // rather than reaching an invoice as an unexplained sign.
+    // Where the category the bound is attributed to cannot hold the whole of
+    // it, the rest is drawn from the next — `adjustment_parts`, walking the
+    // order this function has just solved against. That is a settlement fact
+    // rather than a fault, and it travels with the record because which
+    // supplies a cap reduces decides how much tax is due.
     let in_category: Decimal = rated
         .lines
         .iter()
@@ -2393,10 +2783,26 @@ fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<
         .map(|line| line.amount)
         .sum();
     if (in_category + amount).is_sign_negative() {
-        notes.push(RatingNote::AdjustmentExceedsCategory {
+        // Counted off the same walk rather than re-derived: the split is one
+        // rule, and a note that counted categories its own way would be a
+        // second reading of it.
+        let spread = Rated {
+            adjustment: Some(Adjustment {
+                kind: AdjustmentKind::Maximum,
+                lines_total,
+                amount,
+                vat,
+            }),
+            lines: rated.lines.clone(),
+            currency: rated.currency,
+            tax_included: rated.tax_included,
+            notes: Vec::new(),
+        };
+        notes.push(RatingNote::AdjustmentSpread {
             vat,
             in_category,
             amount,
+            categories: spread.adjustment_parts().len(),
         });
     }
 
@@ -2509,16 +2915,14 @@ fn round_family(
     // whole number of blocks `billed` names and carries no residue forward.
     accumulators[last].quantity += billed - exact;
 
-    // The note reports the displayed unit, because that is what a driver
-    // reads: "0.58 h rounded up to 1 h", not "2100 s rounded to 3600 s".
-    let to_display = match dimension {
-        Dimension::Time | Dimension::ParkingTime => SECONDS_PER_HOUR,
-        Dimension::Energy | Dimension::Flat => Decimal::ONE,
-    };
+    // The note carries the **base** unit — kWh, whole seconds — because the
+    // difference between the two figures is what a reader reconciles against,
+    // and 2100 seconds is `0.5833…` hours in every scale there is. `Display`
+    // converts to the unit a driver reads.
     notes.push(RatingNote::RoundedToBlock {
         dimension,
-        actual: measured / to_display,
-        billed: billed / to_display,
+        actual: measured,
+        billed,
     });
 }
 
@@ -2847,6 +3251,190 @@ mod tests {
             rate(&t, &sampled).amount_for(Dimension::ParkingTime),
             Some(dec("0.10"))
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_session_arrives_through_the_constructor_that_refuses_an_overlap() {
+        // Two periods covering one minute is that minute charged twice, and
+        // `Chargeable::new` refuses it. A derived `Deserialize` restored the
+        // list and asked nothing, and `rate` prices every period it is given
+        // (D264).
+        let overlapping = r#"{"periods":[
+            {"start":"2026-01-02T10:00:00+01:00","end":"2026-01-02T10:30:00+01:00",
+             "energy":"10.000","activity":"charging"},
+            {"start":"2026-01-02T10:15:00+01:00","end":"2026-01-02T10:45:00+01:00",
+             "energy":"10.000","activity":"charging"}]}"#;
+        assert!(serde_json::from_str::<Chargeable>(overlapping).is_err());
+        assert!(serde_json::from_str::<Chargeable>(r#"{"periods":[]}"#).is_err());
+
+        // …and an ordinary session still reads, with the clock its record
+        // states — the figure a replay may not be told a different one of.
+        let ordinary = r#"{"periods":[
+            {"start":"2026-01-02T10:00:00+01:00","end":"2026-01-02T10:30:00+01:00",
+             "energy":"10.000","activity":"charging"}],"clock":10}"#;
+        let session: Chargeable = serde_json::from_str(ordinary).unwrap();
+        assert_eq!(session.periods().len(), 1);
+        assert_eq!(
+            session.clock().shortest_billable_span(),
+            time::Duration::seconds(10)
+        );
+    }
+
+    #[test]
+    fn a_reservation_is_not_judged_against_the_stations_metering_clock() {
+        // `[REA 6-A §3.1]` bounds a **measured value**, and the instrument is
+        // the station's clock. A reservation ran before the cable went in and no
+        // meter observed it — `emob_cdr` says so where it declines to gate the
+        // reservation on the evidence — so the sixty-second floor does not reach
+        // it. It was reaching it: a driver who reserved a point and plugged in
+        // forty-five seconds later had the whole `TIME` line dropped, with a note
+        // telling them the station's clock was why (D257).
+        let t = Tariff {
+            id: "with-reservation".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            time_zone: TimeZone::new("Europe/Berlin").unwrap(),
+            tax_included: TaxIncluded::No,
+            elements: vec![TariffElement {
+                components: vec![PriceComponent::new(Dimension::Time, dec("5.00"))],
+                restrictions: Restrictions {
+                    reservation: Some(crate::tariff::ReservationRestriction::Reservation),
+                    ..Restrictions::default()
+                },
+            }],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+
+        let brief = Reservation::honoured(at(0), at(0) + time::Duration::seconds(45));
+        let rated = rate_reservation(&t, &brief);
+        assert_eq!(
+            rated.total().to_string(),
+            "0.06 EUR",
+            "45 s at 5.00/h, charged"
+        );
+        assert!(
+            !rated
+                .notes
+                .iter()
+                .any(|n| matches!(n, RatingNote::DurationBelowResolution { .. })),
+            "{:?}",
+            rated.notes
+        );
+
+        // …and the floor still governs the session beside it, on the same
+        // tariff object, because that duration *is* a measured value.
+        let session = Chargeable::new(vec![
+            Period::charging(at(0), at(30), kwh("15")),
+            Period::parked(at(30), at(30) + time::Duration::seconds(45)),
+        ])
+        .unwrap();
+        let occupancy = Tariff::simple(
+            "occupancy".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
+            vec![PriceComponent::new(Dimension::ParkingTime, dec("5.00"))],
+        );
+        assert!(
+            rate(&occupancy, &session)
+                .notes
+                .iter()
+                .any(|n| matches!(n, RatingNote::DurationBelowResolution { .. })),
+        );
+    }
+
+    #[test]
+    fn a_block_rounding_states_its_figures_in_the_unit_a_difference_is_exact_in() {
+        // The note is read by `emob_cdr::validate`, which subtracts the block
+        // from what was billed to find out what was delivered. In hours that
+        // subtraction is two rounded quotients — 2100 s is `0.5833…` h in every
+        // scale there is — so the figures are base units and the division to the
+        // unit a driver reads happens in `Display` (D258).
+        let t = Tariff::simple(
+            "blocks".parse().unwrap(),
+            Currency::EUR,
+            TariffKind::AdHoc,
+            TimeZone::new("Europe/Berlin").unwrap(),
+            vec![PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_step_size(3600)],
+        );
+        let s = Chargeable::new(vec![Period::parked(at(0), at(35))]).unwrap();
+        let rated = rate(&t, &s);
+
+        let note = rated
+            .notes
+            .iter()
+            .find_map(|n| match n {
+                RatingNote::RoundedToBlock { actual, billed, .. } => Some((*actual, *billed)),
+                _ => None,
+            })
+            .expect("the block rounded");
+        assert_eq!(note, (dec("2100"), dec("3600")), "whole seconds, exactly");
+        assert_eq!(
+            rated.block_surplus_for(Dimension::ParkingTime),
+            dec("1500"),
+            "and the difference is exact, which it is not in hours"
+        );
+        // The sentence a driver reads is still in hours.
+        assert!(
+            rated.reasons().any(|r| r.ends_with(" h")),
+            "{:?}",
+            rated.reasons().collect::<Vec<_>>()
+        );
+
+        // The identity the record is checked against: what was billed, less the
+        // block, plus what nothing priced, is what was there.
+        assert_eq!(
+            rated.accounted_quantity_for(Dimension::ParkingTime),
+            dec("2100")
+        );
+    }
+
+    #[test]
+    fn what_a_rating_says_was_delivered_is_what_it_charged_plus_what_it_gave_away() {
+        // "The first 10 kWh are free, then 0.49" — written the way `[OCPI 2.3.0
+        // §Tariff]`'s per-dimension rule invites, with no unrestricted energy
+        // element behind it. The rating charges twenty of thirty kilowatt-hours
+        // and reports the ten it did not, and the sum of the two is the session.
+        //
+        // Before this identity existed, `emob_cdr::validate` compared the billed
+        // figure alone against the record and **blocked** it — so a lawful
+        // promotional tariff produced a record the builder emitted and the
+        // validator refused, and `emob-billing` would not invoice the month
+        // (D258).
+        let t = Tariff {
+            id: "promo".parse().unwrap(),
+            currency: Currency::EUR,
+            kind: TariffKind::AdHoc,
+            time_zone: TimeZone::new("Europe/Berlin").unwrap(),
+            tax_included: TaxIncluded::Yes,
+            elements: vec![TariffElement {
+                components: vec![PriceComponent::new(Dimension::Energy, dec("0.49"))],
+                restrictions: Restrictions {
+                    min_kwh: Some(dec("10")),
+                    ..Restrictions::default()
+                },
+            }],
+            min_price: None,
+            max_price: None,
+            valid_from: None,
+            valid_until: None,
+        };
+        let s = Chargeable::energy_only(kwh("30.000"), at(0), at(60)).unwrap();
+        let rated = rate(&t, &s);
+
+        assert_eq!(rated.base_quantity_for(Dimension::Energy), dec("20.000"));
+        assert_eq!(rated.unpriced_for(Dimension::Energy), dec("10.000"));
+        assert_eq!(rated.block_surplus_for(Dimension::Energy), Decimal::ZERO);
+        assert_eq!(
+            rated.accounted_quantity_for(Dimension::Energy),
+            dec("30.000"),
+            "the whole session is accounted for: charged, or named as unpriced"
+        );
+        assert_eq!(rated.total().to_string(), "9.80 EUR");
     }
 
     #[test]

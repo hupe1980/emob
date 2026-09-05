@@ -40,6 +40,34 @@ let (rate, notes) = emob_poi::rate::publish(&tariff, "rate-1");
 // …reaches the feed as `"value": 0.49`, not 0.49000000000000000222.
 ```
 
+## …and one inventory, two audiences
+
+The same argument reaches the *connectors*. A point states its interfaces to the
+national access point in `[DATEX-II-Profil Tab. A.88]`'s spelling, and to the
+regulator, because `[AFIR Art. 21(1)]` makes the interface a **duty** —
+`[AFIR Anh. II 1.1]` and `[AFIR Anh. II 1.2]` ask for at least Type 2 on AC and
+at least CCS Combo 2 on DC, and `[LSV26 §5(3)]` lets the Bundesnetzagentur forbid
+the operation of a point over it.
+
+So `ConnectorType` is `emob-core`'s and re-exported here, and
+`ChargingPoint::profile` builds the compliance profile the calendar judges out of
+the inventory's own list:
+
+```rust
+let profile = point.profile(commissioned_on, Accessibility::Public);
+// A CHAdeMO-only DC post: ordinary hardware, and a closable breach.
+assert_eq!(
+    assess(&profile, on).status_of(ObligationId::AfirAnnexIiConnector),
+    Some(Status::Failing),
+);
+```
+
+What the bridge does **not** do is guess. Notice dates, metering posture, price
+indication and the ownership arrangement live in a register export, a type
+approval and a contract; they stay at `ChargePointProfile::bare`'s value for the
+caller to state, because a bridge that invented one would put the fault it exists
+to remove one layer further in.
+
 ## What the profile cannot say, and is told to say anyway
 
 `[DATEX-II-Profil Tab. A.116]` offers six price types: `basePrice`, `flatRate`,
@@ -49,8 +77,18 @@ of them are reported rather than papered over.
 **There is no per-hour price type.** A tariff is written and displayed per hour;
 the profile only counts minutes. The conversion is a division by sixty, and
 publishing the hourly number under `pricePerMinute` overstates the price
-sixtyfold. Where the division does not terminate, the exact hourly price goes
-into `additionalInformation` beside the rounded one and a `RateNote` says so.
+sixtyfold.
+
+Where the division does not terminate there is no per-minute price to publish at
+all. `2.50` an hour is `0.041666…` a minute; `Decimal` states twenty-eight places
+of it, which is not an amount of money, and rounding to the currency's own two is
+a price the operator does not charge `[PAngV]`. `check_afir` calls such a tariff
+unlawful ad-hoc for exactly that reason and the OCPP 2.1 crossing refuses it
+outright — but a feed cannot refuse, because publishing is the duty
+`[AFIR Art. 20(2)(c)]`. So it states what the price **is**: the hourly figure,
+under `other`, with the unit in `additionalInformation`, and a `RateNote` naming
+the dimension. That is the same answer the occupancy fee below already gives for
+the same reason.
 
 **There is no occupancy price type.** `[AFIR Art. 5(4)]` explicitly permits a
 fee per minute for time connected and *not* charging, at points of 50 kW and
@@ -106,7 +144,7 @@ point.report(PointStatus::Removed)        // Ok — the register's own answer
 `ChargingPoint::report` is the only constructor, and it reads the lifecycle off
 the point rather than taking it beside the status — a constructor given both is
 one a caller satisfies by handing over the lifecycle that makes the status legal
-(D217). The document cannot be built.
+. The document cannot be built.
 
 ## The silence between the two publications
 

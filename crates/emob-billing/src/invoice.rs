@@ -83,7 +83,7 @@
 //! charge they remember finds it; a partner disputing one finds the same row.
 
 use emob_cdr::{Cdr, CdrKey, CdrLedger, Cost};
-use emob_core::{Crossing, Currency, Energy, Money};
+use emob_core::{CdrId, Crossing, Currency, Energy, Money, PartyId};
 use emob_tariff::{Dimension, Rated};
 use rust_decimal::Decimal;
 
@@ -320,6 +320,22 @@ pub struct InvoiceLine {
     /// one, because they are two different statements and an invoice that makes
     /// the wrong one comes back (D183).
     pub vat_rate: Option<Decimal>,
+    /// The VAT category this line's supply falls in — BT-151.
+    ///
+    /// # Why this is on the line and not on the document
+    ///
+    /// It was on the document, and that was right for every invoice this crate
+    /// could build: an invoice is assembled from rated CDRs and every one of
+    /// them is electricity, so one supply meant one treatment. C-60/23 is where
+    /// that stops — a periodic subscription is a **separate and independent**
+    /// supply of services beside the electricity, and a service follows a
+    /// different place-of-supply rule, so one document carries two categories at
+    /// two rates in two countries (D269).
+    ///
+    /// EN 16931 has always modelled it this way: BT-151 is a *line* field and
+    /// BG-23 repeats. What changed is that this crate can now build the document
+    /// the standard was already shaped for.
+    pub vat_category: VatCategory,
     /// The line's **net** amount, rounded to the currency's minor unit —
     /// BT-131.
     pub net: Decimal,
@@ -381,6 +397,53 @@ impl InvoiceLine {
     }
 }
 
+/// A periodic fee an e-mobility provider charges its own driver.
+///
+/// # Not a session, and deliberately not derived from one
+///
+/// C-60/23 turns on the fact that this is charged *"regardless of whether the
+/// user actually purchased electricity during the relevant period"*. It has no
+/// record behind it, no meter, no evidence and no `[MessEG §33]` question,
+/// because it rests on no measured value — which is the same reasoning that
+/// already lets a session fee onto a document without one (D232), applied to a
+/// supply that is not electricity at all.
+///
+/// The amount is **net**, because BT-131 is and because a subscription is quoted
+/// as a price rather than derived from a tariff: there is no `Rated` to strip a
+/// gross figure out of and no basis to read one from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Subscription {
+    /// What it is, in words a driver recognises — BT-153.
+    pub description: String,
+    /// The net amount for the period.
+    pub net: Decimal,
+    /// The first day it covers — BT-134.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::date"))]
+    pub from: time::Date,
+    /// …and the last — BT-135.
+    #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::date"))]
+    pub to: time::Date,
+}
+
+impl Subscription {
+    /// A fee for one period.
+    #[must_use]
+    pub fn new(
+        description: impl Into<String>,
+        net: Decimal,
+        from: time::Date,
+        to: time::Date,
+    ) -> Self {
+        Self {
+            description: description.into(),
+            net,
+            from,
+            to,
+        }
+    }
+}
+
 /// Whether a document-level adjustment reduces or increases the taxable
 /// amount — BG-20 or BG-21.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,6 +500,12 @@ pub struct DocumentAdjustment {
     pub amount: Decimal,
     /// What it came to exactly, before the document rounded it.
     pub exact_amount: Decimal,
+    /// BT-95 / BT-102 — the category it falls in.
+    ///
+    /// One allowance sits in one category `[BR-S-08]`, and which one is
+    /// `emob_tariff::Adjustment::vat`'s answer carried through: a bound is
+    /// economically more of whatever that session mostly was.
+    pub vat_category: VatCategory,
     /// BT-96 / BT-103 — the rate it is taxed at, absent under the one category
     /// that states none. See [`InvoiceLine::vat_rate`].
     pub vat_rate: Option<Decimal>,
@@ -462,7 +531,7 @@ pub const fn unit_code(dimension: Dimension) -> &'static str {
 }
 
 /// One VAT category of an invoice — BG-23.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TaxSubtotal {
     /// The category — BT-118.
@@ -476,6 +545,23 @@ pub struct TaxSubtotal {
     pub taxable: Decimal,
     /// The tax on it — BT-117.
     pub tax: Decimal,
+    /// Why this category levies no tax — BT-120.
+    ///
+    /// On the subtotal because that is where the standard puts it: BT-120 is a
+    /// field of BG-23, and BG-23 repeats. It was on the document, which worked
+    /// while a document had one treatment and states the wrong thing the moment
+    /// it has two — a reverse-charged subscription beside standard-rated
+    /// electricity needs the sentence on the group it explains and nowhere else
+    /// (D269).
+    pub exemption_reason: Option<String>,
+    /// Where this category's supply is taxed.
+    ///
+    /// Not an EN 16931 field. Carried because it is the *conclusion*
+    /// [`TaxTreatment::decide`] and [`TaxTreatment::decide_service`] reached, and
+    /// a document whose stated rate and stated place of supply belong to two
+    /// different countries is one that reconciles against nothing — which is a
+    /// thing an auditor asks and the standard has no room for.
+    pub place_of_supply: String,
 }
 
 /// What a billing document is — BT-3, and the UBL root element.
@@ -552,10 +638,35 @@ pub struct Cancelled {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DocumentNote {
-    /// Which record it is about.
-    pub cdr: CdrKey,
-    /// What the rating said.
+    /// Which record it is about, where it is about one.
+    ///
+    /// `None` for a note about the **document** rather than a session — the
+    /// reason a `Stornorechnung` was issued is the case this crate makes, and a
+    /// reason tagged with a record would tell the reader the cancellation was
+    /// about that one session when it reverses the whole month.
+    pub cdr: Option<CdrKey>,
+    /// What the rating, or the issuer, said.
     pub text: String,
+}
+
+impl DocumentNote {
+    /// A note about one record.
+    #[must_use]
+    pub fn about(cdr: CdrKey, text: impl Into<String>) -> Self {
+        Self {
+            cdr: Some(cdr),
+            text: text.into(),
+        }
+    }
+
+    /// A note about the document as a whole.
+    #[must_use]
+    pub fn on_the_document(text: impl Into<String>) -> Self {
+        Self {
+            cdr: None,
+            text: text.into(),
+        }
+    }
 }
 
 /// An invoice for a period, or the credit note that cancels one.
@@ -615,8 +726,14 @@ pub struct Invoice {
     pub buyer: Counterparty,
     /// The one currency every amount is in — BT-5.
     pub currency: Currency,
-    /// The tax treatment every line carries, and why.
-    pub treatment: TaxTreatment,
+    /// Whether this document's tax statement admits anything beside itself.
+    ///
+    /// `O` — outside the scope of VAT — is the one category `BR-O-11` … `BR-O-14`
+    /// forbid to share a document, and [`VatCategory::is_exclusive`] is the
+    /// standard's own predicate for it rather than this crate's reading. Kept as
+    /// a derived flag so a reader of an [`Invoice`] can see the constraint the
+    /// builder enforced without re-deriving it from the breakdown.
+    pub exclusive_category: bool,
     /// The lines — BG-25.
     pub lines: Vec<InvoiceLine>,
     /// The document level allowances and charges — BG-20 and BG-21.
@@ -785,12 +902,15 @@ impl Invoice {
         &self,
         number: impl Into<String>,
         issued_on: time::Date,
+        reason: impl Into<String>,
     ) -> Result<Self, BillingError> {
         if self.kind.is_credit_note() {
             return Err(BillingError::NotCancellable {
                 number: self.number.clone(),
             });
         }
+        let mut notes = self.notes.clone();
+        notes.insert(0, DocumentNote::on_the_document(reason));
         Ok(Self {
             kind: DocumentKind::CreditNote,
             cancels: Some(Cancelled {
@@ -799,6 +919,7 @@ impl Invoice {
             }),
             number: number.into(),
             issued_on,
+            notes,
             ..self.clone()
         })
     }
@@ -834,6 +955,7 @@ pub struct InvoiceBuilder<'a> {
     seller: Counterparty,
     buyer: Counterparty,
     treatment: Option<TaxTreatment>,
+    subscriptions: Vec<Subscription>,
     point_country: String,
     rates: VatRates,
     records: Vec<&'a Cdr>,
@@ -865,6 +987,7 @@ impl<'a> InvoiceBuilder<'a> {
             seller,
             buyer,
             treatment: None,
+            subscriptions: Vec::new(),
             point_country,
             rates: VatRates::new(),
             records: Vec::new(),
@@ -939,6 +1062,39 @@ impl<'a> InvoiceBuilder<'a> {
         self
     }
 
+    /// Bill a periodic fee that is **not electricity**.
+    ///
+    /// # The line C-60/23 keeps apart
+    ///
+    /// *Digital Charging Solutions* (C-60/23, 17 October 2024) describes exactly
+    /// this document: a provider that bills its users *"first for the quantity
+    /// of electricity supplied on a monthly basis, and second for access to the
+    /// network and adjacent services"*, where the fixed fee is charged
+    /// *"regardless of whether the user actually purchased electricity during
+    /// the relevant period"*. The Court held the access to be a **separate and
+    /// independent** supply of services.
+    ///
+    /// Separate means it does not follow the electricity anywhere. Electricity
+    /// is a good and lands where Article 38 or 39 puts it; the fee is a service
+    /// and lands where `[UStG §3a]` puts it — for a private driver where the
+    /// **supplier** is established, for a business customer where the
+    /// **customer** is. One document, two places of supply, and in general two
+    /// categories at two rates.
+    ///
+    /// Its treatment is decided here from the parties rather than taken as an
+    /// argument, for the same reason the electricity's is: it is a conclusion
+    /// drawn from facts about the two companies, and a field somebody fills in
+    /// is a field somebody fills in wrongly.
+    ///
+    /// A subscription needs **no** records. It is charged whether or not the
+    /// driver ever plugged in — the fact the Court turned on — so an invoice
+    /// that is nothing but subscriptions is a lawful invoice.
+    #[must_use]
+    pub fn subscription(mut self, subscription: Subscription) -> Self {
+        self.subscriptions.push(subscription);
+        self
+    }
+
     /// State the tax treatment outright instead of deriving it from the
     /// parties.
     #[must_use]
@@ -966,6 +1122,34 @@ impl<'a> InvoiceBuilder<'a> {
         self
     }
 
+    /// Append the subscription lines, and the treatment that governs them.
+    ///
+    /// The **services** treatment beside the goods one, which C-60/23 keeps
+    /// apart and which lands somewhere else entirely. Decided once for the whole
+    /// set: a provider's subscriptions to one customer are one supply
+    /// relationship, however many periods are billed at a time.
+    fn append_subscriptions(
+        &self,
+        lines: &mut Vec<InvoiceLine>,
+        goods: TaxTreatment,
+    ) -> Result<Vec<TaxTreatment>, BillingError> {
+        let mut treatments = vec![goods];
+        if self.subscriptions.is_empty() {
+            return Ok(treatments);
+        }
+        let service = TaxTreatment::decide_service(&self.seller.tax, &self.buyer.tax, &self.rates)?;
+        let start = lines.len();
+        for (offset, subscription) in self.subscriptions.iter().enumerate() {
+            lines.push(subscription_line(
+                subscription,
+                start + offset + 1,
+                &service,
+            ));
+        }
+        treatments.push(service);
+        Ok(treatments)
+    }
+
     /// Build it, with the account of what the rounding cost.
     ///
     /// # Errors
@@ -979,10 +1163,13 @@ impl<'a> InvoiceBuilder<'a> {
         refuse_superseded(&self.records)?;
         refuse_export(&self.records)?;
         refuse_unsettleable(&self.records)?;
+        refuse_uncarryable_bound(&self.records)?;
         refuse_unverifiable(&self.records, &self.point_country)?;
 
         let currency = first_currency(&self.records)?;
-        let treatment = match self.treatment {
+        // The **goods** treatment, which governs every line that came out of a
+        // rated record. A caller whose own tax engine decided states it.
+        let treatment = match self.treatment.clone() {
             Some(treatment) => treatment,
             None => TaxTreatment::decide(
                 &self.seller.tax,
@@ -1005,12 +1192,23 @@ impl<'a> InvoiceBuilder<'a> {
             },
             &mut crossing,
         )?;
+        let mut lines = lines;
+        let treatments = self.append_subscriptions(&mut lines, treatment)?;
 
         if lines.is_empty() {
             return Err(BillingError::NoLines);
         }
 
-        let tax = breakdown(&lines, &adjustments, &treatment, currency);
+        // `BR-O-11` … `BR-O-14`: `O` is the one category that may not share a
+        // document, and `VatCategory::is_exclusive` is the standard's own
+        // predicate for it rather than this crate's reading of the rules. A
+        // subscription outside the scope of EU VAT beside standard-rated
+        // electricity is a document no validator accepts, and refusing it here
+        // names the two supplies rather than leaving `to_en16931` to report a
+        // rule id (D269).
+        let exclusive_category = refuse_mixed_exclusive(&treatments)?;
+
+        let tax = breakdown(&lines, &adjustments, &treatments, currency);
         // What the records came to, exactly: the lines, less what the bounds
         // took off them and plus what they added.
         let exact_taxable: Decimal = lines.iter().map(|line| line.exact_net).sum::<Decimal>()
@@ -1032,7 +1230,7 @@ impl<'a> InvoiceBuilder<'a> {
             seller: self.seller,
             buyer: self.buyer,
             currency,
-            treatment,
+            exclusive_category,
             lines,
             adjustments,
             tax,
@@ -1195,6 +1393,64 @@ fn refuse_unsettleable(records: &[&Cdr]) -> Result<(), BillingError> {
     Ok(())
 }
 
+/// Refuse a record whose bound no set of allowances can carry.
+///
+/// # The document that passes every rule and is still unacceptable
+///
+/// `BR-S-08` makes a VAT category's taxable amount its lines minus its
+/// allowances, and a cut deeper than a category's own lines drives BT-116
+/// negative. Nothing in the standard forbids it: the invoice reconciles, the
+/// totals chain holds, `to_en16931` produces the document and **all 317 rules
+/// pass** — and no tax office accepts a negative taxable amount under a positive
+/// invoice (D283).
+///
+/// For a record this workspace rated that case no longer arises.
+/// `emob_tariff::Rated::adjustment_parts` draws the bound from as many
+/// categories as it needs (BG-20 is repeatable) and `bound` solves the price
+/// against the same walk, so the parts sum to the bound and no part is deeper
+/// than its own category (D284).
+///
+/// What remains is the door those values arrive by. A `Rated` **deserialised**
+/// from a partner's document went through no rating and no clamp, so its
+/// adjustment can exceed everything the record charges — and then the split has
+/// a remainder it leaves on the first part rather than losing. That is the
+/// record this refuses, by the same rule the document is built with: **no part
+/// deeper than its own category.**
+///
+/// Both parts of a record are checked. A reservation is priced against its own
+/// window by its own elements and `rate_reservation` sets no bound today — but
+/// "today" is the shape of a bug that comes back, and the loop costs nothing.
+fn refuse_uncarryable_bound(records: &[&Cdr]) -> Result<(), BillingError> {
+    for cdr in records {
+        let Some(cost) = &cdr.cost else { continue };
+        for rated in core::iter::once(&cost.rated).chain(cost.reservation.as_ref()) {
+            for part in rated.adjustment_parts() {
+                // Only a cut can take a category below zero; a minimum adds.
+                if !part.amount.is_sign_negative() {
+                    continue;
+                }
+                let available: Decimal = rated
+                    .lines
+                    .iter()
+                    .filter(|line| line.vat == part.vat)
+                    .map(|line| line.amount)
+                    .sum();
+                let shortfall = available + part.amount;
+                if shortfall.is_sign_negative() {
+                    return Err(BillingError::AdjustmentExceedsCategory {
+                        cdr: cdr.key.to_string(),
+                        vat: part.vat,
+                        amount: part.amount,
+                        available,
+                        shortfall,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a record of energy that flowed **out** of the vehicle.
 ///
 /// # Why this is a refusal rather than a sign
@@ -1348,6 +1604,7 @@ fn assemble(
                 basis,
                 &mut lines,
                 &mut adjustments,
+                crossing,
             );
         }
         note_rounding(cdr, &lines[before..], before, crossing);
@@ -1360,10 +1617,7 @@ fn assemble(
         for rated in core::iter::once(&cost.rated).chain(cost.reservation.as_ref()) {
             for note in &rated.notes {
                 if note.concerns_the_payer() {
-                    notes.push(DocumentNote {
-                        cdr: cdr.key.clone(),
-                        text: note.to_string(),
-                    });
+                    notes.push(DocumentNote::about(cdr.key.clone(), note.to_string()));
                 } else {
                     crossing.note(
                         format!("/lines/{before}"),
@@ -1482,6 +1736,7 @@ fn record_lines(
     basis: &Basis<'_>,
     into: &mut Vec<InvoiceLine>,
     adjustments: &mut Vec<DocumentAdjustment>,
+    crossing: &mut Crossing<()>,
 ) {
     let (cdr, rated) = (supply.cdr, supply.rated);
     let (treatment, currency) = (basis.treatment, basis.currency);
@@ -1498,15 +1753,45 @@ fn record_lines(
         // a document whose price does not reproduce its own line is one a
         // Peppol access point returns (`R120`).
         let rate = effective_rate(line.vat, treatment);
+        // A tariff written for a German estate and priced at a French point
+        // states 19 % inside a supply France taxes at 20 % — the case
+        // `[UStG §3g]` creates. The tariff's rate governs, because this crate
+        // never moves a gross price and overriding would change what the driver
+        // pays; the disagreement is reported rather than settled in silence,
+        // because ignoring it leaves a document whose place of supply and rate
+        // belong to two different countries (D271).
+        if let Some(stated) = line.vat
+            && treatment.category.carries_tax()
+            && stated != treatment.rate
+        {
+            crossing.note(
+                format!("/lines/{position}"),
+                format!(
+                    "this line is taxed at the {stated} % the tariff quotes and its supply is \
+                     taxed in {} at {} %: the gross price a driver was shown is not moved, so the \
+                     document states a rate the place of supply does not levy",
+                    treatment.place_of_supply, treatment.rate
+                ),
+            );
+        }
         let unit_price = net_of(line.unit_price, rate, rated.tax_included);
         let base_quantity = emob_tariff::Line::base_units_per_unit(line.dimension);
-        // Derived from the two figures the document states, so the identity
-        // `BT-131 = BT-129 × BT-146 ÷ BT-149` holds by construction rather than
-        // to within a rounding.
+        // Derived from the two figures the document states, so
+        // `BT-129 × BT-146 ÷ BT-149` is this line's own arithmetic rather than a
+        // second computation of it — `InvoiceLine::reconciles` is that identity,
+        // and BT-131 is this figure rounded to the minor unit once, below.
+        //
+        // BT-146 is the one amount on the document EN 16931 puts **no** decimal
+        // cap on (Table 26), which is what lets a gross tariff's net price stay
+        // as exact as `Decimal` can state it: `0.49 / 1.19` does not terminate,
+        // and every place kept here is a place the residual does not have to
+        // carry. The two amounts beside it are capped at two, and both are
+        // rounded.
         let exact_net = line.base_quantity * unit_price / base_quantity;
 
         into.push(InvoiceLine {
             vat_rate: stated_rate(rate, treatment),
+            vat_category: treatment.category,
             id: format!("{ordinal}.{position}"),
             cdr: cdr.key.clone(),
             dimension: line.dimension,
@@ -1538,12 +1823,49 @@ fn record_lines(
         });
     }
 
+    record_adjustments(supply, ordinal, position, basis, first, into, adjustments);
+}
+
+/// The bound's document-level allowances — one per VAT category it is drawn
+/// from.
+///
+/// A minimum or maximum is a term of the **total** rather than of any one line,
+/// and a maximum moves it down — which as a line would be a negative BT-146 and
+/// an invoice `BR-27` refuses outright. EN 16931 models it as a document level
+/// allowance or charge; see [`DocumentAdjustment`].
+///
+/// Split out of [`record_lines`] when the bound stopped being one allowance
+/// (D284): the lines answer *what was supplied*, and this answers *what the
+/// tariff's own limits did to the total*, which is a different question with a
+/// different failure mode.
+fn record_adjustments(
+    supply: &Supply<'_>,
+    ordinal: usize,
+    position: &mut usize,
+    basis: &Basis<'_>,
+    first: usize,
+    into: &mut Vec<InvoiceLine>,
+    adjustments: &mut Vec<DocumentAdjustment>,
+) {
+    let (cdr, rated) = (supply.cdr, supply.rated);
+    let (treatment, currency) = (basis.treatment, basis.currency);
+    let description = describe(cdr);
+    let round = |amount: Decimal| Money::new(amount, currency).round_to_minor_unit().amount();
+
     // A minimum or maximum is a term of the **total** rather than of any one
     // line, and a maximum moves it down — which as a line would be a negative
     // BT-146 and an invoice `BR-27` refuses outright. EN 16931 models it as a
     // document level allowance or charge; see `DocumentAdjustment`.
     if let Some(adjustment) = rated.adjustment {
         let rate = effective_rate(adjustment.vat, treatment);
+        // **Where the bound lands, category by category.** One part in the
+        // ordinary case; several where a cut is deeper than the category
+        // `Adjustment::vat` names, because BG-20 is repeatable and BR-S-08
+        // would otherwise state a negative taxable amount (D283, D284). The
+        // split is `emob-tariff`'s, computed against the same walk the price
+        // was solved along, so the document and the total agree by
+        // construction rather than by a second reading here.
+        let parts = rated.adjustment_parts();
         // What this record's lines state on the document, and what the bound
         // says the record comes to. Both rounded, so the document reaches the
         // tariff's own figure exactly rather than a cent past it.
@@ -1556,12 +1878,22 @@ fn record_lines(
         // category — and wrong on any other: a session priced at 19 % beside a
         // fee at 7 % had its 7 % half divided by 1.19 as well, and the document
         // came out €1.20 under a €100.00 session (D248). The lines a few lines
-        // above already strip **per line**; the bound is one further amount in
-        // one further category, so it is stripped on its own and added, and the
-        // two halves of this function now read the same rule.
+        // above already strip **per line**; each part of the bound is one
+        // further amount in one further category, so each is stripped on its
+        // own and added, and the two halves of this function read one rule.
         let stated: Decimal = into[first..].iter().map(|line| line.net).sum();
         let exact_lines: Decimal = into[first..].iter().map(|line| line.exact_net).sum();
-        let adjustment_net = net_of(adjustment.amount, rate, rated.tax_included);
+        let part_nets: Vec<Decimal> = parts
+            .iter()
+            .map(|part| {
+                net_of(
+                    part.amount,
+                    effective_rate(part.vat, treatment),
+                    rated.tax_included,
+                )
+            })
+            .collect();
+        let adjustment_net: Decimal = part_nets.iter().sum();
         let exact_target = exact_lines + adjustment_net;
         let signed = stated - round(exact_target);
         // Which is `-adjustment_net`, written as the difference so that the
@@ -1578,6 +1910,7 @@ fn record_lines(
             *position += 1;
             into.push(InvoiceLine {
                 vat_rate: stated_rate(rate, treatment),
+                vat_category: treatment.category,
                 id: format!("{ordinal}.{position}"),
                 cdr: cdr.key.clone(),
                 dimension: Dimension::Flat,
@@ -1598,38 +1931,143 @@ fn record_lines(
         }
 
         if !signed.is_zero() || !exact_signed.is_zero() {
-            // Which side of the totals chain this sits on, from the figure that
-            // has a side. The rounded difference is the document's, so it
-            // decides — but it can be zero while the exact one is not, because
-            // both ends round to the same minor unit, and then `is_sign_negative`
-            // on a zero says "Allowance" about a bound that moved the total *up*.
-            //
-            // The document is unharmed either way — the amount is 0.00 — but
-            // `exact_amount` is signed by `kind`, so the wrong side subtracts a
-            // residual it should add and `rounding_residual` reports twice the
-            // difference against a document that is exactly right. Rounding is
-            // monotonic, so the two figures can only disagree through zero:
-            // where the rounded one has no side, the exact one is the only one
-            // left to ask.
-            let direction = if signed.is_zero() {
-                exact_signed
-            } else {
-                signed
-            };
-            let kind = if direction.is_sign_negative() {
-                DocumentAdjustmentKind::Charge
-            } else {
-                DocumentAdjustmentKind::Allowance
-            };
-            adjustments.push(DocumentAdjustment {
-                kind,
-                cdr: cdr.key.clone(),
-                amount: signed.abs(),
-                exact_amount: exact_signed.abs(),
-                vat_rate: stated_rate(rate, treatment),
-                reason: format!("{description} — {}", adjustment_name(adjustment.kind)),
-            });
+            // **The rounded total is the document's, and it is shared out.**
+            // `signed` is a difference of two figures the document already
+            // prints, which is what makes the invoice reach the tariff's own
+            // total exactly rather than a cent past it — so it cannot be
+            // re-derived per part. Each part takes its own rounded share and
+            // the largest one carries whatever the rounding left over, because
+            // it is by construction the part with the most room under it.
+            let mut shares: Vec<Decimal> = part_nets.iter().map(|net| round(-net)).collect();
+            if let Some(index) = largest_share(&shares) {
+                let allocated: Decimal = shares.iter().sum();
+                shares[index] += signed - allocated;
+            }
+
+            for ((part, share), exact) in parts.iter().zip(&shares).zip(&part_nets) {
+                let exact_share = -exact;
+                if share.is_zero() && exact_share.is_zero() {
+                    continue;
+                }
+                // Which side of the totals chain this sits on, from the figure
+                // that has a side. The rounded difference is the document's, so
+                // it decides — but it can be zero while the exact one is not,
+                // because both ends round to the same minor unit, and then
+                // `is_sign_negative` on a zero says "Allowance" about a bound
+                // that moved the total *up*.
+                //
+                // The document is unharmed either way — the amount is 0.00 —
+                // but `exact_amount` is signed by `kind`, so the wrong side
+                // subtracts a residual it should add and `rounding_residual`
+                // reports twice the difference against a document that is
+                // exactly right. Rounding is monotonic, so the two figures can
+                // only disagree through zero: where the rounded one has no
+                // side, the exact one is the only one left to ask.
+                let direction = if share.is_zero() { exact_share } else { *share };
+                let kind = if direction.is_sign_negative() {
+                    DocumentAdjustmentKind::Charge
+                } else {
+                    DocumentAdjustmentKind::Allowance
+                };
+                adjustments.push(DocumentAdjustment {
+                    kind,
+                    vat_category: treatment.category,
+                    cdr: cdr.key.clone(),
+                    amount: share.abs(),
+                    exact_amount: exact_share.abs(),
+                    vat_rate: stated_rate(effective_rate(part.vat, treatment), treatment),
+                    reason: format!("{description} — {}", adjustment_name(adjustment.kind)),
+                });
+            }
         }
+    }
+}
+
+/// The part that carries the rounding residual: the largest share by magnitude.
+///
+/// It has the most room under it, so a cent moved onto it cannot take a
+/// category below what its lines hold — which is the whole reason the bound was
+/// split in the first place.
+fn largest_share(shares: &[Decimal]) -> Option<usize> {
+    shares
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.abs().cmp(&right.abs()))
+        .map(|(index, _)| index)
+}
+
+/// Refuse a document whose categories cannot share one, and say which two.
+///
+/// `BR-O-11` … `BR-O-14` make `O` — outside the scope of VAT — exclusive: no
+/// second breakdown group, no line, allowance or charge in another category.
+/// [`VatCategory::is_exclusive`] is `en16931`'s own predicate, generated from the
+/// CEN artefacts, so this crate states the *consequence* and not the rule.
+///
+/// Returns whether the document's statement is an exclusive one, which is what a
+/// reader needs to know before asking whether it may carry a VAT identifier.
+fn refuse_mixed_exclusive(treatments: &[TaxTreatment]) -> Result<bool, BillingError> {
+    let mut categories: Vec<VatCategory> = treatments.iter().map(|t| t.category).collect();
+    categories.sort_unstable_by_key(|category| category.code());
+    categories.dedup();
+
+    let exclusive = categories.iter().copied().find(|c| c.is_exclusive());
+    match (exclusive, categories.len()) {
+        (Some(_), 1) => Ok(true),
+        (Some(exclusive), _) => Err(BillingError::NoTaxTreatment {
+            reason: format!(
+                "this document states category {} and {}, and {} may not share a document with \
+                 any other [BR-O-11..14]: the electricity and the subscription are taxed in two \
+                 places and only one of them is inside the scope of EU VAT, so they are two \
+                 documents",
+                exclusive.code(),
+                categories
+                    .iter()
+                    .filter(|c| !c.is_exclusive())
+                    .map(|c| c.code().to_owned())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                exclusive.code(),
+            ),
+        }),
+        (None, _) => Ok(false),
+    }
+}
+
+/// One subscription, as the line C-60/23 keeps apart from the electricity.
+///
+/// A quantity of **one** at the fee's own price, in the unit a session fee
+/// already uses — `C62`, a dimensionless count — because a month of access is
+/// one thing supplied once and not a measured quantity of anything.
+fn subscription_line(
+    subscription: &Subscription,
+    position: usize,
+    service: &TaxTreatment,
+) -> InvoiceLine {
+    let rate = effective_rate(None, service);
+    InvoiceLine {
+        vat_rate: stated_rate(rate, service),
+        vat_category: service.category,
+        id: format!("S.{position}"),
+        // A subscription belongs to no record. The key is the document's own,
+        // and nothing downstream reads it as a session: `records()` lists what
+        // an invoice billed, and a fee that rests on no measurement is not one
+        // of them.
+        cdr: CdrKey {
+            party: PartyId::new("ZZ", "SUB").unwrap_or_else(|_| unreachable!()),
+            id: CdrId::new("subscription").unwrap_or_else(|_| unreachable!()),
+        },
+        dimension: Dimension::Flat,
+        description: subscription.description.clone(),
+        started_at: subscription.from.midnight().assume_utc(),
+        ended_at: subscription.to.midnight().assume_utc(),
+        quantity: Decimal::ONE,
+        unit_price: subscription.net,
+        base_quantity: Decimal::ONE,
+        net: subscription.net,
+        exact_net: subscription.net,
+        // A fee that rests on no measured value has no measured value to
+        // disclose the contents of `[REA 6-A §3.2]`.
+        compensated_loss: None,
     }
 }
 
@@ -1714,54 +2152,84 @@ const fn stated_rate(effective: Decimal, treatment: &TaxTreatment) -> Option<Dec
 fn breakdown(
     lines: &[InvoiceLine],
     adjustments: &[DocumentAdjustment],
-    treatment: &TaxTreatment,
+    treatments: &[TaxTreatment],
     currency: Currency,
 ) -> Vec<TaxSubtotal> {
-    // One entry per **rate**, in ascending order. The *category* is a property
-    // of the whole document — a supply is a reverse charge or it is not — and
-    // the rate is a property of the line, because electricity and a service fee
-    // can sit in different categories and EN 16931 states a taxable amount for
-    // each. An invoice that taxed both at one rate would over-declare on one of
-    // them and state a figure no accountant can reproduce.
-    let mut groups: Vec<(Option<Decimal>, Decimal)> = Vec::new();
-    let mut add = |rate: Option<Decimal>, amount: Decimal| match groups
+    // One entry per **(category, rate)**, which is what BG-23 groups on. It was
+    // per rate, with the category taken from the document — right while a
+    // document had one supply, and wrong the moment it has two: a
+    // reverse-charged subscription and standard-rated electricity can both state
+    // a rate of nothing and are not one group (D269).
+    let mut groups: Vec<((VatCategory, Option<Decimal>), Decimal)> = Vec::new();
+    let mut add = |key: (VatCategory, Option<Decimal>), amount: Decimal| match groups
         .iter_mut()
-        .find(|(group, _)| *group == rate)
+        .find(|(group, _)| *group == key)
     {
         Some((_, taxable)) => *taxable += amount,
-        None => groups.push((rate, amount)),
+        None => groups.push((key, amount)),
     };
     for line in lines {
-        add(line.vat_rate, line.net);
+        add((line.vat_category, line.vat_rate), line.net);
     }
     // `BR-S-08` and its nine siblings: a category's taxable amount is the sum
     // of its lines **minus** the allowances and **plus** the charges in it.
     for adjustment in adjustments {
         add(
-            adjustment.vat_rate,
+            (adjustment.vat_category, adjustment.vat_rate),
             adjustment.kind.sign() * adjustment.amount,
         );
     }
-    groups.sort_by_key(|(rate, _)| *rate);
+    groups.sort_by(|((left, left_rate), _), ((right, right_rate), _)| {
+        left.code()
+            .cmp(right.code())
+            .then(left_rate.cmp(right_rate))
+    });
 
     groups
         .into_iter()
-        .map(|(rate, taxable)| TaxSubtotal {
-            category: treatment.category,
-            rate,
-            // From the category's own taxable amount, which is what `BR-CO-17`
-            // checks and `BR-S-09` computes — not the sum of per-line taxes:
-            // two lines of 0.005 each round to zero apiece and to one cent
-            // together, and the standard states the rule on the subtotal.
-            tax: match rate {
-                Some(rate) if treatment.category.carries_tax() => {
-                    Money::new(taxable * rate / HUNDRED, currency)
-                        .round_to_minor_unit()
-                        .amount()
-                }
-                _ => Decimal::ZERO,
-            },
-            taxable,
+        .map(|((category, rate), taxable)| {
+            // BT-120 and the place of supply belong to the *supply*, so they
+            // come from the treatment that produced this group rather than from
+            // the document — which no longer has one to give.
+            //
+            // Matched on the **rate** as well as the category, because two
+            // supplies can share a category and not a country: electricity taxed
+            // in France at 20 % beside a subscription taxed in Germany at 19 %
+            // is two `S` groups, and taking the first would put the French
+            // rate under a German place of supply.
+            //
+            // Falling back to the category alone where no rate matches, which is
+            // the case a tariff's own stated rate creates — the document then
+            // states a rate the place of supply does not levy, and there is a
+            // note beside it saying so (D271).
+            let stated = treatments
+                .iter()
+                .find(|t| {
+                    t.category == category && (!category.carries_tax() || Some(t.rate) == rate)
+                })
+                .or_else(|| treatments.iter().find(|t| t.category == category));
+            TaxSubtotal {
+                category,
+                rate,
+                // From the category's own taxable amount, which is what
+                // `BR-CO-17` checks and `BR-S-09` computes — not the sum of
+                // per-line taxes: two lines of 0.005 each round to zero apiece
+                // and to one cent together, and the standard states the rule on
+                // the subtotal.
+                tax: match rate {
+                    Some(rate) if category.carries_tax() => {
+                        Money::new(taxable * rate / HUNDRED, currency)
+                            .round_to_minor_unit()
+                            .amount()
+                    }
+                    _ => Decimal::ZERO,
+                },
+                taxable,
+                exemption_reason: stated.and_then(|t| t.reason.clone()),
+                place_of_supply: stated
+                    .map(|t| t.place_of_supply.clone())
+                    .unwrap_or_default(),
+            }
         })
         .collect()
 }
@@ -2062,7 +2530,12 @@ mod tests {
         );
 
         // Every note names its record, because a month carries many.
-        assert!(invoice.notes.iter().all(|n| n.cdr == cdr.key));
+        assert!(
+            invoice
+                .notes
+                .iter()
+                .all(|n| n.cdr.as_ref() == Some(&cdr.key))
+        );
 
         // And the standard accepts the document with BG-1 on it, in both
         // syntaxes CEN/TS 16931-2 makes mandatory.
@@ -2426,7 +2899,7 @@ mod tests {
         let cdr = record("c-1", "29.500", &tariff);
         let invoice = builder(&[&cdr]).build().unwrap().value;
         let storno = invoice
-            .cancellation("R-1-STORNO", date!(2026 - 08 - 15))
+            .cancellation("R-1-STORNO", date!(2026 - 08 - 15), "re-rated")
             .unwrap();
 
         assert_eq!(storno.kind, DocumentKind::CreditNote);
@@ -2451,7 +2924,7 @@ mod tests {
         // …and cancelling a cancellation is a re-issued invoice rather than a
         // second reversal, which this crate cannot tell apart.
         assert!(matches!(
-            storno.cancellation("R-1-STORNO-2", date!(2026 - 08 - 16)),
+            storno.cancellation("R-1-STORNO-2", date!(2026 - 08 - 16), "re-rated"),
             Err(BillingError::NotCancellable { .. })
         ));
     }
@@ -2462,7 +2935,7 @@ mod tests {
         let cdr = record("c-1", "29.500", &tariff);
         let invoice = builder(&[&cdr]).build().unwrap().value;
         let storno = invoice
-            .cancellation("R-1-STORNO", date!(2026 - 08 - 15))
+            .cancellation("R-1-STORNO", date!(2026 - 08 - 15), "re-rated")
             .unwrap();
 
         // BT-3 is 381 and BG-3 names the document being reversed — `BR-55`
@@ -2552,7 +3025,7 @@ mod tests {
         let cdr = record("c-1", "29.500", &tariff);
         let invoice = builder(&[&cdr]).build().unwrap().value;
         let storno = invoice
-            .cancellation("R-1-STORNO", date!(2026 - 08 - 15))
+            .cancellation("R-1-STORNO", date!(2026 - 08 - 15), "re-rated")
             .unwrap();
 
         let billed = crate::postings::postings_for(&invoice);

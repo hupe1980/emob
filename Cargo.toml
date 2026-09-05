@@ -14,8 +14,11 @@ members = [
     "crates/emob-roam",
     "crates/emob-service",
     "services/agentd",
+    "services/billd",
     "services/csmsd",
+    "services/empd",
     "services/poid",
+    "services/roamd",
     "services/tarifd",
     "xtask",
 ]
@@ -131,6 +134,7 @@ en16931-formats = { version = "0.6", default-features = false, features = ["ubl"
 # because a domain crate that reads a clock cannot be replayed (see `just
 # purity`), and a collection file that differs between two runs of one billing
 # job is a file no bank reconciles.
+doubleentry = { version = "0.7", default-features = false }
 sepa = { version = "0.6", default-features = false, features = ["time"] }
 
 # ── Eichrecht: the OCMF format ──────────────────────────────────────────────

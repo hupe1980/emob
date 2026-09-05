@@ -17,10 +17,12 @@ use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_poi::site::{
     Address, ChargingPoint, Connector, ConnectorType, Coordinates, Facility, Site,
 };
-use emob_roam::ocpi::cdr::{Context, SignedPayload, check_conserves, downgrade, to_ocpi};
+use emob_roam::ocpi::cdr::{
+    Context, Outbound, SignedPayload, check_conserves, downgrade, for_partner, to_ocpi,
+};
 use emob_roam::ocpi::inbound::from_ocpi;
 use emob_roam::ocpi::location::cdr_location;
-use emob_roam::{Partner, PartnerRegistry, Reach, RoamError, RoamingToken, TokenType};
+use emob_roam::{OcpiVersion, Partner, PartnerRegistry, Reach, RoamError, RoamingToken, TokenType};
 use emob_session::{
     Authorization, EndReason, MeterReading, MeterSeries, ReadingContext, Session, SessionState,
 };
@@ -306,6 +308,30 @@ fn one_session_settles_at_the_same_money_on_every_wire() {
         older.notes().len() >= crossing.notes().len(),
         "a downgrade never explains less than the crossing it came from"
     );
+
+    // …and the version is the **registry's**, not the caller's. `Partner`
+    // records which OCPI version a peer speaks and nothing read it, so sending a
+    // 2.3.0 document to a 2.2.1 peer was one forgotten call away (D265).
+    let legacy = Partner::emsp(PartyId::new("NL", "TNM").unwrap())
+        .on_signed_data()
+        .speaking(OcpiVersion::V2_2_1);
+    let addressed = for_partner(&cdr, &legacy, &context).expect("the same record, the older wire");
+    assert_eq!(addressed.value.version(), OcpiVersion::V2_2_1);
+    let Outbound::V2_2_1(document) = &addressed.value else {
+        panic!("the registry says 2.2.1, so the document is 2.2.1");
+    };
+    assert_eq!(document.total_energy.get().to_string(), "18.000");
+    assert_eq!(
+        addressed.notes().len(),
+        older.notes().len(),
+        "and it carries the same account the two-step path produced"
+    );
+
+    // A partner on the canonical version gets the canonical document, through
+    // the same door.
+    let current = for_partner(&cdr, &partner, &context).expect("and the newer wire");
+    assert_eq!(current.value.version(), OcpiVersion::V2_3_0);
+    assert!(matches!(current.value, Outbound::V2_3_0(_)));
 
     // ── Self-roaming ─────────────────────────────────────────────────────
     // The same path with this operator as its own provider. Nothing about the

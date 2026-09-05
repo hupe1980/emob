@@ -64,6 +64,15 @@ pub struct DisplayLine {
     pub dimension: Dimension,
     /// The price, in the unit [`Self::unit`] names.
     pub price: Decimal,
+    /// The VAT percentage the component states, when it states one.
+    ///
+    /// Carried on the line rather than on the description because
+    /// `[PAngV §2 Nr. 1]`'s *Arbeitspreis* is a price *"einschließlich der
+    /// Umsatzsteuer"* per component — and a tariff whose energy sits at one
+    /// rate and whose service fee sits at another has no single rate to gross
+    /// the display with. With the rate on the line, [`describe_gross`] can
+    /// gross a mixed tariff correctly instead of refusing it.
+    pub vat: Option<Decimal>,
 }
 
 impl DisplayLine {
@@ -255,6 +264,7 @@ pub fn describe(tariff: &Tariff, at: time::OffsetDateTime) -> PriceDescription {
             lines.push(DisplayLine {
                 dimension,
                 price: price_in_display_unit(dimension, component.price),
+                vat: component.vat,
             });
             applicable.push(index);
         }
@@ -286,6 +296,216 @@ pub fn describe(tariff: &Tariff, at: time::OffsetDateTime) -> PriceDescription {
     }
 }
 
+/// Which bound had no gross spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// The minimum a session costs.
+    Minimum,
+    /// The maximum.
+    Maximum,
+}
+
+impl core::fmt::Display for Bound {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Minimum => "minimum",
+            Self::Maximum => "maximum",
+        })
+    }
+}
+
+/// Why a net tariff cannot be shown to a consumer as a `Gesamtpreis`.
+///
+/// **Two absences, so two variants.** A description that could not be grossed
+/// because a component states no rate and one that could not be grossed because
+/// a *bound* states none are different faults with different remedies, and an
+/// `Option` collapsing them would be the shape this workspace keeps finding
+/// (rule 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NoGesamtpreis {
+    /// A component is quoted net and states no VAT rate, so nothing grosses it
+    /// up.
+    RateUnstated {
+        /// Which component.
+        dimension: Dimension,
+    },
+    /// A bound is stated only before taxes, and the tariff's components state
+    /// no single rate to gross it with.
+    BoundHasNoGrossSpelling {
+        /// Which bound.
+        bound: Bound,
+    },
+}
+
+impl core::fmt::Display for NoGesamtpreis {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RateUnstated { dimension } => write!(
+                f,
+                "{dimension:?} is quoted net and states no VAT rate, so it has no Gesamtpreis: \
+                 [PAngV §3(1)] and [PAngV §2 Nr. 1] want the price a consumer pays, tax included"
+            ),
+            Self::BoundHasNoGrossSpelling { bound } => write!(
+                f,
+                "the {bound} is stated only before taxes and the components state no single rate \
+                 to gross it with, so the figure a driver compares their total against cannot be \
+                 shown tax-inclusive [PAngV §3(1)]"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for NoGesamtpreis {}
+
+impl PriceDescription {
+    /// Whether these figures are the **Gesamtpreis** a consumer must be shown.
+    ///
+    /// `[PAngV §3(1)]` obliges an operator offering a service to consumers to
+    /// state *"die Gesamtpreise"*, and `[PAngV §2 Nr. 3]` defines one as the
+    /// price payable *"einschließlich der Umsatzsteuer und sonstiger
+    /// Preisbestandteile"*. A net figure with a flag beside it is not that: the
+    /// driver reads the number.
+    ///
+    /// [`TaxIncluded::NotApplicable`](crate::tariff::TaxIncluded::NotApplicable)
+    /// answers `true`, because outside a tax
+    /// regime the figure quoted *is* the figure payable.
+    #[must_use]
+    pub const fn is_gesamtpreis(&self) -> bool {
+        !matches!(self.tax_included, crate::tariff::TaxIncluded::No)
+    }
+}
+
+/// Describe a tariff as the **Gesamtpreis** a German consumer must be shown.
+///
+/// # The failure this closes
+///
+/// [`describe`] hands out the tariff's own figures with a
+/// [`TaxIncluded`](crate::tariff::TaxIncluded) beside them. That is right for
+/// a partner reconciling a settlement and wrong for the one audience whose law
+/// names the number: `[PAngV §14(2)]` wants the *Arbeitspreis*, and
+/// `[PAngV §2 Nr. 1]` defines it as the price per kilowatt-hour
+/// *"einschließlich der Umsatzsteuer und aller besonderen Verbrauchssteuern"*.
+/// A post that renders a net `0.49` breaches `[PAngV §3(1)]` — and every wire
+/// crossing in this workspace already refuses to let a net figure travel as a
+/// gross one, while the module that faces the driver could not produce the
+/// gross one at all.
+///
+/// # Exact, not rounded
+///
+/// `0.49` at 19 % is `0.5831` per kWh and this returns `0.5831`. Rounding it
+/// here would be a price the operator does not charge, which is the whole
+/// failure `[PAngV]` and `[AFIR Art. 5(4)]` are about — and this workspace's
+/// standing rule is that the exact figure is what a computation carries and the
+/// rounded one is what a document prints. A renderer that shows two decimals
+/// rounds at the point of rendering, where the choice is visible.
+///
+/// # Errors
+///
+/// [`NoGesamtpreis`] where a net tariff states no rate to gross a component or
+/// a bound with. Refused rather than defaulted to zero, because a rate nobody
+/// wrote down is not a rate of nothing.
+///
+/// ```
+/// use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+/// use emob_tariff::{TaxIncluded, describe, describe_gross};
+/// use emob_core::{Currency, TimeZone};
+/// use rust_decimal::Decimal;
+/// use std::str::FromStr;
+/// use time::macros::datetime;
+///
+/// # let dec = |s: &str| Decimal::from_str(s).unwrap();
+/// let mut tariff = Tariff::simple(
+///     "ad-hoc".parse()?,
+///     Currency::EUR,
+///     TariffKind::AdHoc,
+///     TimeZone::new("Europe/Berlin")?,
+///     vec![PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19"))],
+/// );
+/// tariff.tax_included = TaxIncluded::No;
+///
+/// let at = datetime!(2026-01-02 10:00 +1);
+/// // What a settlement partner reads — and what a driver may not be shown.
+/// assert!(!describe(&tariff, at).is_gesamtpreis());
+/// assert_eq!(describe(&tariff, at).one_line(), "0.49 EUR / kWh");
+///
+/// // What `[PAngV §14(2)]` asks for, exactly.
+/// let shown = describe_gross(&tariff, at)?;
+/// assert!(shown.is_gesamtpreis());
+/// assert_eq!(shown.one_line(), "0.5831 EUR / kWh");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn describe_gross(
+    tariff: &Tariff,
+    at: time::OffsetDateTime,
+) -> Result<PriceDescription, NoGesamtpreis> {
+    let shown = describe(tariff, at);
+    // Already the figure payable: a gross tariff states it, and outside a tax
+    // regime there is nothing to add to it.
+    if shown.is_gesamtpreis() {
+        return Ok(shown);
+    }
+
+    let gross_line = |line: &DisplayLine| -> Result<DisplayLine, NoGesamtpreis> {
+        let rate = line.vat.ok_or(NoGesamtpreis::RateUnstated {
+            dimension: line.dimension,
+        })?;
+        Ok(DisplayLine {
+            price: line.price * (Decimal::ONE + rate / HUNDRED),
+            ..*line
+        })
+    };
+
+    let lines = shown
+        .lines
+        .iter()
+        .map(gross_line)
+        .collect::<Result<Vec<_>, _>>()?;
+    let tiers = shown
+        .tiers
+        .iter()
+        .map(|tier| {
+            Ok(Tier {
+                condition: tier.condition.clone(),
+                lines: tier
+                    .lines
+                    .iter()
+                    .map(gross_line)
+                    .collect::<Result<Vec<_>, _>>()?,
+                applies_now: tier.applies_now,
+            })
+        })
+        .collect::<Result<Vec<_>, NoGesamtpreis>>()?;
+
+    // A bound is a fact about a **total**, so it is grossed with the rate the
+    // tariff as a whole states rather than with any one line's — and where the
+    // author wrote the gross limb down, that figure wins over any derivation of
+    // it `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]`.
+    let whole = tariff.vat_basis().stated();
+    let gross_bound = |limit: Option<crate::tariff::PriceLimit>,
+                       which: Bound|
+     -> Result<Option<Decimal>, NoGesamtpreis> {
+        let Some(limit) = limit else { return Ok(None) };
+        if let Some(after) = limit.after_taxes {
+            return Ok(Some(after));
+        }
+        let Some(before) = limit.before_taxes else {
+            return Ok(None);
+        };
+        let rate = whole.ok_or(NoGesamtpreis::BoundHasNoGrossSpelling { bound: which })?;
+        Ok(Some(before * (Decimal::ONE + rate / HUNDRED)))
+    };
+
+    Ok(PriceDescription {
+        lines,
+        tiers,
+        currency: shown.currency,
+        tax_included: crate::tariff::TaxIncluded::Yes,
+        min_price: gross_bound(tariff.min_price, Bound::Minimum)?,
+        max_price: gross_bound(tariff.max_price, Bound::Maximum)?,
+    })
+}
+
 /// One element's prices, in the order the article prescribes.
 fn lines_of(element: &TariffElement) -> Vec<DisplayLine> {
     let mut lines: Vec<DisplayLine> = element
@@ -294,6 +514,7 @@ fn lines_of(element: &TariffElement) -> Vec<DisplayLine> {
         .map(|c| DisplayLine {
             dimension: c.dimension,
             price: price_in_display_unit(c.dimension, c.price),
+            vat: c.vat,
         })
         .collect();
     lines.sort_by_key(|l| l.dimension);
@@ -323,6 +544,9 @@ pub(crate) fn price_in_display_unit(dimension: Dimension, price: Decimal) -> Dec
 
 /// Minutes in an hour.
 const MINUTES_PER_HOUR: Decimal = Decimal::from_parts(60, 0, 0, false, 0);
+
+/// The divisor a VAT percentage is a percentage of.
+const HUNDRED: Decimal = Decimal::from_parts(100, 0, 0, false, 0);
 
 /// An hourly price as the **exact** price per minute, or `None` when there is
 /// none.
@@ -671,7 +895,105 @@ mod tests {
         let line = DisplayLine {
             dimension: Dimension::Energy,
             price: dec("0.49"),
+            vat: None,
         };
         assert_eq!(line.to_string(), "0.49 / kWh");
+    }
+
+    #[test]
+    fn a_mixed_tariff_still_has_a_gesamtpreis() {
+        // The reason the rate sits on the **line** and not on the description:
+        // electricity at one rate beside a service fee at another has no single
+        // rate to gross the display with, and it does have a Gesamtpreis —
+        // one per component, which is exactly what `[PAngV §14(3)]` and
+        // `[PAngV §3(3)]` ask for when a price is broken out.
+        let mut tariff = Tariff::simple(
+            "mixed".parse().unwrap(),
+            Currency::EUR,
+            crate::tariff::TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            vec![
+                crate::tariff::PriceComponent::new(Dimension::Energy, dec("0.49"))
+                    .with_vat(dec("19")),
+                crate::tariff::PriceComponent::new(Dimension::Flat, dec("1.00")).with_vat(dec("7")),
+            ],
+        );
+        tariff.tax_included = crate::tariff::TaxIncluded::No;
+        assert!(
+            tariff.vat_basis().is_mixed(),
+            "no single rate to fall back on"
+        );
+
+        let shown = describe_gross(&tariff, datetime!(2026-01-02 10:00 +1)).unwrap();
+        assert!(shown.is_gesamtpreis());
+        // Exact, and the scale is the product's own: 0.49 × 1.19 and
+        // 1.00 × 1.07. Trailing zeros are an artefact of the multiplication
+        // rather than a claim about precision, and trimming them here would be
+        // this function deciding how a post renders a price.
+        assert_eq!(shown.one_line(), "0.5831 EUR / kWh · 1.0700 EUR / session");
+    }
+
+    #[test]
+    fn a_component_with_no_rate_is_refused_rather_than_grossed_by_zero() {
+        // A rate nobody wrote down is not a rate of nothing. Grossing by zero
+        // would show the net figure under a gross label, which is the one
+        // outcome worse than refusing.
+        let mut tariff = Tariff::simple(
+            "silent".parse().unwrap(),
+            Currency::EUR,
+            crate::tariff::TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            vec![crate::tariff::PriceComponent::new(
+                Dimension::Energy,
+                dec("0.49"),
+            )],
+        );
+        tariff.tax_included = crate::tariff::TaxIncluded::No;
+
+        assert_eq!(
+            describe_gross(&tariff, datetime!(2026-01-02 10:00 +1)),
+            Err(NoGesamtpreis::RateUnstated {
+                dimension: Dimension::Energy
+            })
+        );
+    }
+
+    #[test]
+    fn a_gross_bound_the_author_wrote_wins_over_one_derived_from_it() {
+        // `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` gives a limit two limbs
+        // that bind separately, so where the operator published the gross one
+        // that is the figure a driver compares against — not the net one times
+        // a rate this function chose.
+        let mut tariff = Tariff::simple(
+            "capped".parse().unwrap(),
+            Currency::EUR,
+            crate::tariff::TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            vec![
+                crate::tariff::PriceComponent::new(Dimension::Energy, dec("0.49"))
+                    .with_vat(dec("19")),
+            ],
+        );
+        tariff.tax_included = crate::tariff::TaxIncluded::No;
+        tariff.max_price = Some(crate::tariff::PriceLimit {
+            before_taxes: Some(dec("40.00")),
+            after_taxes: Some(dec("47.50")),
+        });
+
+        let shown = describe_gross(&tariff, datetime!(2026-01-02 10:00 +1)).unwrap();
+        assert_eq!(
+            shown.max_price,
+            Some(dec("47.50")),
+            "the published gross ceiling, not 40.00 × 1.19"
+        );
+
+        // With only the net limb written down, the tariff's own single rate
+        // grosses it.
+        tariff.max_price = Some(crate::tariff::PriceLimit {
+            before_taxes: Some(dec("40.00")),
+            after_taxes: None,
+        });
+        let derived = describe_gross(&tariff, datetime!(2026-01-02 10:00 +1)).unwrap();
+        assert_eq!(derived.max_price, Some(dec("47.60")));
     }
 }

@@ -1,0 +1,31 @@
+[package]
+name        = "empd"
+description = "The provider side: the token store two domain crates deliberately refuse to be, whether a contract authorises a session now, what the driver is quoted before it starts, and the fee that is owed whether or not they charged"
+publish     = false
+
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-billing = { workspace = true }
+emob-core    = { workspace = true }
+emob-roam    = { workspace = true }
+emob-service = { workspace = true }
+emob-session = { workspace = true }
+emob-tariff  = { workspace = true }
+
+anyhow       = { workspace = true }
+rust_decimal = { workspace = true }
+sha2         = { workspace = true }
+hex          = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+time = { workspace = true, features = ["macros"] }

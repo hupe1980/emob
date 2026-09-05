@@ -51,7 +51,7 @@ use rust_decimal::Decimal;
 use crate::crossing::{AbsorbLossy as _, Crossing};
 use crate::error::RoamError;
 use crate::ocpi::location::{bounded, bounded_ocpi};
-use crate::partner::Partner;
+use crate::partner::{OcpiVersion, Partner};
 use crate::token::RoamingToken;
 
 /// The decimal places a duration in hours is rounded to when it has no exact
@@ -275,6 +275,8 @@ pub fn to_ocpi(
         );
     }
 
+    price_notes(cost, &mut crossing);
+
     if let Some(previous) = &cdr.supersedes {
         // OCPI corrects a CDR in two documents: a Credit CDR that reverses the
         // original — `credit = true`, `credit_reference_id` naming it, and
@@ -421,6 +423,68 @@ pub fn to_ocpi_credit(
     );
 
     Ok(crossing.map(|()| credit))
+}
+
+/// The OCPI field a rating note is **about**, as a JSON Pointer into the
+/// partner's own copy.
+///
+/// A note names a dimension; the partner is looking at that dimension's total.
+fn pointer_for(dimension: Dimension) -> &'static str {
+    match dimension {
+        Dimension::Energy => "/total_energy_cost",
+        Dimension::Time => "/total_time_cost",
+        Dimension::ParkingTime => "/total_parking_cost",
+        Dimension::Flat => "/total_fixed_cost",
+    }
+}
+
+/// Carry the rating's own account of the price onto the wire.
+///
+/// # Why a note and not a field
+///
+/// [`emob_tariff::RatingNote`] is serialisable *because* it is meant to travel:
+/// "a note that stays behind in the process that produced it is a note nobody
+/// can invoke". It was staying behind. OCPI states a quantity and a cost per
+/// dimension and has no field for the distance between them, so a partner
+/// receiving `total_energy: 30` beside a `total_energy_cost` computed for twenty
+/// kilowatt-hours — a promotional first tier, a night-only energy price, any
+/// tariff whose energy element is conditional — sees a document that does not
+/// multiply out and opens a dispute about a discount the operator gave on
+/// purpose. The same is true in the other direction of a `step_size`, which
+/// bills a block more than the record states.
+///
+/// [`emob_tariff::RatingNote::concerns_the_payer`] is already the question
+/// "is this a term of the price, or a fault in a document the payer did not
+/// write" — asked here for the party that settles, exactly as `emob-billing`
+/// asks it for the party that pays (D260). The rest stay with the operator:
+/// a partner cannot act on a fault in this side's tariff.
+fn price_notes(cost: &emob_cdr::Cost, crossing: &mut Crossing<()>) {
+    let mut carry = |pointer: &str, note: &emob_tariff::RatingNote| {
+        crossing.note(pointer.to_owned(), note.to_string());
+    };
+    for note in &cost.rated.notes {
+        if !note.concerns_the_payer() {
+            continue;
+        }
+        match note {
+            emob_tariff::RatingNote::Unpriced { dimension, .. }
+            | emob_tariff::RatingNote::RoundedToBlock { dimension, .. }
+            | emob_tariff::RatingNote::DurationBelowResolution { dimension, .. } => {
+                carry(pointer_for(*dimension), note);
+            }
+            // Seconds no dimension may price, inside a `total_parking_time`
+            // that counts them: the one payer-facing note that is about a
+            // quantity rather than about a cost.
+            _ => carry("/total_parking_time", note),
+        }
+    }
+    // The reservation is its own rating over its own window, and the partner
+    // reads it in its own field.
+    for note in cost.reservation.iter().flat_map(|rated| &rated.notes) {
+        if note.concerns_the_payer() {
+            carry("/total_reservation_cost", note);
+        }
+    }
 }
 
 /// The charging periods, and how many whole seconds of them the vehicle was
@@ -848,12 +912,70 @@ pub fn key_of(cdr: &ocpi_kit::v2_3_0::Cdr) -> Option<emob_cdr::CdrKey> {
     })
 }
 
+/// A CDR in the version the partner it is addressed to actually speaks.
+///
+/// # Why the choice is not the caller's
+///
+/// [`Partner::version`] is what the registry records a peer as speaking, and
+/// nothing read it: [`to_ocpi`] produced 2.3.0 for every partner and
+/// [`downgrade`] was a second step a caller had to remember. A registry field
+/// that decides nothing is a rule that is not enforced (rule 1) — and the thing
+/// it fails to prevent is sending a 2.3.0 document to a peer that parses 2.2.1,
+/// which is the ordinary case in this market rather than the exceptional one
+/// (D265).
+///
+/// So the version decides, once, here. The account of what the downgrade cost
+/// travels with the document either way, folded into the same [`Crossing`] as
+/// everything else the translation could not carry.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Outbound {
+    /// The canonical version.
+    V2_3_0(Box<ocpi_kit::v2_3_0::Cdr>),
+    /// The version most of the market still runs.
+    V2_2_1(Box<ocpi_kit::v2_2_1::cdrs::Cdr>),
+}
+
+impl Outbound {
+    /// Which version this document is written in.
+    #[must_use]
+    pub const fn version(&self) -> OcpiVersion {
+        match self {
+            Self::V2_3_0(_) => OcpiVersion::V2_3_0,
+            Self::V2_2_1(_) => OcpiVersion::V2_2_1,
+        }
+    }
+}
+
+/// Carry a canonical CDR onto the OCPI version **this partner** speaks.
+///
+/// The one entry point a sender needs: it applies every refusal [`to_ocpi`]
+/// applies, and then the version the registry records for the recipient rather
+/// than the one the caller happened to reach for.
+///
+/// # Errors
+///
+/// Everything [`to_ocpi`] refuses.
+pub fn for_partner(
+    cdr: &Cdr,
+    partner: &Partner,
+    context: &Context<'_>,
+) -> Result<Crossing<Outbound>, RoamError> {
+    let crossing = to_ocpi(cdr, partner, context)?;
+    Ok(match partner.version {
+        OcpiVersion::V2_3_0 => crossing.map(|value| Outbound::V2_3_0(Box::new(value))),
+        OcpiVersion::V2_2_1 => downgrade(crossing).map(|value| Outbound::V2_2_1(Box::new(value))),
+    })
+}
+
 /// Carry a CDR onto a partner's older OCPI version, folding the downgrade's
 /// own loss report into the crossing's.
 ///
 /// A partner on 2.2.1 is the ordinary case, not the exceptional one. What is
 /// not ordinary is handing them a document with two half-accounts of what it
-/// cost to reach them.
+/// cost to reach them. [`for_partner`] is what chooses between this and
+/// [`to_ocpi`]; this stays public because a caller that already knows the
+/// version — a re-send, a test — should not have to build a `Partner` to say so.
 #[must_use]
 pub fn downgrade(
     crossing: Crossing<ocpi_kit::v2_3_0::Cdr>,
@@ -899,6 +1021,69 @@ mod tests {
                 "{quarters} quarter hours"
             );
         }
+    }
+
+    #[test]
+    fn the_ratings_own_account_of_the_price_reaches_the_partner() {
+        // `RatingNote` is serialisable *because* it is meant to travel, and the
+        // OCPI crossing was not carrying it. A partner receiving 30 kWh beside a
+        // cost computed for twenty — an ordinary promotional first tier — reads a
+        // document that does not multiply out, and OCPI has no field that says
+        // why. The note is that field (D260).
+        let rated = emob_tariff::Rated {
+            lines: Vec::new(),
+            currency: emob_core::Currency::EUR,
+            tax_included: emob_tariff::TaxIncluded::Yes,
+            adjustment: None,
+            notes: vec![
+                emob_tariff::RatingNote::Unpriced {
+                    dimension: Dimension::Energy,
+                    at: time::OffsetDateTime::UNIX_EPOCH,
+                    periods: 1,
+                    base_quantity: Decimal::from(10),
+                },
+                emob_tariff::RatingNote::WithheldNotPriced {
+                    seconds: Decimal::from(600),
+                    periods: 1,
+                },
+                // …and a fault in this side's own tariff, which a partner
+                // cannot act on and does not receive.
+                emob_tariff::RatingNote::UnevaluableRestriction {
+                    index: 0,
+                    restrictions: vec!["min_current".into()],
+                },
+            ],
+        };
+        let cost = emob_cdr::Cost {
+            tariff_id: "t".parse().unwrap(),
+            tariff_fingerprint: emob_tariff::Tariff::simple(
+                "t".parse().unwrap(),
+                emob_core::Currency::EUR,
+                emob_tariff::TariffKind::AdHoc,
+                emob_core::TimeZone::utc(),
+                Vec::new(),
+            )
+            .fingerprint(),
+            rated,
+            reservation: None,
+        };
+
+        let mut crossing = Crossing::lossless(());
+        price_notes(&cost, &mut crossing);
+
+        let pointers: Vec<&str> = crossing
+            .notes()
+            .iter()
+            .map(|n| n.pointer.as_str())
+            .collect();
+        assert_eq!(pointers, ["/total_energy_cost", "/total_parking_time"]);
+        assert!(
+            crossing.notes()[0]
+                .reason
+                .contains("10 kWh was not charged"),
+            "{:?}",
+            crossing.notes()
+        );
     }
 
     #[test]

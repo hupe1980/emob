@@ -1,13 +1,12 @@
 +++
 title = "The OCPP seam"
 weight = 3
-description = "Where the charging protocol meets the money, in both directions: a signed meter value lifted out of three generations of OCPP, and a tariff carried onto the charge point's own screen over OCPP 2.1 — with no field a float could arrive in."
+description = "The seam between the OCPP wire and the money: signed meter values lifted out of transaction events, and the tariff carried onto the charge point's own screen."
 
 [extra]
+state = "built"
 nav = "OCPP seam"
 +++
-
-# The OCPP seam ✅
 
 OCPP is how a charge point and a backend talk. It is **not** how a kilowatt-hour
 becomes a euro, and the difference is the whole content of this page.

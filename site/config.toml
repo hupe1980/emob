@@ -1,6 +1,6 @@
 base_url = "https://hupe1980.github.io/emob"
 title = "emob"
-description = "The open-source e-mobility operating stack: CPO and EMP in one Rust workspace. OCMF signed meter values verified end to end, a quarter-hour split that conserves energy exactly, one tariff that reaches the driver, the roaming partner and the national access point as one number, AFIR and Eichrecht as executable cited rules, and no binary float anywhere near the money."
+description = "Open-source EV charging operations for Europe — CPO and eMSP in one Rust workspace. Signed meter values, exact settlement, AFIR and Eichrecht as code."
 default_language = "en"
 compile_sass = false
 build_search_index = false
@@ -16,19 +16,23 @@ insert_anchor_links = "heading"
 [extra]
 repository = "https://github.com/hupe1980/emob"
 tagline    = "open-source charging operations for the European market"
+msrv       = "1.94"
 # The landing page's five numbers. They live here rather than in the template so
-# that changing one is a one-line diff against the thing that produced it:
+# that changing one is a one-line diff against the thing that produced it — and
+# `cargo xtask check-concepts` now holds the first three against their sources,
+# because the comment below was true, unenforced, and wrong in three of five
+# places for four milestones (D288):
 #
-#   stat_obligations  emob_core::obligation::CALENDAR — `.len()`
+#   stat_obligations  emob_core::obligation::CALENDAR — one entry per `id:`
 #   stat_tests        cargo test --workspace --all-features
 #   stat_crates       the publishable crates under crates/
 #   stat_floats       cargo xtask no-floats
-#   stat_curves       emob_eichrecht::ocmf::verify::KeyType
+#   stat_curves       the ECDSA curves the pure-Rust build verifies
 #
 # A number here that no longer matches its source is worse than no number.
-stat_obligations = "40"
-stat_tests       = "662"
-stat_crates      = "9"
+stat_obligations = "47"
+stat_tests       = "913"
+stat_crates      = "12"
 stat_floats      = "0"
 stat_curves      = "4"
 

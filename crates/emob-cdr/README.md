@@ -116,7 +116,7 @@ for one dimension, and the per-dimension rule would drop one of them.
 per-dimension fields close. It **adds** the two rather than dropping either: a
 total short by a term the record states is a plausible number in the right
 currency, and it reaches the invoice and the ledger's restatement comparison
-alike (D250).
+alike.
 
 `validate` asks of the reservation's rating everything it asks of the session's,
 through one function that records **which** part a finding came from. Three
@@ -281,7 +281,7 @@ session fees for one session.
 `[OCPI 2.3.0 §mod_tariffs_tariffdimensiontype_enum]` defines `FLAT` as *"fixed
 amount for the whole charging session"*; `rate` charges it once by construction
 and gives it no `step_size` to round with, so any quantity above one is blocking
-(D251). Asked of both of a record's ratings, because a reservation fee is one fee
+. Asked of both of a record's ratings, because a reservation fee is one fee
 too.
 
 ### …and what is inside the value
@@ -461,6 +461,28 @@ because a dropped energy line looks identical from the record alone. Every
 note the rating made is surfaced as a warning, so a minimum charge or a block
 rounding reaches the receiving party as a term of the price rather than as a
 discrepancy they have to discover.
+
+### …and the quantity it is compared against is the rating's own
+
+Two things stand lawfully between what a price charged for and what a meter
+measured, and the rating states both on the record. A `step_size` bills up to one
+block **more** `[OCPI 2.3.0 §mod_cdrs_step_size]`; a dimension no element matched
+is charged **nothing at all** — *"there will be no costs for that Tariff
+Dimension"* `[OCPI 2.3.0 §Tariff]`, which is how *the first 10 kWh are free* is
+written.
+
+So the comparison is against `Rated::accounted_quantity_for`: the billed
+quantity, less the block the rating declared, plus the quantity it reported
+unpriced. What is left over is a price computed for a different session.
+
+Both halves were wrong in opposite directions before. Comparing the billed figure
+alone blocked a promotional first tier as an arithmetic fault — a record the
+builder emits and the validator refuses, which stops a month of invoices over a
+discount the operator gave on purpose — while the excuse beside it was the mere
+*presence* of a block note, so a partner declaring a `step_size` could over-bill
+that dimension without bound. One identity answers both, and it is exact because
+every term is in the dimension's base unit: an hour is 3600 seconds and most
+durations have no decimal in hours at all.
 
 ## No I/O, no clock
 

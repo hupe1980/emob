@@ -27,7 +27,7 @@ asserts the consequence rather than the intention.
 `TariffHistory::in_force_at` is what rates a CDR, so an edited object that never
 entered the history is a price no session will ever be billed at — and
 publishing it would put that price in front of the driver, the national access
-point and every roaming partner (D255):
+point and every roaming partner:
 
 ```rust
 tarifd.prepare(&edited, &party, at)?;
