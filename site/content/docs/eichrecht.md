@@ -165,9 +165,11 @@ clear something the station signed.
 | Are any records missing? | `ocmf::session` | the format's | a session with a hole in it bills |
 | Is this key *this charge point's* key? | `KeyRegistry` | **ours** | the record vouches for itself |
 | Which quantity does each failure take away? | `chain::validate` | **ours** | one boolean throws away what the format kept apart |
+| Are the two ends the same quantity? | the OBIS code **and the unit** | **ours** | kWh minus Wh, off by a thousand |
 | May these readings be billed? | `MeterState`, error flags | both | a substitute value becomes an invoice |
 | May the **duration** be billed too? | `TimeStatus`, the `t` flag | both | an occupancy fee is billed off an unsynchronised clock |
 | Which way did the energy go? | the OBIS code | both | a V2G discharge is billed as consumption |
+| …and did only **one** direction move? | the OBIS codes of every register | **ours** | the other half of a V2G session vanishes with no finding |
 | Who was charging, and did it hold? | `IdentificationLevel` | both | a rejected certificate becomes a customer |
 | Can the **customer** repeat all of it? | `transparency::to_xml` | both | the law's actual requirement is unmet |
 
@@ -189,10 +191,19 @@ removed in between.
 
 ```rust
 // Every signature genuine; the session still does not bill.
+use ocmf::session::Finding;
+
 let report = chain::validate(&[record_pg1_begin, record_pg3_end]);
-assert!(report.findings.contains(&ChainFinding::PaginationBreak { after: 1, found: 3 }));
+assert!(report.findings.iter().any(|f| matches!(
+    f,
+    ChainFinding::Sequence(Finding::PaginationBroken { from: 1, to: 3, .. })
+)));
 assert!(!report.is_billable());
 ```
+
+The finding is `ocmf`'s and the verdict is this crate's, which is the split in
+one line: `ChainFinding::Sequence` wraps what the format found about the records
+*as records*, and `disqualifies` says what it costs.
 
 The chain also holds every record to one signing component
 `[OCMF §Relation of Serial Numbers]`, taking its reference from the first record
@@ -340,6 +351,16 @@ record.
 A code the crate cannot classify states *no* direction rather than defaulting to
 import.
 
+And a chain that measured **both** directions bills neither. A bidirectional
+meter reports an import register and an export register, and `[OCMF Tab. 25]`
+keeps them apart in the code — what it does not say is which of them a session is
+*for*. Billing the first one seen dropped the other with no finding at all: a
+driver's discharge that existed nowhere downstream, not netted but simply gone,
+out of the one crate whose whole promise is that a value which does not bill says
+why. It is raised only where the other register actually **moved**, because a
+bidirectional charger doing an ordinary import reports a `C` register that stood
+still all session and refusing that would refuse the hardware for being capable.
+
 Reading the code is also what makes the cable-loss rules checkable. `CL` may be
 reported "only when RI is indicating an accumulation register reading" and "must
 be reset at TX=B" `[OCMF Tab. 7]` — a transaction opening on a non-zero
@@ -351,11 +372,50 @@ OCPI crossing states it as a note because the wire has no field for it and
 `[REA 6-A §3.2]` makes telling the affected party what is inside a measured
 value a duty rather than a courtesy.
 
+**And "accumulation register" is a question about the `D` group.** `[OCMF Tab. 7,
+CL]` permits the compensation *"only when RI is indicating an accumulation
+register reading"*, and that was asked as *"does the code state a direction"* —
+a different question, wrong in both directions. It refused a **manufacturer**
+register, because `[OCMF Tab. 25]` classifies by the `C` group and anything
+outside its own range has no direction, so a `CL` beside one took both quantities
+away from a meter that had done nothing wrong. And it accepted an
+**instantaneous** one: `1-0:1.7.0*255` is active power, and it classifies as
+active-energy-import because that is decided by `C = 1`. What separates a running
+total from a spot reading is the `D` group, where 8 is the time integral — `1.8.0`
+accumulates and `1.7.0` does not, and the two differ in the digit nothing read.
+
 And it comes back as an `Energy`, not a bare decimal: `CL` "is given in the same
 unit as RV which is specified in RU" `[OCMF Tab. 7, CL]`, and `RU` is `Wh` on
 ordinary German hardware. Reported raw beside a `billable_energy` in kWh, a
 420 Wh cable loss reads as 420 kWh — a figure a thousand times larger than the
 session it exists to explain, in the middle of a dispute about that session.
+
+### …and the two ends have to be counted in the same unit
+
+The register says *which* quantity moved. `RU` says what it was counted in, and
+it carries forward only **within** a record `[OCMF Tab. 7]` — so a chain that
+opens `2935.600 kWh` and closes `2965100 Wh` is something a station can emit, and
+both records are perfectly signed.
+
+`ocmf` reports the difference of the two and labels it with the unit of the
+*begin* reading, which is the honest answer to the question a format crate is
+asked: this is what the records say. Whether that difference is a **quantity** is
+a billing question, and it is this crate's:
+
+```rust
+// The same physical 29.5 kWh, counted two ways.
+let report = chain::validate(&[opens_in_kwh, closes_in_wh]);
+assert_eq!(report.billable_energy, None);
+// …and it takes the energy only. The clock said nothing.
+assert!(report.billable_duration.is_some());
+```
+
+Refused rather than converted, and the exact inter-convertibility of the two
+spellings is why. A station that changes the unit it counts in mid-transaction
+has done something no conforming meter does; repairing it silently would put a
+register on an invoice that nobody can reproduce `[MessEG §33]`. Without the rule
+the session above bills **2 962 164.4 kWh**, with every signature verifying and
+nothing objecting.
 
 ### An exception marker stops the arithmetic
 
@@ -440,9 +500,11 @@ session.
 Writing each record's pagination counter there instead is schema-valid, distinct,
 and degrades one session into N single-record transactions the driver cannot
 pair — the exact failure `[MessEG §33]` is about, produced by the code written to
-prevent it. OCMF has no transaction number of its own, so `to_xml` derives one
-from the counter the transaction opened at, and `to_xml_with_transaction_id`
-takes the operator's own when there is one.
+prevent it. OCMF has no transaction number of its own, so the grouping is
+`ocmf::xml`'s: `Values::from_records` derives one id per transaction the way
+S.A.F.E.'s own 257 reference values are grouped — counted rather than assumed,
+including the 223 that carry a begin *and* an end in one record and are therefore
+written with no `transactionId` at all.
 
 The `context` label follows the same reading. It is a statement about the whole
 data set, so a record carrying `TX=B` **and** `TX=E` — the `MR` configuration,
@@ -477,7 +539,7 @@ file exists to prevent, pointed inward.
 
 Every other fixture on this page is signed at test time with a key the test also
 holds, which proves the code agrees with itself — not the question anybody is
-asking. So the suite runs records from four sources `emob` did not write, each
+asking. So the suite runs records from **five** devices `emob` did not write, each
 checked against the key it is published with:
 
 ```rust
@@ -494,6 +556,7 @@ Each one exercises something a self-signed fixture cannot reach:
 | DZG DVH4013 / Nano (secp256k1) | a signature with `s` in the **high half** of the curve order, which the secp256k1 library refuses on Bitcoin's malleability rule and plain ECDSA allows |
 | DZG + TwinCharger Pro | `RV` written as a **quoted string**, padded with spaces |
 | TwinCharger Pro | `FV` and `CT` written as **numbers** where the tables say String |
+| DZG GSH01.1K2L | the Open Charge Alliance's own `StopTransaction.req` example — the one device on this list that cost nothing, which is what a list like this needs to have on it |
 
 The secp256k1 case is the sharpest. A self-signed fixture uses a signer that
 naturally produces low `s`, so no amount of self-signed corpus contains the
@@ -502,7 +565,7 @@ diagnostic for **tampering**, on a meter that has done nothing wrong. A verifier
 that reports it has told an operator to investigate a fraud that did not happen,
 and will keep doing so for every session that meter signs.
 
-Three defects from four records is not a rate that suggests the list is
+Four defects from five devices is not a rate that suggests the list is
 finished, which is why every format this workspace claims to read carries at
 least one third-party sample in its tests.
 

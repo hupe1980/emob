@@ -1,0 +1,33 @@
+[package]
+name        = "emob-smart"
+description = "§ 14a EnWG as executable law: which charge points are steuerbare Verbrauchseinrichtungen, the Mindestleistung the operator is owed, and a site allocation that cannot exceed the grid operator's setpoint"
+keywords    = ["ev-charging", "load-management", "enwg", "smart-charging", "germany"]
+categories  = ["science", "data-structures"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = [
+    "dep:serde",
+    "emob-core/serde",
+    "rust_decimal/serde",
+    "time/serde-well-known",
+]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+time       = { workspace = true, features = ["macros"] }

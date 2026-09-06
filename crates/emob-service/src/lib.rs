@@ -60,6 +60,8 @@ pub mod authority;
 pub mod config;
 pub mod events;
 pub mod health;
+#[cfg(feature = "policy")]
+pub mod policy;
 pub mod serve;
 pub mod shutdown;
 pub mod telemetry;

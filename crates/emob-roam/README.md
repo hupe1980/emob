@@ -290,6 +290,37 @@ the price, one field over. And OCPI's length bounds are enforced rather than
 truncated: 45 characters is not generous for a German street, and a truncated
 address names a different building.
 
+## The invoice a partner is entitled to check
+
+`[OCPI 2.3.0 §mod_invoice_reconciliation_module]` is four fields — an invoice
+identifier and the CDR ids that invoice covers — and it closes the last seam in
+the chain. Inside one process a record and its invoice line cannot disagree,
+because the record carries the price its own periods produced. Between two
+companies nothing tied them together: the records cross here and the invoice
+arrives over an access point, and neither document says which records the other
+is about.
+
+```rust
+let record = reconciliation::to_ocpi(&cpo, "rec-2026-03", "R-2026-0001", &covered, now)?;
+let checked = reconciliation::check(&record, &cpo, &ledger);
+assert!(checked.is_conclusive());
+```
+
+The check is **this side's** rather than the wire's. A party holding only OCPI
+documents adds up OCPI CDRs; this side holds the canonical records, each carrying
+the `Rated` that priced it, so the sum is exact and a second currency makes the
+total absent rather than approximate.
+
+And it reads the ledger the way every other consumer does. A correction is a new
+record that supersedes the old one, so an invoice naming the **superseded** id is
+one for a session this side has since restated — reported beside the record that
+replaced it, because *"your invoice covers a record we have corrected"* is a
+conversation rather than an error. Four answers rather than one verdict: an id
+nobody here holds is a transport question, one this side corrected is a
+settlement question, one held unrated is a partner's own record priced by nobody,
+and a second currency is a total that means nothing beside a single invoice
+amount.
+
 ## A correction is two documents, and neither is the other
 
 OCPI has no way to amend a CDR. It reverses one with a Credit CDR — `credit =

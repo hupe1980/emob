@@ -240,6 +240,33 @@ replacement names nothing. Inbound, a Credit CDR is refused by name rather than
 read: it repeats the original's kilowatt-hours with the money negated, and read
 as a session it would put them in the ledger twice.
 
+## The invoice a partner is entitled to check
+
+`[OCPI 2.3.0 §mod_invoice_reconciliation_module]` is the one module the wire
+added for the half this workspace is about, and it is four fields: an invoice
+identifier and the list of CDR ids that invoice covers.
+
+It closes the last seam. Inside one process a CDR and its invoice line cannot
+disagree — the record carries the price its own periods produced. Between two
+**companies** nothing tied them together: the records cross over OCPI, the
+invoice arrives over an access point, and neither document says which records the
+other is about, so a settlement dispute began with somebody exporting a
+spreadsheet.
+
+The check is **this side's** rather than the wire's. A party holding only OCPI
+documents adds up OCPI CDRs; this side holds the canonical records, each carrying
+the rating that priced it, so the sum is exact and a second currency makes the
+total absent rather than approximate. And it reads the ledger the way every other
+consumer does: a correction is a new record that supersedes the old one, so an
+invoice naming the **superseded** id is one for a session this side has since
+restated — reported beside the record that replaced it, because *"your invoice
+covers a record we have corrected"* is a conversation rather than an error.
+
+Four answers, not one verdict: an id nobody here holds is a **transport**
+question, an id this side has corrected is a **settlement** one, an id held
+**unrated** is a partner's own record priced by nobody, and a second currency is a
+total that means nothing beside a single invoice amount.
+
 ## Routing comes out of the identifier
 
 A contract identifier names its issuer in its first five characters, and that is
@@ -328,6 +355,19 @@ already built: the Credit CDR the specification spells out, the `supersedes` lin
 on the record, a ledger that refuses to bill both halves. None of them knows
 whether the original ever left the building, which is the one fact both rules turn
 on.
+
+**And an acceptance is terminal.** The seal is enforced where a record is
+consigned, by reading the delivery — which made it exactly as durable as the
+field: one `refused` after the fact overwrote the acceptance and the same record
+could go to the same partner again, who then holds two records for one session
+and settles both. Recording the same outcome twice is idempotent, because a
+location that arrives late is a fact about one delivery rather than a second one.
+
+**And a reversal is owed only where one happened.** A Credit CDR reverses a
+record the eMSP **has**; for one they refused there is nothing to reverse and no
+credit will ever be accepted. Requiring one before every replacement deadlocked
+the correction of every refused record — against the rule the same paragraph
+states and this node's own documentation repeats, that nothing refused is sealed.
 
 **Late is per partner, not per node.** The same paragraph makes the cadence a
 contract: *"if there is an agreement between parties to send them, for example,

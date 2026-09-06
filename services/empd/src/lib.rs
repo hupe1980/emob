@@ -456,6 +456,26 @@ pub enum ProviderError {
         /// Which partner.
         partner: String,
     },
+
+    /// More was invoiced against a contract than it has run up.
+    ///
+    /// Either the closing counted a session twice, or it counted one this
+    /// provider has no record of. Both are worth stopping at: the running total
+    /// is what the credit limit is judged against, and a subtraction that takes
+    /// it below zero would hand the driver back a limit they have not paid for.
+    #[error(
+        "{contract} has run up {outstanding} and {invoiced} was invoiced against it: a closing \
+         that bills more than the ledger holds has counted a session twice or counted one this \
+         provider never saw"
+    )]
+    MoreInvoicedThanRunUp {
+        /// Which contract.
+        contract: String,
+        /// What the closing says it billed.
+        invoiced: String,
+        /// What this provider holds outstanding, in the currency it holds it in.
+        outstanding: String,
+    },
 }
 
 /// The provider: contracts, the tokens inside them, and the price list.
@@ -723,9 +743,61 @@ impl Empd {
         self.unbilled.get(&contract.to_string()).copied()
     }
 
-    /// Clear a contract's running total, because a month has been invoiced.
-    pub fn invoiced(&mut self, contract: &ContractId) {
-        self.unbilled.remove(&contract.to_string());
+    /// Take what an invoice billed off a contract's running total.
+    ///
+    /// # Why this is a subtraction rather than a clear
+    ///
+    /// It used to remove the entry outright, on the reading that a month which
+    /// has been invoiced is a month with nothing outstanding. That is true only
+    /// at the instant the document was assembled. A session authorised while the
+    /// closing runs is added by [`Self::ran_up`] and then **wiped**: money this
+    /// provider will not collect, and — because [`Self::authorize`] judges the
+    /// credit limit against this total — a driver handed back a limit they have
+    /// not paid for (D299). Every other ledger in this workspace is written the
+    /// way that makes a lost update unrepresentable, and this one was written
+    /// the way that invites it.
+    ///
+    /// So the caller states **what the invoice billed**, and what remains
+    /// remains. `None` is a contract with nothing outstanding, which is a
+    /// different statement from a balance of zero and is why the entry is
+    /// removed at exactly that point.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::MoreInvoicedThanRunUp`] where the amount exceeds the
+    /// running total or is in another currency — a closing that bills more than
+    /// the ledger holds has counted a session twice, or counted one this
+    /// provider never saw.
+    pub fn invoiced(
+        &mut self,
+        contract: &ContractId,
+        amount: Money,
+    ) -> Result<Option<Money>, ProviderError> {
+        let key = contract.to_string();
+        let outstanding = self.unbilled.get(&key).copied();
+        let too_much = || ProviderError::MoreInvoicedThanRunUp {
+            contract: key.clone(),
+            invoiced: amount.to_string(),
+            outstanding: outstanding.map_or_else(|| "nothing".to_owned(), |m| m.to_string()),
+        };
+
+        let Some(outstanding) = outstanding else {
+            return if amount.is_zero() {
+                Ok(None)
+            } else {
+                Err(too_much())
+            };
+        };
+        let left = outstanding.checked_sub(amount).map_err(|_| too_much())?;
+        if left.amount().is_sign_negative() {
+            return Err(too_much());
+        }
+        if left.is_zero() {
+            self.unbilled.remove(&key);
+            return Ok(None);
+        }
+        self.unbilled.insert(key, left);
+        Ok(Some(left))
     }
 
     /// What a driver is told before they plug in.

@@ -136,6 +136,15 @@ So the conversion has a name and happens once, rather than in each adapter:
 let series = split.market_series();   // each period labelled by its end
 ```
 
+**And a § 14a reduction is not balanced away.** `[BK6-22-300 Ziff. 4.8]`: *"Für
+das veränderte Verbrauchsverhalten, das aufgrund der Reduzierung des
+netzwirksamen Leistungsbezuges … hervorgerufen wird, findet **kein bilanzieller
+Ausgleich** im Bilanzkreis des Lieferanten statt."* A curtailed quarter hour is
+allocated at what actually flowed, and nothing makes the supplier whole for the
+difference — which is the one place the § 14a half of an estate touches this
+seam. What the allocation needs is unchanged: the series is what the meter
+measured.
+
 ## Every slot says where its number came from
 
 ```rust
@@ -834,6 +843,14 @@ cancels doubles the revenue and the VAT liability. And `payment::instruct`
 **refuses** it: a direct debit draws money in, a credit note is money owed back,
 and every figure on it is positive, so nothing else would have objected before
 the driver was debited a second time.
+
+**And a reversal is only a reversal beside the entry it undoes.** Posted on its
+own it credits a receivable nobody debited and debits revenue nobody earned, and
+the journal balances either way — double entry balances whatever it is told, so
+nothing fails until somebody reconciles against the recipient. A cancellation
+whose original has not been booked is refused by name, in `billd`, because which
+document cancels which is a service's fact: neither the crate that builds the
+cancellation nor the journal that seals the entry holds it (D298).
 
 ### A roaming settlement is not taxed where the charge point stands
 

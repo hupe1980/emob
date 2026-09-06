@@ -371,6 +371,32 @@ published ceiling is what the driver was shown.
 A maximum deeper than the session's own total is held at zero — a cap below
 nothing is a payment to the driver.
 
+### …and the slope it walks may be flat, which is not the same as absent
+
+Reaching the limb the lines are *not* quoted in needs a **slope** per VAT
+category: what one unit of movement does to the other basis. A rate of exactly
+−100 % makes that slope zero, and the conversion refused it on both bases,
+because the factor is a divisor — on **gross** lines. On net lines it is a
+multiplier, and multiplying by zero has no hole in it: the walk spends that
+category, the gross does not move, and it carries on into the next.
+
+Refusing it dropped the whole limb, so a tariff quoting net prices with one
+component at −100 % and a published **gross** `max_price` was not capped at all.
+A partner's tariff is somebody else's document and the rate is data rather than a
+promise, so the shape arrives.
+
+There is one predicate now: a rate splits when `1 + rate/100 > 0`, and
+`RatingNote::VatRateNotUsable` is raised on every basis that reads a rate rather
+than on gross tariffs only — a taxable amount of €4.90 with a **negative tax of
+€4.90** beside it is exactly as unfilable as one with no split at all.
+
+Two limbs still have no answer and both are named. `RatingNote::BoundUnreachable`
+reports a bound that needed to move and could not: a **lift** lands in one
+category, so a gross minimum cannot be reached through a category whose gross does
+not move, and a rate *below* −100 % makes the other basis fall as the movement
+deepens. Only where it needed to move — a maximum the session is already under
+asks for nothing, and a note about it would fire on a compliant session.
+
 And a maximum deeper than the **category** it is attributed to is drawn from the
 next one. EN 16931 gives an allowance one category, so a single allowance would
 state a negative taxable amount — a document that reconciles and that all 317 of
@@ -601,6 +627,29 @@ whole seconds, exact, and it is the figure the amount came from:
 ```rust
 assert!(rated.lines_reconcile());   // base_quantity × unit_price / 3600 == amount
 ```
+
+## No input takes the process down
+
+`Decimal` panics on overflow rather than saturating, and **both** operands of
+every multiplication here come from outside: the quantity on a charge detail
+record a partner pushed, the price and the published limits on the tariff beside
+it (D305).
+
+An `Energy` is bounded where it is built, so the quantity reaching this crate is
+a measurement. A **price** is not a measurement and has no natural bound, so the
+check is here — and it is on what a line *feeds*, not on the product alone. A
+`Rated` holds at most one line per dimension and there are four; every total is a
+sum of those in one basis, the widest being the gross. So a line whose gross
+clears `Decimal::MAX / 4` sums with any three others of its kind, and one check
+stands for every multiplication downstream of it.
+
+A price that fails it leaves its dimension **unbilled** with a `PriceOutOfRange`
+note: under-billing is the direction a refusal falls in, and the note is what
+stops it being silent. A published `PriceLimit` gets the same door —
+`[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` puts no ceiling on one, and
+answering it moves a total through the VAT factor. Where one limit is
+unanswerable **both** go unanswered: an adjustment against half a pair of bounds
+is a price nobody published.
 
 ## `step_size` is a property of the session, not of a price
 

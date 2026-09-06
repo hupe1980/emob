@@ -58,11 +58,13 @@
 use std::collections::BTreeMap;
 
 use emob_cdr::{Cdr, CdrKey, CdrLedger};
-use emob_core::Money;
+use emob_core::{Money, PartyId};
 use emob_roam::ocpi::cdr::Outbound;
 use emob_roam::{
     Inbound, Partner, PartnerRegistry, Reach, RoamError, RoamingToken, SignedDataPolicy, Wire,
 };
+use emob_service::caps;
+use emob_service::policy::{Gate, PolicyError, Resource};
 
 /// Where a record has got to on its way to the party that will pay it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +143,21 @@ pub enum DispatchError {
     /// A gate between a record and a price refused it.
     #[error(transparent)]
     Cdr(#[from] emob_cdr::CdrError),
+
+    /// Policies were offered to a node that holds no gate.
+    ///
+    /// A refusal rather than a quiet `with_policies`: a set loaded into a node
+    /// that will not consult it is a grant nobody is enforcing, and the operator
+    /// who wrote it has every reason to believe it is in force.
+    #[error(
+        "this node holds no policy gate, so a policy set loaded into it would decide nothing: \
+         build it with `with_policies` first"
+    )]
+    NoPolicies,
+
+    /// Operator-authored policies that do not hold.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
 
     /// A record already accepted by its partner was consigned again.
     ///
@@ -340,6 +357,25 @@ pub enum Verdict {
         /// debugged by seeing all of it in one pass.
         reasons: Vec<String>,
     },
+
+    /// The credential that sent it may not push this record here.
+    ///
+    /// # Why it is a sixth answer and why it comes first
+    ///
+    /// The other five are all things to say to a partner this node accepts
+    /// records from: your document is malformed, your claim does not hold, we
+    /// have it already. This one is said to a caller that is not that partner,
+    /// or is that partner acting outside what an operator granted it — a trial
+    /// that has ended, a party whose records this credential does not reach.
+    ///
+    /// And it is decided **before** the document is read, because the other five
+    /// answers are information: telling an unauthorised caller which of its
+    /// periods do not sum is telling it about a session it has no business
+    /// knowing exists.
+    Unauthorised {
+        /// Why — the typed model's own sentence, or the policies that decided.
+        reasons: Vec<String>,
+    },
 }
 
 /// What a settled record is worth to each of the two parties.
@@ -393,6 +429,14 @@ pub struct Roamd {
     inbound: CdrLedger,
     /// What every partner's document is asked about its signed metering data.
     signed_data: SignedDataPolicy,
+    /// The operator's own policies, where there are any.
+    ///
+    /// `None` is not "no authorisation": [`Roamd::receive`] applies the typed
+    /// ceiling either way, and that is the model every other daemon here uses.
+    /// What a gate adds is the half a set of capability patterns cannot say — a
+    /// grant that starts on a date, one that ends on one — and the ability to
+    /// change it while the node runs.
+    policies: Option<Gate>,
 }
 
 impl Roamd {
@@ -404,6 +448,88 @@ impl Roamd {
             outbound: BTreeMap::new(),
             inbound: CdrLedger::new(),
             signed_data: SignedDataPolicy::default(),
+            policies: None,
+        }
+    }
+
+    /// Onboard the operator's own policies over this node's peers.
+    ///
+    /// The half `[OCPI 2.3.0 §mod_credentials]` leaves to the two parties: a
+    /// partner arrives while the node runs, and what an operator wants to say
+    /// about one is *"charge detail records, until the trial ends"* rather than
+    /// a set of dotted capability patterns. See [`emob_service::policy`].
+    #[must_use]
+    pub fn with_policies(mut self, gate: Gate) -> Self {
+        self.policies = Some(gate);
+        self
+    }
+
+    /// Replace them, without a deploy — which is the whole reason they are text.
+    ///
+    /// A set that does not validate is refused and the **old one keeps
+    /// deciding**: default deny makes an empty policy set a total outage rather
+    /// than a degraded state, so a failed reload must not be able to produce
+    /// one.
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError`] for text that does not parse or does not hold against the
+    /// schema, and [`DispatchError::NoPolicies`] for a node that was never given
+    /// a gate — because loading policies into a node that will not consult them
+    /// is a grant nobody is enforcing.
+    pub fn reload_policies(&mut self, text: &str) -> Result<usize, DispatchError> {
+        let gate = self.policies.as_mut().ok_or(DispatchError::NoPolicies)?;
+        Ok(gate.reload(text)?)
+    }
+
+    /// Whether a credential may act on a record this node holds.
+    ///
+    /// The typed ceiling always, and the operator's policies as well where there
+    /// are any. See [`Self::receive`] for the order and why it is that order.
+    ///
+    /// # Errors
+    ///
+    /// The reasons it may not — the typed model's own sentence, the policies
+    /// that decided, or anything that could not be evaluated. A list rather than
+    /// a boolean because an operator debugging *"why can this partner not push
+    /// to us"* is answering a question about a policy set, and the policy that
+    /// matched is the answer.
+    pub fn may(
+        &self,
+        principal: &emob_service::Principal,
+        capability: &str,
+        owner: &PartyId,
+        id: &str,
+        at: time::OffsetDateTime,
+    ) -> Result<(), Vec<String>> {
+        let Some(gate) = &self.policies else {
+            // The typed model alone, which is the model every other daemon here
+            // uses and is not "no authorisation".
+            return if principal.may_act_for(capability, owner) {
+                Ok(())
+            } else {
+                Err(vec![format!(
+                    "the credential's own grant does not reach {capability} on records owned by \
+                     {owner}"
+                )])
+            };
+        };
+        let resource = match Resource::of(capability, id, owner.clone()) {
+            Ok(resource) => resource,
+            Err(error) => return Err(vec![error.to_string()]),
+        };
+        let verdict = gate.verdict(principal, capability, &resource, at);
+        if verdict.allowed() {
+            Ok(())
+        } else {
+            let mut reasons = verdict.reasons().to_vec();
+            reasons.extend(verdict.errors().iter().cloned());
+            if reasons.is_empty() {
+                reasons.push(format!(
+                    "no policy grants {capability} on records owned by {owner}"
+                ));
+            }
+            Err(reasons)
         }
     }
 
@@ -474,7 +600,15 @@ impl Roamd {
         // The replacement half of a correction may not overtake its own
         // reversal. `emob_cdr` refuses to bill both halves and `to_ocpi_credit`
         // builds the reversal; neither knows whether it left the building.
+        //
+        // …and a reversal is owed only where the partner **took** the original.
+        // A Credit CDR reverses a record the eMSP has; for one they refused, or
+        // one that never left, there is nothing to reverse and no credit will
+        // ever be accepted — so requiring one deadlocked the correction of every
+        // refused record, against this method's own documented rule that
+        // *"nothing was settled, so nothing is sealed"* (D297).
         if let Some(superseded) = &cdr.supersedes
+            && self.was_accepted(superseded)
             && !self.credit_accepted_for(superseded)
         {
             return Err(DispatchError::CreditNotAcceptedYet {
@@ -683,9 +817,25 @@ impl Roamd {
 
     /// Decide what to do with a record a partner sent.
     ///
-    /// Three gates in the order that makes them mean something — the document,
-    /// the conversion, the record — and four answers rather than one error. See
-    /// the module documentation.
+    /// **Four** gates in the order that makes them mean something — the
+    /// credential, the document, the conversion, the record — and **six**
+    /// answers rather than one error: unauthorised, rejected, disputed,
+    /// accepted, a duplicate and a conflict. See the module documentation.
+    ///
+    /// # The credential is asked first, and that is a security property
+    ///
+    /// The other five answers are *information*. Telling a caller which of its
+    /// charging periods do not sum to its total is telling it about a session it
+    /// may have no business knowing exists — so a credential that may not push
+    /// this record here is answered before the document is read at all.
+    ///
+    /// The typed ceiling applies whether or not policies are loaded, and a gate
+    /// adds the operator's own conditions on top of it. A policy may grant
+    /// inside a delegation and may never widen one, which is what keeps a
+    /// roaming peer reaching only its own records however the text is written.
+    ///
+    /// `at` is an argument for the reason every instant here is one: a grant an
+    /// operator bounded by a date is a decision somebody will replay.
     ///
     /// `evidence` is the caller's because producing it means **verifying** the
     /// signed records against this node's own key registry, which is
@@ -695,9 +845,30 @@ impl Roamd {
     #[must_use]
     pub fn receive(
         &mut self,
+        from: &emob_service::Principal,
         document: &ocpi_kit::v2_3_0::Cdr,
         evidence: Option<emob_cdr::EvidenceRef>,
+        at: time::OffsetDateTime,
     ) -> Verdict {
+        // 0. The credential. Read off the document's own party rather than off
+        //    the credential, because the question is whose records this is being
+        //    pushed *for*: a hub pushes on behalf of the operators it brokers,
+        //    and a peer pushing somebody else's record is the leak the whole
+        //    authority model exists to prevent.
+        let owner = match PartyId::new(document.country_code.as_str(), document.party_id.as_str()) {
+            Ok(owner) => owner,
+            Err(error) => {
+                return Verdict::Unauthorised {
+                    reasons: vec![format!(
+                        "the document names no party this node can attribute it to: {error}"
+                    )],
+                };
+            }
+        };
+        if let Err(reasons) = self.may(from, caps::CDR_WRITE, &owner, document.id.as_str(), at) {
+            return Verdict::Unauthorised { reasons };
+        }
+
         // 1. The document, asked OCPI's own questions — **before** any
         //    conversion, because every conversion repairs something.
         let report = emob_roam::preflight(document, self.signed_data);
@@ -800,14 +971,43 @@ impl Roamd {
     }
 
     /// Record one outcome against a consignment.
+    ///
+    /// # An acceptance is terminal
+    ///
+    /// `[OCPI 2.3.0 §mod_cdrs]` seals a record the moment the eMSP has it, and
+    /// [`Self::consign`] is where that is enforced — by reading the delivery.
+    /// Which made the seal exactly as durable as the field: one
+    /// [`Self::refused`] after the fact overwrote the acceptance, and the same
+    /// record could then be sent to the same partner again, who now holds two
+    /// records for one session and settles both (D297).
+    ///
+    /// So an accepted consignment may not be moved to another outcome. Recording
+    /// the **same** outcome again is idempotent, because a location that arrives
+    /// late is a fact about one delivery rather than a second one.
     fn delivered(&mut self, key: &CdrKey, delivery: Delivery) -> Result<(), DispatchError> {
         let Some(consignment) = self.outbound.get_mut(key) else {
             return Err(DispatchError::NotConsigned {
                 key: key.to_string(),
             });
         };
+        if let Delivery::Accepted { at, .. } = consignment.delivery
+            && !delivery.is_accepted()
+        {
+            return Err(DispatchError::AlreadyAccepted {
+                key: key.to_string(),
+                recipient: consignment.recipient().to_string(),
+                at,
+            });
+        }
         consignment.delivery = delivery;
         Ok(())
+    }
+
+    /// Whether a partner has taken this record.
+    fn was_accepted(&self, key: &CdrKey) -> bool {
+        self.outbound
+            .get(key)
+            .is_some_and(|consignment| consignment.delivery.is_accepted())
     }
 
     /// Whether a reversal of this record has been accepted by its partner.

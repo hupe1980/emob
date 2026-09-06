@@ -81,7 +81,7 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `roamd` | The roaming node: who a record goes to, whether it may go at all, when it is late, and what to do with one that arrives. Every document is `emob-roam`'s; what is here is the ledger of what was sent to whom — the one thing no crate can hold, because `[OCPI 2.3.0 §mod_cdrs]` seals a record once the eMSP has it and gives a correction an order, and neither rule is a property of a document |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-**913 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
+**969 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
 `emob-service` is the one shared place that stops being true, and everything
 above it is a daemon. `just ci` green.
 
@@ -200,13 +200,69 @@ the orchestrator takes it out of rotation, and only then drains — because kill
 a CSMS mid-transaction does not lose a request, it loses the `StopTransaction`
 that carries the signed meter record.
 
-### Cedar and MCP are dated rather than declined
+### …and a policy an operator wrote, for the question a capability set cannot ask
 
-A policy engine earns its weight when policies are operator-authored and change
-without a deploy — which is `roamd` onboarding a partner at runtime, and `roamd`
-is 📐. The authority model is deliberately Cedar-shaped: a principal, an action,
-a resource with an owner. When it lands, the schema is those entity types and the
-default is deny.
+The typed model above already takes its values at runtime: a `Principal` is built
+from configuration, not from a `const`. So a policy engine buys nothing until
+there is a question that model has **no vocabulary for** — and onboarding a
+partner while the node runs is where one appears:
+
+> charge detail records, **until the trial ends**
+
+A set of dotted capability patterns cannot say *until*, and inventing a grammar
+that can is how a capability model becomes a policy language nobody specified.
+Cedar is that language, with a schema and a validator — behind a feature that is
+off by default, because it costs a hundred and eight crates and only the roaming
+node needs it.
+
+```cedar
+@id("nl-tnm-trial")
+permit (
+  principal == emob::Party::"NL*TNM",
+  action in [emob::Action::"emob.cdr.read", emob::Action::"emob.tariff.read"],
+  resource
+)
+when { resource.owner == principal }
+unless { context.at > datetime("2027-01-01T00:00:00Z") };
+```
+
+Four things make it more than a dependency.
+
+**The schema is derived from the capability list, not written beside it.** One
+action per capability and one entity type per family, read out of
+`emob.<family>.<verb>`. A second list would let a policy validate against an
+action nobody can ever be granted — a rule that never matches, which fails open
+on a `forbid` and silently on a `permit`.
+
+**A policy may grant, and it may never widen a delegation.** The typed ceiling is
+asked first and a `no` there is final. A roaming peer still reaches only its own
+records however the text is written, and the sharper half: an agent's principal
+is *derived* by `attenuate` rather than configured, so **no agent can hold a
+capability that writes** survives a policy file. An engine consulted instead of
+the typed model would make a structural property depend on what somebody wrote
+this morning.
+
+**A warning is an error.** Cedar's own typechecker reports a condition that can
+never be true — a rule that does not run. Its other warnings are about confusable
+identifiers: a mixed script, a bidirectional control character, a homoglyph. In a
+policy set whose whole job is keeping one company's records away from another's,
+a party id that merely *looks* like `NL*TNM` is the leak above, spelled in
+Unicode.
+
+**And what cannot be evaluated is not assumed open.** Cedar skips a policy that
+errors and carries on, which is right for a large policy store and wrong here: a
+`forbid` that could not be evaluated is a refusal that silently did not happen.
+That is the same sentence the pricing engine says about an element carrying a
+restriction it cannot judge.
+
+The roaming node asks it **before** it reads the document, because the other five
+answers are information — telling a caller it does not accept which of its
+charging periods do not sum is telling it about a session it has no business
+knowing exists. And a reload that does not validate leaves the running set
+deciding: default deny makes an empty policy set a total outage rather than a
+degraded state.
+
+### MCP is dated rather than declined
 
 An MCP surface is what an agent reaches a daemon's read side through, and emob's
 specialists read data a daemon already holds. When one lands the rule is `hems`'s
@@ -249,13 +305,74 @@ replay that re-executes the logic while reading each effect back rather than
 performing it again. "Why did the queue say that in March" becomes a replay
 instead of an argument.
 
+## A grid operator may switch a charge point down, and there is a rule about it
+
+`[EnWG §14a]` lets a grid operator reduce the draw of *steuerbare
+Verbrauchseinrichtungen* to relieve a local overload, and
+`[BK6-22-300 Ziff. 2.4.1]` says which devices those are. The first condition
+decides whether any of it applies, and it is the one every summary drops:
+
+> ein Ladepunkt für Elektromobile, **der kein öffentlich zugänglicher Ladepunkt
+> im Sinne des § 2 Nr. 5 der Ladesäulenverordnung (LSV) ist**
+
+A **publicly accessible** point is not one at all. The fast charger on the
+forecourt is outside § 14a; the depot behind the fence, the workplace car park
+and the fleet yard are inside it. And charge points are counted one by one,
+because `Ziff. 2.4.2`'s grouping of several devices into one names only the
+heat-pump and space-cooling families — so a yard of nine wall boxes is nine
+devices, which is what the Mindestleistung formula's `n` is.
+
+```rust
+SteuVe::of(&forecourt, Control::Ems)   // Err: publicly accessible
+SteuVe::of(&depot,     Control::Ems)   // Ok
+```
+
+### The ceiling is a door rather than a check
+
+`Ziff. 4.6` makes the grid operator's reduction outrank *"marktliche
+Laststeuerung"* — a dynamic tariff, a departure schedule, a driver in a hurry.
+Every one of those is a reason somebody writes code that reaches past the limit,
+so the limit is not something that gets checked: `Allocation` has no constructor
+and no public fields, `allocate` is the only thing that returns one and it takes
+the grid limit, and a market plan is a `Demand` going **in**. A property over
+four thousand generated sites asserts there is no way out.
+
+### …and the operator keeps a claim the site does not give up quietly
+
+`Ziff. 4.5` owes the operator 4.2 kW per directly controlled device, and for the
+ones on an energy-management system
+
+```text
+Pmin = 4,2 kW + (n − 1) × GZF × 4,2 kW
+```
+
+where `n` counts **only** those. Folding the directly controlled boxes in is the
+mistake and it falls the way that hurts: a yard of two direct and six on the EMS
+is owed 25.2 kW, and counting all eight as one group gives 18.9 — six and a third
+kilowatts the site would have stopped asking for. A setpoint below the minimum is
+one the grid operator may not give, so the site holds at the minimum and says so.
+
+### Why 4.2 kW is 4.14 kW rounded up
+
+`DIN EN 61851-1` signals the charging current over the pilot's PWM duty cycle and
+cannot express less than **6 A**, so a three-phase point cannot be told to draw
+under `3 × 230 V × 6 A = 4.14 kW`. The first draft of the Festlegung said 3.7 kW;
+the consultation reply was that a point told to draw it would *abort the session*
+and could not restart itself.
+
+Which is why a proportional share is the wrong arithmetic. Dividing 10 kW across
+four boxes gives each a number none of them can signal, and the site draws
+nothing while reporting that it allocated everything. Points are seated at their
+own floor first, in the order the operator hands them, and one that cannot be
+seated is held at zero and named.
+
 ## What is designed 📐
 
 | Crate | Holds |
 |---|---|
 | `emob-roam` (eMIP) | GIREVE legacy, beside the OCPI and OICP halves that are built. Only if a partner forces it — GIREVE speaks OCPI |
 | `emob-pnc` | Plug & Charge contracts, certificate pools, multi-PKI |
-| `emob-smart` | Site load management, OCPP charging profiles, DER control, the § 14a guard, V2G |
+| `emob-smart` (the wire) | The § 14a **rule** is built — see below. What is designed is both ends of the wire: a setpoint arriving over EEBUS, an allocation leaving as an OCPP charging profile, DER control on 2.1, and the V2G flow model |
 | `emob-sim` (the rest) | Virtual EVs with 15118 PnC handshakes, MockHubject, an OCPI peer-in-a-process |
 
 Services — `csmsd`, `agentd`, `poid`, `tarifd`, `roamd`, `billd` and `empd` are
@@ -414,7 +531,7 @@ and they are the hard sixty per cent of a platform:
 | `ocpi-kit` | OCPI 2.1.1 / 2.2.1 / 2.3.0 models, client and server, hub pieces, the tariff engine |
 | `oicp-kit` | Hubject, both halves, delta-sync, CDR pre-flight, and a mock hub for CI |
 | `iso15118` | The EXI codec, the -2/-20 message sets, the Plug & Charge signature profile. Already a **dev**-dependency of `emob-core`: it owns the unambiguous spelling of a vehicle-communication generation, and a test asserts ours is its spelling — the DATEX II profile's own literal `iso15118` means -20 and has no name for -2, so an ambiguous one published in the official record is a claim of compliance with a 2027 duty |
-| `eebus` | The § 14a wire at a site's grid connection point |
+| `eebus` | The § 14a wire: SHIP, SPINE and the four use cases certifiable since July 2026, on both sides. Not a dependency yet, and already load-bearing — `emob-smart` reads its Limitation of Power Consumption use case for the five states a controllable site can be in, because *what a site draws while nobody is telling it anything* is a rule, and the socket that notices the silence is a daemon's |
 
 The billing half comes from `en16931` (+ formats) and `sepa`, with
 `doubleentry` reserved for the daemon that holds a journal; the
@@ -523,6 +640,7 @@ reaches for one.
 | `purity` | a domain crate that reaches for a clock, a socket or the filesystem in **its own** source |
 | `check-constructors` | a rule with a door around it. `Energy::from_kwh` refuses a negative so a discharge can never cancel a draw; `TokenRef::new` refuses anything that is not a keyed digest so a raw RFID UID is never stored; `PartyId::new` upper-cases so `DE*ABC` and `DEABC` are not two entries in one routing table. A `derive(Deserialize)` restores the value and asks none of it — and that is the path values arrive by, out of a store, an outbox or a partner's document. So a type whose fields are **private** and whose construction can **refuse** may not derive it. Both halves matter: a bag of public fields has no door to guard, and "can refuse" is recognised by shape rather than by a list of names, because a search for `new` and `parse` walks past `Energy::from_kwh` |
 | `check-reach` | a rule with no caller. `dead_code` sees an unused private item and `cargo tree --invert` sees an unused crate; neither sees a `pub fn`, because `pub` is a promise to a downstream and the compiler takes it at face value — and here the downstream is this workspace. A public function whose name appears nowhere but its own definition, in no other crate, no test, no doc comment and nowhere on this site, is a rule stated and not enforced. A textual search rather than a call graph, deliberately: it over-approximates reachability, so it can miss a dead function and can never invent one |
+| `check-api` | the mirror of `check-reach`, and the half nothing looked for. A deleted function takes its callers with it — the compiler sees to that — and leaves every page that explained it standing, because no compiler reads a Markdown file. A path `A::B` counts when `A` is a type, an enum, a trait or a module **this workspace declares**, so somebody else's promise is left alone, and `B` then has to exist in the source with the comments stripped |
 | `check-graph` | the other half: a clock, a socket or a database reaching a domain crate through a **dependency**, which `purity` greps past — a `uuid`/`v7` identifier is `SystemTime::now` behind a manifest line |
 | `check-prose` | a sentence a person reads with a hole in it. Rust joins a `\`-continued string literal with no separator, so dropping the backslash moves the continuation's indentation *inside* the string: it still compiles, every test matching a substring still passes, and the message reaches an operator with a run of spaces in the middle of it. The six that had accumulated were all in refusal texts — the longest strings here, and the only thing a person sees when the platform says no |
 | `check-wire` | a date or an instant in a serialisable type going out as `time`'s derived **nine-element array** instead of RFC 3339. Nothing fails when it does — a round trip through the same library succeeds either way — so every such field has to name the module it writes with |

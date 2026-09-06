@@ -11,6 +11,7 @@ members = [
     "crates/emob-ocpp",
     "crates/emob-poi",
     "crates/emob-sim",
+    "crates/emob-smart",
     "crates/emob-roam",
     "crates/emob-service",
     "services/agentd",
@@ -77,7 +78,18 @@ ocpp-kit = { version = "0.2", default-features = false }
 # Only `emob-roam` sees these types. `convert` is not an extra: a partner on
 # 2.2.1 is the ordinary case, and the point of the crossing is that what the
 # downgrade cost is reported rather than decided silently.
-ocpi-kit = { version = "0.2", default-features = false, features = ["v2_3_0", "v2_2_1", "convert"] }
+#
+# Invoice Reconciliation is the module 2.3.0 added for the half this workspace
+# is about. A CDR and its invoice line cannot disagree inside one process, and
+# between two *companies* nothing tied them together at all: the records go over
+# OCPI and the invoice over an access point, and neither document says which
+# records the other is about. That is the seam `emob-billing` ends at and the one
+# `emob-roam` now carries. It needs no feature: upstream moved the module into
+# core 2.3.0 in July 2026 — in place, on a released branch, with no version bump
+# — and `payments` went the other way, out of core onto a branch. This workspace
+# does not take `payments`: a pre-authorisation hold is the acquirer's and
+# `Tariff.preauthorize_amount` decides nothing `emob-tariff` computes.
+ocpi-kit = { version = "0.3", default-features = false, features = ["v2_3_0", "v2_2_1", "convert"] }
 
 # ── The OICP wire ───────────────────────────────────────────────────────────
 # Also only `emob-roam`. OICP is hub-and-spoke where OCPI is peer-to-peer —
@@ -101,7 +113,11 @@ oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp"
 # refuses a bare `iso15118` because the DATEX II profile defines that literal as
 # -20 and has no literal for -2). `crates/emob-core/tests/the_kits_agree.rs`
 # asserts the two spellings are one spelling, which is a test rather than a hope.
-iso15118 = { version = "0.3", default-features = false }
+# 0.4 is taken for `emob-pnc` rather than for this dev-dependency: certificate
+# chains validated against ISO 15118's own Annex F profiles, and the encrypted
+# contract private key out of its envelope, are the artefact half that crate
+# would otherwise have written.
+iso15118 = { version = "0.4", default-features = false }
 
 # ── The money leaves the platform ───────────────────────────────────────────
 # Only `emob-billing` sees these. Three standards this workspace has no business
@@ -114,7 +130,7 @@ iso15118 = { version = "0.3", default-features = false }
 # produce a different number for the same session is the drift this workspace
 # exists to make unrepresentable. `time` rather than `chrono`, because every
 # instant here is a `time::OffsetDateTime`.
-en16931 = { version = "0.6", default-features = false, features = ["time"] }
+en16931 = { version = "0.7", default-features = false, features = ["time"] }
 
 # The syntax half: **both** the formats CEN/TS 16931-2 makes mandatory. UBL is
 # what the German platforms take by default and CII is what a partner may
@@ -122,20 +138,20 @@ en16931 = { version = "0.6", default-features = false, features = ["time"] }
 # binding serves the next consumer too. `zugferd` itself is the hybrid PDF and
 # stays off: `en16931-formats` reads those and does not write them, and `lopdf`
 # takes the graph from thirteen crates to fifty-seven.
-en16931-formats = { version = "0.6", default-features = false, features = ["ubl", "cii"] }
+en16931-formats = { version = "0.7", default-features = false, features = ["ubl", "cii"] }
 
 # pain.008 for the collection, and the IBAN/BIC/Creditor-Id validation that
 # stops an unpayable instruction being written in the first place. Its `time`
 # feature so a date crosses as a date.
 #
-# Note for `emob-billing`: this crate's builders **default** several fields off
-# the system clock — `IsoDate::today()` for a collection date, `now` for the
-# message timestamp. Every one of them is an argument at this workspace's seam,
-# because a domain crate that reads a clock cannot be replayed (see `just
-# purity`), and a collection file that differs between two runs of one billing
-# job is a file no bank reconciles.
+# The two values a replay cannot tolerate — the collection date and the message
+# id's timestamp — are constructor arguments rather than defaults, because a
+# domain crate that reads a clock cannot be replayed and a collection file that
+# differs between two runs of one billing job is a file no bank reconciles
+# (D304). `created_at` is the one that stays optional; `emob-billing` passes it,
+# and `just purity` keeps it passing.
 doubleentry = { version = "0.7", default-features = false }
-sepa = { version = "0.6", default-features = false, features = ["time"] }
+sepa = { version = "0.7", default-features = false, features = ["time"] }
 
 # ── Eichrecht: the OCMF format ──────────────────────────────────────────────
 # The format is `ocmf`'s and the law is `emob-eichrecht`'s: that crate keeps only
@@ -153,10 +169,18 @@ ocmf = { version = "0.1", default-features = false, features = [
 
 # Signing, for the simulator's virtual meters and for test fixtures only.
 # Nothing on the billing path signs anything: `ocmf` verifies.
+#
+# **One RustCrypto generation here, and it is `ocmf`'s (D304).** The 1.0-track
+# releases — `sha2` 0.11, `hmac` 0.13, `p256` 0.14 — take `digest` 0.11 and
+# `ecdsa` 0.17 with them, and `ocmf` links 0.10 and 0.16. Two implementations of
+# SHA-256 in one binary would compile, because the boundary is SEC1 bytes, and
+# that is the problem: the simulator is only worth something if the signature it
+# writes and the signature `ocmf` checks go through the same code. When `ocmf`
+# moves, this moves.
 sha2      = "0.10"
 p256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 hex       = "0.4"
-base64    = "0.22"
+base64    = "0.23"
 
 # ── Internal (path + version so the domain crates can be published) ─────────
 emob-core      = { path = "crates/emob-core",      version = "0.1" }
@@ -167,6 +191,7 @@ emob-tariff    = { path = "crates/emob-tariff",    version = "0.1" }
 emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.1" }
 emob-poi       = { path = "crates/emob-poi",       version = "0.1" }
 emob-sim       = { path = "crates/emob-sim",       version = "0.1" }
+emob-smart     = { path = "crates/emob-smart",     version = "0.1" }
 emob-roam      = { path = "crates/emob-roam",      version = "0.1" }
 emob-billing   = { path = "crates/emob-billing",   version = "0.1" }
 emob-thg       = { path = "crates/emob-thg",       version = "0.1" }
@@ -181,7 +206,7 @@ tokio              = { version = "1", default-features = false }
 tokio-util         = { version = "0.7", default-features = false }
 tracing            = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "std", "ansi"] }
-toml               = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+toml               = { version = "1.1", default-features = false, features = ["parse", "serde"] }
 
 # Standard Webhooks signatures are HMAC-SHA256 over `id.timestamp.payload`,
 # base64 — and the comparison has to be constant time, which is what `subtle`
@@ -190,12 +215,26 @@ toml               = { version = "0.9", default-features = false, features = ["p
 hmac   = { version = "0.12", default-features = false }
 subtle = { version = "2", default-features = false }
 
+# ── The policy an operator writes ───────────────────────────────────────────
+# Only `emob-service`, behind a feature that is **off** by default, and only
+# `roamd` turns it on. The same argument `doubleentry` gets one manifest for
+# (D181): a partner onboarded while the node runs is the one place a policy
+# engine earns its weight, and it costs a hundred and eight crates — which every
+# other daemon would carry for a decision it makes from a typed value.
+#
+# `cedar-policy` rather than a grammar of our own: the conditions an operator
+# wants to write are a *language* — a grant that starts on a date, one that ends
+# on one, one that turns on a role — and inventing one is how a capability model
+# becomes a policy engine nobody specified and nothing validates. Cedar has a
+# schema, a validator and a proof of its own analysis.
+cedar-policy = { version = "4.12", default-features = false, features = ["datetime"] }
+
 # ── The agent plane ─────────────────────────────────────────────────────────
 # Only `agentd`. The runtime whose journal is the plan of record: every effect
 # performed at most once, written to an append-only hash-chained log, and read
 # back on replay. `manifest` because what an agent may do has to be a file a
 # reviewer sees in a diff rather than a builder call nobody reads.
-agentplane = { version = "0.26", default-features = false, features = ["redb", "manifest"] }
+agentplane = { version = "0.28", default-features = false, features = ["redb", "manifest"] }
 
 [profile.release]
 opt-level     = 3

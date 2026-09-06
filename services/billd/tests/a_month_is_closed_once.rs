@@ -580,3 +580,77 @@ fn an_operators_own_chart_of_accounts_is_the_one_that_is_posted_to() {
         "the default path is not opened beside the operator's own"
     );
 }
+
+/// **A reversal is only a reversal beside the entry it undoes.**
+///
+/// `postings_for` reverses every side of a *Stornorechnung* — same accounts,
+/// same amounts, the other way — which is exactly right against the invoice it
+/// cancels and a fabrication on its own. Booked alone it credits a receivable
+/// nobody debited and debits revenue nobody earned, and the journal balances:
+/// double entry balances whatever it is told, so nothing fails until somebody
+/// reconciles against the recipient's own records — which is the failure this
+/// service's separation of *issuing* from *posting* exists to prevent (D298).
+///
+/// Which document cancels which is this service's fact. `emob-billing` builds
+/// the cancellation and reverses the postings; neither it nor the journal knows
+/// whether the original was ever posted.
+#[test]
+fn a_cancellation_cannot_reach_the_books_before_the_invoice_it_reverses() {
+    let ledger = month("0.49");
+    let mut billd = service().posting_to(ChartOfAccounts::new());
+
+    let original = billd
+        .issue("2026-06", closing(&ledger, driver()))
+        .expect("the first closing")
+        .invoice
+        .number
+        .clone();
+    billd
+        .accepted(&original, date!(2026 - 07 - 02), None)
+        .expect("the recipient took it");
+
+    // Accepted, and deliberately **not** booked.
+    let (credit, _replacement) = billd
+        .rebill(
+            &original,
+            date!(2026 - 07 - 10),
+            "the meter was re-read",
+            closing(&ledger, driver()),
+        )
+        .expect("a re-rated month cancels before it re-bills");
+    billd
+        .accepted(&credit, date!(2026 - 07 - 11), None)
+        .expect("the recipient took the credit note too");
+
+    let error = billd
+        .book(&credit)
+        .expect_err("a reversal of an entry that does not exist is not a posting");
+    assert!(
+        matches!(error, ClosingError::ReversesUnbooked { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains(&original), "{error}");
+    // …and nothing reached the accounts, which is the whole of the claim: a
+    // balance of `None` is a different statement from a balance of zero.
+    for path in [
+        "assets:receivable",
+        "income:energy",
+        "liabilities:vat:DE:19",
+    ] {
+        assert_eq!(
+            billd.balance_of(path, "EUR").expect("a readable journal"),
+            None,
+            "{path}"
+        );
+    }
+
+    // …and in the order the correction actually has, both halves post and the
+    // accounts net to nothing.
+    billd.book(&original).expect("the invoice first");
+    billd.book(&credit).expect("then the reversal");
+    let receivable = billd
+        .balance_of("assets:receivable", "EUR")
+        .expect("a readable journal")
+        .expect("both halves are posted");
+    assert_eq!(receivable.debits, receivable.credits);
+}

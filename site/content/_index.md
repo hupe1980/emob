@@ -137,10 +137,11 @@ sessions unverifiable.
 
 ## Where it stands
 
-Twelve domain crates are real, tested and green — `emob-core`, `emob-eichrecht`,
-`emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`, `emob-poi`, `emob-roam`,
-`emob-billing`, `emob-thg`, `emob-service` and `emob-sim` — with seven daemons on
-top of them and **913 tests**. The domain crates do no I/O, read no clock and
+Thirteen domain crates are real, tested and green — `emob-core`,
+`emob-eichrecht`, `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`,
+`emob-poi`, `emob-roam`, `emob-billing`, `emob-thg`, `emob-smart`,
+`emob-service` and `emob-sim` — with seven daemons on top of them and
+**969 tests**. The domain crates do no I/O, read no clock and
 hold no binary floats.
 
 What that buys, concretely:
@@ -175,14 +176,18 @@ What that buys, concretely:
   between a kilowatt-hour and the quota is refused by name rather than missing
   from the file;
 - a hundred-station fleet run reconciles exactly;
+- a § 14a site shares its grid operator's setpoint out under a ceiling nothing
+  can raise — the allocation has no constructor and a market plan is an input —
+  and it holds the minimum draw the Festlegung guarantees even when the control
+  box has gone silent;
 - a roaming peer's credential reaches its own party's records and no others, and
   the advisory plane beside the daemons **cannot move money** — its output type
   is a leaf nothing consumes, and its principal cannot hold a capability that
   writes.
 
-Plug & Charge contracts and smart charging are designed and not yet built. Every
-page here marks ✅ built and 📐 designed, and the gap between the two is never
-blurred.
+Plug & Charge contracts and the § 14a **wire** — the EEBUS session a setpoint
+arrives over — are designed and not yet built. Every page here marks ✅ built and
+📐 designed, and the gap between the two is never blurred.
 
 <div class="cta">
 

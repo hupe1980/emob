@@ -44,7 +44,7 @@ lint:
 purity:
     #!/usr/bin/env bash
     set -uo pipefail
-    pure="emob-core emob-eichrecht emob-session emob-cdr emob-billing emob-tariff emob-thg emob-ocpp emob-poi emob-roam emob-sim"
+    pure="emob-core emob-eichrecht emob-session emob-cdr emob-billing emob-tariff emob-thg emob-ocpp emob-poi emob-roam emob-sim emob-smart"
     fail=0
     for crate in $pure; do
         [ -d "crates/$crate/src" ] || continue
@@ -70,7 +70,8 @@ test-crate crate:
 
 # 🛡️ Workspace guards: no floats, citations, publishable manifests, wire
 # spellings, unbroken sentences, self-consistent documents, public functions
-# something calls, constructors the wire goes through, clean graphs
+# something calls, documented APIs the code still has, constructors the wire
+# goes through, clean graphs
 guards:
     cargo run -q -p xtask -- check-all
 
@@ -92,7 +93,7 @@ msrv:
     cargo +{{ msrv }} check --all-features \
         -p emob-core -p emob-eichrecht -p emob-session -p emob-cdr \
         -p emob-tariff -p emob-ocpp -p emob-poi -p emob-billing -p emob-thg -p emob-service \
-        -p emob-sim
+        -p emob-sim -p emob-smart
     @echo "🔒 the crates that promise {{ msrv }} build on {{ msrv }}"
 
 # `cargo publish` cannot be undone, so the dry run is the cheap half of the

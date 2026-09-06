@@ -180,13 +180,47 @@ fn no_credit_is_a_question_about_sessions_nobody_has_invoiced() {
         Allowed::NoCredit
     );
 
-    // …and a month that has been invoiced is a driver who may charge again.
-    provider.invoiced(&contract());
-    assert!(provider.unbilled(&contract()).is_none());
+    // …and a month that has been invoiced is a driver who may charge again —
+    // for **what the invoice billed**, and no more. A session authorised while
+    // the closing runs is added to this total and would be wiped by a clear:
+    // money nobody collects, and a credit limit handed back unpaid (D299).
+    let outstanding = Money::new(dec("12.30"), Currency::EUR);
+    provider
+        .ran_up(&contract(), outstanding)
+        .expect("a session started while the month was closing");
+    assert_eq!(
+        provider
+            .invoiced(&contract(), Money::new(dec("55.74"), Currency::EUR))
+            .expect("the closing billed what it had")
+            .map(|left| left.to_string()),
+        Some("12.30 EUR".to_owned()),
+        "the session that arrived after the document survives it"
+    );
     assert_eq!(
         provider.authorize(&token, date!(2026 - 06 - 01)).unwrap(),
-        Allowed::Allowed
+        Allowed::Allowed,
+        "and the driver is under the limit again"
     );
+
+    // …and a closing that bills more than the ledger holds has counted a
+    // session twice, or counted one this provider never saw.
+    let error = provider
+        .invoiced(&contract(), Money::new(dec("99.00"), Currency::EUR))
+        .expect_err("a running total cannot go below zero");
+    assert!(
+        matches!(error, ProviderError::MoreInvoicedThanRunUp { .. }),
+        "{error}"
+    );
+
+    // …and the last of it leaves nothing outstanding, which is a different
+    // statement from a balance of zero.
+    assert_eq!(
+        provider
+            .invoiced(&contract(), outstanding)
+            .expect("the remainder"),
+        None
+    );
+    assert!(provider.unbilled(&contract()).is_none());
 }
 
 #[test]

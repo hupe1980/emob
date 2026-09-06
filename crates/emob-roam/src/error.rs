@@ -148,6 +148,22 @@ pub enum RoamError {
         max: usize,
     },
 
+    /// An invoice reconciliation record covers no CDR at all.
+    ///
+    /// `[OCPI 2.3.0 §mod_invoice_reconciliation_record_object]` gives `cdrs`
+    /// cardinality `+`. A record naming no session is one the receiving party
+    /// cannot check anything against, which is the whole of what the module is
+    /// for — so it is refused here rather than sent and rejected there.
+    #[error(
+        "the invoice {invoice_id} covers no charge detail record \
+         [OCPI 2.3.0 §mod_invoice_reconciliation_record_object]: an invoice a partner \
+         cannot tie to a session is one they cannot check"
+    )]
+    NoInvoicedRecords {
+        /// The invoice the record was about.
+        invoice_id: String,
+    },
+
     /// The record has no charging periods.
     ///
     /// OCPI gives `charging_periods` cardinality `+`. A record with none is

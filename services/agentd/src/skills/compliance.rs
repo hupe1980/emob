@@ -4,7 +4,7 @@
 //! # The rule is `emob-core`'s; the sweep is the agent's
 //!
 //! `emob_core::obligation::assess` judges **one** charge point against the
-//! **47 duties** on one date. It is the only implementation of those rules and
+//! **49 duties** on one date. It is the only implementation of those rules and
 //! this specialist does not have a second one — it calls it, once per point.
 //!
 //! What it adds is the two things a single assessment cannot say.

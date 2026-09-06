@@ -126,6 +126,17 @@ books on issue and submits afterwards has a trial balance that disagrees with
 what the recipient holds, and the disagreement is invisible until somebody
 reconciles.
 
+**And a reversal is only a reversal beside the entry it undoes.** `postings_for`
+reverses every side of a *Stornorechnung* — same accounts, same amounts, the
+other way — which is exactly right against the invoice it cancels and a
+fabrication on its own: booked alone it credits a receivable nobody debited and
+debits revenue nobody earned. The journal balances either way, because double
+entry balances whatever it is told, so nothing fails until somebody reconciles
+against the recipient. A cancellation whose original has not been booked is
+refused by name. Which document cancels which is this service's fact, and neither
+the crate that builds the cancellation nor the journal that seals the entry holds
+it.
+
 Two second bookings are two different things, and get two answers. A caller that
 books the same number twice is repeating themselves, and is told so. A *process*
 that crashed between the journal's write and its own flag is not: the entry is

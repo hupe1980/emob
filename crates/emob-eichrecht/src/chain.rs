@@ -30,7 +30,7 @@
 //!
 //! # What this adds to the sequence rules
 //!
-//! Seven rules that are about billing rather than about the format — one row per
+//! Nine rules that are about billing rather than about the format — one row per
 //! variant of [`ChainFinding`] that is not a [`ChainFinding::Sequence`], because
 //! a rule the enum can report and the table cannot is a rule nobody reviewing
 //! this list knows about:
@@ -39,6 +39,8 @@
 //! |---|---|---|
 //! | The billed register is not one `[OCMF Tab. 25]` reserved and never defined | `[OCMF Tab. 25]` | energy |
 //! | The reading is in an energy unit at all | `[OCMF Tab. 7, RU]` | energy |
+//! | …and both ends of the subtraction are counted in the **same** one | `[OCMF Tab. 7, RU]` | energy |
+//! | Only one **direction** moved, so which register the session is has an answer | `[OCMF Tab. 25]` | energy |
 //! | Cable-loss compensation is reported against an accumulation register | `[OCMF Tab. 7, CL]` | both |
 //! | …and is reset at `TX=B`, so the session's own loss is `CL_end` | `[OCMF Tab. 7, CL]` | both |
 //! | The identification level does not change mid-session | `[OCMF Tab. 11]` | both |
@@ -115,6 +117,62 @@ pub enum ChainFinding {
         unit: String,
     },
 
+    /// The two ends of the subtraction are counted in different units
+    /// `[OCMF Tab. 7, RU]`.
+    ///
+    /// `RU` carries forward only **within** a record, so a chain opening in
+    /// `kWh` and closing in `Wh` is something a station can emit — and
+    /// `end − begin` is then not a difference at all. The energy comes out a
+    /// thousand times wrong in whichever direction the reader guessed, with a
+    /// unit label taken from one of the two readings and true of neither.
+    ///
+    /// Refused rather than converted. The two spellings are exactly
+    /// inter-convertible and that is the trap: a station that changes the unit it
+    /// counts in mid-transaction has done something no conforming meter does, and
+    /// silently repairing it would bill a register nobody can reproduce
+    /// `[MessEG §33]`. The clock is untouched, so it takes the energy and leaves
+    /// the duration.
+    ///
+    /// Raised once per register rather than once per reading, for the reason the
+    /// two `CL` findings are: a quarter-hourly session carries ninety-six of
+    /// them.
+    UnitChanged {
+        /// The register it was measured on, canonically spelled.
+        register: String,
+        /// The unit the chain opened in, as written.
+        expected: String,
+        /// The unit that turned up, as written.
+        found: String,
+    },
+
+    /// The chain measured energy in **both** directions, and only one of them
+    /// can be the session `[OCMF Tab. 25]`.
+    ///
+    /// A bidirectional meter reports an import register and an export register,
+    /// and `[OCMF Tab. 25]` puts the direction in the OBIS code so the two can
+    /// never be confused. What it does not say is which of them a session is
+    /// *for* — and the whole workspace rests on import and export never netting,
+    /// so a chain that bills the first register it saw has silently thrown the
+    /// other one away: a driver's discharge that no record downstream mentions,
+    /// because nothing was refused and nothing was noted.
+    ///
+    /// Raised only where the other direction's register actually **moved**. A
+    /// bidirectional charger doing an ordinary import reports a `C` register
+    /// that stayed still, and refusing that would refuse the hardware for being
+    /// capable.
+    ///
+    /// Disqualifies the energy and leaves the clock: which quantity the session
+    /// is remains a question somebody has to answer, and this crate will not
+    /// answer it by taking whichever register was listed first.
+    MixedDirections {
+        /// The register the chain would otherwise have billed.
+        billed: String,
+        /// The register measuring the other direction.
+        also: String,
+        /// What that other register moved by, as written.
+        moved: String,
+    },
+
     /// Cable-loss compensation was reported against a register that does not
     /// accumulate `[OCMF Tab. 7, CL]`.
     ///
@@ -179,6 +237,8 @@ impl ChainFinding {
             // The register and its unit say nothing about the clock.
             Self::ReservedRegister { .. }
             | Self::NotAnEnergyUnit { .. }
+            | Self::UnitChanged { .. }
+            | Self::MixedDirections { .. }
             | Self::NoBillableEnergy => Disqualifies::Energy,
 
             // A compensation that cannot be traced is a register value nobody
@@ -195,8 +255,14 @@ impl ChainFinding {
 /// What a sequence finding takes away.
 ///
 /// The one place in this workspace where `ocmf`'s vocabulary becomes a billing
-/// decision, and it is a `match` rather than a default so that adding a variant
-/// upstream is a compile error here rather than a silent `Both`.
+/// decision.
+///
+/// `Finding` is `#[non_exhaustive]`, so an exhaustive `match` is not available
+/// and a variant a later release adds cannot be a compile error here. What is
+/// available is the **direction** of the fallback: the three narrow answers
+/// below are the exhaustive list of what is *not* fatal, and everything else —
+/// including anything unrecognised — takes both quantities away. A new upstream
+/// check can therefore only ever narrow what this build bills, never widen it.
 fn sequence_disqualifies(finding: &Finding) -> Disqualifies {
     match finding {
         // `EF` names its quantities separately, and the whole point of this
@@ -246,6 +312,22 @@ impl core::fmt::Display for ChainFinding {
             Self::NotAnEnergyUnit { unit } => {
                 write!(f, "the reading is not in an energy unit: {unit}")
             }
+            Self::UnitChanged {
+                register,
+                expected,
+                found,
+            } => write!(
+                f,
+                "the readings on {register} are counted in more than one unit: {expected} then {found}. RU carries forward only within a record [OCMF Tab. 7], so the difference between the two ends is not a quantity"
+            ),
+            Self::MixedDirections {
+                billed,
+                also,
+                moved,
+            } => write!(
+                f,
+                "the chain measured energy in both directions — {billed} and {also}, which moved by {moved} — and only one of them is this session [OCMF Tab. 25]. Import and export never net, so which register is billed is a question a caller has to answer rather than one this crate answers by taking the first"
+            ),
             Self::LossOnNonAccumulationRegister { register } => write!(
                 f,
                 "cable-loss compensation is reported against {register}, which is not an accumulation register"
@@ -632,15 +714,29 @@ fn timeline_of(records: &[&Record<'_>]) -> Vec<SignedMarker> {
 /// The specification defines `E` and `t`. Anything else is a statement the meter
 /// made and this build cannot read, and it takes everything away — a future
 /// revision must not be able to widen what gets billed by adding a character.
+///
+/// **Once per distinct flag string.** `EF` carries forward, so a fault raised at
+/// the first reading is restated by every reading after it: a quarter-hourly
+/// session reported the same unreadable character ninety-six times. That is the
+/// rule the two `CL` findings and `RatingNote::Unpriced` already keep — ninety-six
+/// identical notes are one fact reported ninety-six times, and a queue nobody
+/// reads (D296). A *second*, different flag string is a second fact and is
+/// reported.
 fn check_error_flag_vocabulary(records: &[&Record<'_>], findings: &mut Vec<ChainFinding>) {
+    let mut reported: Vec<&str> = Vec::new();
     for record in records {
         for reading in record.payload().readings() {
             let flags = reading.error_flags().as_str();
-            if !flags.is_empty() && flags.chars().any(|c| c != 'E' && c != 't') {
-                findings.push(ChainFinding::UnknownErrorFlag {
-                    flags: flags.to_owned(),
-                });
+            if flags.is_empty() || flags.chars().all(|c| c == 'E' || c == 't') {
+                continue;
             }
+            if reported.contains(&flags) {
+                continue;
+            }
+            reported.push(flags);
+            findings.push(ChainFinding::UnknownErrorFlag {
+                flags: flags.to_owned(),
+            });
         }
     }
 }
@@ -740,9 +836,10 @@ fn billable_register(
     let (started_at, ended_at) = session_bounds(records);
 
     // The first energy register the sequence measured. A chain that measured
-    // two — an import and an export on one meter — is one whose *caller* has to
-    // say which it is billing, and `Evidence` splits them by direction before
-    // it gets here.
+    // two is only unambiguous while they agree about the direction, which is
+    // `check_one_direction`'s question below — and a meter reporting a lifetime
+    // and a transaction register of the same direction states one quantity
+    // twice.
     let Some(total) = sequence.totals().first() else {
         findings.push(ChainFinding::NoBillableEnergy);
         return Energetics {
@@ -781,6 +878,16 @@ fn billable_register(
         }
     });
 
+    // …and `RegisterTotal` labels its delta with the unit of the **begin**
+    // reading alone, so the subtraction underneath it has never been asked
+    // whether the two ends were counted in the same thing.
+    check_unit_consistency(records, register.as_deref(), &total.unit, findings);
+
+    // …and neither the format nor this function has asked whether the *other*
+    // registers measured the other direction. Taking the first one is what this
+    // used to do, silently.
+    check_one_direction(sequence, register.as_deref(), direction, findings);
+
     // `RV` is in `RU`, and `RU` is `Wh` on ordinary German hardware. Converting
     // here, once, is what keeps a `billable_energy` in kWh from sitting beside a
     // figure a thousand times too large.
@@ -791,7 +898,7 @@ fn billable_register(
     // `CL` on each, and a sweep that took the last one it saw subtracted an
     // opening value from one register out of a closing value from another. The
     // figure that came out was not a quantity at all (D242).
-    let loss = check_loss_compensation(records, register.as_deref(), findings);
+    let loss = check_loss_compensation(records, register.as_deref(), &total.unit, findings);
 
     Energetics {
         energy,
@@ -800,6 +907,128 @@ fn billable_register(
         compensated_loss: loss,
         started_at,
         ended_at,
+    }
+}
+
+/// Whether exactly one **direction** moved across this chain `[OCMF Tab. 25]`.
+///
+/// # The comment that was not true
+///
+/// This function's caller used to say *"a chain that measured two — an import
+/// and an export on one meter — is one whose caller has to say which it is
+/// billing, and `Evidence` splits them by direction before it gets here"*.
+/// [`crate::Evidence::assemble`] does no such thing: it hands every record to
+/// [`validate`] and takes one answer back. So a well-formed chain carrying
+/// `01-00:B2.08.00*FF` at +18 kWh and `01-00:C2.08.00*FF` at +5 kWh — a V2G
+/// session, both registers properly marked, every signature valid — reported
+/// **no finding at all**, billed the 18, and dropped the 5 on the floor.
+///
+/// Not a netting bug: nothing was subtracted. A worse one, in this workspace's
+/// terms — a measured quantity that vanished with no reason attached, out of the
+/// one crate whose entire promise is that a value which does not bill says why.
+///
+/// # Only where the other direction moved
+///
+/// A bidirectional charger doing an ordinary import reports a `C` register that
+/// stood still all session, and so does a meter that carries both a lifetime and
+/// a transaction register of the same direction. Refusing either would refuse
+/// hardware for being capable. The ambiguity is a register that moved, in the
+/// direction the billed one is not.
+fn check_one_direction(
+    sequence: &SessionReport,
+    billed: Option<&str>,
+    direction: Option<Direction>,
+    findings: &mut Vec<ChainFinding>,
+) {
+    let Some(direction) = direction else {
+        // A register whose code states no direction states none about the
+        // others either, and `ChainReport::direction` already says so.
+        return;
+    };
+    for total in sequence.totals().iter().skip(1) {
+        if total.delta.is_zero() {
+            continue;
+        }
+        let other = ObisCode::parse(&total.obis)
+            .as_ref()
+            .map(ObisCode::register)
+            .and_then(Register::is_import)
+            .map(|import| {
+                if import {
+                    Direction::Import
+                } else {
+                    Direction::Export
+                }
+            });
+        if other.is_some_and(|other| other != direction) {
+            findings.push(ChainFinding::MixedDirections {
+                billed: billed.unwrap_or("(unparsed register)").to_owned(),
+                also: total.obis.clone(),
+                moved: total.delta.to_string(),
+            });
+            // One finding per chain: the question is which register the session
+            // is, and a third register does not make it a different question.
+            return;
+        }
+    }
+}
+
+/// Whether both ends of the subtraction were counted in the same unit
+/// `[OCMF Tab. 7, RU]`.
+///
+/// # Why `ocmf` cannot answer this and this crate has to
+///
+/// [`RegisterTotal`](ocmf::session::RegisterTotal) takes its `unit` from the
+/// **begin** reading and its `delta` from `end − begin`, and compares the two
+/// readings' units nowhere: that is arithmetic over what the records say, and
+/// whether the arithmetic is a *quantity* is a billing question. `RU` carries
+/// forward only within a record, so a chain opening `2935.600 kWh` and closing
+/// `2965100 Wh` — the same physical 29.5 kWh — bills **2 962 164.4 kWh** with
+/// nothing objecting. The energy is a million times the truth, the label is
+/// `kWh`, and every signature verifies.
+///
+/// # Silent is not contradicting
+///
+/// Only readings that **state** a unit are compared. A reading that omits `RU`
+/// with nothing in its own record to carry from says nothing, and real meters
+/// omit fields the tables mark mandatory — 89 % of the S.A.F.E. corpus omits an
+/// `MS`. Refusing an absence would refuse hardware that has done nothing wrong,
+/// which is the same reasoning [`check_identification`] already applies to a
+/// record carrying no identification section.
+///
+/// The register total's own unit is the first claim, so a chain whose *only*
+/// stated unit sits on the begin reading is consistent by construction.
+fn check_unit_consistency(
+    records: &[&Record<'_>],
+    billed: Option<&str>,
+    total_unit: &str,
+    findings: &mut Vec<ChainFinding>,
+) {
+    for record in records {
+        for reading in record.payload().readings() {
+            // Only the register this chain bills. A meter reporting an import
+            // and an export register reports two series, and one of them
+            // changing its unit says nothing about the other.
+            if let Some(billed) = billed
+                && reading.obis().map(ObisCode::canonical).as_deref() != Some(billed)
+            {
+                continue;
+            }
+            let Some(unit) = reading.unit() else { continue };
+            let found = unit.as_str();
+            if found == total_unit {
+                continue;
+            }
+            findings.push(ChainFinding::UnitChanged {
+                register: billed.unwrap_or("(unparsed register)").to_owned(),
+                expected: total_unit.to_owned(),
+                found: found.to_owned(),
+            });
+            // One finding per register: the readings after the change are the
+            // same fact restated, and a quarter-hourly session carries
+            // ninety-six of them.
+            return;
+        }
     }
 }
 
@@ -853,13 +1082,26 @@ fn session_bounds(
 /// the same fault ninety-six times is a queue nobody reads, and it is the same
 /// rule the rating engine keeps for an unpriced dimension: the finding is about
 /// the register, so it is raised once for it.
+///
+/// # …and in the unit the register was counted in
+///
+/// `CL` "is given in the same unit as `RV` which is specified in `RU`", so the
+/// unit is the **billed register's** rather than whichever reading happened to
+/// close the sweep. Reading it off the closing reading and falling back to `kWh`
+/// where that reading stated none put a `Wh` figure on the record labelled as
+/// kilowatt-hours — a thousand-fold error in the one number that exists to
+/// explain the energy beside it, on a chain that bills perfectly well.
+/// [`check_unit_consistency`] has already refused a register whose readings
+/// disagree about the unit, so this is the register's one answer rather than a
+/// choice between two.
 fn check_loss_compensation(
     records: &[&Record<'_>],
     billed: Option<&str>,
+    total_unit: &str,
     findings: &mut Vec<ChainFinding>,
 ) -> Option<Energy> {
     let mut opening: Option<Decimal> = None;
-    let mut closing: Option<(Decimal, String)> = None;
+    let mut closing: Option<Decimal> = None;
     let mut not_an_accumulation: Option<String> = None;
     let mut not_reset: Option<Decimal> = None;
 
@@ -881,9 +1123,8 @@ fn check_loss_compensation(
             // register. Reported against anything else it is a number nobody
             // can trace to a value.
             let accumulates = code
-                .map(ObisCode::register)
-                .and_then(|kind| kind.is_import().map(|_| kind))
-                .is_some();
+                .as_ref()
+                .is_some_and(|code| is_accumulation_register(code));
             if !accumulates && not_an_accumulation.is_none() {
                 not_an_accumulation =
                     Some(code.map_or_else(|| "(absent)".to_owned(), |c| c.as_str().to_owned()));
@@ -895,10 +1136,7 @@ fn check_loss_compensation(
                     not_reset = Some(value);
                 }
             }
-            let unit = reading
-                .unit()
-                .map_or_else(|| "kWh".to_owned(), |u| u.as_str().to_owned());
-            closing = Some((value, unit));
+            closing = Some(value);
         }
     }
 
@@ -911,8 +1149,54 @@ fn check_loss_compensation(
         });
     }
 
-    let (end, unit) = closing?;
-    energy_in(end - opening.unwrap_or(Decimal::ZERO), &unit)
+    let end = closing?;
+    energy_in(end - opening.unwrap_or(Decimal::ZERO), total_unit)
+}
+
+/// Whether an OBIS code names a register whose reading **accumulates**
+/// `[OCMF Tab. 7, CL]`.
+///
+/// The question `CL` turns on — *"may be reported only when RI is indicating an
+/// accumulation register reading"* — and it used to be asked as *"does the code
+/// state a direction"*, which is a different question and wrong in both
+/// directions.
+///
+/// It refused a **manufacturer** register, because `[OCMF Tab. 25]` classifies
+/// by the `C` group alone and anything outside its own range is `Other` with no
+/// direction. `EICHRECHT.md` says the opposite in as many words — *"a
+/// manufacturer register nobody recognises is still evidence and still bills"* —
+/// and a `CL` beside one took **both** quantities away.
+///
+/// And it accepted an **instantaneous** one. `1-0:1.7.0*255` is active power,
+/// not energy, and it classifies as `ActiveEnergyImport` because that is decided
+/// by `C = 1`; what separates a running total from a spot reading is the `D`
+/// group, where **8** is the time integral. `1.8.0` accumulates and `1.7.0` does
+/// not, and the two differ in the digit this never read (D296).
+///
+/// So: any of `[OCMF Tab. 25]`'s own registers, which the table *defines* as
+/// totals, or an IEC code whose `D` group is 8.
+fn is_accumulation_register(code: &ObisCode<'_>) -> bool {
+    match code.register() {
+        Register::TotalImportMains
+        | Register::TotalImportDevice
+        | Register::TransactionImportMains
+        | Register::TransactionImportDevice
+        | Register::TotalExportMains
+        | Register::TotalExportDevice
+        | Register::TransactionExportMains
+        | Register::TransactionExportDevice => true,
+        // `[OCMF Tab. 25]` claimed these codes and never said what they measure,
+        // so nothing can be said about what a compensation beside one means
+        // either. `ChainFinding::ReservedRegister` is the finding that names it.
+        Register::Reserved => false,
+        // Everything from the ordinary IEC grammar, including the classic
+        // `1.8.0` the S.A.F.E. reference record bills on and every manufacturer
+        // code: the `D` group decides.
+        // `Register` is `#[non_exhaustive]`, so the ordinary IEC grammar and
+        // anything a later release adds land here together — and the `D` group
+        // is the question either way.
+        _ => code.processing() == "8",
+    }
 }
 
 /// A `TM` as an instant, in the offset the meter wrote.
@@ -969,6 +1253,405 @@ mod tests {
                 Energy::from_kwh(Decimal::from_str_exact("0.4").expect("a decimal")).expect("kWh")
             ),
             "the export register's 9.0 is not this session's cable loss"
+        );
+    }
+
+    /// A record with a reading whose unit is written however the caller says.
+    fn reading(pagination: &str, tx: &str, rv: &str, ru: Option<&str>, minute: u8) -> String {
+        let unit = ru.map_or_else(String::new, |u| format!(r#""RU":"{u}","#));
+        format!(
+            r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"01-00:B2.08.00*FF",{unit}"ST":"G"}}]}}|{{"SD":"00"}}"#
+        )
+    }
+
+    fn report_over(raw: &[String]) -> ChainReport {
+        let records: Vec<Record<'_>> = raw
+            .iter()
+            .map(|r| Record::parse(r).expect("a well-formed record"))
+            .collect();
+        validate(&records)
+    }
+
+    /// `[OCMF Tab. 7, RU]` — **the two ends have to be the same quantity.**
+    ///
+    /// `RU` carries forward only *within* a record, so a chain opening in kWh
+    /// and closing in Wh is something a station can emit. `RegisterTotal` labels
+    /// its delta with the unit of the *begin* reading and compares the two
+    /// nowhere, because that is arithmetic and this is a billing question — so
+    /// the same physical 29.5 kWh came out as **2 962 164.4 kWh**, with a `kWh`
+    /// label, no finding, and every signature verifying.
+    ///
+    /// The rule was written once (D36) and lost when the format moved to `ocmf`
+    /// (D184); the documentation went on claiming it for four milestones, which
+    /// is rule 1 pointed at a check rather than at a `pub fn` (D290).
+    #[test]
+    fn the_two_ends_have_to_be_counted_in_the_same_unit() {
+        let report = report_over(&[
+            reading("T1", "B", "2935.600", Some("kWh"), 0),
+            reading("T2", "E", "2965100", Some("Wh"), 30),
+        ]);
+
+        assert_eq!(
+            report.billable_energy, None,
+            "a difference of two units is not a quantity"
+        );
+        let found = report
+            .findings
+            .iter()
+            .find(|f| matches!(f, ChainFinding::UnitChanged { .. }))
+            .expect("the unit change is reported");
+        assert_eq!(found.disqualifies(), Disqualifies::Energy);
+        // …and it takes the energy only: the clock said nothing.
+        assert!(report.billable_duration.is_some());
+        assert!(found.to_string().contains("kWh then Wh"), "{found}");
+    }
+
+    /// One finding, however many readings restate the unit.
+    ///
+    /// The same rule the two `CL` findings keep: a quarter-hourly session
+    /// carries ninety-six readings, and reporting one fact ninety-six times is a
+    /// queue nobody reads.
+    #[test]
+    fn a_changed_unit_is_reported_once_per_register() {
+        let report = report_over(&[
+            reading("T1", "B", "2935.600", Some("kWh"), 0),
+            reading("T2", "C", "2940000", Some("Wh"), 10),
+            reading("T3", "C", "2950000", Some("Wh"), 20),
+            reading("T4", "E", "2965100", Some("Wh"), 30),
+        ]);
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|f| matches!(f, ChainFinding::UnitChanged { .. }))
+                .count(),
+            1
+        );
+    }
+
+    /// A reading that states **no** unit is silent, not contradicting.
+    ///
+    /// Real meters omit fields the tables mark mandatory — 89 % of the S.A.F.E.
+    /// corpus omits an `MS` — so an absence may not be read as a second claim.
+    /// The same reasoning `check_identification` applies to a record carrying no
+    /// identification section.
+    #[test]
+    fn a_reading_that_states_no_unit_says_nothing() {
+        let report = report_over(&[
+            reading("T1", "B", "2935.600", Some("kWh"), 0),
+            reading("T2", "E", "2965.100", None, 30),
+        ]);
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| matches!(f, ChainFinding::UnitChanged { .. })),
+            "{:?}",
+            report.findings
+        );
+        assert_eq!(
+            report.billable_energy.map(|e| e.to_string()),
+            Some("29.500 kWh".to_owned())
+        );
+    }
+
+    /// A `CL` is stated in the **register's** unit `[OCMF Tab. 7, CL]`.
+    ///
+    /// A meter counting in `Wh` reports its cable loss in `Wh`, and reading the
+    /// unit off whichever reading closed the sweep — falling back to `kWh` where
+    /// it stated none — put a figure a thousand times too large on the one
+    /// number that exists to explain the energy beside it.
+    #[test]
+    fn a_cable_loss_is_read_in_the_registers_own_unit() {
+        let in_wh = |pagination: &str, tx: &str, rv: &str, cl: &str, minute: u8| {
+            format!(
+                r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"01-00:B2.08.00*FF","RU":"Wh","CL":{cl},"ST":"G"}}]}}|{{"SD":"00"}}"#
+            )
+        };
+        let report = report_over(&[
+            in_wh("T1", "B", "2935600", "0.0", 0),
+            in_wh("T2", "E", "2965100", "400.0", 30),
+        ]);
+        assert_eq!(
+            report.billable_energy.map(|e| e.to_string()),
+            Some("29.500 kWh".to_owned())
+        );
+        assert_eq!(
+            report.compensated_loss.map(|e| e.to_string()),
+            Some("0.4000 kWh".to_owned()),
+            "400.0 Wh of cable, not 400.0 kWh — and the meter's own scale survives"
+        );
+    }
+
+    /// `[OCMF Tab. 25]` — **import and export never net, and one of them is not
+    /// this session.**
+    ///
+    /// A bidirectional meter reports both registers. With both properly marked
+    /// this chain validated with *no finding at all*, billed the import and
+    /// dropped the export: not a netting bug — nothing was subtracted — but a
+    /// measured quantity that vanished with no reason attached, out of the one
+    /// crate whose whole promise is that a value which does not bill says why
+    /// (D293).
+    #[test]
+    fn a_chain_that_measured_both_directions_bills_neither() {
+        let both = |pagination: &str, tx: &str, import: &str, export: &str, minute: u8| {
+            format!(
+                r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{import},"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}},{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{export},"RI":"01-00:C2.08.00*FF","RU":"kWh","ST":"G"}}]}}|{{"SD":"00"}}"#
+            )
+        };
+        let report = report_over(&[
+            both("T1", "B", "100.000", "50.000", 0),
+            both("T2", "E", "118.000", "55.000", 30),
+        ]);
+
+        assert_eq!(report.billable_energy, None);
+        let found = report
+            .findings
+            .iter()
+            .find(|f| matches!(f, ChainFinding::MixedDirections { .. }))
+            .expect("the second direction is reported");
+        assert_eq!(found.disqualifies(), Disqualifies::Energy);
+        assert!(found.to_string().contains("5.000"), "{found}");
+    }
+
+    /// …and a bidirectional charger doing an ordinary import is not refused for
+    /// being capable.
+    ///
+    /// The `C` register is there and stood still all session. So does a meter
+    /// carrying a lifetime register beside a transaction one: two registers is
+    /// the ordinary shape, and the ambiguity is a register that **moved** in the
+    /// direction the billed one is not.
+    #[test]
+    fn an_export_register_that_did_not_move_is_not_an_ambiguity() {
+        let both = |pagination: &str, tx: &str, import: &str, minute: u8| {
+            format!(
+                r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{import},"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}},{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":50.000,"RI":"01-00:C2.08.00*FF","RU":"kWh","ST":"G"}}]}}|{{"SD":"00"}}"#
+            )
+        };
+        let report = report_over(&[
+            both("T1", "B", "100.000", 0),
+            both("T2", "E", "118.000", 30),
+        ]);
+        assert_eq!(
+            report.billable_energy.map(|e| e.to_string()),
+            Some("18.000 kWh".to_owned()),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    /// Every one of this module's own findings, exercised.
+    ///
+    /// # Why this is one test rather than six
+    ///
+    /// A sweep over every refusal in the workspace asked which of them a test
+    /// ever *names*, and six of these did not — each one documented at length,
+    /// in the crate, in its README and on the site, and none of them ever run
+    /// (D296). Rule 1 says a rule with no caller is a rule not enforced;
+    /// `check-reach` finds a `pub fn` nobody calls and cannot see an enum
+    /// variant nothing constructs. This is that gap, closed by hand.
+    ///
+    /// Two of the six were **wrong**, and only running them showed it. See
+    /// [`is_accumulation_register`] and [`check_error_flag_vocabulary`].
+    #[test]
+    fn every_register_finding_this_module_raises_can_be_reached() {
+        let with = |obis: &str, ru: &str, extra: &str| {
+            let reading = |pagination: &str, tx: &str, rv: &str, minute: u8| {
+                format!(
+                    r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"{obis}","RU":"{ru}"{extra},"ST":"G"}}]}}|{{"SD":"00"}}"#
+                )
+            };
+            report_over(&[
+                reading("T1", "B", "10.000", 0),
+                reading("T2", "E", "25.000", 30),
+            ])
+        };
+        let raises = |report: &ChainReport, want: &ChainFinding| {
+            report
+                .findings
+                .iter()
+                .any(|found| std::mem::discriminant(found) == std::mem::discriminant(want))
+        };
+        // A begin/end pair on one register, with the compensation reset at
+        // `TX=B` the way `[OCMF Tab. 7, CL]` asks.
+        let compensated = |obis: &str| {
+            let reading = |pagination: &str, tx: &str, rv: &str, cl: &str, minute: u8| {
+                format!(
+                    r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"{obis}","RU":"kWh","CL":{cl},"ST":"G"}}]}}|{{"SD":"00"}}"#
+                )
+            };
+            report_over(&[
+                reading("T1", "B", "10.000", "0.0", 0),
+                reading("T2", "E", "25.000", "0.4", 30),
+            ])
+        };
+
+        // `[OCMF Tab. 25]` claimed `B4`–`BF` and never said what they measure.
+        let reserved = with("01-00:B4.08.00*FF", "kWh", "");
+        assert!(
+            raises(
+                &reserved,
+                &ChainFinding::ReservedRegister {
+                    register: String::new()
+                }
+            ),
+            "{:?}",
+            reserved.findings
+        );
+        assert_eq!(reserved.billable_energy, None);
+
+        // `mOhm` is a lawful `RU` — a meter reporting cable resistance — and a
+        // difference of two of them is not electricity.
+        let ohms = with("01-00:B2.08.00*FF", "mOhm", "");
+        assert!(
+            raises(
+                &ohms,
+                &ChainFinding::NotAnEnergyUnit {
+                    unit: String::new()
+                }
+            ),
+            "{:?}",
+            ohms.findings
+        );
+
+        // `CL` accumulates across the transaction and is reset at `TX=B`, so a
+        // transaction opening on a non-zero one is carrying the previous
+        // session's compensation into this one.
+        let carried = with("01-00:B2.08.00*FF", "kWh", r#","CL":3.0"#);
+        assert!(
+            raises(
+                &carried,
+                &ChainFinding::LossNotResetAtBegin {
+                    cumulated: String::new()
+                }
+            ),
+            "{:?}",
+            carried.findings
+        );
+
+        // …and it belongs beside a register that accumulates. `1.7.0` is
+        // instantaneous **power**: it classifies as active-energy-import because
+        // `[OCMF Tab. 25]` reads the `C` group, and what separates a running
+        // total from a spot reading is the `D` group.
+        let power = compensated("1-0:1.7.0*255");
+        assert!(
+            raises(
+                &power,
+                &ChainFinding::LossOnNonAccumulationRegister {
+                    register: String::new()
+                }
+            ),
+            "{:?}",
+            power.findings
+        );
+
+        // …and a **manufacturer** register with a `D` of 8 is an accumulation
+        // register, whatever its quantity group says. Asking for a direction
+        // instead refused it, and took both quantities away from a meter that
+        // had done nothing wrong.
+        let vendor = compensated("1-0:129.8.0*255");
+        assert!(
+            vendor.findings.is_empty(),
+            "a manufacturer register is still evidence and still bills: {:?}",
+            vendor.findings
+        );
+        assert_eq!(
+            vendor.compensated_loss.map(|loss| loss.to_string()),
+            Some("0.4 kWh".to_owned())
+        );
+
+        // …and the last of the register-shaped ones: records that carry no
+        // **pair** of readings to subtract at all. Not the empty chain, which
+        // `ocmf::session` answers first and this function returns on — a chain
+        // with records in it whose begin reading states no unit, so no register
+        // total can be built.
+        let unitless = |pagination: &str, tx: &str, rv: &str, minute: u8| {
+            format!(
+                r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"01-00:B2.08.00*FF","ST":"G"}}]}}|{{"SD":"00"}}"#
+            )
+        };
+        let nothing = report_over(&[
+            unitless("T1", "B", "10.000", 0),
+            unitless("T2", "E", "25.000", 30),
+        ]);
+        assert!(
+            raises(&nothing, &ChainFinding::NoBillableEnergy),
+            "{:?}",
+            nothing.findings
+        );
+        assert_eq!(nothing.billable_energy, None);
+    }
+
+    /// …and the two that are about a **reading** rather than a register.
+    ///
+    /// The other half of the sweep above. Split because the fixtures are different shapes, not because the claim is:
+    /// every variant of `ChainFinding` that is not a `Sequence` is reached by
+    /// one of the two.
+    #[test]
+    fn every_reading_finding_this_module_raises_can_be_reached() {
+        let raises = |report: &ChainReport, want: &ChainFinding| {
+            report
+                .findings
+                .iter()
+                .any(|found| std::mem::discriminant(found) == std::mem::discriminant(want))
+        };
+        let with = |obis: &str, ru: &str, extra: &str| {
+            let reading = |pagination: &str, tx: &str, rv: &str, minute: u8| {
+                format!(
+                    r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"{obis}","RU":"{ru}"{extra},"ST":"G"}}]}}|{{"SD":"00"}}"#
+                )
+            };
+            report_over(&[
+                reading("T1", "B", "10.000", 0),
+                reading("T2", "E", "25.000", 30),
+            ])
+        };
+
+        // An `EF` character the specification does not define might disqualify
+        // either quantity, so it disqualifies both.
+        let unknown = with("01-00:B2.08.00*FF", "kWh", r#","EF":"Q""#);
+        assert!(
+            raises(
+                &unknown,
+                &ChainFinding::UnknownErrorFlag {
+                    flags: String::new()
+                }
+            ),
+            "{:?}",
+            unknown.findings
+        );
+        // …once, however many readings restate it. `EF` carries forward, so a
+        // quarter-hourly session reported the same character ninety-six times.
+        assert_eq!(
+            unknown
+                .findings
+                .iter()
+                .filter(|found| matches!(found, ChainFinding::UnknownErrorFlag { .. }))
+                .count(),
+            1
+        );
+
+        // A session identified one way at its start and another at its end is
+        // one whose records cannot all be about the same authorisation.
+        let identified = |pagination: &str, tx: &str, level: &str, rv: &str, minute: u8| {
+            format!(
+                r#"OCMF|{{"FV":"1.0","PG":"{pagination}","MS":"M1","IS":true,"IL":"{level}","IT":"ISO14443","ID":"AB","RD":[{{"TM":"2026-01-02T10:{minute:02}:00,000+0100 S","TX":"{tx}","RV":{rv},"RI":"01-00:B2.08.00*FF","RU":"kWh","ST":"G"}}]}}|{{"SD":"00"}}"#
+            )
+        };
+        let changed = report_over(&[
+            identified("T1", "B", "TRUSTED", "10.000", 0),
+            identified("T2", "E", "VERIFIED", "25.000", 30),
+        ]);
+        assert!(
+            raises(
+                &changed,
+                &ChainFinding::IdentificationChanged {
+                    expected: String::new(),
+                    found: String::new()
+                }
+            ),
+            "{:?}",
+            changed.findings
         );
     }
 

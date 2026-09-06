@@ -51,6 +51,17 @@ A contract that runs *until* the last of the month covers a session on that day.
 Inclusive at both ends, because that is what a driver reading their own contract
 expects.
 
+### …and the ledger it reads is written down, not cleared
+
+`invoiced` takes **what the invoice billed** and subtracts it. Clearing the
+running total outright is true only at the instant the document was assembled: a
+session authorised while the closing runs is added to that total and then wiped —
+money nobody collects, and, because the credit limit is judged against exactly
+this figure, a driver handed back a limit they have not paid for. A closing that
+bills more than the ledger holds has counted a session twice or counted one this
+provider never saw, and is refused by name rather than driving the total below
+zero.
+
 ### The whitelist is a two-sided rule
 
 `ALWAYS` tells an operator to start from its own list and **never ask**; `NEVER`

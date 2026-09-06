@@ -56,6 +56,116 @@ pub enum Accessibility {
     Private,
 }
 
+/// The grid level a point's connection hangs off.
+///
+/// `[BK6-22-300 Ziff. 2.4.1]` reaches *"einem unmittelbaren oder mittelbaren
+/// Anschluss in der Niederspannung (Netzebene 6 oder 7)"* and nothing above it.
+/// A large charge park on medium voltage has a connection contract instead, and
+/// its load management answers to that rather than to `[EnWG §14a]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum GridLevel {
+    /// Netzebene 6 or 7 — low voltage, directly or through a transformer
+    /// station the site does not own.
+    #[default]
+    LowVoltage,
+    /// Medium voltage or above.
+    Above,
+}
+
+/// How a point hangs off the grid, for the one duty that turns on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct GridConnection {
+    /// Which level.
+    pub level: GridLevel,
+    /// The **Netzanschlussleistung**: what the point is connected at, which is
+    /// not what it is rated to deliver. A 22 kW wall box on an 11 kW supply is
+    /// an 11 kW device to `[EnWG §14a]`, and the two figures are the same only
+    /// on a point nobody de-rated.
+    pub capacity_kw: Decimal,
+    /// `[BK6-22-300 Ziff. 4.6]` S. 1: the operator has to equip the device so
+    /// that it *"stets steuerbar ist"*.
+    pub always_controllable: bool,
+    /// `[BK6-22-300 Ziff. 4.6]` S. 3: where the grid operator's reduction
+    /// competes with market-driven load control, the operator has to ensure
+    /// **technisch** that the reduction wins.
+    ///
+    /// A separate fact from being controllable at all, and the one a load
+    /// manager gets wrong: a site that obeys a setpoint until a dynamic tariff
+    /// says otherwise is controllable and in breach.
+    pub grid_reduction_takes_priority: bool,
+}
+
+impl Default for GridConnection {
+    /// The ordinary 11 kW three-phase connection, equipped for neither duty —
+    /// which is what a profile that claims nothing should say.
+    fn default() -> Self {
+        Self {
+            level: GridLevel::LowVoltage,
+            capacity_kw: Decimal::from(11),
+            always_controllable: false,
+            grid_reduction_takes_priority: false,
+        }
+    }
+}
+
+/// Why a charge point is **not** a steuerbare Verbrauchseinrichtung.
+///
+/// Three answers rather than one boolean, because they are three different
+/// situations: a public point is outside `[EnWG §14a]` and always will be, a
+/// small one becomes controllable the day it is uprated, and a medium-voltage
+/// site answers to its connection contract instead.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum NotSteuVe {
+    /// `[BK6-22-300 Ziff. 2.4.1]` excludes a publicly accessible point by name.
+    ///
+    /// The condition every summary of the Festlegung drops. Reading it the other
+    /// way round — *"a charge park is a steuerbare Verbrauchseinrichtung at its
+    /// grid connection point"* — puts a public site under a régime it is not in,
+    /// and leaves the operator of a private one believing it may refuse a
+    /// command it is obliged to obey.
+    #[error(
+        "{evse_id} is a publicly accessible charge point, which [BK6-22-300 Ziff. 2.4.1] excludes \
+         from [EnWG §14a] by name"
+    )]
+    PubliclyAccessible {
+        /// Which point.
+        evse_id: String,
+    },
+
+    /// At or below the threshold `[BK6-22-300 Ziff. 2.4.1]`.
+    #[error(
+        "{evse_id} is connected at {capacity_kw} kW, and [BK6-22-300 Ziff. 2.4.1] reaches one of \
+         **more than** 4.2 kW"
+    )]
+    AtOrBelowThreshold {
+        /// Which point.
+        evse_id: String,
+        /// What it is connected at.
+        capacity_kw: Decimal,
+    },
+
+    /// Not in low voltage `[BK6-22-300 Ziff. 2.4.1]`.
+    #[error(
+        "{evse_id} is not connected in low voltage, and [BK6-22-300 Ziff. 2.4.1] reaches \
+         Netzebene 6 and 7: a medium-voltage site answers to its connection contract instead"
+    )]
+    NotLowVoltage {
+        /// Which point.
+        evse_id: String,
+    },
+}
+
+/// The connection capacity a point has to be **over** to be controllable
+/// `[BK6-22-300 Ziff. 2.4.1]`.
+///
+/// A `>=` would get the ordinary 4.2 kW wall box wrong, in the direction that
+/// binds a device the Festlegung does not reach.
+pub const STEUVE_THRESHOLD_KW: Decimal = Decimal::from_parts(42, 0, 0, false, 1);
+
 /// Alternating or direct current.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1113,6 +1223,14 @@ pub struct ChargePointProfile {
     /// hopelessly late the moment it opens.
     #[cfg_attr(feature = "serde", serde(with = "crate::wire::date::option"))]
     pub became_publicly_accessible_on: Option<Date>,
+    /// How the point hangs off the grid, and what it is equipped for.
+    ///
+    /// The one duty in this calendar that is not about charging at all: a
+    /// non-public point over 4.2 kW in low voltage is a *steuerbare
+    /// Verbrauchseinrichtung* and its operator owes `[EnWG §14a]` the ability to
+    /// switch it down. See [`Self::steuve`].
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub grid: GridConnection,
     /// Whether the point sits along the trans-European transport network.
     pub on_ten_t: bool,
     /// Whether the point is on a safe and secure parking area.
@@ -1409,6 +1527,51 @@ impl ChargePointProfile {
         self.accessibility == Accessibility::Public
     }
 
+    /// Whether `[EnWG §14a]` reaches this point, and why not where it does not.
+    ///
+    /// `[BK6-22-300 Ziff. 2.4.1]` states three conditions and every one of them
+    /// is a fact this profile already carries, so the answer is **derived**
+    /// rather than ticked beside them — the same reasoning that makes a
+    /// provider's four disclosures derived, and for a sharper reason: this flag
+    /// would decide whether a grid operator may switch a charge park down.
+    ///
+    /// The first condition is the one every summary drops: an *öffentlich
+    /// zugänglicher Ladepunkt* is excluded **by name**. The forecourt is outside
+    /// § 14a; the depot behind the fence, the workplace car park and the fleet
+    /// yard are inside it.
+    ///
+    /// # Errors
+    ///
+    /// [`NotSteuVe`] with the condition that failed — three answers rather than
+    /// one, because they are three different situations.
+    pub fn steuve(&self) -> Result<(), NotSteuVe> {
+        let evse_id = self.evse_id.to_string();
+        if self.is_public() {
+            return Err(NotSteuVe::PubliclyAccessible { evse_id });
+        }
+        if self.grid.capacity_kw <= STEUVE_THRESHOLD_KW {
+            return Err(NotSteuVe::AtOrBelowThreshold {
+                evse_id,
+                capacity_kw: self.grid.capacity_kw,
+            });
+        }
+        if self.grid.level != GridLevel::LowVoltage {
+            return Err(NotSteuVe::NotLowVoltage { evse_id });
+        }
+        Ok(())
+    }
+
+    /// `true` when `[EnWG §14a]` reaches this point.
+    ///
+    /// The applicability the obligation calendar reads. [`Self::steuve`] is the
+    /// same question with the reason attached, and there is one of it rather
+    /// than two, because a predicate and a diagnostic that can disagree are a
+    /// duty judged one way and explained another.
+    #[must_use]
+    pub fn is_steuve(&self) -> bool {
+        self.steuve().is_ok()
+    }
+
     /// `true` for a point of at least 50 kW — the AFIR threshold for card
     /// readers and for several reporting duties.
     #[must_use]
@@ -1445,6 +1608,7 @@ impl ChargePointProfile {
             renovated_on: None,
             placed_on_market_on: None,
             became_publicly_accessible_on: None,
+            grid: GridConnection::default(),
             on_ten_t: false,
             on_safe_secure_parking: false,
             requires_payment: true,

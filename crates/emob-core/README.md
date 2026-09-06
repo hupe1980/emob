@@ -255,7 +255,7 @@ for finding in report.failing() {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-**47 duties** from AFIR — Article 5 **and Annex II**, the interface requirement
+**49 duties** from AFIR — Article 5 **and Annex II**, the interface requirement
 `[LSV26 §5]` lets the regulator close a point over — Delegated Regulation (EU)
 2025/656, LSV 2026, the Preisangabenverordnung, MessEG/PTB-A, the THG-Quote's
 four preconditions and the NIS2/CRA cybersecurity regime, as dated, cited,
@@ -374,7 +374,7 @@ a fourth subject cannot leave a duty behind.
 
 ### Every entry is exercisable in both directions
 
-Forty-seven duties, each a pair of closures. A `satisfied` that reads the wrong field —
+Forty-nine duties, each a pair of closures. A `satisfied` that reads the wrong field —
 or the right one negated — answers every question about that duty confidently and
 wrongly, and a report is clean either way: nothing fails, and there is no
 arithmetic to disagree. One property covers all of them:
@@ -449,6 +449,22 @@ refuses.
 `cargo xtask check-constructors` is the rule rather than the habit: a type whose
 fields are private and whose construction can refuse may not *derive*
 `Deserialize`.
+
+### A quantity is bounded, not just signed
+
+`Decimal` **panics** on overflow rather than saturating, and every figure here is
+multiplied afterwards — by a price, by a VAT factor, by a thousand to reach
+watt-hours. Both operands arrive from outside, on a partner's charge detail
+record, so a magnitude is refused where it is built (D305).
+
+`Energy::MAX_KWH` is one terawatt-hour: the lifetime output of a 3.75 MW
+Megawatt Charging System unit, the largest that exists, running flat out for
+thirty years. Not a limit anything real approaches — the line past which a number
+stopped being a measurement.
+
+`Money::checked_add` and `checked_sub` check the sum as well as the currency, and
+the currency first, because two currencies are a different mistake from one
+figure being absurd.
 
 Every identifier here reads back the way it writes, `PartyId` included. A type
 with a `Display` and no `FromStr` cannot round-trip, and every caller that reads

@@ -30,9 +30,9 @@ msrv       = "1.94"
 #   stat_curves       the ECDSA curves the pure-Rust build verifies
 #
 # A number here that no longer matches its source is worse than no number.
-stat_obligations = "47"
-stat_tests       = "913"
-stat_crates      = "12"
+stat_obligations = "49"
+stat_tests       = "969"
+stat_crates      = "13"
 stat_floats      = "0"
 stat_curves      = "4"
 

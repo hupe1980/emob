@@ -390,6 +390,35 @@ pub mod caps {
     pub const INVOICE_READ: &str = "emob.invoice.read";
     /// Issue an invoice or a collection.
     pub const INVOICE_WRITE: &str = "emob.invoice.write";
+
+    /// Every capability this workspace names, in one place.
+    ///
+    /// # Why the list exists as well as the constants
+    ///
+    /// A constant is what a call site names; this is what something can
+    /// **enumerate**. `crate::policy` derives its whole Cedar schema from it —
+    /// one action per capability, one entity type per family — so the schema an
+    /// operator writes policies against cannot drift from the capabilities this
+    /// workspace actually checks. A hand-written schema would be a second list,
+    /// and a policy validating against an action nobody can be granted is a rule
+    /// that never matches: a `forbid` that fails open and a `permit` that fails
+    /// silently.
+    ///
+    /// A test asserts every constant above is in it, because the one way this
+    /// list goes wrong is a capability added beside it and not to it.
+    pub const ALL: [&str; 11] = [
+        CDR_READ,
+        CDR_WRITE,
+        TARIFF_READ,
+        TARIFF_WRITE,
+        LOCATION_READ,
+        LOCATION_WRITE,
+        SESSION_READ,
+        TOKEN_AUTHORIZE,
+        EVIDENCE_READ,
+        INVOICE_READ,
+        INVOICE_WRITE,
+    ];
 }
 
 #[cfg(test)]

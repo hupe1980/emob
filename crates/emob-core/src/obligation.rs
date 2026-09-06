@@ -171,6 +171,12 @@ pub enum ObligationId {
     PangvAdditionalPricesAdjacent,
     /// THG-Quote requires a register entry and third-party access.
     ThgEligibility,
+    /// A steuerbare Verbrauchseinrichtung has to be equipped so that it is
+    /// always controllable.
+    EnwgSteuVeControllable,
+    /// …and so that the grid operator's reduction outranks market-driven load
+    /// control.
+    EnwgSteuVeGridPriority,
     /// An undertaking in scope must give the competent authority its details.
     Nis2Registration,
     /// …and take the ten risk-management measures the article enumerates.
@@ -232,6 +238,8 @@ impl ObligationId {
             Self::PangvArbeitspreisBeforeStart => "pangv-arbeitspreis-before-start",
             Self::PangvAdditionalPricesAdjacent => "pangv-additional-prices-adjacent",
             Self::ThgEligibility => "thg-eligibility",
+            Self::EnwgSteuVeControllable => "enwg-steuve-controllable",
+            Self::EnwgSteuVeGridPriority => "enwg-steuve-grid-priority",
             Self::Nis2Registration => "nis2-registration",
             Self::Nis2RiskManagement => "nis2-risk-management",
             Self::Nis2IncidentEarlyWarning => "nis2-incident-early-warning",
@@ -542,6 +550,15 @@ const EICHRECHT_ENFORCED: Date = date!(2019 - 04 - 01);
 /// `[REA 6-A]` — the date the Regelermittlungsausschuss published the
 /// e-mobility rules under `[MessEG §46]`.
 const REA_6A_PUBLISHED: Date = date!(2017 - 03 - 16);
+
+/// When `[EnWG §14a]`'s Festlegung began binding a device.
+///
+/// `[BK6-22-300]` was decided on 27.11.2023 and applies to every steuerbare
+/// Verbrauchseinrichtung *technisch in Betrieb genommen* from **01.01.2024**.
+/// Points commissioned before it have a transitional régime this calendar does
+/// not model — which under-reports rather than over-reports, and is the
+/// direction a compliance answer has to fall in.
+const STEUVE_APPLIES: Date = date!(2024 - 01 - 01);
 /// `[REA 6-A §3.2]` — AC metering is allowed only in DC stations placed on the
 /// market "bis zum 31. Dezember 2017", so the duty compares against the day
 /// after.
@@ -1334,6 +1351,55 @@ pub const CALENDAR: &[Obligation] = &[
         },
         remedy: "state on the receipt and at the point that the value includes the energy the rectification consumed: a value the customer cannot interpret is one they cannot check",
     },
+    // ── § 14a EnWG: the duty that is not about charging at all ─────────────
+    //
+    // `[BK6-22-300 Ziff. 2.4.1]` makes a charge point a *steuerbare
+    // Verbrauchseinrichtung* when it is **not** publicly accessible, is
+    // connected at more than 4.2 kW, and hangs off low voltage. Every summary
+    // of the Festlegung drops the first of those, and it is the one that
+    // decides whether any of this binds: the forecourt is outside § 14a and the
+    // depot behind the fence is inside it.
+    //
+    // Both duties bind the *Betreiber*, which for a depot is the operator, and
+    // both are facts about how a point is equipped rather than about how it is
+    // priced — which is why they belong here and the arithmetic belongs in
+    // `emob-smart` (D301).
+    Obligation {
+        id: ObligationId::EnwgSteuVeControllable,
+        consequence: Consequence::Breach,
+        title: "A non-public point over 4.2 kW in low voltage must always be controllable",
+        citation: "[BK6-22-300 Ziff. 4.6]",
+        applies_from: STEUVE_APPLIES,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            applicable: ChargePointProfile::is_steuve,
+            // "Der Betreiber hat dafür Sorge zu tragen, dass die steuerbare
+            // Verbrauchseinrichtung mit den notwendigen technischen
+            // Einrichtungen einschließlich Steuerungseinrichtungen ausgestattet
+            // wird und **stets steuerbar ist**."
+            satisfied: |p, _| p.grid.always_controllable,
+        },
+        remedy: "fit the control equipment: a device that cannot be reduced is one the grid operator may refuse to connect at all, and § 14a's whole bargain is that it may not",
+    },
+    Obligation {
+        id: ObligationId::EnwgSteuVeGridPriority,
+        consequence: Consequence::Breach,
+        title: "The grid operator's reduction must outrank market-driven load control",
+        citation: "[BK6-22-300 Ziff. 4.6]",
+        applies_from: STEUVE_APPLIES,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            applicable: ChargePointProfile::is_steuve,
+            // The third sentence, and a **separate** fact from being
+            // controllable: a site that obeys a setpoint until a dynamic tariff
+            // says otherwise is controllable and in breach. This is the duty
+            // `emob_smart::allocate` discharges by construction — the ceiling is
+            // the only door an allocation exists through — and the profile says
+            // whether the site's own scheduler was built that way.
+            satisfied: |p, _| p.grid.grid_reduction_takes_priority,
+        },
+        remedy: "make the grid setpoint a bound the scheduler cannot exceed rather than one input among several: a dynamic tariff, a departure schedule and a driver in a hurry are all 'anderweitige Steuerungsmaßnahmen', and the Festlegung ranks them below the reduction",
+    },
     // ── PAngV § 14: the German price indication, older and wider than AFIR ──
     //
     // `[AFIR Art. 5(4)]` splits at 50 kW and dates from 13.04.2024.
@@ -1915,12 +1981,16 @@ mod tests {
 
     /// **No duty in this calendar is decoration, and none of them is inverted.**
     ///
-    /// Thirty-four of the forty entries were asserted somewhere in this module,
-    /// each by the example that motivated it. Six were not — and an entry
-    /// nothing exercises is one whose `satisfied` closure could read a field
-    /// that is always true, or the wrong field, or the right one negated, and
-    /// the calendar would report a clean estate either way. Rule 1, pointed at
-    /// the table rather than at a `match` arm (D256).
+    /// Most entries were asserted somewhere in this module already, each by the
+    /// example that motivated it, and a handful never were — an entry nothing
+    /// exercises is one whose `satisfied` closure could read a field that is
+    /// always true, or the wrong field, or the right one negated, and the
+    /// calendar would report a clean estate either way. Rule 1, pointed at the
+    /// table rather than at a `match` arm (D256).
+    ///
+    /// So the statement here is over the **whole** calendar rather than over a
+    /// list somebody keeps up to date: a count in a comment is a count that
+    /// drifts, and this one had (D291).
     ///
     /// Two statements, and each catches a different way of being wrong:
     ///

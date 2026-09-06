@@ -183,6 +183,26 @@ pub enum ClosingError {
         number: String,
     },
 
+    /// A **cancellation** was booked before the invoice it reverses.
+    ///
+    /// `postings_for` reverses every side of a *Stornorechnung* — same accounts,
+    /// same amounts, the other way — which is right beside the entry it undoes
+    /// and is a fabrication on its own. Posted alone it credits a receivable
+    /// nobody debited and debits revenue nobody earned, and the journal balances
+    /// perfectly: double entry balances whatever it is told, which is why
+    /// nothing here fails until somebody reconciles against the recipient (D298).
+    #[error(
+        "invoice {number} reverses {cancels}, which is not in the books: posting a reversal on \
+         its own credits a receivable nobody debited and debits revenue nobody earned — book \
+         {cancels} first, or book neither"
+    )]
+    ReversesUnbooked {
+        /// The cancellation.
+        number: String,
+        /// The invoice it reverses.
+        cancels: String,
+    },
+
     /// A document was booked twice.
     #[error("invoice {number} is already in the books")]
     AlreadyBooked {
@@ -576,6 +596,16 @@ impl Billd {
     /// document the recipient has not accepted is not one to book — see the
     /// module documentation.
     ///
+    /// # A reversal is only a reversal beside the entry it undoes
+    ///
+    /// `postings_for` reverses every side of a *Stornorechnung*, which is right
+    /// against the invoice it cancels and a fabrication on its own: posted alone
+    /// it credits a receivable nobody debited and debits revenue nobody earned.
+    /// The journal balances either way — double entry balances whatever it is
+    /// told — so a cancellation whose original was never booked is refused by
+    /// name. Which document cancels which is this service's fact and nothing
+    /// else holds it (D298).
+    ///
     /// # Two different second bookings
     ///
     /// A caller that books the same number twice gets
@@ -604,6 +634,19 @@ impl Billd {
         if document.booked {
             return Err(ClosingError::AlreadyBooked {
                 number: number.to_owned(),
+            });
+        }
+        // A reversal is only a reversal beside the entry it undoes. See
+        // `ClosingError::ReversesUnbooked`.
+        if let Some(cancels) = &document.cancels
+            && !self
+                .issued
+                .get(cancels)
+                .is_some_and(|original| original.booked)
+        {
+            return Err(ClosingError::ReversesUnbooked {
+                number: number.to_owned(),
+                cancels: cancels.clone(),
             });
         }
 

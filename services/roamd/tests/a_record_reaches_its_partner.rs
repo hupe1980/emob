@@ -246,6 +246,48 @@ fn location() -> ocpi_kit::v2_3_0::cdrs::CdrLocation {
         .expect("a publishable location")
 }
 
+/// The document this node would send, arriving at the other end, and the
+/// evidence **this** node's own registry makes of the payloads inside it.
+fn crossing() -> (ocpi_kit::v2_3_0::Cdr, EvidenceRef) {
+    let node = node();
+    let cdr = issued("cdr-77", None);
+    let token = token();
+    let context = Context {
+        token: &token,
+        location: location(),
+        signed: payloads(),
+        public_key: None,
+        last_updated: at(31),
+    };
+    let document = emob_roam::ocpi::cdr::to_ocpi(
+        &cdr,
+        node.registry()
+            .get(&PartyId::new("NL", "TNM").expect("a valid party"))
+            .expect("a peered partner"),
+        &context,
+    )
+    .expect("a rated import record crosses")
+    .into_value_discarding_notes();
+
+    let payloads = emob_roam::ocpi::cdr::inbound_payloads(&document);
+    let records: Vec<_> = payloads
+        .iter()
+        .map(|payload| ocmf::Record::parse(&payload.signed_data).expect("verbatim OCMF"))
+        .collect();
+    let verified = Evidence::assemble(&records, &key_registry(), at(0));
+    (document, EvidenceRef::from_evidence(&verified, "OCMF"))
+}
+
+/// The credential the partner pushes with: its own party, its own role, and
+/// reaching only its own records.
+fn peer() -> emob_service::Principal {
+    emob_service::Principal::peer(
+        PartyId::new("DE", "ABC").expect("a valid party"),
+        emob_core::Role::Cpo,
+        emob_service::Capabilities::root(),
+    )
+}
+
 fn node() -> Roamd {
     Roamd::new(
         PartnerRegistry::new(PartyId::new("DE", "ABC").expect("a valid party")).with(
@@ -428,37 +470,13 @@ fn a_partners_record_is_accepted_re_rated_and_never_taken_twice() {
     // answer: it lands a record unpriced, and what to *do* with it is a
     // service's.
     let mut node = node();
-    let cdr = issued("cdr-77", None);
-    let token = token();
-    let context = Context {
-        token: &token,
-        location: location(),
-        signed: payloads(),
-        public_key: None,
-        last_updated: at(31),
-    };
-    // The same document this node would send, arriving at the other end.
-    let document = emob_roam::ocpi::cdr::to_ocpi(
-        &cdr,
-        node.registry()
-            .get(&PartyId::new("NL", "TNM").unwrap())
-            .unwrap(),
-        &context,
-    )
-    .expect("a rated import record crosses")
-    .into_value_discarding_notes();
+    // The same document this node would send, arriving at the other end — with
+    // its payloads verified against **this** node's registry, never the key the
+    // document carries.
+    let (document, ours) = crossing();
 
-    // The payloads are verified against **this** node's registry, never the key
-    // the document carries.
-    let payloads = emob_roam::ocpi::cdr::inbound_payloads(&document);
-    let records: Vec<_> = payloads
-        .iter()
-        .map(|p| ocmf::Record::parse(&p.signed_data).expect("verbatim OCMF"))
-        .collect();
-    let verified = Evidence::assemble(&records, &key_registry(), at(0));
-    let ours = EvidenceRef::from_evidence(&verified, "OCMF");
-
-    let Verdict::Accepted(inbound) = node.receive(&document, Some(ours.clone())) else {
+    let Verdict::Accepted(inbound) = node.receive(&peer(), &document, Some(ours.clone()), at(60))
+    else {
         panic!("a coherent document from a known partner is accepted");
     };
     assert!(
@@ -478,7 +496,7 @@ fn a_partners_record_is_accepted_re_rated_and_never_taken_twice() {
 
     // A partner that re-sends after a timeout has not created a second session.
     assert!(matches!(
-        node.receive(&document, Some(ours.clone())),
+        node.receive(&peer(), &document, Some(ours.clone()), at(60)),
         Verdict::Duplicate { .. }
     ));
     assert_eq!(node.received().len(), 1);
@@ -493,7 +511,7 @@ fn a_partners_record_is_accepted_re_rated_and_never_taken_twice() {
     let mut restated = document.clone();
     restated.end_date_time = at(45).into();
     restated.total_time = ocpi_kit::types::Number::new(dec("0.75"));
-    let verdict = node.receive(&restated, Some(ours));
+    let verdict = node.receive(&peer(), &restated, Some(ours), at(60));
     assert!(matches!(verdict, Verdict::Conflicted { .. }), "{verdict:?}");
     assert_eq!(node.received().len(), 1, "the held record stands");
 }
@@ -523,7 +541,7 @@ fn a_document_that_is_wrong_and_a_claim_that_does_not_hold_are_different_answers
     // ── The document is wrong: the sender can fix it and send it again ──────
     let mut broken = document.clone();
     broken.total_energy = ocpi_kit::types::Number::new(dec("999.000"));
-    let Verdict::Rejected { reasons } = node.receive(&broken, None) else {
+    let Verdict::Rejected { reasons } = node.receive(&peer(), &broken, None, at(60)) else {
         panic!("a document whose periods do not sum to its total is refused");
     };
     assert!(reasons.iter().any(|r| r.contains("periods")), "{reasons:?}");
@@ -542,7 +560,9 @@ fn a_document_that_is_wrong_and_a_claim_that_does_not_hold_are_different_answers
         compensated_loss: None,
         tariff_changes: Vec::new(),
     };
-    let Verdict::Disputed { key, reasons } = node.receive(&document, Some(unverifiable)) else {
+    let Verdict::Disputed { key, reasons } =
+        node.receive(&peer(), &document, Some(unverifiable), at(60))
+    else {
         panic!("a record this side cannot settle is disputed rather than refused");
     };
     assert_eq!(key.id.as_str(), "cdr-77");
@@ -657,15 +677,192 @@ fn a_node_that_settles_german_sessions_refuses_a_record_with_no_signed_data() {
     // A node that does not ask reads it.
     let mut lenient = node();
     assert!(matches!(
-        lenient.receive(&document, None),
+        lenient.receive(&peer(), &document, None, at(60)),
         Verdict::Accepted(_)
     ));
 
     // …and one that does refuses the same document, before any conversion.
     let mut strict = node().requiring_signed_data();
-    let Verdict::Rejected { reasons } = strict.receive(&document, None) else {
+    let Verdict::Rejected { reasons } = strict.receive(&peer(), &document, None, at(60)) else {
         panic!("a record with no signed data is not one this node may settle");
     };
     assert!(reasons.iter().any(|r| r.contains("signed")), "{reasons:?}");
     assert_eq!(strict.received().len(), 0);
+}
+
+/// **An acceptance is terminal, and a reversal is owed only where one happened.**
+///
+/// Two readings of one paragraph, each held by a different method.
+/// `[OCPI 2.3.0 §mod_cdrs]` seals a record the moment the eMSP has it, and
+/// `consign` enforced that by reading the delivery field — which `refused` would
+/// overwrite, so one call after the fact re-opened the seal and the same record
+/// could go to the same partner twice.
+///
+/// And the same paragraph's *other* half: a Credit CDR reverses a record the
+/// eMSP **has**. Requiring one before every replacement deadlocked the
+/// correction of a record the partner had refused, against `consign`'s own
+/// documented rule that nothing refused is sealed (D297).
+#[test]
+fn an_acceptance_cannot_be_taken_back_and_a_refusal_does_not_need_reversing() {
+    let mut node = node();
+    let token = token();
+
+    // ── The seal holds against a later refusal ─────────────────────────────
+    let taken = issued("cdr-90", None);
+    node.consign(&taken, &token).expect("it routes");
+    node.accepted(&taken.key, at(32), None)
+        .expect("the partner took it");
+    let error = node
+        .refused(&taken.key, at(33), "on reflection, no")
+        .expect_err("a record the eMSP has cannot become one it refused");
+    assert!(
+        matches!(error, DispatchError::AlreadyAccepted { .. }),
+        "{error}"
+    );
+    assert!(
+        node.consign(&taken, &token).is_err(),
+        "and the seal is still a seal"
+    );
+    // …while re-recording the same outcome is idempotent, because a location
+    // that arrives late is a fact about one delivery rather than a second.
+    node.accepted(
+        &taken.key,
+        at(32),
+        Some("https://emsp.example/cdrs/9".to_owned()),
+    )
+    .expect("the same acceptance, with the URL the receiver returned");
+
+    // ── …and a refused record is corrected without one ─────────────────────
+    let refused = issued("cdr-91", None);
+    node.consign(&refused, &token).expect("it routes");
+    node.refused(
+        &refused.key,
+        at(33),
+        "total_cost does not match the periods",
+    )
+    .expect("the partner said no");
+
+    let replacement = issued("cdr-92", Some(refused.key.clone()));
+    let consigned = node
+        .consign(&replacement, &token)
+        .expect("nothing was settled, so nothing is sealed and nothing is owed back");
+    assert_eq!(consigned.supersedes.as_ref(), Some(&refused.key));
+}
+
+/// **M7b: a partner onboarded at runtime gets a policy an operator wrote.**
+///
+/// The typed authority model already takes its values at runtime — a
+/// `Principal` is built from configuration, not from a `const` — so a policy
+/// engine buys nothing until there is a question that model has no vocabulary
+/// for. This is that question: *charge detail records, until the trial ends*.
+/// A set of dotted capability patterns cannot say **until**.
+///
+/// Four things are asserted, and each is a way a policy engine goes wrong:
+///
+/// 1. it decides, and the answer is the operator's own name for the policy;
+/// 2. it decides **inside** a ceiling no text can widen;
+/// 3. an operator who wrote nothing gets nothing;
+/// 4. a reload that does not validate leaves the running set standing, because
+///    default deny makes an empty set a total outage rather than a degraded one.
+#[test]
+fn a_partner_onboarded_at_runtime_is_decided_by_a_policy_an_operator_wrote() {
+    use emob_service::policy::{Gate, Policies};
+
+    // What an operator writes when the partner arrives. `@id` is their own name
+    // for it, and it is what a verdict says back.
+    const TRIAL: &str = r#"
+        @id("de-abc-trial")
+        permit (
+          principal == emob::Party::"DE*ABC",
+          action == emob::Action::"emob.cdr.write",
+          resource
+        )
+        when { resource.owner == principal }
+        unless { context.at > datetime("2026-07-01T00:00:00Z") };
+    "#;
+
+    let fresh = node;
+    let mut node = fresh().with_policies(Gate::new(
+        Policies::load(TRIAL).expect("the trial policy holds against the derived schema"),
+    ));
+    let (document, ours) = crossing();
+
+    // ── 1. Inside the trial, the record is taken ───────────────────────────
+    let inside = node.receive(&peer(), &document, Some(ours.clone()), at(60));
+    assert!(
+        matches!(inside, Verdict::Accepted(_)),
+        "the policy grants it: {inside:?}"
+    );
+
+    // ── 2. …and after it, the same document from the same partner is not ───
+    //
+    // Nothing about the record changed. The grant did, without a deploy, which
+    // is the whole of what this milestone is about.
+    let mut later = fresh().with_policies(Gate::new(Policies::load(TRIAL).expect("it holds")));
+    let after = later.receive(
+        &peer(),
+        &document,
+        Some(ours.clone()),
+        datetime!(2026-09-01 10:00 +2),
+    );
+    let Verdict::Unauthorised { reasons } = after else {
+        panic!("a trial that has ended is not a document fault: {after:?}");
+    };
+    assert!(!reasons.is_empty());
+
+    // ── 3. A policy may grant, and it may never widen a delegation ─────────
+    //
+    // The credential reaches only its own party's records, and no text can turn
+    // that off — which is the leak `emob_service::authority` exists to prevent
+    // and the reason the typed model is asked first.
+    let stranger = emob_service::Principal::peer(
+        PartyId::new("NL", "TNM").expect("a valid party"),
+        emob_core::Role::Emsp,
+        emob_service::Capabilities::root(),
+    );
+    let mut node = fresh().with_policies(Gate::new(Policies::load(TRIAL).expect("it holds")));
+    let pushed = node.receive(&stranger, &document, Some(ours.clone()), at(60));
+    let Verdict::Unauthorised { reasons } = pushed else {
+        panic!("a peer pushing another party's record is not a document fault: {pushed:?}");
+    };
+    assert!(
+        reasons[0].contains("does not reach"),
+        "the typed ceiling answers first, and says so: {reasons:?}"
+    );
+
+    // ── 4. An operator who writes nothing gets nothing ─────────────────────
+    let mut silent =
+        fresh().with_policies(Gate::new(Policies::load("").expect("no policies is a set")));
+    assert!(matches!(
+        silent.receive(&peer(), &document, Some(ours.clone()), at(60)),
+        Verdict::Unauthorised { .. }
+    ));
+
+    // …and a reload that does not hold leaves the old set deciding, because an
+    // empty policy set is not a degraded state — it refuses every request the
+    // node was serving a second ago.
+    let mut node = fresh().with_policies(Gate::new(Policies::load(TRIAL).expect("it holds")));
+    assert!(
+        node.reload_policies(r#"permit (principal, action == emob::Action::"nope", resource);"#)
+            .is_err()
+    );
+    assert!(matches!(
+        node.receive(&peer(), &document, Some(ours.clone()), at(60)),
+        Verdict::Accepted(_)
+    ));
+
+    // …and one that does hold replaces it, while the node runs.
+    let mut node = fresh().with_policies(Gate::new(Policies::load(TRIAL).expect("it holds")));
+    assert_eq!(node.reload_policies("").expect("an empty set is valid"), 0);
+    assert!(matches!(
+        node.receive(&peer(), &document, Some(ours), at(60)),
+        Verdict::Unauthorised { .. }
+    ));
+
+    // …and a node that was never given a gate refuses the load rather than
+    // holding a grant nobody enforces.
+    assert!(matches!(
+        fresh().reload_policies(TRIAL),
+        Err(DispatchError::NoPolicies)
+    ));
 }

@@ -119,6 +119,27 @@ pub enum QuantityError {
         right: String,
     },
 
+    /// A magnitude no meter states and no arithmetic here survives, or two
+    /// figures whose sum or difference no decimal holds.
+    ///
+    /// `Decimal` **panics** on overflow rather than saturating, and every
+    /// quantity in this workspace is multiplied — by a price, by 1000 to reach
+    /// watt-hours, by a VAT factor. A value near `Decimal::MAX` therefore does
+    /// not produce a wrong invoice, it takes the process down, and it arrives
+    /// from a peer's charge detail record (D305).
+    #[error(
+        "{what} is past what this workspace carries ({limit}), got {value}: a figure that cannot \
+         be multiplied or added is not one anything here can bill"
+    )]
+    Unbillable {
+        /// Which quantity.
+        what: &'static str,
+        /// The value that was rejected.
+        value: String,
+        /// The bound it passed.
+        limit: String,
+    },
+
     /// A currency code that is not three letters.
     #[error("a currency code is three letters (ISO 4217), got {0:?}")]
     BadCurrency(String),

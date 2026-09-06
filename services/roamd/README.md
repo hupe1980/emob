@@ -1,7 +1,8 @@
 # roamd
 
-The roaming node: **who** a record goes to, **when** it is late, and **what to
-do** with one that arrives — and never what a record says.
+The roaming node: **who** a record goes to, **who may send one here**, **when**
+it is late, and **what to do** with one that arrives — and never what a record
+says.
 
 ```console
 cargo run -p roamd
@@ -18,8 +19,8 @@ signed session already settles at the same money over three paths.
 
 None of that is here, and none of it could be: a document is what a domain crate
 says it is. What is here is the half a domain crate cannot have — a **ledger of
-what was sent to whom and what came back** — and the four questions that need
-one.
+what was sent to whom and what came back**, and the policies an operator wrote
+about the partners it peers with — and the five questions that need one.
 
 ## 1. Who is owed this record
 
@@ -61,6 +62,19 @@ send a new CDR"*. A replacement consigned before its reversal was accepted is
 refused, because sent the other way round the partner holds two records for one
 session and settles both until somebody notices.
 
+**An acceptance is terminal.** The seal is enforced where a record is consigned,
+by reading the delivery — which made it exactly as durable as that field: one
+`refused` recorded after the fact overwrote the acceptance, and the same record
+could then go to the same partner again. Recording the same outcome twice is
+idempotent, because a location that arrives late is a fact about one delivery
+rather than a second one.
+
+**And a reversal is owed only where one happened.** A Credit CDR reverses a
+record the eMSP **has**. For one they refused there is nothing to reverse and no
+credit will ever be accepted, so requiring one before every replacement
+deadlocked the correction of every refused record — against the rule this section
+states two paragraphs up, that nothing refused is sealed.
+
 That rule cannot live in a crate. `to_ocpi_credit` builds the reversal,
 `emob_cdr` refuses to bill both halves, and `Cdr::supersedes` names what a record
 replaces — three layers modelling the correction, and none of them knows whether
@@ -81,14 +95,57 @@ every day. `Partner::settles_within` is the figure, and `Roamd::unsettled` is th
 sharp question: not work outstanding, but a session that has been delivered,
 settled on this side, and never billed to anybody.
 
-## 4. What to do with one that arrives
+## 4. Who may send one here
 
-Three gates, in the order that makes them mean something — the **document**
-(`preflight`), the **conversion** (`from_ocpi`), the **record** (`validate`) —
-and four answers rather than one error:
+A partner is onboarded while the node runs, and what an operator wants to say
+about one is not a set of dotted capability patterns:
+
+```cedar
+@id("nl-tnm-trial")
+permit (
+  principal == emob::Party::"NL*TNM",
+  action == emob::Action::"emob.cdr.write",
+  resource
+)
+when { resource.owner == principal }
+unless { context.at > datetime("2027-01-01T00:00:00Z") };
+```
+
+```rust
+let node = Roamd::new(registry).with_policies(Gate::new(Policies::load(text)?));
+node.reload_policies(&edited)?;   // …while it runs, and never with nothing
+```
+
+The policies are `emob_service::policy`'s and the schema is generated from the
+capability list, so this service decides *when* a grant is consulted and never
+what one may say. Three things about the composition are this node's:
+
+**It is asked before the document is read.** The other five answers are
+information: telling a caller this node does not accept which of its charging
+periods do not sum is telling it about a session it has no business knowing
+exists. So `Verdict::Unauthorised` is a sixth answer and it comes first.
+
+**A policy may grant, and it may never widen a delegation.** The typed ceiling in
+`emob_service::authority` is asked first and a `no` there is final, so a peer
+pushing another party's record is refused whatever any policy says — and the
+refusal names the ceiling rather than the policy, because that is the half no
+text can turn off.
+
+**And a reload that does not validate leaves the running set deciding.** Default
+deny makes an empty policy set a total outage rather than a degraded state, so a
+failed reload must not be able to produce one. A node that was never given a gate
+refuses to load policies at all, because a set nothing consults is a grant nobody
+is enforcing.
+
+## 5. What to do with one that arrives
+
+**Four** gates, in the order that makes them mean something — the **credential**
+(above), the **document** (`preflight`), the **conversion** (`from_ocpi`), the
+**record** (`validate`) — and six answers rather than one error:
 
 | Verdict | Means | What the sender does |
 |---|---|---|
+| `Unauthorised` | this credential may not push this record here | asks the operator |
 | `Accepted` | the document holds up and the record is new | nothing; settle it |
 | `Disputed` | the document is fine and the claim does not hold here | talks to you |
 | `Duplicate` | already held, unchanged | nothing; the retry was harmless |

@@ -669,6 +669,42 @@ pub enum AdjustmentKind {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum RatingNote {
+    /// A price the session's own quantity cannot be multiplied by.
+    ///
+    /// `Decimal` panics on overflow rather than saturating, and a tariff
+    /// arrives from a partner over OCPI. [`Energy`] is bounded at its own door
+    /// — no measurement is near the limit — so this is a *price* nobody meant,
+    /// and the dimension is left unbilled rather than billed at a number the
+    /// arithmetic invented or not billed at all because the process died
+    /// (D305).
+    ///
+    /// Nothing is charged for the dimension. Under-billing is the direction a
+    /// refusal falls in here, and the note is what stops it being silent.
+    PriceOutOfRange {
+        /// Which dimension went unpriced.
+        dimension: Dimension,
+        /// What the session delivered, in the dimension's base unit.
+        base_quantity: Decimal,
+        /// The price that could not be applied.
+        unit_price: Decimal,
+    },
+
+    /// A published bound whose own figures the arithmetic cannot carry.
+    ///
+    /// `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` puts no ceiling on a
+    /// `PriceLimit`, and answering one moves a total through the VAT factor. A
+    /// limit near `Decimal::MAX` therefore reaches the tax split as an amount
+    /// nothing can gross up, where `Decimal` panics rather than saying so. The
+    /// total is left **unadjusted** and both limits go unanswered, because an
+    /// adjustment computed against half a pair is a price nobody published
+    /// (D305).
+    LimitOutOfRange {
+        /// Which of the two limits could not be carried.
+        kind: AdjustmentKind,
+        /// The limit as the tariff published it.
+        limit: crate::tariff::PriceLimit,
+    },
+
     /// A quantity the tariff did not price.
     ///
     /// No element carrying this dimension had restrictions matching the
@@ -867,21 +903,53 @@ pub enum RatingNote {
     /// A component carries a VAT rate no net-and-tax split can be computed
     /// from.
     ///
-    /// A gross amount is `net × (1 + rate/100)`, so at exactly −100 % the
-    /// factor is zero and no net grosses up to it. The amount is still charged
-    /// — the price is the price — but [`Rated::tax_summary`] reports it whole,
-    /// and an invoice built from it would state a taxable amount it cannot
-    /// justify. A tariff from a roaming partner is somebody else's document, so
-    /// the rate is data rather than a promise.
+    /// A gross amount is `net × (1 + rate/100)`, so a rate of −100 % or below
+    /// makes that factor zero or negative — and there is then no *positive*
+    /// gross for a positive net. The amount is still charged, because the price
+    /// is the price, but every figure derived from it is a document nobody can
+    /// file: a taxable amount with a negative tax beside it, or a gross of zero
+    /// under a positive net. A tariff from a roaming partner is somebody else's
+    /// document, so the rate is data rather than a promise.
     ///
-    /// Raised **only for a [`TaxIncluded::Yes`] tariff**, the one basis on which
-    /// that factor is a divisor: net prices multiply by it and zero multiplies
-    /// fine, and a party outside a tax regime never reads the rate at all.
+    /// # Both bases, and it used to be one
+    ///
+    /// This was raised only for a [`TaxIncluded::Yes`] tariff, on the reasoning
+    /// that the factor is a divisor there and *"net prices multiply by it and
+    /// zero multiplies fine"*. The multiplication is fine and the consequence is
+    /// not: on net prices the factor is the **slope** by which a movement
+    /// reaches the gross, and at zero the gross does not move at all — so a
+    /// gross `min_price` the operator published could not be reached, silently
+    /// (D295). One reading of the field, on every basis that reads it.
     VatRateNotUsable {
         /// Which dimension carried it.
         dimension: Dimension,
         /// The rate that arrived.
         rate: Decimal,
+    },
+
+    /// A limit the tariff publishes in the basis its prices are **not** quoted
+    /// in, which this rating could not solve for.
+    ///
+    /// `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` states a bound before taxes
+    /// and one after, and *"as a rule, they both apply"*. The limb in the
+    /// tariff's own basis is a subtraction and always binds; reaching the other
+    /// one is an inversion, and two shapes have no answer:
+    ///
+    /// - **The other basis does not move.** A lift lands in one VAT category
+    ///   ([`Adjustment::vat`]), and where that category's rate makes the other
+    ///   basis's slope zero, no amount added there reaches the target.
+    /// - **The other basis moves the wrong way.** A rate below −100 % makes the
+    ///   gross *fall* as a net cut deepens, and an inversion of a function that
+    ///   is not monotone has no unique answer.
+    ///
+    /// Reported rather than swallowed, because a reader otherwise cannot tell a
+    /// session that was **inside** a bound from one whose bound could not be
+    /// computed — and the two are a compliant price and a document fault.
+    BoundUnreachable {
+        /// Which limit it was.
+        kind: AdjustmentKind,
+        /// The figure the tariff published, in the basis it published it in.
+        target: Decimal,
     },
 }
 
@@ -933,6 +1001,23 @@ impl core::fmt::Display for RatingNote {
             } => write!(
                 f,
                 "no tariff element prices {dimension:?} under the conditions of {periods} period(s) beginning {at}: {base_quantity} {} was not charged",
+                dimension.base_unit()
+            ),
+            Self::LimitOutOfRange { kind, limit } => write!(
+                f,
+                "the {} price this tariff publishes is {limit}, whose own figures no decimal here can carry through a tax split [OCPI 2.3.0 §mod_tariffs_pricelimit_class]: the total is left unadjusted and neither limit was answered, because an adjustment against half a pair of bounds is a price nobody published",
+                match kind {
+                    AdjustmentKind::Minimum => "minimum",
+                    AdjustmentKind::Maximum => "maximum",
+                }
+            ),
+            Self::PriceOutOfRange {
+                dimension,
+                base_quantity,
+                unit_price,
+            } => write!(
+                f,
+                "{base_quantity} {} at a unit price of {unit_price} is a product no decimal here can hold, so {dimension:?} went unbilled: an energy is bounded at its own door and no measurement comes near that, which makes this a price nobody meant — check the tariff the partner sent rather than the session",
                 dimension.base_unit()
             ),
             Self::PowerJudgedPerPeriod {
@@ -991,7 +1076,15 @@ impl core::fmt::Display for RatingNote {
             ),
             Self::VatRateNotUsable { dimension, rate } => write!(
                 f,
-                "{dimension:?} carries a VAT rate of {rate} %, from which no net and tax can be computed: the amount is reported whole"
+                "{dimension:?} carries a VAT rate of {rate} %, at or below the −100 % that makes the gross-to-net factor zero: there is no positive gross for a positive net, so no net and tax can be computed from this amount"
+            ),
+            Self::BoundUnreachable { kind, target } => write!(
+                f,
+                "the tariff publishes a {} of {target} in the basis its prices are not quoted in, and this rating cannot solve for it: a VAT rate at or below −100 % leaves the other basis either immovable or falling as the movement deepens [OCPI 2.3.0 §mod_tariffs_pricelimit_class]. The limb in the tariff's own basis still binds",
+                match kind {
+                    AdjustmentKind::Minimum => "minimum",
+                    AdjustmentKind::Maximum => "maximum",
+                }
             ),
             Self::Adjusted(adjustment) => match adjustment.kind {
                 AdjustmentKind::Minimum => write!(
@@ -1688,6 +1781,55 @@ pub fn rate_reservation(tariff: &Tariff, reservation: &Reservation) -> Rated {
     rated
 }
 
+/// One [`Line`] per accumulator that priced anything, and a note for each that
+/// could not.
+///
+/// Split out of [`rate_with`] because it is where the crate's one *arithmetic*
+/// door lives — see [`usable_amount`] — rather than because of its length.
+fn lines_of(accumulators: Vec<Accumulator>, notes: &mut Vec<RatingNote>) -> Vec<Line> {
+    accumulators
+        .into_iter()
+        .filter(|acc| !acc.quantity.is_zero())
+        .filter_map(|acc| {
+            // Multiply, then divide. `price × seconds / 3600` is exact wherever
+            // the arithmetic allows it to be; `price × (seconds / 3600)` has
+            // already lost the last digits to a repeating decimal — which is
+            // why `base_quantity` is the figure the amount comes from and
+            // `quantity` is the one a driver reads.
+            let per_display_unit = Line::base_units_per_unit(acc.dimension);
+            let billed = acc.quantity;
+            // …and checked, because `Decimal` **panics** on overflow rather
+            // than saturating. `Energy` is bounded at its own door, so the
+            // quantity here is a measurement; a price is not a measurement, has
+            // no natural bound, and arrives on a partner's tariff (D305).
+            //
+            // The check is on what the line *feeds*, not only on the product:
+            // every figure this crate derives afterwards is an amount times its
+            // own VAT factor — `exact_bases` multiplies, `split_tax` divides,
+            // `bound` moves a limb by it — and the totals are sums of at most
+            // one line per [`Dimension`]. So a line is one this crate can carry
+            // when its **gross** leaves room for the other three, and that is
+            // provable here rather than hoped for downstream.
+            let Some(amount) = usable_amount(billed, acc.price, acc.vat) else {
+                notes.push(RatingNote::PriceOutOfRange {
+                    dimension: acc.dimension,
+                    base_quantity: billed,
+                    unit_price: acc.price,
+                });
+                return None;
+            };
+            Some(Line {
+                dimension: acc.dimension,
+                quantity: billed / per_display_unit,
+                base_quantity: billed,
+                unit_price: acc.price,
+                amount: amount / per_display_unit,
+                vat: acc.vat,
+            })
+        })
+        .collect()
+}
+
 /// The rating, over a session or over a reservation.
 ///
 /// One function because the arithmetic is one arithmetic — the per-dimension
@@ -1823,27 +1965,7 @@ fn rate_with(
     // bill a two-hour session eight times over. See `apply_step_sizes`.
     apply_step_sizes(&mut accumulators, &mut notes);
 
-    let mut lines: Vec<Line> = accumulators
-        .into_iter()
-        .filter(|acc| !acc.quantity.is_zero())
-        .map(|acc| {
-            // Multiply, then divide. `price × seconds / 3600` is exact wherever
-            // the arithmetic allows it to be; `price × (seconds / 3600)` has
-            // already lost the last digits to a repeating decimal — which is
-            // why `base_quantity` is the figure the amount comes from and
-            // `quantity` is the one a driver reads.
-            let per_display_unit = Line::base_units_per_unit(acc.dimension);
-            let billed = acc.quantity;
-            Line {
-                dimension: acc.dimension,
-                quantity: billed / per_display_unit,
-                base_quantity: billed,
-                unit_price: acc.price,
-                amount: billed * acc.price / per_display_unit,
-                vat: acc.vat,
-            }
-        })
-        .collect();
+    let mut lines = lines_of(accumulators, &mut notes);
     // Stable, so a tier keeps the order it was first charged in, inside the
     // dimension order `[AFIR Art. 5(4)]` prescribes.
     lines.sort_by_key(|l| l.dimension);
@@ -1931,18 +2053,21 @@ fn preflight(tariff: &Tariff) -> Vec<RatingNote> {
                 max_kw: element.restrictions.max_power_kw,
             });
         }
-        // A rate of exactly -100 % makes the gross-to-net factor zero, and no
-        // net grosses up to a non-zero amount at that rate. Said once here,
-        // rather than discovered by `tax_summary` where there is nowhere to
-        // put it.
+        // A rate at or below −100 % makes the gross-to-net factor zero or
+        // negative, so no *positive* gross corresponds to a positive net. Said
+        // once here, rather than discovered by `tax_summary` where there is
+        // nowhere to put it.
         //
-        // Only on a gross tariff, where the factor is a divisor. Net prices
-        // multiply by it and zero multiplies fine; a party outside a tax regime
-        // never reads the rate at all.
-        if tariff.tax_included == TaxIncluded::Yes {
+        // On **both** bases that read a rate. It used to be gross tariffs only,
+        // on the argument that the factor is a divisor there — true, and beside
+        // the point: on net prices the same factor is the slope by which a
+        // movement reaches the gross, and at zero the gross does not move, so a
+        // gross bound the operator published could not be reached (D295). A
+        // party outside a tax regime never reads the rate at all.
+        if tariff.tax_included != TaxIncluded::NotApplicable {
             for component in &element.components {
                 if let Some(rate) = component.vat
-                    && (Decimal::ONE + rate / HUNDRED).is_zero()
+                    && !is_usable_vat(rate)
                 {
                     notes.push(RatingNote::VatRateNotUsable {
                         dimension: component.dimension,
@@ -2543,15 +2668,117 @@ fn categories_for_bound(
 /// grosses up to it. The limb that needed it does not bind, which is what this
 /// function returning `None` makes the caller do — the same hole
 /// [`Rated::split_tax`] reports rather than dividing into.
-fn per_unit_in_other_basis(basis: TaxIncluded, vat: Option<Decimal>) -> Option<Decimal> {
+/// Whether a VAT rate has a net-and-tax split at all.
+///
+/// A gross amount is `net × (1 + rate/100)`. The factor is what every figure in
+/// this module is derived through — `split_tax` divides by it, `exact_bases`
+/// multiplies by it, and [`per_unit_in_other_basis`] is it — so the one
+/// predicate worth stating is whether it is **strictly positive**. At zero no
+/// positive gross corresponds to a positive net; below zero the correspondence
+/// runs backwards. Either way the document is one nobody can file, and
+/// [`RatingNote::VatRateNotUsable`] says so.
+///
+/// One function, because the alternative is what this module keeps finding: two
+/// readings of one field, and the stricter one living wherever somebody
+/// remembered to write it.
+/// The largest figure this module lets any total reach.
+///
+/// # Why there is one at all
+///
+/// `Decimal` **panics** on overflow rather than saturating, and both operands of
+/// every multiplication here arrive from a partner: the quantity on a charge
+/// detail record, the price and the published limits on a tariff. A figure near
+/// `Decimal::MAX` does not produce a wrong invoice, it takes the process down
+/// mid-settlement (D305).
+///
+/// # Why a quarter
+///
+/// A [`Rated`] holds at most one line per [`Dimension`] and there are four of
+/// them, and every total this module states is a sum of those lines in one
+/// basis or the other — the widest being the gross, each line's amount at its
+/// own VAT factor. A figure under `Decimal::MAX / 4` can therefore be summed
+/// with any three others of its kind, which is what lets the check live at the
+/// two doors below rather than at every multiplication downstream of them.
+fn headroom() -> Decimal {
+    const DIMENSIONS: u64 = 4;
+    Decimal::MAX / Decimal::from(DIMENSIONS)
+}
+
+/// A line's amount, where every figure derived from it is representable.
+///
+/// [`None`] where it is not, which is the whole of what the caller needs: the
+/// dimension goes unbilled and [`RatingNote::PriceOutOfRange`] says why.
+fn usable_amount(base_quantity: Decimal, price: Decimal, vat: Option<Decimal>) -> Option<Decimal> {
+    let amount = base_quantity.checked_mul(price)?;
+    (fits(amount, vat)).then_some(amount)
+}
+
+/// Whether a figure and everything derived from it stay inside [`headroom`].
+fn fits(amount: Decimal, vat: Option<Decimal>) -> bool {
+    let factor = Decimal::ONE + vat.unwrap_or(Decimal::ZERO) / HUNDRED;
+    amount
+        .checked_mul(factor)
+        .is_some_and(|gross| gross.abs() <= headroom() && amount.abs() <= headroom())
+}
+
+/// Whether either published bound is one this crate cannot answer, noting it.
+///
+/// Refusing **both** limits where one is unanswerable is deliberate: an
+/// adjustment computed against half a pair of bounds is a price neither the
+/// operator nor the partner published (D305).
+fn refuses_its_own_limits(
+    tariff: &Tariff,
+    vat: Option<Decimal>,
+    notes: &mut Vec<RatingNote>,
+) -> bool {
+    let mut refused = false;
+    for (kind, limit) in [
+        (AdjustmentKind::Minimum, tariff.min_price),
+        (AdjustmentKind::Maximum, tariff.max_price),
+    ] {
+        if let Some(limit) = limit
+            && !is_carryable_limit(limit, vat)
+        {
+            notes.push(RatingNote::LimitOutOfRange { kind, limit });
+            refused = true;
+        }
+    }
+    refused
+}
+
+/// Whether a published bound is one this crate can answer.
+///
+/// The second door, and the same argument as the first. A `PriceLimit` is a
+/// figure a *partner* publishes, `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]`
+/// puts no ceiling on it, and answering one moves a total through the VAT
+/// factor — so a limit near `Decimal::MAX` reaches `split_tax` as an amount
+/// nothing can gross up, and `Decimal` panics rather than saying so.
+fn is_carryable_limit(limit: crate::tariff::PriceLimit, vat: Option<Decimal>) -> bool {
+    [limit.before_taxes, limit.after_taxes]
+        .into_iter()
+        .flatten()
+        .all(|figure| fits(figure, vat))
+}
+
+fn is_usable_vat(rate: Decimal) -> bool {
+    Decimal::ONE + rate / HUNDRED > Decimal::ZERO
+}
+
+fn per_unit_in_other_basis(basis: TaxIncluded, vat: Option<Decimal>) -> Decimal {
     let factor = Decimal::ONE + vat.unwrap_or(Decimal::ZERO) / HUNDRED;
     match basis {
-        // Net lines: one net unit moves the gross by the factor.
-        TaxIncluded::No => (factor > Decimal::ZERO).then_some(factor),
+        // Net lines: one net unit moves the gross by the factor — for **any**
+        // factor, including zero, because a multiplication has no hole in it.
+        TaxIncluded::No => factor,
         // Gross lines: one gross unit moves the net by its reciprocal.
-        TaxIncluded::Yes => (factor > Decimal::ZERO).then(|| Decimal::ONE / factor),
-        // Outside a tax regime the two totals are one figure.
-        TaxIncluded::NotApplicable => Some(Decimal::ONE),
+        TaxIncluded::Yes if !factor.is_zero() => Decimal::ONE / factor,
+        // …and the one rate that has no reciprocal is the one
+        // [`Rated::split_tax`] reports **whole** rather than dividing into: at
+        // exactly −100 % no net grosses up to a non-zero amount, so the amount
+        // is its own net and a unit of one basis moves the other by one. Said
+        // here the same way it is said there, because two readings of one field
+        // is what this whole module is built to prevent.
+        TaxIncluded::Yes | TaxIncluded::NotApplicable => Decimal::ONE,
     }
 }
 
@@ -2574,11 +2801,29 @@ fn per_unit_in_other_basis(basis: TaxIncluded, vat: Option<Decimal>) -> Option<D
 /// walk [`Rated::adjustment_parts`] then places the movement along, so the
 /// price and the document are computed against one order (D284).
 ///
-/// `None` where the other basis has no answer at all: a rate of exactly −100 %
-/// makes the gross-to-net factor zero, the hole [`Rated::split_tax`] reports
-/// rather than dividing into. Asked of **every** category rather than of the
-/// one a solve happens to stop in, because which it stops in is what the solve
-/// is for.
+/// # …and what it refuses to invert
+///
+/// The walk is an inversion, and an inversion needs the function to be
+/// **monotone**. A VAT rate below −100 % makes the other basis move the *other
+/// way* as the cut deepens — cut further and the gross goes up — and a
+/// piecewise function with a descending segment has no unique answer to "how
+/// deep a cut reaches this target". That limb does not bind, and the ordinary
+/// one in the tariff's own basis still does.
+///
+/// A rate of exactly −100 % is **not** that case and used to be treated as it.
+/// On net lines the gross is `net × 0`, which is a multiplication with no hole
+/// in it: the walk spends that category and moves on, because cutting there
+/// changes the gross by nothing. Refusing it dropped the whole limb — so a
+/// tariff quoting net prices, carrying one component at −100 % and publishing a
+/// gross `max_price`, was **not capped at all** and charged a driver above a
+/// ceiling the operator had published, which is the failure this function exists
+/// to prevent (D295). [`preflight`] never raised a note about it either, on the
+/// same reasoning that makes the arithmetic fine: net prices multiply, and zero
+/// multiplies.
+///
+/// A **lift** still needs a strictly positive slope, because it is a division
+/// and it lands in one category: adding to a category whose gross slope is zero
+/// never reaches a gross target, whatever is added.
 fn movement_reaching(
     wanted: Decimal,
     basis: TaxIncluded,
@@ -2586,12 +2831,15 @@ fn movement_reaching(
     chosen: Option<Decimal>,
 ) -> Option<Decimal> {
     if !wanted.is_sign_negative() {
-        let per = per_unit_in_other_basis(basis, chosen)?;
-        return (!per.is_zero()).then(|| wanted / per);
+        let per = per_unit_in_other_basis(basis, chosen);
+        return (per > Decimal::ZERO).then(|| wanted / per);
     }
-    if !categories
+    // A descending segment makes the inversion ambiguous. Asked of **every**
+    // category rather than of the one a solve happens to stop in, because which
+    // it stops in is what the solve is for.
+    if categories
         .iter()
-        .all(|(vat, _)| per_unit_in_other_basis(basis, *vat).is_some())
+        .any(|(vat, _)| per_unit_in_other_basis(basis, *vat).is_sign_negative())
     {
         return None;
     }
@@ -2603,11 +2851,12 @@ fn movement_reaching(
         if available.is_zero() {
             continue;
         }
-        let per = per_unit_in_other_basis(basis, *vat)?;
+        let per = per_unit_in_other_basis(basis, *vat);
         let segment = available * per;
         if remaining <= segment {
-            // `per` is strictly positive here: a zero factor would have failed
-            // the check above.
+            // `per` is strictly positive here: a flat segment has `segment == 0`
+            // and `remaining` is strictly positive, so this arm is unreachable
+            // for it and the walk moves on to the next category.
             return Some(-(movement + remaining / per));
         }
         movement += available;
@@ -2616,6 +2865,91 @@ fn movement_reaching(
     // Cutting everything does not reach the target. The deepest cut there is,
     // which the caller's clamp then reads as "the whole of the lines".
     Some(-movement)
+}
+
+/// One limit, and everything solving its two limbs needs.
+///
+/// A struct rather than eight arguments, because `clippy::too_many_arguments` is
+/// right about this one: `lines_total` and `other_total` are two decimals that
+/// mean opposite things and would sit next to each other in the call.
+struct LimbContext<'a> {
+    /// The limit being solved.
+    limit: crate::tariff::PriceLimit,
+    /// Which of the two it is — a floor or a ceiling.
+    kind: AdjustmentKind,
+    /// Whether the lines are quoted net.
+    own_is_net: bool,
+    /// The lines' own total, in their own basis.
+    lines_total: Decimal,
+    /// The same session in the basis the lines are **not** quoted in.
+    other_total: Decimal,
+    /// Which basis that is.
+    basis: TaxIncluded,
+    /// The order a cut is drawn in, and what each category holds.
+    categories: &'a [(Option<Decimal>, Decimal)],
+    /// The category the bound is attributed to.
+    vat: Option<Decimal>,
+}
+
+/// What one limit's limbs ask for, in the lines' own basis.
+///
+/// Both limbs of a limit are bounds on the same number — the movement the total
+/// needs — so they are returned together and the caller takes the extreme of
+/// them.
+///
+/// A limb with **no answer** is not returned and is not silent: a bound the
+/// tariff publishes and this rating cannot apply is reported as
+/// [`RatingNote::BoundUnreachable`], because swallowing it made that
+/// indistinguishable from a session that was simply inside the bound (D295).
+/// Only where the limb had somewhere to go — a maximum the session is already
+/// under, and a minimum it is already over, ask for no movement at all, and a
+/// note about those would fire on a compliant session.
+fn limb_movements(context: &LimbContext<'_>, notes: &mut Vec<RatingNote>) -> Vec<Decimal> {
+    let &LimbContext {
+        limit,
+        kind,
+        own_is_net,
+        lines_total,
+        other_total,
+        basis,
+        categories,
+        vat,
+    } = context;
+
+    let (own_target, other_target) = if own_is_net {
+        (limit.before_taxes, limit.after_taxes)
+    } else {
+        (limit.after_taxes, limit.before_taxes)
+    };
+
+    let mut out = Vec::new();
+    if let Some(target) = own_target {
+        out.push(target - lines_total);
+    }
+    if let Some(target) = other_target {
+        let wanted = target - other_total;
+        match movement_reaching(wanted, basis, categories, vat) {
+            Some(movement) => out.push(movement),
+            None if binds(kind, wanted) => {
+                notes.push(RatingNote::BoundUnreachable { kind, target });
+            }
+            None => {}
+        }
+    }
+    out
+}
+
+/// Whether a limit's limb asks for a movement at all.
+///
+/// A maximum binds by **cutting** and a minimum by **lifting**, so a maximum the
+/// session is already under and a minimum it is already over each ask for
+/// nothing. Which of the two a `wanted` of zero is does not matter: neither
+/// moves.
+const fn binds(kind: AdjustmentKind, wanted: Decimal) -> bool {
+    match kind {
+        AdjustmentKind::Maximum => wanted.is_sign_negative() && !wanted.is_zero(),
+        AdjustmentKind::Minimum => !wanted.is_sign_negative() && !wanted.is_zero(),
+    }
 }
 
 /// Apply the tariff's minimum and maximum, **in both bases**.
@@ -2665,6 +2999,10 @@ fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<
     let lines_total = rated.lines_total();
     let vat = adjustment_vat(tariff, &rated.lines);
 
+    if refuses_its_own_limits(tariff, vat, notes) {
+        return None;
+    }
+
     // The totals the two limbs are read against, before any adjustment.
     // `rated.adjustment` is `None` here by construction.
     //
@@ -2686,24 +3024,20 @@ fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<
     // it is a fact about the lines, and both limbs of both limits read it.
     let categories = categories_for_bound(&rated.lines, vat);
 
-    // What each limb asks for, in the lines' own basis.
-    let movements = |limit: crate::tariff::PriceLimit| -> Vec<Decimal> {
-        let (own_target, other_target) = if own_is_net {
-            (limit.before_taxes, limit.after_taxes)
-        } else {
-            (limit.after_taxes, limit.before_taxes)
-        };
-        let mut out = Vec::new();
-        if let Some(target) = own_target {
-            out.push(target - lines_total);
-        }
-        if let Some(target) = other_target
-            && let Some(movement) =
-                movement_reaching(target - other_total, tariff.tax_included, &categories, vat)
-        {
-            out.push(movement);
-        }
-        out
+    let mut movements = |limit: crate::tariff::PriceLimit, kind: AdjustmentKind| -> Vec<Decimal> {
+        limb_movements(
+            &LimbContext {
+                limit,
+                kind,
+                own_is_net,
+                lines_total,
+                other_total,
+                basis: tariff.tax_included,
+                categories: &categories,
+                vat,
+            },
+            notes,
+        )
     };
 
     // # Every limb is a bound on the movement itself
@@ -2725,10 +3059,10 @@ fn bound(tariff: &Tariff, rated: &Rated, notes: &mut Vec<RatingNote>) -> Option<
     // a lift once the cut has already been taken.
     let floor = tariff
         .min_price
-        .and_then(|limit| movements(limit).into_iter().max());
+        .and_then(|limit| movements(limit, AdjustmentKind::Minimum).into_iter().max());
     let ceiling = tariff
         .max_price
-        .and_then(|limit| movements(limit).into_iter().min());
+        .and_then(|limit| movements(limit, AdjustmentKind::Maximum).into_iter().min());
 
     // An interval with nothing in it is a tariff contradicting itself, and the
     // reading that stands is the one that is not against the customer: a
@@ -4001,12 +4335,16 @@ mod tests {
     }
 
     #[test]
-    fn the_unsplittable_rate_is_only_unsplittable_on_a_gross_tariff() {
-        // The factor is a *divisor* only when the prices are gross. On a net
-        // tariff it is a multiplier, and zero multiplies fine — so the note
-        // that says "reported whole" must not be attached to a breakdown that
-        // was computed exactly. A partner reads these notes to decide whether a
-        // taxable amount can be justified, and a false one is worse than none.
+    fn the_unsplittable_rate_is_reported_on_every_basis_that_reads_one() {
+        // This asserted the opposite for four milestones, on the argument that
+        // the factor is a *divisor* only when the prices are gross — that on a
+        // net tariff it is a multiplier and "zero multiplies fine". The
+        // multiplication is fine. What it produces is not: a taxable amount of
+        // €4.90 with a **negative tax of €4.90** beside it, which is not a
+        // breakdown "computed exactly", it is a document nobody can file. And
+        // one field further on it is what stopped a published gross bound being
+        // reached at all, because that same zero is the slope by which a
+        // movement reaches the gross (D295).
         let mut t = ad_hoc(vec![
             PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("-100")),
         ]);
@@ -4014,14 +4352,25 @@ mod tests {
         let r = rate(&t, &session("10"));
 
         assert!(
-            !r.reasons().any(|note| note.contains("no net and tax")),
+            r.reasons().any(|note| note.contains("no net and tax")),
             "{:?}",
             r.reasons().collect::<Vec<_>>()
         );
+        // The price is still the price, and the arithmetic still says what it
+        // says — the note is what stops a reader taking it for a justified one.
         let summary = r.tax_summary();
         assert_eq!(summary[0].net, dec("4.90"));
-        assert_eq!(summary[0].gross, Decimal::ZERO, "net × 0 is defined");
-        assert_eq!(summary[0].tax, dec("-4.90"));
+        assert_eq!(summary[0].gross, Decimal::ZERO);
+
+        // …and a rate *below* −100 % is the same fault: the gross runs backwards
+        // from the net rather than merely standing still.
+        let mut steeper = t.clone();
+        steeper.elements[0].components[0].vat = Some(dec("-150"));
+        assert!(
+            rate(&steeper, &session("10"))
+                .reasons()
+                .any(|note| note.contains("no net and tax"))
+        );
 
         // …and a party outside a tax regime never reads the rate at all.
         t.tax_included = TaxIncluded::NotApplicable;
@@ -4030,6 +4379,64 @@ mod tests {
                 .reasons()
                 .any(|note| note.contains("no net and tax"))
         );
+    }
+
+    #[test]
+    fn a_published_gross_maximum_binds_on_net_lines_at_a_dead_rate() {
+        // The defect this pair of readings produced. A tariff quotes net prices,
+        // one component carries −100 %, and the operator publishes a **gross**
+        // ceiling. Reaching it is an inversion through the tax, and the
+        // conversion refused a factor of zero on both bases — so the limb was
+        // dropped and the ceiling was not applied at all, silently, which is the
+        // one failure `bound` exists to prevent (D295).
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.50")).with_vat(dec("-100")),
+            PriceComponent::new(Dimension::Flat, dec("2.00")).with_vat(dec("19")),
+        ]);
+        t.tax_included = TaxIncluded::No;
+        t.max_price = Some(PriceLimit::gross(dec("1.00")));
+
+        let r = rate(&t, &session("10"));
+        assert!(
+            r.gross().amount() <= dec("1.00"),
+            "a published ceiling of 1.00 was not applied: gross {}",
+            r.gross()
+        );
+        assert_eq!(
+            r.adjustment.expect("the ceiling bound").kind,
+            AdjustmentKind::Maximum
+        );
+    }
+
+    #[test]
+    fn a_bound_the_rating_cannot_solve_for_is_named_rather_than_dropped() {
+        // A gross **minimum** on net lines whose only category carries −100 %:
+        // the gross does not move however much net is added, so no lift reaches
+        // it. That is a document fault rather than an arithmetic one, and a
+        // reader otherwise cannot tell it from a session that was simply above
+        // the floor.
+        let mut t = ad_hoc(vec![
+            PriceComponent::new(Dimension::Energy, dec("0.50")).with_vat(dec("-100")),
+        ]);
+        t.tax_included = TaxIncluded::No;
+        t.min_price = Some(PriceLimit::gross(dec("5.00")));
+
+        let r = rate(&t, &session("10"));
+        assert!(
+            r.notes.iter().any(|note| matches!(
+                note,
+                RatingNote::BoundUnreachable {
+                    kind: AdjustmentKind::Minimum,
+                    ..
+                }
+            )),
+            "{:?}",
+            r.reasons().collect::<Vec<_>>()
+        );
+        // …and the limb in the tariff's own basis still binds, so a tariff that
+        // publishes both is not left unbounded.
+        t.min_price = Some(PriceLimit::net_and_gross(dec("9.00"), dec("5.00")));
+        assert_eq!(rate(&t, &session("10")).net().amount(), dec("9.00"));
     }
 
     #[test]

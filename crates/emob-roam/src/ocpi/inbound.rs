@@ -122,8 +122,19 @@ pub fn from_ocpi(
         })?;
 
     let token_type = cdr.cdr_token.token_type.clone();
-    let auth_path = auth_path_of(cdr.auth_method, &token_type);
-    if let Some(reason) = auth_path_note(cdr.auth_method, &token_type) {
+    let auth_path =
+        auth_path_of(&cdr.auth_method, &token_type).ok_or_else(|| RoamError::UnreadableField {
+            field: "auth_method".to_owned(),
+            detail: format!(
+                "`{}` is not an authorisation method this side has a path for [OCPI 2.3.0 \
+                 §mod_cdrs_authmethod_enum]. The value decides whether a contract was presented, \
+                 which decides who is invoiced and which identification level the signed record \
+                 may claim, so the record is refused rather than read back under the nearest \
+                 path this side does know",
+                custom_auth_method(&cdr.auth_method).unwrap_or("(unnamed)")
+            ),
+        })?;
+    if let Some(reason) = auth_path_note(&cdr.auth_method, &token_type) {
         crossing.note("/auth_method", reason);
     }
 
@@ -360,9 +371,21 @@ fn periods_of(
 /// `AUTH_REQUEST` with a contract — so the weaker of the two is taken.
 /// Under-reporting an authorisation is never a fault; over-reporting it bills
 /// a contract that was never presented.
+///
+/// # Why this returns an option
+///
+/// OCPI 2.3.0 leaves this enum open, and `ocpi-kit` decodes a value it does not
+/// know into `AuthMethod::Custom` and keeps the string rather than refusing the
+/// document — right for a Locations page, where one odd EVSE should not cost a
+/// CPO the other ninety-nine. It is not right here. There is no *weakest* path
+/// to fall back to: [`AuthPath::LocalList`] asserts nobody was asked,
+/// [`AuthPath::Roaming`] asserts somebody was, and one of those decides whether
+/// a provider is invoiced while the other decides the identification level the
+/// signed record may honestly claim. `None` is this function saying so, and the
+/// caller refuses the record by name.
 #[must_use]
-pub fn auth_path_of(method: AuthMethod, token: &TokenType) -> AuthPath {
-    match (method, token) {
+pub fn auth_path_of(method: &AuthMethod, token: &TokenType) -> Option<AuthPath> {
+    Some(match (method, token) {
         (AuthMethod::Command, _) => AuthPath::RemoteCommand,
         // Nothing went out to a provider. A one-time token says why: there was
         // nobody to ask.
@@ -372,11 +395,23 @@ pub fn auth_path_of(method: AuthMethod, token: &TokenType) -> AuthPath {
         // `AUTH_REQUEST` covers roaming, Plug & Charge and AutoCharge alike;
         // roaming is the one that claims least.
         (AuthMethod::AuthRequest, _) => AuthPath::Roaming,
+        _ => return None,
+    })
+}
+
+/// The wire value behind an `auth_method` this side has no path for.
+///
+/// Named in the refusal, because "not a method this side has a path for" is
+/// unactionable without saying which one arrived.
+fn custom_auth_method(method: &AuthMethod) -> Option<&str> {
+    match method {
+        AuthMethod::Custom(value) => Some(value.as_str()),
+        _ => None,
     }
 }
 
 /// What the three values could not say about the six paths.
-fn auth_path_note(method: AuthMethod, token: &TokenType) -> Option<String> {
+fn auth_path_note(method: &AuthMethod, token: &TokenType) -> Option<String> {
     match (method, token) {
         (AuthMethod::AuthRequest, TokenType::Emaid) => Some(
             "`AUTH_REQUEST` with an EMAID token is Plug & Charge or AutoCharge — a contract \
@@ -398,6 +433,9 @@ fn auth_path_note(method: AuthMethod, token: &TokenType) -> Option<String> {
              this comes back as a local list"
                 .to_owned(),
         ),
+        // `Custom`, and any value a later OCPI adds: `auth_path_of` refuses the
+        // record, so there is no crossing left to note it on.
+        _ => None,
     }
 }
 
@@ -410,31 +448,49 @@ mod tests {
         // `WHITELIST` says the CPO decided without asking anybody, which is
         // both a local list and an ad-hoc session. A one-time token says which.
         assert_eq!(
-            auth_path_of(AuthMethod::Whitelist, &TokenType::AdHocUser),
-            AuthPath::AdHoc
+            auth_path_of(&AuthMethod::Whitelist, &TokenType::AdHocUser),
+            Some(AuthPath::AdHoc)
         );
         assert_eq!(
-            auth_path_of(AuthMethod::Whitelist, &TokenType::Rfid),
-            AuthPath::LocalList
+            auth_path_of(&AuthMethod::Whitelist, &TokenType::Rfid),
+            Some(AuthPath::LocalList)
         );
         assert_eq!(
-            auth_path_of(AuthMethod::Command, &TokenType::AppUser),
-            AuthPath::RemoteCommand
+            auth_path_of(&AuthMethod::Command, &TokenType::AppUser),
+            Some(AuthPath::RemoteCommand)
         );
 
         // What cannot be recovered: Plug & Charge and AutoCharge are one value.
         // The weaker claim is the one taken, and the note says why — a contract
         // that was never presented is not one this side may bill.
         assert_eq!(
-            auth_path_of(AuthMethod::AuthRequest, &TokenType::Emaid),
-            AuthPath::Roaming
+            auth_path_of(&AuthMethod::AuthRequest, &TokenType::Emaid),
+            Some(AuthPath::Roaming)
         );
-        let note = auth_path_note(AuthMethod::AuthRequest, &TokenType::Emaid).expect("a note");
+        let note = auth_path_note(&AuthMethod::AuthRequest, &TokenType::Emaid).expect("a note");
         assert!(note.contains("Plug & Charge or AutoCharge"), "{note}");
         assert!(note.contains("weaker claim"), "{note}");
 
         // The two that are exact say nothing.
-        assert!(auth_path_note(AuthMethod::Command, &TokenType::AppUser).is_none());
-        assert!(auth_path_note(AuthMethod::Whitelist, &TokenType::AdHocUser).is_none());
+        assert!(auth_path_note(&AuthMethod::Command, &TokenType::AppUser).is_none());
+        assert!(auth_path_note(&AuthMethod::Whitelist, &TokenType::AdHocUser).is_none());
+    }
+
+    /// OCPI 2.3.0 leaves `auth_method` open, so a partner may send a value this
+    /// side has never heard of. There is no weakest path to fall back to: one
+    /// answer says a provider was asked and the other says nobody was, and they
+    /// invoice different parties. The record is refused, and the refusal names
+    /// the value that arrived.
+    #[test]
+    fn an_auth_method_this_side_does_not_know_is_refused_rather_than_guessed() {
+        let unknown = AuthMethod::Custom("BIOMETRIC".to_owned());
+        assert_eq!(auth_path_of(&unknown, &TokenType::Rfid), None);
+        assert_eq!(auth_path_of(&unknown, &TokenType::AdHocUser), None);
+        assert_eq!(auth_path_of(&unknown, &TokenType::Emaid), None);
+
+        // And no crossing note pretends it was read: the refusal is the report.
+        assert!(auth_path_note(&unknown, &TokenType::Rfid).is_none());
+        assert_eq!(custom_auth_method(&unknown), Some("BIOMETRIC"));
+        assert_eq!(custom_auth_method(&AuthMethod::Whitelist), None);
     }
 }

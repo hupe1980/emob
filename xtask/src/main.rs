@@ -20,6 +20,7 @@ fn main() -> Result<()> {
         Some("check-prose") => check_prose(&root),
         Some("check-concepts") => check_concepts(&root),
         Some("check-reach") => check_reach(&root),
+        Some("check-api") => check_api(&root),
         Some("check-constructors") => check_constructors(&root),
         Some("check-all") => {
             no_floats(&root)?;
@@ -29,6 +30,7 @@ fn main() -> Result<()> {
             check_prose(&root)?;
             check_concepts(&root)?;
             check_reach(&root)?;
+            check_api(&root)?;
             check_constructors(&root)?;
             check_graph(&root)
         }
@@ -81,6 +83,10 @@ cargo xtask <task>
                     compiler a downstream may call it, and in this workspace
                     the downstream is this workspace — a rule with no caller
                     is a rule that is not enforced
+  check-api         the mirror of check-reach: every API this workspace's
+                    published prose names is one it has. A removed function
+                    leaves a documentation page that still teaches it, and no
+                    compiler reads a Markdown file
   check-constructors
                     no type with a fallible `new` derives `Deserialize`: a
                     constructor that states a rule has to be the door the wire
@@ -458,9 +464,20 @@ fn check_duty_count(root: &Path, problems: &mut Vec<String>, internal: bool) -> 
     // documentation rather than a design note. A specialist telling a reader it
     // sweeps forty duties while sweeping forty-four is the same untruth in a
     // place nobody thinks to re-read.
+    //
+    // …and the convention is not self-enforcing, which is what the second sweep
+    // is for. Five sentences had drifted to "forty" while the calendar held
+    // forty-seven — a design note calling it *the forty-duty obligation
+    // calendar*, two documents opening a table with *thirty-nine of the forty
+    // entries*, one crate's own test module counting *thirty-four of the forty*,
+    // and an overview saying *two of the forty-four* — and every one of them
+    // passed, because none of them was bold (D291). A guard that only reads the
+    // convention checks the sentences somebody remembered to write correctly.
     let mut sources = prose_sources(root)?;
     sources.extend(rust_sources(root)?);
     for file in sources {
+        // This file states the wrong figures on purpose: they are the examples
+        // in the guard's own explanation of what it is for.
         if file.ends_with("xtask/src/main.rs") {
             continue;
         }
@@ -470,6 +487,22 @@ fn check_duty_count(root: &Path, problems: &mut Vec<String>, internal: bool) -> 
             if stated != held {
                 problems.push(format!(
                     "{} states **{stated} duties** and `obligation::CALENDAR` holds {held}",
+                    file.strip_prefix(root).unwrap_or(&file).display(),
+                ));
+            }
+        }
+        // The decision log is the one document that is *about* history, so a
+        // figure that was true when an entry was written stays written. Every
+        // other document here describes current state, which is the convention
+        // `concepts/README.md` opens with.
+        if file.ends_with("concepts/DECISIONS.md") {
+            continue;
+        }
+        for (phrase, stated) in unbolded_calendar_counts(&text) {
+            if stated != held {
+                problems.push(format!(
+                    "{} writes \"{phrase}\" and `obligation::CALENDAR` holds {held}: the figure \
+                     goes in **bold** so the guard that checks it can find it",
                     file.strip_prefix(root).unwrap_or(&file).display(),
                 ));
             }
@@ -514,6 +547,105 @@ fn stated_duty_counts(text: &str) -> Vec<usize> {
         }
     }
     out
+}
+
+/// Every claim about the calendar's size a document makes **without** the bold
+/// the convention asks for, with the phrase it made it in.
+///
+/// # Why the un-bolded half needs its own reader
+///
+/// [`stated_duty_counts`] enforces a convention, and a convention is exactly
+/// what a sentence written in a hurry does not follow. The figure had drifted in
+/// five places at once and none of them was bold: *the forty-duty obligation
+/// calendar*, *thirty-nine of the forty entries* (twice), *thirty-four of the
+/// forty entries*, *two of the forty-four*. Each reads as prose rather than as a
+/// figure, which is precisely why nobody re-checked it.
+///
+/// # Spelled in words only, and only from ten up
+///
+/// Digits are how a citation is written — `[DA-656 Anh. 2.1.2]` reaches this
+/// sweep as "656 duty", `[EN 61851]` as "61851 duty" — so reading them would be
+/// a guard whose findings are all false. Words are unambiguous.
+///
+/// And only from **ten**, because the small counts in this prose are about
+/// something else and are correct: *"[38k §6(3)]'s four conditions"*, *"the
+/// calendar carries seven more duties"*, *"two duties from the Cyber Resilience
+/// Act"*. A calendar-size claim has never been a single digit and never will be.
+///
+/// # …and "entries" needs a subject
+///
+/// Two of the drifted sentences count *entries* rather than *duties*, because
+/// one entry in the calendar is an entitlement rather than a duty and the
+/// sentence is about exactly that distinction. But `concepts/README.md` opens a
+/// paragraph *"Eleven entries in DECISIONS.md came from running one record this
+/// workspace did not write"*, which is a true sentence about a different set —
+/// so the noun on its own is not the subject and the sweep asks for the word
+/// `calendar` or `dut…` nearby. `duty` and `duties` need no such window: they
+/// name the thing being counted.
+fn unbolded_calendar_counts(text: &str) -> Vec<(String, usize)> {
+    const NOUNS: [&str; 3] = ["duty", "duties", "entries"];
+    /// How far either side of an `entries` the sweep looks for its subject.
+    const CONTEXT: usize = 240;
+
+    let mut out = Vec::new();
+    let lower = text.to_ascii_lowercase();
+    for noun in NOUNS {
+        let mut at = 0usize;
+        while let Some(found) = lower[at..].find(noun) {
+            let start = at + found;
+            at = start + noun.len();
+            // A whole word: `duty` must not match inside `duties`, and `entries`
+            // must not match inside a longer word.
+            if lower[at..].starts_with(|c: char| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            // The token before it, across the one space or hyphen that joins a
+            // spelled-out number to its noun.
+            let head = &text[..start];
+            let Some(sep) = head.chars().next_back() else {
+                continue;
+            };
+            if sep != ' ' && sep != '-' {
+                continue;
+            }
+            let head = &head[..head.len() - sep.len_utf8()];
+            // `char_indices` rather than `rfind`, because the boundary wanted is
+            // the one *after* the character found and a `+ 1` past a multi-byte
+            // one is not a char boundary — this prose is full of em dashes.
+            let word_start = head
+                .char_indices()
+                .rev()
+                .find(|&(_, c)| !c.is_ascii_alphabetic() && c != '-')
+                .map_or(0, |(i, c)| i + c.len_utf8());
+            let number = &head[word_start..];
+            let Some(count) = words_to_number(number) else {
+                continue;
+            };
+            if count < 10 {
+                continue;
+            }
+            if noun == "entries" {
+                let from = start.saturating_sub(CONTEXT);
+                let to = (at + CONTEXT).min(lower.len());
+                let window = &lower[floor_boundary(&lower, from)..floor_boundary(&lower, to)];
+                if !window.contains("calendar") && !window.contains("dut") {
+                    continue;
+                }
+            }
+            out.push((format!("{number}{sep}{noun}"), count));
+        }
+    }
+    out
+}
+
+/// The nearest char boundary at or below `index`, so a window cut around a
+/// match cannot land inside an em dash.
+fn floor_boundary(text: &str, mut index: usize) -> usize {
+    index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 /// The heading's spelled-out count, and the properties the table under it holds.
@@ -1421,12 +1553,37 @@ fn citation_phrases(line: &str) -> Vec<String> {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
-        let looks_cited = CITATION_MARKERS.iter().any(|m| phrase.contains(m));
+        let looks_cited =
+            CITATION_MARKERS.iter().any(|m| phrase.contains(m)) || is_requirement_id(phrase);
         if starts_right && looks_cited && !phrase.contains('`') && !phrase.contains('[') {
             found.push(phrase.to_owned());
         }
     }
     found
+}
+
+/// Whether a bracketed phrase is a numbered requirement rather than a section.
+///
+/// `[LPC-021]`, `[LPC-901/1]`. A EEBUS use case specification numbers its rules
+/// where the other documents here number their sections, so `CITATION_MARKERS`
+/// — which are all section markers — saw nothing to check and the guard
+/// reported success. That is the D65 hole in a second shape, and it opened the
+/// moment this workspace cited its first requirement id.
+///
+/// Narrow, for the reason the marker list is: an uppercase family, a hyphen,
+/// then digits and slashes and nothing else. `[DA-656 Art. 3]` is not one (the
+/// number has a space in it) and is already caught by its marker; a crate name
+/// like `en16931-formats` is not one either.
+fn is_requirement_id(phrase: &str) -> bool {
+    let Some((family, number)) = phrase.split_once('-') else {
+        return false;
+    };
+    !family.is_empty()
+        && family
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && !number.is_empty()
+        && number.chars().all(|c| c.is_ascii_digit() || c == '/')
 }
 
 // ── check-citations ─────────────────────────────────────────────────────────
@@ -1484,6 +1641,25 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
         "Energiewirtschaftsgesetz",
         "hems/specs/law/enwg.pdf",
     ),
+    // …and the Festlegung that says what § 14a means in numbers: which devices
+    // it reaches, what they are owed back, and that the grid operator's
+    // reduction outranks a market signal. In the sibling `hems` workspace for
+    // the same reason the statute is.
+    (
+        "[BK6-22-300 ",
+        "BNetzA BK6-22-300 (§ 14a EnWG), Anlage 1",
+        "hems/specs/bnetza/bk6-22-300-anlage1",
+    ),
+    // …and the use case the Festlegung is carried over: EEBUS's Limitation of
+    // Power Consumption, whose §2.3.2 gives a controllable system five states
+    // where a summary gives it two, and whose numbered requirements say what a
+    // site draws while nobody is telling it anything. In the sibling `eebus`
+    // workspace, which implements it; this workspace consumes the *rule*.
+    (
+        "[LPC",
+        "EEBUS UC TS Limitation of Power Consumption 1.0.0",
+        "EEBus_UC_TS_LimitationOfPowerConsumption",
+    ),
 ];
 
 /// The markers that make a bracketed phrase a citation rather than a doc link,
@@ -1492,7 +1668,7 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
 /// Deliberately narrow. A citation this misses is one the prefix table still
 /// checks; a false positive here would fail the build over a Rust doc link,
 /// which is how a guard gets switched off.
-const CITATION_MARKERS: &[&str] = &["§", "Art. ", "Tab. ", "Anh. "];
+const CITATION_MARKERS: &[&str] = &["§", "Art. ", "Tab. ", "Anh. ", "Ziff. "];
 
 /// Every regulatory claim in emob cites its source in the form `[AFIR Art. 5(1)]`
 /// or `[OCMF Tab. 7]`. This checks that the documents those refer to are indexed
@@ -1647,7 +1823,7 @@ fn array_field(text: &str, field: &str) -> Option<Vec<String>> {
 /// there — after the version has already been consumed on the registry.
 /// The crates that promise to read no clock, open no socket and touch no
 /// filesystem — the same list `just purity` greps.
-const PURE_CRATES: [&str; 11] = [
+const PURE_CRATES: [&str; 12] = [
     "emob-core",
     "emob-eichrecht",
     "emob-session",
@@ -1659,6 +1835,7 @@ const PURE_CRATES: [&str; 11] = [
     "emob-poi",
     "emob-roam",
     "emob-sim",
+    "emob-smart",
 ];
 
 /// Crates whose presence in a graph means an ambient-state path was activated.
@@ -1981,6 +2158,162 @@ fn check_reach(root: &Path) -> Result<()> {
     }
     println!("🔗 check-reach: {checked} public functions, every one of them called");
     Ok(())
+}
+
+/// Every API the published prose names is one this workspace has.
+///
+/// # The mirror of `check-reach`, and the half that was missing
+///
+/// `check-reach` asks of every public function whether anything names it, and
+/// catches a rule stated and never enforced. This asks the other direction: does
+/// every name the documentation *teaches* still exist? A function that is
+/// deleted or renamed takes its callers with it — the compiler sees to that —
+/// and leaves every page that explained it standing, because no compiler reads a
+/// Markdown file.
+///
+/// Both were live on the published site. The Eichrecht page taught
+/// `transparency::to_xml_with_transaction_id`, which left with the format when
+/// `ocmf` took over the container and started deriving the id itself (D184); and
+/// it asserted `ChainFinding::PaginationBreak` in a code block, a variant that
+/// became `ChainFinding::Sequence(Finding::PaginationBroken { .. })` when the
+/// sequence rules moved upstream. Both are what a reader copies first (D292).
+///
+/// # What is checked, and why it is not everything
+///
+/// A path `A::B` counts when `A` is a type, enum, trait or module **this
+/// workspace declares** — so `ocmf::verify` and `Vec::new` are somebody else's
+/// promise and are left alone, while `Evidence::billable_energy` is ours. `B`
+/// then has to appear in the workspace's own source as a whole word. A textual
+/// search, deliberately, and in the same direction `check-reach` errs: it
+/// over-approximates existence, so it can miss a stale name and can never invent
+/// one.
+///
+/// The **published** prose only — the root README, the crate and service
+/// READMEs, the site. `concepts/` is skipped for D228's reason and for one of
+/// its own: the decision log and the thirteen rules are *about* what a name used
+/// to be, and `Tariff::uniform_vat` is in them precisely because it is gone.
+fn check_api(root: &Path) -> Result<()> {
+    let sources = rust_sources(root)?;
+    let mut haystack = String::new();
+    let mut declared: BTreeSet<String> = BTreeSet::new();
+    for file in &sources {
+        let text = std::fs::read_to_string(file)?;
+        for line in text.lines() {
+            if let Some(name) = declared_type_name(line) {
+                declared.insert(name.to_owned());
+            }
+        }
+        // Code only. A comment naming an API does not make it exist, and three
+        // of them named `PaginationBreak` for a year after the variant became
+        // `Sequence(Finding::PaginationBroken { .. })` — so a haystack that
+        // included comments answered "yes, the workspace has one" out of the
+        // very prose the guard is auditing.
+        haystack.push_str(&code_only(&text));
+        haystack.push('\n');
+    }
+
+    let mut missing = Vec::new();
+    let mut checked = 0usize;
+    for file in prose_sources(root)? {
+        if file.starts_with(root.join("concepts")) {
+            continue;
+        }
+        let relative = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        let text = std::fs::read_to_string(&file)?;
+        for (owner, name) in workspace_paths(&text, &declared) {
+            checked += 1;
+            if mentions(&haystack, &name) == 0 {
+                missing.push(format!(
+                    "{relative}: `{owner}::{name}` — `{owner}` is this workspace's and it has no \
+                     `{name}`. A page that teaches an API the code does not have is the first \
+                     thing a reader copies"
+                ));
+            }
+        }
+    }
+
+    missing.dedup();
+    if !missing.is_empty() {
+        eprintln!("❌ documented APIs the workspace does not have:");
+        for problem in &missing {
+            eprintln!("   {problem}");
+        }
+        bail!("{} documented API(s) that do not exist", missing.len());
+    }
+    println!("🧭 check-api: {checked} documented API reference(s), every one of them real");
+    Ok(())
+}
+
+/// The name a line declares, when it declares a public type, trait or module.
+///
+/// The **left** half of a path is what this is for: `ChainFinding::…` is worth
+/// checking because `ChainFinding` is ours, and `Duration::…` is not.
+fn declared_type_name(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("pub ")?;
+    let rest = rest
+        .strip_prefix("struct ")
+        .or_else(|| rest.strip_prefix("enum "))
+        .or_else(|| rest.strip_prefix("trait "))
+        .or_else(|| rest.strip_prefix("mod "))?;
+    let end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')?;
+    (end > 0).then(|| &rest[..end])
+}
+
+/// Every `Owner::name` in a document whose owner this workspace declares.
+///
+/// Read from the whole document rather than from backticked spans alone, because
+/// the reference that had gone stale longest was inside a fenced ```rust block —
+/// the one part of a page a reader runs rather than reads.
+fn workspace_paths(text: &str, declared: &BTreeSet<String>) -> Vec<(String, String)> {
+    let bytes = text.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    while let Some(at) = text[from..].find("::") {
+        let colons = from + at;
+        from = colons + 2;
+
+        // The identifier before the `::`, and the one after it.
+        let mut start = colons;
+        while start > 0 && word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = from;
+        while end < bytes.len() && word(bytes[end]) {
+            end += 1;
+        }
+        let owner = &text[start..colons];
+        let name = &text[from..end];
+        if owner.is_empty() || name.len() < 3 || !declared.contains(owner) {
+            continue;
+        }
+        // A path that continues — `Foo::Bar::baz` — is answered by the pair that
+        // starts at `Bar`, which the next iteration reaches.
+        out.push((owner.to_owned(), name.to_owned()));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Rust source with every comment removed.
+///
+/// What is left is what the compiler compiles, which is the only thing that can
+/// answer *does this workspace have such an item*. [`code_and_quoted`] is the
+/// other reduction and answers the other question — *does anything refer to this
+/// item* — for which a comment counts.
+fn code_only(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.lines() {
+        out.push_str(code_part(line));
+        out.push('\n');
+    }
+    out
 }
 
 /// Rust source with its comments reduced to the parts that quote code.

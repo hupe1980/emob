@@ -12,11 +12,11 @@ value survives in, and the driver contract all of it turns into an invoice.
 [The Eichrecht chain](https://hupe1980.github.io/emob/docs/eichrecht/) ·
 [Architecture](https://hupe1980.github.io/emob/docs/architecture/)
 
-> 🚧 **Status: early.** Twelve domain crates and seven daemons are built, tested
+> 🚧 **Status: early.** Thirteen domain crates and seven daemons are built, tested
 > and green. Everything else is designed and marked 📐 rather than blurred into
 > it.
 
-**913 tests.** The ones that are hard to fake:
+**959 tests.** The ones that are hard to fake:
 
 - **A real message, end to end.** The Open Charge Alliance's own published OCPP
   example goes in at the wire and comes out as a taxable amount — and again as a
@@ -36,8 +36,14 @@ value survives in, and the driver contract all of it turns into an invoice.
 - **Properties over generated input**, not examples — because an example is a
   shape somebody already thought of: one price however finely a session is
   sliced, every quantity priced or named, no VAT category owed a negative amount,
-  a record its own validator accepts, a month that adds up under the standard's
+  a bound published in the basis the prices are *not* quoted in still binding, a
+  record its own validator accepts, a month that adds up under the standard's
   own 317 rules, and one price on all three wires.
+- **…and a property over generated *sequences*, not values.** Every one above
+  builds one thing and asks a question of it. A service holds what happened, and
+  its rules are about the pair — what was true before a call and what may be true
+  after — so the roaming node is driven with generated orderings of consign,
+  accept, refuse and credit, and its invariants are checked after every step.
 
 ## Why
 
@@ -113,7 +119,7 @@ into a record another company pays against, priced by a tariff that shows the
 same number before the session starts, out to a roaming partner and the national
 access point, and into an e-invoice with a SEPA collection behind it.
 
-## The twenty-seven properties that decide quality
+## The twenty-eight properties that decide quality
 
 Not features — properties, each one either true of every run or false. They are
 what the tests are for, and each links to the page that explains why it is hard.
@@ -147,6 +153,7 @@ what the tests are for, and each links to the page that explains why it is hard.
 | 25 | Notified is not published, and the quota turns on the difference | [Compliance](https://hupe1980.github.io/emob/docs/compliance/) |
 | 26 | Money is never a float, and scale is information | [Architecture](https://hupe1980.github.io/emob/docs/architecture/) |
 | 27 | An agent proposes; it cannot move money, and that is a property | [Architecture](https://hupe1980.github.io/emob/docs/architecture/) |
+| 28 | A policy may grant, and it may never widen a delegation | [Architecture](https://hupe1980.github.io/emob/docs/architecture/) |
 
 Three of them are worth the summary here, because they are what a reviewer
 should disbelieve first.
@@ -187,7 +194,7 @@ older and considerably wider than the European one everybody models.
 | [`emob-roam`](crates/emob-roam) | The roaming edge, on both wires: the canonical record onto OCPI 2.3.0 and 2.2.1 in both directions, and onto **OICP 2.3** through Hubject — where the record carries no money at all, so the price crosses separately as a pricing product and the account says the amount did not. Routing read out of the contract identifier itself. eMIP is still 📐 | ✅ |
 | [`emob-sim`](crates/emob-sim) | A deterministic fleet: virtual stations that sign genuine OCMF, eight seeded faults, and a day that reconciles exactly — assembled from OCPP events | ✅ |
 | `emob-pnc` | Plug & Charge contracts, OPCP pools, multi-PKI | 📐 |
-| `emob-smart` | Load management, OCPP charging profiles, DER control, § 14a guard, V2G | 📐 |
+| [`emob-smart`](crates/emob-smart) | **`[EnWG §14a]` as executable law.** Which charge points a grid operator may switch down — a *publicly accessible* one is not a steuerbare Verbrauchseinrichtung at all `[BK6-22-300 Ziff. 2.4.1]`, the condition every summary drops — what their operator keeps a claim to, and an allocation that cannot exceed the setpoint because the ceiling is the only door one exists through | ✅ |
 | [`emob-thg`](crates/emob-thg) | The greenhouse-gas quota: `[38k §6(3)]`'s four conditions per point, and a notification built only from energy a meter signed. Notified is not published, and no factor is a constant | ✅ |
 | [`emob-billing`](crates/emob-billing) | Rated CDRs → an EN 16931 e-invoice and the verdict on it, a SEPA collection, and postings addressed by role. The rounding happens once, at the line, and the residual is reported | ✅ |
 | [`emob-service`](crates/emob-service) | The daemon shell, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature | ✅ |
@@ -223,7 +230,7 @@ just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs
 just test       # cargo test --workspace --all-features
 just guards     # no-floats, check-citations, check-manifests, check-wire,
-                # check-prose, check-concepts, check-reach,
+                # check-prose, check-concepts, check-reach, check-api,
                 # check-constructors, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
@@ -239,10 +246,10 @@ dispute about a two-year-old session is replayed exactly as it happened — and
 builds each from its own tarball. Pushing a `vX.Y.Z` tag runs
 [`release.yml`](.github/workflows/release.yml), which re-runs the whole gate
 against the tagged revision, refuses a tag whose version the manifests do not
-carry, and then publishes the twelve crates one step at a time in dependency
+carry, and then publishes the thirteen crates one step at a time in dependency
 order.
 
-A publish is twelve uploads and can stop in the middle, leaving the version spent
+A publish is thirteen uploads and can stop in the middle, leaving the version spent
 for some crates and free for the rest — so each step treats *already uploaded* as
 the upload having already happened, and a re-run finishes the release instead of
 needing a version bump. Every other failure still stops the run.

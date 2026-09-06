@@ -114,16 +114,21 @@ pub fn instruct(
         invoice.number
     )));
 
-    let mut group =
-        DirectDebitGroup::new(creditor.name.clone(), &creditor.iban, &creditor.creditor_id)
-            .collection_date(collect_on)
-            .add_entry(entry);
+    let mut group = DirectDebitGroup::new(
+        creditor.name.clone(),
+        &creditor.iban,
+        &creditor.creditor_id,
+        collect_on,
+    )
+    .add_entry(entry);
     if let Some(bic) = &creditor.bic {
         group = group.creditor_bic(bic.clone());
     }
 
-    let builder = Pain008Builder::new(creditor.name.clone())
-        .msg_id(format!("EMOB-{}", invoice.number))
+    // `MsgId` is how a bank de-duplicates a submission, so it has to survive a
+    // restart: the invoice number does, because it is the document this
+    // collection is for and `emob-billing` never issues that number twice.
+    let builder = Pain008Builder::new(creditor.name.clone(), format!("EMOB-{}", invoice.number))
         .created_at(created_at)
         .add_group(group);
 
@@ -142,7 +147,14 @@ pub fn instruct(
 fn minor_units(amount: Decimal, digits: u32) -> Result<i64, PaymentError> {
     use rust_decimal::prelude::ToPrimitive as _;
 
-    let scaled = amount * Decimal::from(10_u64.pow(digits));
+    // `checked_mul`, because `Decimal` panics on overflow and this is the last
+    // multiplication before money leaves the platform. The figure is a rated
+    // total, which `emob-tariff` already holds inside its own headroom (D305) —
+    // so this cannot fire from that path, and a caller assembling an invoice
+    // some other way does not get a panicking bank file out of it.
+    let Some(scaled) = amount.checked_mul(Decimal::from(10_u64.pow(digits))) else {
+        return Err(PaymentError::NotAWholeMinorUnit { amount });
+    };
     if scaled.fract() != Decimal::ZERO {
         return Err(PaymentError::NotAWholeMinorUnit { amount });
     }

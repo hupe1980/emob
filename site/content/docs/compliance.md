@@ -43,7 +43,7 @@ a provider, and in breach again as a company.
 
 ## What is in it
 
-**47 duties** over three subjects.
+**49 duties** over three subjects.
 
 | Duty | Source | From | Reads |
 |---|---|---|---|
@@ -164,7 +164,7 @@ which is the whole purpose of the subparagraph.
 
 ### Failing a duty and forgoing an entitlement are different answers
 
-Thirty-nine of the forty entries are duties: a regulator can fine an operator,
+**Forty-eight** of the forty-nine entries are duties: a regulator can fine an operator,
 order a retrofit, or forbid the operation of a point. One is not. The four
 conditions between a public kilowatt-hour and the German greenhouse-gas quota are
 worth money and break no law when unmet — the entry's own remedy ends *"…or forgo
@@ -566,6 +566,74 @@ today and in breach on new year's day, and that forecast is the only compliance
 advice arriving before the breach rather than after it. The horizon is the
 caller's; the date is an argument rather than a clock, so a run in March replays
 to the same answer in September.
+
+## The duty that is not about charging at all
+
+`[EnWG §14a]` lets a grid operator reduce the draw of *steuerbare
+Verbrauchseinrichtungen* to relieve a local overload, and
+`[BK6-22-300 Ziff. 2.4.1]` says which devices those are:
+
+> ein Ladepunkt für Elektromobile, **der kein öffentlich zugänglicher Ladepunkt
+> im Sinne des § 2 Nr. 5 der Ladesäulenverordnung (LSV) ist**
+
+— over 4.2 kW, in low voltage. The first condition is the one every summary
+drops, and it decides whether any of this applies: a **publicly accessible**
+point is not a steuerbare Verbrauchseinrichtung at all. The fast charger on the
+forecourt is outside § 14a; the depot behind the fence, the workplace car park
+and the fleet yard are inside it.
+
+Which is the opposite of *"a charge park is a SteuVE at its grid connection
+point"*, the sentence these notes carried for six milestones. It is wrong twice
+over, because `Ziff. 2.4.2`'s grouping of several installations behind one
+connection into **one** device names only the heat-pump and space-cooling
+families — `2.4.1.b` and `2.4.1.c`. Charge points are not in that sentence, so a
+yard of nine wall boxes is nine devices and not one, which is what the
+Mindestleistung formula's `n` is (D301).
+
+Two duties, both facts about how a point is equipped rather than how it is
+priced, both binding the *Betreiber* — which for a depot is the operator:
+
+| Duty | Source | Satisfied by |
+|---|---|---|
+| The device is equipped so that it is **always controllable** | `[BK6-22-300 Ziff. 4.6]` S. 1 | `grid.always_controllable` |
+| The grid operator's reduction **outranks** market-driven load control | `[BK6-22-300 Ziff. 4.6]` S. 3 | `grid.grid_reduction_takes_priority` |
+
+The second is a separate fact from the first and it is the one a load manager
+gets wrong: a site that obeys a setpoint until a dynamic tariff says otherwise is
+controllable and in breach. It is also the duty `emob-smart` discharges by
+construction — the ceiling is the only door an allocation exists through — and
+the profile records whether the site's own scheduler was built that way.
+
+**And a third fact the two duties do not cover: what the site draws when the
+grid operator stops speaking.** § 14a is carried over EEBUS's *Limitation of
+Power Consumption* use case, certifiable since July 2026, and `[LPC §2.3.2]`
+gives a controllable site five states rather than two:
+
+| State | The ceiling | Reported |
+|---|---|---|
+| `limited` | the setpoint | — |
+| `unlimited/controlled` | the site's connection | — |
+| `failsafe state` `[LPC-912]` | the Failsafe Consumption Active Power Limit `[LPC-021]` | **yes** |
+| `unlimited/autonomous` `[LPC-906]` | the site's connection | **yes** |
+| no control box commissioned | the site's connection | — |
+
+Three of the five allow full power and they are three different facts, so
+`GridLimit` is those five rather than an option: a depot at 60 kW because its
+grid operator says it may and one at 60 kW because its control box died are the
+same number and different problems, and a grid operator that believes it can
+still curtail the second cannot. The Anspruch of `Ziff. 4.5` holds against a
+failsafe as against a setpoint — the Mindestleistung is a draw the grid can
+always carry, and giving it up under a communications fault is giving it up where
+nobody is watching (D302). The **timers** are the protocol engine's, beside the
+socket; `eebus` runs them against a virtual clock.
+
+The applicability is **derived** from the profile the calendar already judges
+rather than ticked beside it, and it lives in `emob-core` for that reason: a
+predicate and a load manager that can disagree about whether the statute binds a
+point are a duty judged one way and enforced another. The arithmetic — the
+Mindestleistung, the simultaneity factor, the allocation — is
+`emob-smart`, because a compliance answer is a boolean
+and a load manager is a kilowatt.
 
 ## What is not here 📐
 

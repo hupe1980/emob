@@ -151,6 +151,61 @@ Secret::raw("bXlzZWNyZXQ=");                // the bytes as written
 // neither is a default.
 ```
 
+## …and a policy an operator wrote, for the question a capability set cannot ask
+
+Behind the `policy` feature, **off by default**. The typed model above already
+takes its values at runtime — a `Principal` is built from configuration, not from
+a `const` — so a policy engine buys nothing until there is a question that model
+has no vocabulary for. Onboarding a partner while a node runs is where one turns
+up:
+
+> charge detail records, **until the trial ends**
+
+A set of dotted capability patterns cannot say *until*, and inventing a grammar
+that can is how a capability model becomes a policy language nobody specified.
+
+```cedar
+@id("nl-tnm-trial")
+permit (
+  principal == emob::Party::"NL*TNM",
+  action in [emob::Action::"emob.cdr.read", emob::Action::"emob.tariff.read"],
+  resource
+)
+when { resource.owner == principal }
+unless { context.at > datetime("2027-01-01T00:00:00Z") };
+```
+
+```rust
+let gate = Gate::new(Policies::load(text)?);          // parsed and validated, or refused
+gate.verdict(&peer, caps::CDR_READ, &record, at);     // …and the instant is an argument
+```
+
+Four decisions make it more than a dependency.
+
+**The schema is derived from `caps::ALL`**, not written beside it: one action per
+capability and one entity type per family, read out of `emob.<family>.<verb>`. A
+second list would let a policy validate against an action nobody can ever be
+granted — a rule that never matches, which fails open on a `forbid` and silently
+on a `permit`.
+
+**A policy may grant, and it may never widen a delegation.** The typed ceiling is
+asked first and a `no` there is final, so a roaming peer still reaches only its
+own records however the text is written — and an agent's principal, *derived* by
+`attenuate` rather than configured, cannot be handed a capability by a file.
+
+**A warning is an error**, because Cedar's warnings are a condition that can
+never be true and an identifier that merely *looks* like another party's. In a
+policy set whose job is keeping one company's records away from another's, the
+second is the leak this crate exists to prevent, spelled in Unicode.
+
+**And what cannot be evaluated is not assumed open.** Cedar skips a policy that
+errors and carries on; here an evaluation error is a denial, because a `forbid`
+that could not be evaluated is a refusal that silently did not happen.
+
+`Gate::reload` is what makes it worth having: a set that does not validate is
+refused and the **old one keeps deciding**, since default deny makes an empty
+policy set a total outage rather than a degraded state.
+
 ## Why this is not `mako-service`
 
 Extracting it was considered and rejected, for the reason `hems-service` gives
@@ -162,7 +217,9 @@ reach a record this other company owns*.
 
 What was left after removing the market model was five domain-free modules, and
 copying five domain-free modules is cheaper than maintaining a diff guard against
-a fork that is *supposed* to diverge.
+a fork that is *supposed* to diverge. Cedar came back — but over *these* entity
+types, generated from *this* capability list, and behind a feature only the
+roaming node turns on.
 
 ## Sans-I/O ends here
 
@@ -171,9 +228,11 @@ no socket, so a dispute two years old is answered by replaying the check exactly
 as it ran. This crate is where that stops being true, and it is the only shared
 place it does.
 
-Two things stay pure even here: `webhook::sign` takes the instant it signs, and
+Three things stay pure even here: `webhook::sign` takes the instant it signs,
 `authority` reads no clock at all — so a credential's reach is a property of the
-credential rather than of when it was asked.
+credential rather than of when it was asked — and `policy::Gate::verdict` takes
+the instant a grant bounded by a date is judged against, so a decision made last
+March can be replayed rather than re-asked of today's clock.
 
 ## Licence
 

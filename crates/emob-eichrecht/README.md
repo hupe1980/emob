@@ -114,15 +114,40 @@ chain found, including the parts that took nothing away from it. A signature
 failure is in every answer, because it stops the chain being validated at all and
 there is then no finding to attribute.
 
-### …and five rules that are about billing rather than about the format
+### …and nine rules that are about billing rather than about the format
+
+One row per variant of `ChainFinding` that is not a `ChainFinding::Sequence`,
+because a rule the enum can report and the table cannot is a rule nobody
+reviewing this list knows about.
 
 | Rule | Source | Disqualifies |
 |---|---|---|
 | The billed register is not one `[OCMF Tab. 25]` reserved and never defined | `[OCMF Tab. 25]` | energy |
 | The reading is in an energy unit at all — `mOhm` is a lawful `RU` | `[OCMF Tab. 7, RU]` | energy |
+| …and both ends of the subtraction are counted in the **same** one | `[OCMF Tab. 7, RU]` | energy |
+| Only one **direction** moved, so which register the session is has an answer | `[OCMF Tab. 25]` | energy |
 | Cable-loss compensation is reported against an accumulation register | `[OCMF Tab. 7, CL]` | both |
 | …and is reset at `TX=B`, so the session's own loss is `CL_end` | `[OCMF Tab. 7, CL]` | both |
 | The identification level does not change mid-session | `[OCMF Tab. 11]` | both |
+| An `EF` character this build does not know | `[OCMF Tab. 7, EF]` | both |
+| There is a usable **pair** of readings on one register to subtract at all | `[OCMF Tab. 7]` | energy |
+
+The third is the one a format crate cannot answer. `RU` carries forward only
+*within* a record, so a chain opening `2935.600 kWh` and closing `2965100 Wh` —
+the same physical 29.5 kWh — is something a station can emit; `ocmf`'s
+`RegisterTotal` takes its unit from the *begin* reading and its delta from
+`end − begin`, which is arithmetic over what the records say, and whether that
+arithmetic is a **quantity** is a billing question. Without the rule the session
+billed 2 962 164.4 kWh with every signature verifying and nothing objecting.
+
+The fourth is the same shape in the other axis. A bidirectional meter reports an
+import register and an export register; the chain billed the first one it saw and
+dropped the other, with no finding, so a driver's 5 kWh discharge existed nowhere
+downstream. Not a netting bug — nothing was subtracted — but a measured quantity
+that vanished with no reason attached, which is worse in this crate's terms. It
+is raised only where the other direction's register actually **moved**: a
+bidirectional charger doing an ordinary import reports a `C` register that stood
+still, and refusing that would refuse the hardware for being capable.
 
 ## The key is this charge point's, or it proves nothing
 

@@ -270,11 +270,32 @@ impl TaxStatus {
     /// A list rather than a lookup, because it decides whether a supply leaves
     /// the Union, and a platform that got that from a runtime table would answer
     /// a two-year-old dispute with today's membership.
+    ///
+    /// # `EL` is Greece, and getting that wrong is silent
+    ///
+    /// [`Self::country`] is documented as ISO 3166-1 alpha-2, where Greece is
+    /// `GR`. Every Greek **VAT identifier** begins `EL` — the one member state
+    /// whose VAT prefix is not its ISO code — and a customer master that derives
+    /// the country from the identifier, which is the obvious thing to do, hands
+    /// this `EL`.
+    ///
+    /// The failure has no symptom. A Greek reseller read as outside the Union
+    /// produces category `O`, *outside the scope of EU VAT*, on a supply that
+    /// owed a reverse charge: a valid document, every `BR-O-*` rule satisfied,
+    /// and the tax dropped. So the one code that is not an ISO code is accepted
+    /// as the country it names — no other member state uses `EL`, so there is
+    /// nothing for it to be confused with (D296).
+    ///
+    /// `XI` — Northern Ireland under the Windsor Framework — is deliberately
+    /// **not** here. It is a goods prefix rather than an establishment, the
+    /// arrangement covers goods moving to and from Northern Ireland rather than
+    /// electricity drawn at a charge point, and a party established there states
+    /// `GB`. Adding it would be a tax reading this crate has no source for.
     #[must_use]
     pub fn in_the_union(&self) -> bool {
-        const MEMBER_STATES: [&str; 27] = [
-            "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GR", "HR", "HU",
-            "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK",
+        const MEMBER_STATES: [&str; 28] = [
+            "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "ES", "FI", "FR", "GR", "HR",
+            "HU", "IE", "IT", "LT", "LU", "LV", "MT", "NL", "PL", "PT", "RO", "SE", "SI", "SK",
         ];
         MEMBER_STATES.contains(&self.country.to_ascii_uppercase().as_str())
     }
@@ -870,6 +891,32 @@ mod tests {
         assert!(!TaxStatus::consumer("GB").in_the_union(), "left in 2020");
         assert!(!TaxStatus::consumer("NO").in_the_union());
         assert!(!TaxStatus::consumer("CH").in_the_union());
+    }
+
+    #[test]
+    fn greece_is_in_the_union_under_the_prefix_its_vat_numbers_carry() {
+        // The one member state whose VAT prefix is not its ISO code. A customer
+        // master that derives the country from the identifier — the obvious
+        // thing to do — hands `EL`, and reading that as a third country produces
+        // an *outside the scope* invoice on a supply that owed a reverse charge:
+        // a valid document with the tax dropped and nothing to notice it.
+        assert!(TaxStatus::consumer("EL").in_the_union());
+        assert!(TaxStatus::consumer("el").in_the_union());
+
+        let greek = TaxStatus::reseller("EL", "EL123456789");
+        let treatment = TaxTreatment::decide(
+            &cpo(),
+            &greek,
+            "DE",
+            &VatRates::new().at("DE", dec("19")).at("EL", dec("24")),
+        )
+        .unwrap();
+        assert_eq!(
+            treatment.category,
+            VatCategory::ReverseCharge,
+            "a Greek reseller is not a third country"
+        );
+        assert_eq!(treatment.place_of_supply, "EL");
     }
 
     #[test]

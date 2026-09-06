@@ -380,6 +380,31 @@ about, while the invoice's gross rounds per VAT category and can sit a minor uni
 above it. Closing that last cent would mean deciding the cap from rounded
 categories again.
 
+### …and the slope it walks may be flat, which is not the same as absent
+
+That walk needs a **slope** per category — what one unit of movement in the
+lines' basis does to the other. A VAT rate of exactly −100 % makes that slope
+zero, and the conversion refused it on both bases on the argument that the
+factor is a *divisor*. It is a divisor on gross lines only. On net lines it is a
+multiplier, and multiplying by zero has no hole in it: the walk spends that
+category, the gross does not move, and the walk carries on into the next one.
+
+Refusing it dropped the whole limb. A tariff quoting net prices with one
+component at −100 % and a published **gross** `max_price` was not capped at all —
+a driver charged above a ceiling the operator published, silently, which is the
+one failure this whole section exists to prevent. A partner's tariff is somebody
+else's document and the rate is data rather than a promise, so the shape is
+reachable.
+
+Two limbs still have no answer, and both are now **said** rather than dropped. A
+**lift** lands in one category, so a gross minimum on a category whose gross does
+not move cannot be reached however much is added. And a rate *below* −100 % makes
+the other basis fall as the movement deepens, and an inversion of a function that
+is not monotone has no unique answer. Where a bound that needed to move could not
+be solved for, the rating says so — and only then, because a note that fires on a
+session already inside its ceiling is noise. The limb in the tariff's own basis
+is a subtraction and always binds.
+
 ### …and a bound deeper than its own category is drawn from the next
 
 A cap of €3.00 on a session made of €5.00 of energy at 19 % and a €20.00 fee at
@@ -799,6 +824,32 @@ its periods carry*. Rate the periods the meter produced — which is what
 different total. Reported rather than refused, because `[OCPI 2.3.0 §Tariff]`
 defines the restriction and a lawful partner document is not this crate's to
 reject.
+
+## No input takes the process down (D305)
+
+`Decimal` panics on overflow rather than saturating, and **both** operands of
+every multiplication in the rating come from outside: the quantity on a charge
+detail record a partner pushed, the price and the published limits on the tariff
+beside it. Three doors bound them, each where the figure is **built** rather than
+where it is used, because the place it is used has nowhere to put the answer:
+
+| Door | What it bounds | Where |
+|---|---|---|
+| `Energy::MAX_KWH` | a terawatt-hour: thirty years of the largest charger ever built, flat out | `emob-core` |
+| `usable_amount` | a line whose gross clears `Decimal::MAX / 4`, so it sums with the other three dimensions | `emob-tariff` |
+| `is_carryable_limit` | a published `PriceLimit`, which `[OCPI 2.3.0 §mod_tariffs_pricelimit_class]` puts no ceiling on | `emob-tariff` |
+
+The middle one carries the argument: the check is on what a line *feeds*, not on
+the product alone. A `Rated` holds at most one line per dimension and there are
+four, and every total is a sum of those in one basis — the widest being the
+gross. So one check stands for every multiplication downstream of it, rather than
+a `checked_mul` at each and a hope at the ones nobody thought of.
+
+A price that fails it leaves its dimension **unbilled**, with a note:
+under-billing is the direction a refusal falls in, and the note is what stops it
+being silent. Where one of the two published limits is unanswerable, **both** go
+unanswered — an adjustment against half a pair of bounds is a price nobody
+published.
 
 ## The clock a time-of-day restriction is read against
 

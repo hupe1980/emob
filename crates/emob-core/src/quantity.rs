@@ -115,17 +115,51 @@ impl Energy {
     /// No energy at all.
     pub const ZERO: Self = Self(Decimal::ZERO);
 
+    /// One terawatt-hour: the most this type will carry.
+    ///
+    /// # Why there is an upper bound at all
+    ///
+    /// `Decimal` **panics** on overflow rather than saturating, and this type's
+    /// own [`Energy::wh`] multiplies by a thousand. Without a bound,
+    /// `Energy::from_kwh(Decimal::MAX / 10)` is accepted here and takes the
+    /// process down three crates later — inside `emob_tariff::rate`, on a
+    /// quantity that arrived on a partner's charge detail record (D305). A
+    /// quantity that cannot be multiplied is not one this workspace can bill,
+    /// and the place to say so is the door rather than the arithmetic.
+    ///
+    /// # Why a terawatt-hour
+    ///
+    /// The largest charge point that exists is a Megawatt Charging System unit
+    /// at 3.75 MW. Running flat out, without stopping, for a thirty-year
+    /// service life, it delivers about 0.99 terawatt-hours — so this bound is the entire
+    /// lifetime output of the largest charger ever built, and a register that
+    /// reached it would have rolled over long before. It is not a limit any
+    /// real value approaches; it is the line past which a number stopped being
+    /// a measurement.
+    ///
+    /// It also leaves sixteen orders of magnitude before `Decimal` overflows,
+    /// which is the room a price is multiplied into.
+    pub const MAX_KWH: Decimal = Decimal::from_parts(0xD4A5_1000, 0xE8, 0, false, 0);
+
     /// An energy in kWh.
     ///
     /// # Errors
     ///
     /// [`QuantityError::Negative`] for a negative magnitude — direction is
-    /// [`Direction`], never a minus sign.
+    /// [`Direction`], never a minus sign — and
+    /// [`QuantityError::Unbillable`] past [`Energy::MAX_KWH`].
     pub fn from_kwh(kwh: Decimal) -> Result<Self, QuantityError> {
         if kwh.is_sign_negative() && !kwh.is_zero() {
             return Err(QuantityError::Negative {
                 what: "energy",
                 value: kwh.to_string(),
+            });
+        }
+        if kwh > Self::MAX_KWH {
+            return Err(QuantityError::Unbillable {
+                what: "energy",
+                value: kwh.to_string(),
+                limit: Self::MAX_KWH.to_string(),
             });
         }
         Ok(Self(kwh))
@@ -145,7 +179,10 @@ impl Energy {
     ///
     /// # Errors
     ///
-    /// [`QuantityError::Negative`] for a negative magnitude.
+    /// [`QuantityError::Negative`] for a negative magnitude, and
+    /// [`QuantityError::Unbillable`] past [`Energy::MAX_KWH`] — the same door as
+    /// [`Energy::from_kwh`], so a partner sending watt-hours does not get past a
+    /// check that reads kilowatt-hours.
     pub fn from_wh(wh: Decimal) -> Result<Self, QuantityError> {
         let mut shifted = wh;
         if shifted.set_scale(wh.scale() + 3).is_ok() {
@@ -469,7 +506,10 @@ impl Money {
     ///
     /// # Errors
     ///
-    /// [`QuantityError::CurrencyMismatch`] when the currencies differ.
+    /// [`QuantityError::CurrencyMismatch`] when the currencies differ, and
+    /// [`QuantityError::Unbillable`] when the difference is one no `Decimal`
+    /// holds — it panics on overflow, and the amounts here are a partner's own
+    /// totals off a charge detail record (D305).
     pub fn checked_sub(self, rhs: Self) -> Result<Self, QuantityError> {
         if self.currency != rhs.currency {
             return Err(QuantityError::CurrencyMismatch {
@@ -477,8 +517,15 @@ impl Money {
                 right: rhs.currency.to_string(),
             });
         }
+        let Some(amount) = self.amount.checked_sub(rhs.amount) else {
+            return Err(QuantityError::Unbillable {
+                what: "a difference of money",
+                value: format!("{} − {}", self.amount, rhs.amount),
+                limit: Decimal::MAX.to_string(),
+            });
+        };
         Ok(Self {
-            amount: self.amount - rhs.amount,
+            amount,
             currency: self.currency,
         })
     }
@@ -493,7 +540,10 @@ impl Money {
     ///
     /// # Errors
     ///
-    /// [`QuantityError::CurrencyMismatch`] when the currencies differ.
+    /// [`QuantityError::CurrencyMismatch`] when the currencies differ, and
+    /// [`QuantityError::Unbillable`] when the sum is one no `Decimal` holds. An
+    /// invoice reconciliation adds one partner-stated total per record the
+    /// invoice names, for as many records as the partner names (D305).
     pub fn checked_add(self, rhs: Self) -> Result<Self, QuantityError> {
         if self.currency != rhs.currency {
             return Err(QuantityError::CurrencyMismatch {
@@ -501,8 +551,15 @@ impl Money {
                 right: rhs.currency.to_string(),
             });
         }
+        let Some(amount) = self.amount.checked_add(rhs.amount) else {
+            return Err(QuantityError::Unbillable {
+                what: "a sum of money",
+                value: format!("{} + {}", self.amount, rhs.amount),
+                limit: Decimal::MAX.to_string(),
+            });
+        };
         Ok(Self {
-            amount: self.amount + rhs.amount,
+            amount,
             currency: self.currency,
         })
     }

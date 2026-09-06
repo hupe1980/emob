@@ -13,7 +13,11 @@ rust-version.workspace = true
 emob-cdr     = { workspace = true }
 emob-core    = { workspace = true }
 emob-roam    = { workspace = true }
-emob-service = { workspace = true }
+# `policy` because this is the daemon the feature exists for: a partner is
+# onboarded while the node runs, and what an operator wants to say about one is
+# not a set of dotted capability patterns. No other daemon turns it on, and the
+# hundred and eight crates behind it stay out of their graphs.
+emob-service = { workspace = true, features = ["policy"] }
 emob-tariff  = { workspace = true }
 
 # Only to name the payload types the daemon puts on a socket. Nothing here
