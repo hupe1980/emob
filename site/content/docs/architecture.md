@@ -1,6 +1,6 @@
 +++
 title = "Architecture"
-weight = 9
+weight = 11
 description = "What is built, what is designed, how emob sits beside the protocol kits it consumes, and the roaming stance that decides how the rest gets written."
 
 [extra]
@@ -71,7 +71,10 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `emob-ocpp` | The OCPP seam, both ways: signed meter values lifted out of transaction events with no field a float could arrive in, and the tariff carried onto OCPP 2.1's *Tariff and Cost* block so the price on the station's screen is the object that rates the CDR |
 | `emob-poi` | The register and the national access point feed: DATEX II AFIR Recharging, publishing the tariff that rates the session rather than a copy of it |
 | `emob-roam` | The roaming edge: a canonical CDR, tariff and location onto OCPI 2.3.0 and down to 2.2.1, each crossing returning the value **and** the account of what it cost; routing read out of the contract identifier's own issuer |
-| `csmsd` | The CSMS socket: OCPP on `ocpp-kit` transport, the two ledgers side by side |
+| `emob-pnc` | **Plug & Charge, from the platform's side**: which ecosystem a contract belongs to — because one minted elsewhere *validates*, every signature checking, and the driver has no relationship with this platform `[V2G2-925]` — whether anything on its path has been **withdrawn**, which the protocol libraries name as what they do not answer, and the eMAID read off the certificate's own Common Name rather than taken beside it |
+| `emob-eebus` | **The § 14a wire**: a grid operator's setpoint off the SPINE datagram's own `ScaledNumber` as an exact decimal, and which of `[LPC §2.3.2]`'s five states a silence has put the site in — including the release `[LPC-022]` gives it after two to 24 hours, which every summary of § 14a drops |
+| `csmsd` | The CSMS socket: OCPP on `ocpp-kit` transport, the two ledgers side by side — with the operational one's verdict **read**, so a station's retry is not a second session |
+| `sited` | The site controller, and the only service meant to run **at a site**: a controller behind a broken WAN link is a site held at 4.2 kW because this process could not be reached rather than because a grid operator asked. It holds no rule — only the clock that tells a setpoint from a silence |
 | `emob-billing` | The last seam: rated records become an EN 16931 invoice whose rounding happens once, at the line, and whose residual is reported; the VAT treatment derived from the parties, so a roaming settlement is taxed where the reseller is established `[UStG §3g]`; a SEPA collection; and postings addressed by role rather than by account number |
 | `emob-thg` | The greenhouse-gas quota: `[38k §6(3)]`'s **four** conditions as four fields in the paragraph's own order, a notification built only from energy a meter signed, and no factor held as a constant — the emissions value is announced annually in the Bundesanzeiger, so it is an argument carried with the notice |
 | `emob-service` | The shell every daemon shares, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature |
@@ -81,7 +84,7 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `roamd` | The roaming node: who a record goes to, whether it may go at all, when it is late, and what to do with one that arrives. Every document is `emob-roam`'s; what is here is the ledger of what was sent to whom — the one thing no crate can hold, because `[OCPI 2.3.0 §mod_cdrs]` seals a record once the eMSP has it and gives a correction an order, and neither rule is a property of a document |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-**969 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
+**1040 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
 `emob-service` is the one shared place that stops being true, and everything
 above it is a daemon. `just ci` green.
 
@@ -371,12 +374,11 @@ seated is held at zero and named.
 | Crate | Holds |
 |---|---|
 | `emob-roam` (eMIP) | GIREVE legacy, beside the OCPI and OICP halves that are built. Only if a partner forces it — GIREVE speaks OCPI |
-| `emob-pnc` | Plug & Charge contracts, certificate pools, multi-PKI |
-| `emob-smart` (the wire) | The § 14a **rule** is built — see below. What is designed is both ends of the wire: a setpoint arriving over EEBUS, an allocation leaving as an OCPP charging profile, DER control on 2.1, and the V2G flow model |
-| `emob-sim` (the rest) | Virtual EVs with 15118 PnC handshakes, MockHubject, an OCPI peer-in-a-process |
+| `emob-smart` (the rest) | The § 14a rule and **both ends of its wire** are built. What is designed is what sits beyond them: `Ziff. 4.4.a` *Direktansteuerung*, which addresses a device rather than a site; DER control on OCPP 2.1, behind a capability flag; and the V2G flow model, which waits on a regulator's decision rather than on a crate |
+| `emob-sim` (the rest) | MockHubject and an OCPI peer-in-a-process. The Plug & Charge half is built: a station signs `ISO15118_PNC` into the payload its private key covers, so the contract a session claims and the assignment its meter record states are two independent claims that can be compared |
 
-Services — `csmsd`, `agentd`, `poid`, `tarifd`, `roamd`, `billd` and `empd` are
-built; `pncd`, `opsd` and an optional edge `sited` are 📐.
+Services — `csmsd`, `agentd`, `poid`, `tarifd`, `roamd`, `billd`, `empd` and the
+edge controller `sited` are built; `pncd` and `opsd` are 📐.
 
 ## One inventory, three audiences
 
@@ -494,6 +496,24 @@ numeric register, which is exactly right for that question. The Eichrecht chain
 answers what may be billed. They run beside each other, never one instead of the
 other, and the type system keeps them apart: nothing in the billing path can see
 a float, because `emob_ocpp::TransactionEvent` has no field for one.
+
+**Side by side is not the same as unread.** The operational ledger's verdict on
+each message — `Ingested` — carries the rule on the variant: *"the station
+retried; do not bill it twice."* OCPP guarantees delivery by retrying, so a
+station that loses one answer sends its `StopTransaction` again — and a CSMS that
+drops that verdict opens a fresh transaction out of the second copy and puts it
+through the whole chain. What comes back is a **refusal**: a record claiming
+measurement outside a window one message cannot have, so a session that billed
+correctly lands in the operator's failure queue naming a metrology fault that
+never happened. The verdict is read, and a message arriving after a transaction
+has ended is named rather than made into a second session — the signed value it
+carries is energy that is *not* on the record that settled, which is a fact about
+a station and has its own fix.
+
+No guard here could have found that: `check-reach` asks whether anything in this
+workspace names a public function, and a *sibling's* return value discarded at a
+call site needs no binding to discard. The one mechanism that reaches across is
+the compiler's, and it is filed upstream as a request for `#[must_use]` (D306).
 
 **One funnel, three versions.** `observe_v16`, `observe_v201` and `observe_v21`
 all produce the same observation, so the billing path is one function for all

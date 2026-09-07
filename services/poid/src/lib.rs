@@ -32,6 +32,21 @@
 //! why [`Poid::status`] refuses to produce one before a snapshot has been
 //! accepted, rather than sending it and hoping.
 //!
+//! **And "a snapshot" is not the question — *which* snapshot is.** This service
+//! used to record only that one had been taken, and then check an update's
+//! references against its own current inventory. Between those two facts sits
+//! every change an operator makes: a point added, a facility revised, a station
+//! renumbered. The update resolved perfectly against the estate and named
+//! versions the access point had never received, and the consumer dropped it in
+//! the silence the paragraph above describes — the very failure this service
+//! says it exists to prevent, reached through the *inventory* rather than
+//! through the order (D308).
+//!
+//! So [`Poid::accepted`] takes the publication itself and keeps
+//! [`emob_poi::datex::Published`] — what that document put on the record — and
+//! [`Poid::status`] resolves against **that**. The remedy for a refusal is to
+//! publish the table first, which is what the operator owed anyway.
+//!
 //! # No I/O
 //!
 //! Nothing here opens a socket. [`Poid::snapshot`] and [`Poid::status`] return
@@ -44,18 +59,24 @@
 #![warn(missing_docs, clippy::pedantic)]
 
 use emob_poi::datex::{
-    InformationStatus, PointUpdate, Publisher, StatusPublication, TablePublication,
+    InformationStatus, PointUpdate, Published, Publisher, StatusPublication, TablePublication,
 };
 use emob_poi::site::{ChargingPoint, Facility, Site};
 use emob_poi::{Feed, PoiError, Rate};
 
 /// What a national access point was last told, and when.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accepted {
     /// When the publication this service built was written.
+    ///
+    /// The document's own instant, read off it rather than supplied beside it:
+    /// a caller that stated this separately could state it differently.
     pub published_at: time::OffsetDateTime,
     /// When the access point accepted it.
     pub at: time::OffsetDateTime,
+    /// What that publication put on the record — the facility versions and rate
+    /// names a status message may address.
+    pub published: Published,
 }
 
 /// Why a publication could not be produced.
@@ -203,10 +224,12 @@ impl<'a> Poid<'a> {
         updates: &[PointUpdate],
         published_at: time::OffsetDateTime,
     ) -> Result<StatusPublication, PublishError> {
-        if self.accepted.is_none() {
+        let Some(accepted) = &self.accepted else {
             return Err(PublishError::NoSnapshotYet);
-        }
-        Ok(self.feed().status(updates, published_at)?)
+        };
+        Ok(self
+            .feed()
+            .status(&accepted.published, updates, published_at)?)
     }
 
     /// Record a snapshot the access point **took**.
@@ -214,14 +237,23 @@ impl<'a> Poid<'a> {
     /// Called after the push, never before it. A push that failed leaves the
     /// feed unconfirmed and [`Self::stale`] reports it, which is the whole
     /// reason recording a delivery is a separate act from attempting one.
-    pub const fn accepted(&mut self, published_at: time::OffsetDateTime, at: time::OffsetDateTime) {
-        self.accepted = Some(Accepted { published_at, at });
+    ///
+    /// It takes the **publication**, not a description of one: what a status
+    /// message may address is the set of facility versions and rate names that
+    /// document carried, and only the document knows them. Its instant comes
+    /// off it for the same reason.
+    pub fn accepted(&mut self, publication: &TablePublication, at: time::OffsetDateTime) {
+        self.accepted = Some(Accepted {
+            published_at: publication.published_at(),
+            at,
+            published: publication.published().clone(),
+        });
     }
 
     /// What the access point last took.
     #[must_use]
-    pub const fn last_accepted(&self) -> Option<Accepted> {
-        self.accepted
+    pub const fn last_accepted(&self) -> Option<&Accepted> {
+        self.accepted.as_ref()
     }
 
     /// Whether the feed has gone unrefreshed for longer than `within`.
@@ -232,7 +264,7 @@ impl<'a> Poid<'a> {
     /// simply wrong.
     #[must_use]
     pub fn stale(&self, now: time::OffsetDateTime, within: time::Duration) -> Option<Stale> {
-        match self.accepted {
+        match &self.accepted {
             None => Some(Stale {
                 last_accepted: None,
                 overdue_by: time::Duration::ZERO,

@@ -1,6 +1,6 @@
 +++
 title = "The obligation calendar"
-weight = 8
+weight = 10
 description = "AFIR, DA-656, LSV 2026, PAngV, MessEG, THG and NIS2 as dated, cited, executable rules over three subjects — charge point, provider and undertaking."
 
 [extra]

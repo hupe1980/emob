@@ -459,3 +459,129 @@ async fn a_station_claiming_signed_data_and_sending_none_is_named_not_ignored() 
     );
     assert_eq!(csmsd.settled(), 0, "nothing signed it");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retransmitted_stop_does_not_settle_a_second_time_or_refuse_the_first() {
+    // OCPP guarantees delivery by retrying, so a station that loses one answer
+    // sends its `StopTransaction` again. The record settled on the first
+    // delivery; the second used to find no transaction under the key — it had
+    // just been removed — open a fresh one holding that single message, and put
+    // it through the chain. What came out was a **refusal**, naming a window the
+    // record did not have and a clock that cannot carry a duration: a settled
+    // session in the operator's failure queue, over a metrology fault that
+    // never happened (D306).
+    //
+    // The operational ledger knew: `Ingested::Duplicate` says in as many words
+    // "the station retried; do not bill it twice". `csmsd` was discarding the
+    // answer.
+    let csmsd = Arc::new(Csmsd::new(
+        PartyId::new("DE", "ABC").unwrap(),
+        registry(),
+        tariff(),
+    ));
+    let (addr, server) = serve(Arc::clone(&csmsd)).await;
+    let handle = connect(&addr, "CP-1");
+    handle.call(boot()).await.expect("the CSMS answers a boot");
+    handle.wait_ready().await;
+    let started = handle
+        .call(v1_6::StartTransactionRequest::new(
+            1,
+            "HRWWBX8".to_owned(),
+            0,
+            DateTime::parse("2023-05-19T13:52:39Z").unwrap(),
+        ))
+        .await
+        .expect("the CSMS answers a start");
+    for _ in 0..3 {
+        handle
+            .call(stop_transaction(started.transaction_id))
+            .await
+            .expect("the CSMS answers every stop, retried or not");
+    }
+    handle.shutdown(Duration::from_secs(2)).await;
+    server.abort();
+
+    let outcomes = csmsd.outcomes();
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "one transaction, one outcome, however many times it was sent: {outcomes:?}"
+    );
+    assert!(
+        matches!(&outcomes[0], Outcome::Settled { energy, .. } if energy == "0.636 kWh"),
+        "{outcomes:?}"
+    );
+    assert!(
+        !outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, Outcome::Refused { .. })),
+        "a retry is not a refusal: {outcomes:?}"
+    );
+    assert_eq!(csmsd.settled(), 1, "and it is billed once");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signed_value_arriving_after_the_stop_is_named_rather_than_billed_as_a_session() {
+    // Not a retry — a *new* message, after the station's own `Ended`. It must
+    // not open a second transaction, and it must not be silent either: the
+    // signed value it carries is energy that is **not** on the record that
+    // settled, and the fix for that is at the station.
+    let csmsd = Arc::new(Csmsd::new(
+        PartyId::new("DE", "ABC").unwrap(),
+        registry(),
+        tariff(),
+    ));
+    let (addr, server) = serve(Arc::clone(&csmsd)).await;
+    let handle = connect(&addr, "CP-1");
+    handle.call(boot()).await.expect("the CSMS answers a boot");
+    handle.wait_ready().await;
+    let started = handle
+        .call(v1_6::StartTransactionRequest::new(
+            1,
+            "HRWWBX8".to_owned(),
+            0,
+            DateTime::parse("2023-05-19T13:52:39Z").unwrap(),
+        ))
+        .await
+        .expect("the CSMS answers a start");
+    handle
+        .call(stop_transaction(started.transaction_id))
+        .await
+        .expect("the CSMS answers a stop");
+
+    // A minute after the transaction ended, the station sends one more.
+    handle
+        .call(
+            v1_6::MeterValuesRequest::new(
+                1,
+                vec![v1_6::MeterValue::new(
+                    DateTime::parse("2023-05-19T13:56:48Z").unwrap(),
+                    vec![
+                        v1_6::SampledValue::new(OCA_1_6_SAMPLED_VALUE.to_owned())
+                            .with_format(v1_6::ValueFormat::SignedData)
+                            .with_context(v1_6::ReadingContext::SamplePeriodic)
+                            .with_measurand(v1_6::Measurand::EnergyActiveImportRegister),
+                    ],
+                )],
+            )
+            .with_transaction_id(started.transaction_id),
+        )
+        .await
+        .expect("the CSMS answers it");
+    handle.shutdown(Duration::from_secs(2)).await;
+    server.abort();
+
+    let outcomes = csmsd.outcomes();
+    assert!(
+        matches!(&outcomes[0], Outcome::Settled { energy, .. } if energy == "0.636 kWh"),
+        "{outcomes:?}"
+    );
+    assert!(
+        outcomes.iter().any(|outcome| matches!(
+            outcome,
+            Outcome::AfterTheEnd { transaction, .. } if transaction == &started.transaction_id.to_string()
+        )),
+        "a straggler after the end is named: {outcomes:?}"
+    );
+    assert_eq!(csmsd.settled(), 1, "and it opens no second record");
+}

@@ -7,13 +7,13 @@ description = "Install the crates, verify a charging session under German calibr
 nav = "Getting started"
 +++
 
-Twelve crates are built from this workspace today, with seven daemons on top of
+Fifteen crates are built from this workspace today, with eight daemons on top of
 them. Everything on this page runs. ✅
 
 ```console
 cargo add emob-core emob-eichrecht emob-session emob-cdr emob-tariff \
-          emob-ocpp emob-poi emob-roam emob-billing emob-thg emob-service \
-          emob-sim
+          emob-ocpp emob-poi emob-roam emob-billing emob-thg emob-smart \
+          emob-eebus emob-pnc emob-service emob-sim
 ```
 
 ## Which one do I need?
@@ -36,6 +36,9 @@ yours, and its dependencies come with it.
 | Send a record to a roaming partner, or check one that arrived | `emob-roam` |
 | Turn a month of records into an e-invoice, a SEPA collection and postings | `emob-billing` |
 | File the year's THG-Quote notification, and find out which points are not eligible | `emob-thg` |
+| Ask which charge points § 14a reaches, and share a site's power out under a setpoint | `emob-smart` |
+| Read a grid operator's setpoint off the EEBUS wire without losing a watt | `emob-eebus` |
+| Check a Plug & Charge contract certificate, and which ecosystem it belongs to | `emob-pnc` |
 | Write a daemon: settings, a readiness probe, a graceful stop — and decide whether a credential may reach a record | `emob-service` |
 | Test all of the above against a fleet that signs for real | `emob-sim` |
 

@@ -1,0 +1,39 @@
+[package]
+name        = "sited"
+description = "The site controller: a grid operator's § 14a setpoint off the EEBUS wire, shared out under a ceiling nothing can raise, and sent to the charge points as OCPP charging profiles"
+publish     = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+emob-service = { workspace = true }
+
+# The rule, the seam and the crossing — three crates, and this service holds
+# none of what they decide. `emob-smart` says what a site may draw,
+# `emob-eebus` lifts the setpoint off the wire exactly, and `emob-ocpp` turns
+# an allocation into the profiles a station obeys.
+emob-eebus   = { workspace = true }
+emob-ocpp    = { workspace = true }
+emob-smart   = { workspace = true }
+
+# Only to name the SPINE types that cross the socket. Nothing here decides one.
+eebus        = { workspace = true }
+ocpp-kit     = { workspace = true }
+
+anyhow       = { workspace = true }
+rust_decimal = { workspace = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+# The wire, both ends of it: two SPINE engines and the codec between them, so a
+# datagram is encoded and decoded rather than passed along as a value.
+serde_json   = { workspace = true }
+time         = { workspace = true, features = ["macros"] }

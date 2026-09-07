@@ -27,13 +27,14 @@ msrv       = "1.94"
 #   stat_tests        cargo test --workspace --all-features
 #   stat_crates       the publishable crates under crates/
 #   stat_floats       cargo xtask no-floats
-#   stat_curves       the ECDSA curves the pure-Rust build verifies
+#   stat_curves       the ECDSA curves the pure-Rust build verifies — OCMF's
+#                     four (p192, p256, p384, k256) plus ISO 15118 Annex F's p521
 #
 # A number here that no longer matches its source is worse than no number.
 stat_obligations = "49"
-stat_tests       = "969"
-stat_crates      = "13"
+stat_tests       = "1040"
+stat_crates      = "15"
 stat_floats      = "0"
-stat_curves      = "4"
+stat_curves      = "5"
 
 keywords = "EV charging, CPO, EMP, eMSP, CSMS, OCPP 2.1, OCPI 2.3.0, OICP, ISO 15118, OCMF, Eichrecht, AFIR, NIS2, Cyber Resilience Act, DATEX II, Plug and Charge, roaming, CDR, Rust, charging station management"

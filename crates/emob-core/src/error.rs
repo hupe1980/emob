@@ -158,6 +158,22 @@ pub enum CoreError {
     /// A quantity was inconsistent.
     #[error(transparent)]
     Quantity(#[from] QuantityError),
+
+    /// A vehicle-communication generation this side does not recognise.
+    ///
+    /// A bare `iso15118` lands here, and deliberately.
+    /// `[DATEX-II-Profil Tab. A.130]` defines that literal as **-20** and has
+    /// no literal for -2 at all, so a reader takes it for whichever generation
+    /// they had in mind. Guessing is how a point ends up claiming a duty from
+    /// 01.01.2027 `[DA-656 Anh. 2.1.2]` that its firmware does not meet.
+    #[error(
+        "{given} is not a vehicle-communication generation this side names: din70121, \
+         iso15118-2 or iso15118-20, each saying which generation it means"
+    )]
+    UnknownV2gProtocol {
+        /// What arrived.
+        given: String,
+    },
 }
 
 impl fmt::Display for crate::ids::Spelling {

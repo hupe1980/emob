@@ -759,6 +759,10 @@ fn wire_of(value: Decimal) -> Result<Wire, SeamError> {
 
 /// The widest-scale wire decimal that fits, and the exact value it denotes.
 ///
+/// Shared with [`crate::setpoint`]: a § 14a limit crosses onto the same
+/// `ChargingSchedulePeriod` field a price does, and two spellings of one
+/// conversion is the drift this workspace keeps finding.
+///
 /// `ocpp-kit`'s `Decimal` is a 64-bit mantissa at a scale of at most eighteen —
 /// the JSON number OCPP-J actually carries, kept exact rather than rounded
 /// through an `f64`. A `rust_decimal` is 96 bits at a scale of at most
@@ -770,7 +774,7 @@ fn wire_of(value: Decimal) -> Result<Wire, SeamError> {
 /// conversion has no business weakening one it did not have to. The second
 /// return is what the wire value actually says, which is how the caller knows
 /// whether it has something to report.
-fn to_wire(value: Decimal) -> Option<(Wire, Decimal)> {
+pub(crate) fn to_wire(value: Decimal) -> Option<(Wire, Decimal)> {
     use rust_decimal::RoundingStrategy;
 
     let start = value.scale().min(u32::from(Wire::MAX_SCALE));

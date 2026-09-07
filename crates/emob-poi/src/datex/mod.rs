@@ -30,7 +30,7 @@ pub mod table;
 pub mod wire;
 
 pub use status::{PointUpdate, PriceUpdate, StatusPublication};
-pub use table::{InformationStatus, Publisher, TablePublication};
+pub use table::{InformationStatus, Published, Publisher, TablePublication};
 
 use emob_core::{AdHocPayment, V2gCommunication};
 

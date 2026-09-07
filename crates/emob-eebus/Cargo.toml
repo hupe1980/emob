@@ -1,0 +1,37 @@
+[package]
+name        = "emob-eebus"
+description = "The EEBUS seam for § 14a EnWG: a grid operator's setpoint lifted off a SPINE datagram as an exact decimal, and the five states LPC gives a controllable site"
+keywords    = ["eebus", "spine", "ev-charging", "smart-charging", "enwg-14a"]
+categories  = ["network-programming", "science"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+emob-core    = { workspace = true }
+# The rule this seam feeds. The edge points this way and never the other:
+# `emob-smart` promises the MSRV `mako` and `hems` consume and carries no
+# protocol implementation in its tree, so putting SPINE there would make two
+# other workspaces pay for a wire they do not speak.
+emob-smart   = { workspace = true }
+# SHIP, SPINE and the use-case descriptors — **without** `runtime`. The sockets,
+# TLS and mDNS live in the daemon; what is here is the sans-I/O half, where
+# every timer is an argument and a datagram is a value. `check-graph` is what
+# holds that: `eebus` with `runtime` would bring tokio.
+eebus        = { workspace = true }
+rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
+thiserror    = { workspace = true }
+time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize every public type.
+serde = ["dep:serde", "emob-core/serde", "emob-smart/serde", "time/serde-well-known"]
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -16,6 +16,11 @@ emob-core      = { workspace = true }
 emob-eichrecht = { workspace = true }
 ocmf           = { workspace = true }
 emob-session   = { workspace = true }
+# The § 14a allocation, carried to the stations that have to obey it. The edge
+# points this way for the reason the tariff edge does: `emob-smart` decides the
+# rule and links no protocol implementation, and the seam is the only place both
+# vocabularies are in scope.
+emob-smart     = { workspace = true }
 emob-tariff    = { workspace = true }
 ocpp-kit       = { workspace = true, features = ["std", "csms", "v1_6", "v2_0_1", "v2_1"] }
 rust_decimal   = { workspace = true }
@@ -32,6 +37,7 @@ serde = [
     "emob-eichrecht/serde",
     "ocmf/serde",
     "emob-session/serde",
+    "emob-smart/serde",
     "emob-tariff/serde",
     "time/serde-well-known",
 ]

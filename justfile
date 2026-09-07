@@ -44,7 +44,7 @@ lint:
 purity:
     #!/usr/bin/env bash
     set -uo pipefail
-    pure="emob-core emob-eichrecht emob-session emob-cdr emob-billing emob-tariff emob-thg emob-ocpp emob-poi emob-roam emob-sim emob-smart"
+    pure="emob-core emob-eichrecht emob-session emob-cdr emob-billing emob-tariff emob-thg emob-ocpp emob-poi emob-roam emob-sim emob-smart emob-eebus emob-pnc"
     fail=0
     for crate in $pure; do
         [ -d "crates/$crate/src" ] || continue
@@ -93,7 +93,7 @@ msrv:
     cargo +{{ msrv }} check --all-features \
         -p emob-core -p emob-eichrecht -p emob-session -p emob-cdr \
         -p emob-tariff -p emob-ocpp -p emob-poi -p emob-billing -p emob-thg -p emob-service \
-        -p emob-sim -p emob-smart
+        -p emob-sim -p emob-smart -p emob-eebus -p emob-pnc
     @echo "🔒 the crates that promise {{ msrv }} build on {{ msrv }}"
 
 # `cargo publish` cannot be undone, so the dry run is the cheap half of the
@@ -113,6 +113,16 @@ release-check:
 og:
     rsvg-convert -w 1200 -h 630 -f png -o site/static/og.png site/og.svg
     @echo "🖼️  site/static/og.png re-rendered from site/og.svg"
+
+# The certificates `emob-pnc`'s tests validate paths against. Minted by OpenSSL
+# rather than by anything here, because a path validation checked only against
+# DER this repository produced is checked against its own opinions — and with
+# absolute validity windows, so nothing rots.
+#
+# 🔑 Re-mint the Plug & Charge test PKI
+pnc-fixtures:
+    cd crates/emob-pnc && ./scripts/make-test-pki.sh
+    cargo fmt -p emob-pnc
 
 # 🌐 Serve the documentation site locally
 site:

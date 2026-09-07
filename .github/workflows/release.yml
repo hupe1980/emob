@@ -82,7 +82,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # One step per crate, in dependency order, because a publish is nine
+      # One step per crate, in dependency order, because a publish is fifteen
       # uploads and can stop in the middle: crates.io accepts the first few,
       # something fails, and the version is now spent for those and free for the
       # rest. `cargo publish --workspace` refuses that state outright, so each
@@ -90,7 +90,15 @@ jobs:
       # Every other failure still stops the run.
       #
       # `cargo publish` waits for each crate to reach the index before the next
-      # one resolves against it, so the order below is the dependency order.
+      # one resolves against it, so the order below is the dependency order —
+      # and it is the order `cargo publish --workspace --dry-run` prints, which
+      # is what `just release-check` runs.
+      #
+      # **The list is held to the workspace by a guard.** Six publishable crates
+      # were missing from it for four milestones — `emob-billing`, `emob-thg`,
+      # `emob-smart`, `emob-service` among them — and nothing said so, because a
+      # release that publishes nine of fifteen crates succeeds. `cargo xtask
+      # check-manifests` now reads this file (D317).
 
       - name: Publish emob-core
         run: |
@@ -122,9 +130,39 @@ jobs:
           echo "$out"
           if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
 
+      - name: Publish emob-billing
+        run: |
+          out=$(cargo publish -p emob-billing --locked 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+
+      - name: Publish emob-smart
+        run: |
+          out=$(cargo publish -p emob-smart --locked 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+
+      - name: Publish emob-eebus
+        run: |
+          out=$(cargo publish -p emob-eebus --locked 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+
       - name: Publish emob-ocpp
         run: |
           out=$(cargo publish -p emob-ocpp --locked 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+
+      - name: Publish emob-sim
+        run: |
+          out=$(cargo publish -p emob-sim --locked 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+
+      - name: Publish emob-pnc
+        run: |
+          out=$(cargo publish -p emob-pnc --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
           if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
 
@@ -140,9 +178,15 @@ jobs:
           echo "$out"
           if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
 
-      - name: Publish emob-sim
+      - name: Publish emob-service
         run: |
-          out=$(cargo publish -p emob-sim --locked 2>&1) && rc=0 || rc=$?
+          out=$(cargo publish -p emob-service --locked 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+
+      - name: Publish emob-thg
+        run: |
+          out=$(cargo publish -p emob-thg --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
           if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
 

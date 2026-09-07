@@ -50,8 +50,55 @@ pub struct VirtualStation {
     /// of every rule that mentions it — the tariff shape gate above all. Half
     /// the fleet is a 22 kW AC post and half a 150 kW DC charger.
     pub rated_power_kw: Decimal,
+    /// How the driver was identified, as the **signed record** will state it.
+    ///
+    /// Not decoration either. `[OCMF Tab. 11]` grades an assignment, and that
+    /// grade is inside the bytes a private key covers — so it is the half of a
+    /// session that cannot be typed in afterwards, and the half a CDR is
+    /// cross-checked against. A fleet that only ever signs `TRUSTED` never
+    /// exercises the one path whose ceiling is `SECURE`.
+    pub identification: Identification,
     signing_key: SigningKey,
     register_kwh: Decimal,
+}
+
+/// How a virtual station identifies the driver, in the record it signs.
+///
+/// The two shapes this workspace actually has a rule about, and they are told
+/// apart in the signature rather than beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Identification {
+    /// A backend `Authorize` over TLS — `IF: OCPP_AUTH_TLS`, `IT: CENTRAL`,
+    /// `IL: TRUSTED` `[OCMF Tab. 14]`. The ordinary card-and-backend session,
+    /// and the fleet's default.
+    Central,
+    /// ISO 15118 Plug & Charge — `IF: ISO15118_PNC`, `IT: EMAID`,
+    /// `IL: SECURE` `[OCMF Tab. 15]`, with the contract identifier in `ID`.
+    ///
+    /// `SECURE` is `[OCMF Tab. 11]`'s own example for a contract certificate
+    /// the signature component verified, and it is the ceiling
+    /// `emob_session::AuthPath::PlugAndCharge` allows — so a station signing it
+    /// is the only thing that lets a Plug & Charge session prove what its
+    /// authorisation claims.
+    PlugAndCharge {
+        /// The contract identifier, as `[OCMF Tab. 16]` carries it: 14 or 15
+        /// characters, which is the eMAID with or without its check digit.
+        emaid: String,
+    },
+}
+
+impl Identification {
+    /// The `IS`/`IL`/`IF`/`IT`/`ID` fields, as an OCMF payload writes them.
+    fn fields(&self) -> String {
+        match self {
+            Self::Central => {
+                r#""IS":true,"IL":"TRUSTED","IF":["OCPP_AUTH_TLS"],"IT":"CENTRAL","#.to_owned()
+            }
+            Self::PlugAndCharge { emaid } => format!(
+                r#""IS":true,"IL":"SECURE","IF":["ISO15118_PNC"],"IT":"EMAID","ID":"{emaid}","#
+            ),
+        }
+    }
 }
 
 impl VirtualStation {
@@ -80,11 +127,23 @@ impl VirtualStation {
             evse_id,
             meter_serial: format!("SIM-METER-{index:05}"),
             rated_power_kw: Decimal::from(if index % 2 == 1 { 150 } else { 22 }),
+            identification: Identification::Central,
             signing_key,
             // Posts do not start life at zero, and a chain whose opening
             // reading is `0.000` hides an off-by-one nobody would notice.
             register_kwh: Decimal::from(rng.between(1_000, 900_000)) / Decimal::from(1000),
         }
+    }
+
+    /// The same station, signing records that state a Plug & Charge assignment.
+    ///
+    /// The eMAID goes **into the signed bytes**, which is the whole point: a
+    /// contract identifier a backend typed beside a session is a claim, and one
+    /// inside the payload a private key covered is evidence.
+    #[must_use]
+    pub fn identifying(mut self, identification: Identification) -> Self {
+        self.identification = identification;
+        self
     }
 
     /// The public key a registry has to hold for this station's records to
@@ -261,10 +320,11 @@ impl VirtualStation {
             concat!(
                 r#"{{"FV":"1.4","GI":"emob-sim","GV":"1","PG":"T{pagination}","#,
                 r#""MV":"emob","MM":"virtual","MS":"{serial}","#,
-                r#""IS":true,"IL":"TRUSTED","IF":["OCPP_AUTH_TLS"],"IT":"CENTRAL","#,
+                r#"{identification}"#,
                 r#""RD":[{{"TM":"{time} {clock}","TX":"{marker}","RV":{value},"#,
                 r#""RI":"{register}","RU":"kWh","RT":"AC","EF":"","ST":"{state}"}}]}}"#,
             ),
+            identification = self.identification.fields(),
             pagination = reading.pagination,
             serial = self.meter_serial,
             time = ocmf_time(reading.at),

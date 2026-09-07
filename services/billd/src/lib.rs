@@ -113,6 +113,14 @@ pub struct Issued {
     pub submission: Submission,
     /// The invoice this one cancels, for a *Stornorechnung*.
     pub cancels: Option<String>,
+    /// The invoice this one **replaces**, for the second half of a re-billing.
+    ///
+    /// The other direction of [`Self::cancels`], and it is here because only
+    /// the two together describe a correction. A *Stornorechnung* knows what it
+    /// reverses and a replacement knew nothing at all, so a replacement posted
+    /// while its original still stood in the books charged one month twice and
+    /// the journal balanced (D307). [`Billd::book`] reads this.
+    pub replaces: Option<String>,
     /// Whether it has been booked.
     pub booked: bool,
 }
@@ -203,9 +211,74 @@ pub enum ClosingError {
         cancels: String,
     },
 
+    /// Another invoice for the same period already stands in the books.
+    ///
+    /// The mirror of [`Self::ReversesUnbooked`], and the half a correction was
+    /// missing. That one refuses a reversal posted without its original; this
+    /// refuses a second invoice for a period one is already posted for. Between
+    /// them the pair is atomic in the only sense a journal can express: the
+    /// books hold both sides of a correction or neither of them.
+    ///
+    /// A correction chain — the invoice, its *Stornorechnung*, the replacement,
+    /// and however many times that repeats — holds **one** invoice in the books
+    /// at a time. Posted beside its predecessor, a replacement debits the
+    /// customer a second time for one month — 31.04 and 24.70 against one
+    /// June — and the journal balances, because every entry it was given
+    /// balanced.
+    ///
+    /// It is stated over the chain rather than over the one document a
+    /// replacement names, because the order the calls arrive in is not the
+    /// operator's to choose: a month corrected twice runs A → R1 → R2, and
+    /// booking the *original* after its replacement is the same double charge
+    /// arriving backwards. Both were found by the property that drives the
+    /// books in every order (D307).
+    #[error(
+        "invoice {number} cannot be booked while {standing} stands in the books for the same \
+         period: a correction chain holds one invoice at a time — book the cancellation \
+         {credit} first, or book neither"
+    )]
+    OriginalNotReversed {
+        /// The document being booked.
+        number: String,
+        /// The invoice in its chain that is already booked and not reversed.
+        standing: String,
+        /// The cancellation that would take that one back out.
+        credit: String,
+    },
+
+    /// A cancellation was itself cancelled and re-billed.
+    ///
+    /// A *Stornorechnung* closes no period. Re-billing one issues an invoice
+    /// against a month another chain already covers, and nothing downstream can
+    /// tell the two apart (D307).
+    #[error(
+        "invoice {number} is a cancellation, which closes no period: there is nothing to \
+         re-bill, and correcting one means correcting the pair it belongs to"
+    )]
+    CannotRebillACancellation {
+        /// Which number.
+        number: String,
+    },
+
     /// A document was booked twice.
     #[error("invoice {number} is already in the books")]
     AlreadyBooked {
+        /// Which number.
+        number: String,
+    },
+
+    /// The recipient refused a document that is already in the books.
+    ///
+    /// A late refusal is ordinary — a platform acknowledges receipt and its
+    /// validator rejects afterwards — and the answer to it is a correction
+    /// rather than a field. Recording it in place left the books holding a
+    /// document nobody accepted while [`Billd::book`] went on refusing to post
+    /// one, which is the same state read two ways (D307).
+    #[error(
+        "invoice {number} is already in the books, so a refusal is a correction rather than a \
+         submission outcome: cancel it and re-bill — the books do not un-post"
+    )]
+    RefusedAfterBooking {
         /// Which number.
         number: String,
     },
@@ -445,6 +518,17 @@ impl Billd {
         self.issued.values()
     }
 
+    /// The document that closes a period **now**.
+    ///
+    /// Which is not the one that closed it first: a correction replaces it, and
+    /// [`ClosingError::AlreadyClosed`] names whichever is in force. Asking it
+    /// without spending a number is the operator's question and the one a
+    /// property can check after every call (D307).
+    #[must_use]
+    pub fn closes(&self, period: &str) -> Option<&Issued> {
+        self.issued.get(self.closed.get(period)?)
+    }
+
     /// Issue the invoice that closes a period.
     ///
     /// The caller hands over a document already assembled by `emob-billing` —
@@ -479,6 +563,7 @@ impl Billd {
             invoice,
             submission: Submission::Issued,
             cancels: None,
+            replaces: None,
             booked: false,
         }))
     }
@@ -520,6 +605,16 @@ impl Billd {
                 by: by.clone(),
             });
         }
+        // A *Stornorechnung* closes no period, so there is nothing to re-bill:
+        // cancelling one and issuing a "replacement" for it produces a second
+        // invoice against a month another chain already covers, and the two
+        // stand in the books together (D307). A credit note that is itself
+        // wrong is corrected by correcting the pair it belongs to.
+        if original.invoice.kind.is_credit_note() {
+            return Err(ClosingError::CannotRebillACancellation {
+                number: number.to_owned(),
+            });
+        }
 
         let credit_number = self.numbering.take();
         // The reason travels **on the document** as a BT-22 note, not in a log
@@ -535,6 +630,7 @@ impl Billd {
                 invoice: credit,
                 submission: Submission::Issued,
                 cancels: Some(number.to_owned()),
+                replaces: None,
                 booked: false,
             },
         );
@@ -549,9 +645,27 @@ impl Billd {
                 invoice,
                 submission: Submission::Issued,
                 cancels: None,
+                // The other direction of the correction. Without it a
+                // replacement is a document with no past, and `book` has
+                // nothing to ask about the original (D307).
+                replaces: Some(number.to_owned()),
                 booked: false,
             },
         );
+
+        // The period is closed by the document that closes it **now**. Left
+        // pointing at the original, `AlreadyClosed` named a cancelled invoice
+        // as the one in force, and an operator following that name would
+        // correct a document that had already been corrected (D307).
+        if let Some(period) = self
+            .closed
+            .iter()
+            .find(|(_, closed_by)| closed_by.as_str() == number)
+            .map(|(period, _)| period.clone())
+        {
+            self.closed.insert(period, replacement_number.clone());
+        }
+
         Ok((credit_number, replacement_number))
     }
 
@@ -573,7 +687,8 @@ impl Billd {
     ///
     /// # Errors
     ///
-    /// [`ClosingError::NotIssued`] for a number this service never issued.
+    /// [`ClosingError::NotIssued`] for a number this service never issued, and
+    /// [`ClosingError::RefusedAfterBooking`] for one already in the books.
     pub fn rejected(
         &mut self,
         number: &str,
@@ -596,7 +711,7 @@ impl Billd {
     /// document the recipient has not accepted is not one to book — see the
     /// module documentation.
     ///
-    /// # A reversal is only a reversal beside the entry it undoes
+    /// # A correction is a pair, and the books hold both sides or neither
     ///
     /// `postings_for` reverses every side of a *Stornorechnung*, which is right
     /// against the invoice it cancels and a fabrication on its own: posted alone
@@ -605,6 +720,14 @@ impl Billd {
     /// told — so a cancellation whose original was never booked is refused by
     /// name. Which document cancels which is this service's fact and nothing
     /// else holds it (D298).
+    ///
+    /// The **replacement** is the same rule pointed the other way, and it was
+    /// missing. A re-billing produces two documents, and booking only the
+    /// second leaves the original standing: one June debited at 31.04 and again
+    /// at 24.70, in a journal every entry of which balances. So a replacement
+    /// whose original is booked and whose cancellation is not is refused too,
+    /// and between the two refusals the pair is atomic in the only sense a
+    /// ledger can express (D307).
     ///
     /// # Two different second bookings
     ///
@@ -619,7 +742,8 @@ impl Billd {
     /// # Errors
     ///
     /// [`ClosingError::NotIssued`], [`ClosingError::NotAccepted`],
-    /// [`ClosingError::AlreadyBooked`] and [`ClosingError::Journal`].
+    /// [`ClosingError::AlreadyBooked`], [`ClosingError::ReversesUnbooked`],
+    /// [`ClosingError::OriginalNotReversed`] and [`ClosingError::Journal`].
     pub fn book(&mut self, number: &str) -> Result<Recorded, ClosingError> {
         let Some(document) = self.issued.get(number) else {
             return Err(ClosingError::NotIssued {
@@ -649,6 +773,22 @@ impl Billd {
                 cancels: cancels.clone(),
             });
         }
+        // …and the other way. One invoice per correction chain stands in the
+        // books at a time. See `ClosingError::OriginalNotReversed`.
+        if !document.invoice.kind.is_credit_note()
+            && let Some(standing) = self.standing_in(number)
+        {
+            let credit = self
+                .cancelled_by
+                .get(&standing)
+                .cloned()
+                .unwrap_or_else(|| standing.clone());
+            return Err(ClosingError::OriginalNotReversed {
+                number: number.to_owned(),
+                standing,
+                credit,
+            });
+        }
 
         let postings = emob_billing::postings::postings_for(&document.invoice);
         let entry = self.entry_for(&postings, number)?;
@@ -663,6 +803,41 @@ impl Billd {
             document.booked = true;
         }
         Ok(recorded)
+    }
+
+    /// Another invoice in this document's correction chain that is booked and
+    /// whose reversal is not.
+    ///
+    /// The chain is a path: `rebill` refuses a document already cancelled, so
+    /// each invoice is replaced at most once. Walking it from the root rather
+    /// than one step back is what makes the answer independent of the order the
+    /// calls arrived in.
+    fn standing_in(&self, number: &str) -> Option<String> {
+        let mut at = number.to_owned();
+        while let Some(prior) = self.issued.get(&at).and_then(|d| d.replaces.clone()) {
+            at = prior;
+        }
+        loop {
+            if at != number
+                && self.issued.get(&at).is_some_and(|d| d.booked)
+                && !self
+                    .cancelled_by
+                    .get(&at)
+                    .and_then(|credit| self.issued.get(credit))
+                    .is_some_and(|note| note.booked)
+            {
+                return Some(at);
+            }
+            let next = self
+                .issued
+                .iter()
+                .find(|(_, d)| d.replaces.as_deref() == Some(at.as_str()))
+                .map(|(name, _)| name.clone());
+            match next {
+                Some(next) => at = next,
+                None => return None,
+            }
+        }
     }
 
     /// The trial balance, for an operator that wants to see the books add up.
@@ -784,12 +959,24 @@ impl Billd {
     }
 
     /// Record one submission outcome.
+    ///
+    /// A refusal that arrives **after** the document is in the books is not a
+    /// field to overwrite. `book` refuses a document the recipient has not
+    /// accepted, and the answer to a late rejection is a correction: the books
+    /// do not un-post. Overwriting the field left a journal holding a document
+    /// the recipient had refused, with `book` still saying it may not have been
+    /// posted and the entry already there (D307).
     fn submitted(&mut self, number: &str, outcome: Submission) -> Result<(), ClosingError> {
         let Some(document) = self.issued.get_mut(number) else {
             return Err(ClosingError::NotIssued {
                 number: number.to_owned(),
             });
         };
+        if document.booked && !outcome.is_accepted() {
+            return Err(ClosingError::RefusedAfterBooking {
+                number: number.to_owned(),
+            });
+        }
         document.submission = outcome;
         Ok(())
     }

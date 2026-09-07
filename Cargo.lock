@@ -21,9 +21,9 @@ dependencies = [
 
 [[package]]
 name = "agentplane"
-version = "0.28.0"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b8a96bcbb71ba13b2b9325080f8cdfc94407f7a6e2d3da122f82ec7f8f3bc94"
+checksum = "fdae780316893f34319b3e29e8dd672e9f0eff47e93a11a46ad29a7dfdd655cf"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -775,6 +775,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eebus"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1de7b4293e3facc8f79958e8896e3c2f354c1251d191caece50c294bbf2d482f"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -864,6 +875,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "emob-eebus"
+version = "0.1.0"
+dependencies = [
+ "eebus",
+ "emob-core",
+ "emob-smart",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+]
+
+[[package]]
 name = "emob-eichrecht"
 version = "0.1.0"
 dependencies = [
@@ -887,9 +912,33 @@ dependencies = [
  "emob-core",
  "emob-eichrecht",
  "emob-session",
+ "emob-smart",
  "emob-tariff",
  "ocmf",
  "ocpp-kit",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+]
+
+[[package]]
+name = "emob-pnc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "emob-cdr",
+ "emob-core",
+ "emob-eichrecht",
+ "emob-ocpp",
+ "emob-session",
+ "emob-sim",
+ "emob-tariff",
+ "iso15118",
+ "ocmf",
+ "p256",
+ "p521",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -1123,9 +1172,9 @@ dependencies = [
 
 [[package]]
 name = "fancy-regex"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "476de73bddf2ef8490aa4ee8f1cf40b430bf1d56c48c22080e5186952cd580e6"
+checksum = "52e0387578e845beb7a1acff126228499f26cb18edf12919cc513bb863266464"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -1583,6 +1632,9 @@ name = "iso15118"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48b7fe9924ff8fcae585b0b527ad81431c0e981e62ac1f6d24efde3fcfa0ab32"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "itertools"
@@ -2156,6 +2208,19 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe42f1670a52a47d448f14b6a5c61dd78fce51856e68edaa38f7ae3a46b8d6b6"
 dependencies = [
+ "ecdsa",
+ "elliptic-curve",
+ "primeorder",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "p521"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fc9e2161f1f215afdfce23677034ae137bbd45016a880c2eb3ba8eb95f085b2"
+dependencies = [
+ "base16ct",
  "ecdsa",
  "elliptic-curve",
  "primeorder",
@@ -2924,6 +2989,26 @@ name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
+name = "sited"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eebus",
+ "emob-core",
+ "emob-eebus",
+ "emob-ocpp",
+ "emob-service",
+ "emob-smart",
+ "ocpp-kit",
+ "rust_decimal",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "slab"

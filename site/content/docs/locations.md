@@ -181,9 +181,24 @@ fails, nobody is told. Bump a facility's version in one job and not the other an
 that is exactly what happens.
 
 Both publications are built from one inventory, so the references are right by
-construction; a separate check exists for a deployment whose table is exported by
-a different system and wants the disagreement to be an error rather than a
-silence.
+construction — against **that** inventory, which is the wrong one to be right
+against. The consumer does not hold the operator's estate; it holds the last
+**table it was sent**, and between that push and this status message sits every
+change since. An update built against the estate resolves against the estate
+perfectly, names versions the access point has never received, and is dropped
+exactly as above.
+
+So an update has to resolve against both. `TablePublication::published()` is the
+manifest a table carries — read off the document that was built, not off the
+sites it was built from — and the feed keeps the one the access point
+**accepted**. The estate says whether the update describes something real and in
+a state the register admits; the accepted table says whether the consumer has an
+object to attach it to. The remedy for a refusal is to publish the table first.
+
+The rate reference is the same silence one field over: `[AFIR Art. 20(2)(c)]`
+makes the ad-hoc price dynamic, so a change travels addressed to a rate by the
+`idG` the table gave it, and one naming a rate no table carried leaves the
+published price the old one. That name is checked too.
 
 ## Two more things a validator would accept
 

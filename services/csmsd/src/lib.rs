@@ -114,6 +114,25 @@ pub enum Outcome {
         /// What it claims to sign with.
         claimed: String,
     },
+    /// A billable event arrived for a transaction that had already ended.
+    ///
+    /// The operational ledger answers this — `[ocpp_kit::csms::Ingested]`'s
+    /// `AfterEnd` — and `csmsd` used to throw the answer away, so a straggler
+    /// re-opened a transaction that had already settled and the chain built a
+    /// second record from whatever that one message carried. On 1.6 that is a
+    /// **refusal** naming a metrology fault that does not exist; on 2.x it is a
+    /// restated total, which is the one outcome that needs a human (D306).
+    ///
+    /// Reported rather than dropped, because the signed value it carries is
+    /// energy that is **not** on the record that settled: a station that keeps
+    /// sending after its own `Ended` is one whose sessions are being billed
+    /// short, and the fix is at the station rather than here.
+    AfterTheEnd {
+        /// Which station.
+        identity: String,
+        /// Which transaction.
+        transaction: String,
+    },
     /// A station sent a public key beside its signed value and the key does not
     /// decode.
     ///
@@ -134,13 +153,30 @@ pub enum Outcome {
     },
 }
 
+/// A transaction a station has opened and not yet closed, and what the link
+/// cost to carry it.
+#[derive(Debug)]
+struct Open {
+    transaction: Transaction,
+    /// Messages the operational ledger recognised as retries of ones it had
+    /// already taken.
+    ///
+    /// A different count from `Assembled::duplicates_dropped`, which is the
+    /// same signed *record* delivered by two different messages. This is the
+    /// same *message* delivered twice, and it is counted here because the event
+    /// that carries it never reaches the transaction any more — see
+    /// [`Csmsd::accept`]. Both are what a flaky link cost, and
+    /// [`Outcome::Settled`] reports their sum.
+    retried_messages: usize,
+}
+
 /// The CSMS.
 pub struct Csmsd {
     party: PartyId,
     registry: KeyRegistry,
     tariff: Tariff,
     /// Transactions the stations have opened and not yet closed.
-    inflight: Mutex<BTreeMap<(Identity, String), Transaction>>,
+    inflight: Mutex<BTreeMap<(Identity, String), Open>>,
     /// The operational view: arrival, sequence, retries. Meter values as `f64`,
     /// which is right for the question it answers and never leaves this field.
     operational: Mutex<Ledger>,
@@ -189,7 +225,32 @@ impl Csmsd {
 
     /// Route one billable event into its transaction, settling it when the
     /// station says the transaction is over.
-    fn accept(&self, ctx: &Ctx, transaction_id: &str, event: TransactionEvent) {
+    ///
+    /// # The operational ledger's answer is a rule, not telemetry
+    ///
+    /// `ingested` is what [`Ledger::ingest`] said about this message, and the
+    /// only thing here that knows it has been seen before.
+    /// `Ingested::Duplicate`'s own documentation states the rule — *"the station
+    /// retried; do not bill it twice"*.
+    ///
+    /// Discarding it costs a session. A station retransmitting its
+    /// `StopTransaction` — the ordinary shape of a link that lost one answer —
+    /// finds no transaction under the key on the second delivery, because the
+    /// first settled and removed it; a fresh one opened from that single event
+    /// is refused for a window it does not have, and a settled session lands in
+    /// the operator's failure queue naming a metrology fault that never happened
+    /// (D306).
+    ///
+    /// So a duplicate reaches nothing: it opens no transaction, appends to none
+    /// and closes none. It is counted, because a link that retries constantly is
+    /// worth knowing about.
+    fn accept(
+        &self,
+        ctx: &Ctx,
+        transaction_id: &str,
+        event: TransactionEvent,
+        ingested: Option<Ingested>,
+    ) {
         let identity = ctx.identity();
         // The charge point this station was provisioned as, hung on the session
         // by the authenticator. A connection that reached a handler without one
@@ -219,12 +280,43 @@ impl Csmsd {
             return;
         };
 
-        let mut inflight = lock(&self.inflight);
         let key = (identity.clone(), transaction_id.to_owned());
-        let transaction = inflight.entry(key.clone()).or_insert_with(|| {
-            Transaction::new(id, point.evse_id.clone(), Authorization::ad_hoc())
+
+        match ingested {
+            // Already taken. Counted where there is still a transaction to
+            // count it on; where there is not, the record has settled and the
+            // operational ledger is the one holding the retry.
+            Some(Ingested::Duplicate) => {
+                if let Some(open) = lock(&self.inflight).get_mut(&key) {
+                    open.retried_messages += 1;
+                }
+                return;
+            }
+            // The station's own `Ended` has already been through here. A
+            // straggler after it is not a second transaction, and the signed
+            // value it carries is not on the record that settled.
+            Some(Ingested::AfterEnd) => {
+                lock(&self.outcomes).push(Outcome::AfterTheEnd {
+                    identity: identity.to_string(),
+                    transaction: transaction_id.to_owned(),
+                });
+                return;
+            }
+            // `Applied`, `AppliedWithGap`, no ledger event at all — and a
+            // verdict a later `ocpp-kit` adds, because `Ingested` is
+            // `#[non_exhaustive]`. All of them are a fresh delivery here: a
+            // signed kilowatt-hour dropped on an unrecognised verdict is
+            // unbilled energy, and a record offered twice is a question the
+            // CDR ledger already answers by name.
+            _ => {}
+        }
+
+        let mut inflight = lock(&self.inflight);
+        let open = inflight.entry(key.clone()).or_insert_with(|| Open {
+            transaction: Transaction::new(id, point.evse_id.clone(), Authorization::ad_hoc()),
+            retried_messages: 0,
         });
-        transaction.events.push(event);
+        open.transaction.events.push(event);
 
         if closing && let Some(finished) = inflight.remove(&key) {
             drop(inflight);
@@ -234,13 +326,8 @@ impl Csmsd {
 
     /// The chain, exactly as `emob-sim` drives it: assemble, verify, price,
     /// accept.
-    fn settle(
-        &self,
-        identity: &Identity,
-        transaction_id: &str,
-        point: &ChargePoint,
-        transaction: &Transaction,
-    ) {
+    fn settle(&self, identity: &Identity, transaction_id: &str, point: &ChargePoint, open: &Open) {
+        let transaction = &open.transaction;
         let refuse = |reasons: Vec<String>| {
             lock(&self.outcomes).push(Outcome::Refused {
                 identity: identity.to_string(),
@@ -307,7 +394,9 @@ impl Csmsd {
             Ok(cdr) => {
                 let energy = cdr.total_energy.to_string();
                 let key = cdr.key.to_string();
-                let retries = assembled.duplicates_dropped;
+                // Both halves of what the link cost: records the transport
+                // delivered twice, and messages it delivered twice.
+                let retries = assembled.duplicates_dropped + open.retried_messages;
                 let stored = lock(&self.cdrs).accept(cdr);
                 {
                     let mut outcomes = lock(&self.outcomes);
@@ -417,7 +506,7 @@ impl Csmsd {
     /// The other warning kinds are all about the numeric energy register, which
     /// is telemetry on this side of the seam and never billed here. They reach
     /// the operational ledger's question, not this one.
-    fn bill(&self, ctx: &Ctx, transaction: &str, observed: &Observed) {
+    fn bill(&self, ctx: &Ctx, transaction: &str, observed: &Observed, ingested: Option<Ingested>) {
         let identity = ctx.identity();
         let unreadable: Vec<String> = observed
             .warnings
@@ -434,7 +523,7 @@ impl Csmsd {
         }
 
         if let Some(event) = emob_ocpp::kit::event_from(&observed.event) {
-            self.accept(ctx, transaction, event);
+            self.accept(ctx, transaction, event, ingested);
         }
     }
 
@@ -546,7 +635,7 @@ impl Csmsd {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v1_6::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         let observed = observe_v16(&typed);
-        self.record_operational(ctx.identity(), &observed);
+        let ingested = self.record_operational(ctx.identity(), &observed);
 
         // 1.6's transaction id lives in the response for `StartTransaction` and
         // in the request for everything after it, so the funnel cannot supply
@@ -559,7 +648,7 @@ impl Csmsd {
         };
 
         if let Some(id) = transaction_id {
-            self.bill(ctx, &id.to_string(), &observed);
+            self.bill(ctx, &id.to_string(), &observed, ingested);
         }
 
         answer_v1_6(ctx, &typed, transaction_id)
@@ -570,10 +659,15 @@ impl Csmsd {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_0_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         let observed = observe_v201(&typed);
-        self.record_operational(ctx.identity(), &observed);
+        let ingested = self.record_operational(ctx.identity(), &observed);
 
         if let v2_0_1::CsRequest::TransactionEvent(event) = &typed {
-            self.bill(ctx, &event.transaction_info.transaction_id, &observed);
+            self.bill(
+                ctx,
+                &event.transaction_info.transaction_id,
+                &observed,
+                ingested,
+            );
         }
         answer_v2_0_1(ctx, &typed)
     }
@@ -583,10 +677,15 @@ impl Csmsd {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         let observed = observe_v21(&typed);
-        self.record_operational(ctx.identity(), &observed);
+        let ingested = self.record_operational(ctx.identity(), &observed);
 
         if let v2_1::CsRequest::TransactionEvent(event) = &typed {
-            self.bill(ctx, &event.transaction_info.transaction_id, &observed);
+            self.bill(
+                ctx,
+                &event.transaction_info.transaction_id,
+                &observed,
+                ingested,
+            );
         }
         answer_v2_1(ctx, &typed)
     }

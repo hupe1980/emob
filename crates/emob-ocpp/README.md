@@ -1,9 +1,10 @@
 # emob-ocpp
 
 **The OCPP seam, in both directions** — a charging station's transaction events
-become a session that can be billed, and the tariff that bills it becomes the
-price on the station's own screen. With the rule that no float from the
-telemetry ledger ever becomes a kilowatt-hour on an invoice.
+become a session that can be billed; the tariff that bills it becomes the price
+on the station's own screen, and a § 14a allocation becomes the limit it charges
+under. With the rule that no float from the telemetry ledger ever becomes a
+kilowatt-hour on an invoice.
 
 ```console
 cargo add emob-ocpp
@@ -172,6 +173,25 @@ twelve.
 The finished document is then handed to `ocpp-kit`'s own validator, because the
 bounds above are a list somebody maintains and the schema is the kit's to own. A
 tariff a station would refuse is refused here instead.
+
+## And the grid's limit goes the same way
+
+An `emob_smart::Allocation` is what a site may draw under a grid operator's
+setpoint. `to_charging_profiles` carries it to the stations that have to obey
+it, at **`ChargingStationExternalConstraints`** — the purpose OCPP reserves for
+an external actor, which is what a distribution grid operator is.
+
+The purpose is fixed here and is not a parameter. OCPP resolves overlapping
+profiles by purpose first and stack level second, so a setpoint sent as a
+`TxDefaultProfile` would sit in the same tier as the optimiser
+`[BK6-22-300 Ziff. 4.6]` says it outranks — and the station would settle the two
+by a stack level somebody typed.
+
+Three facts an allocation holds have no field on that wire, and each is reported
+through `Crossing` rather than dropped: the site ceiling, because OCPP addresses
+EVSEs; the headroom, which separates *"we held you down"* from *"nobody was
+plugged in"*; and whether a site at full power is being allowed it or has simply
+stopped being spoken to.
 
 ## What it does not do
 

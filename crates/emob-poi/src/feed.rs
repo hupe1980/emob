@@ -21,7 +21,7 @@
 //! to be an error rather than a silence.
 
 use crate::datex::status::PointUpdate;
-use crate::datex::table::{InformationStatus, Publisher};
+use crate::datex::table::{InformationStatus, Published, Publisher};
 use crate::datex::{StatusPublication, TablePublication, status, table};
 use crate::error::{PoiError, Result};
 use crate::rate::Rate;
@@ -111,17 +111,40 @@ impl Feed<'_> {
 
     /// The dynamic publication `[AFIR Art. 20(2)(c)]`.
     ///
+    /// # Two inventories, and the update has to resolve against both
+    ///
+    /// `accepted` is what the national access point actually **has** — the
+    /// [`Published`] manifest of the table publication it took — and it is a
+    /// different object from `self.sites`, which is what the operator runs
+    /// now. An update is refused unless it resolves against both, and the two
+    /// answer different questions:
+    ///
+    /// * the inventory says whether this describes something the operator runs,
+    ///   at the version it holds, in a state `[LSV26 §5(3)]`'s register allows
+    ///   it to be reported in;
+    /// * the accepted table says whether the consumer on the other end has an
+    ///   object to attach the message to at all.
+    ///
+    /// They agree until the estate moves, and between snapshots the estate
+    /// always has. Checking only the first published a well-formed document
+    /// addressed to versions nobody had, which `[DATEX-II-Profil]` gives a
+    /// consumer no way to resolve and no way to complain about (D308).
+    ///
     /// # Errors
     ///
     /// [`PoiError::FacilityNotPublished`] or [`PoiError::VersionNotPublished`]
-    /// when an update addresses something this feed's table does not carry at
-    /// that version — the failure that is otherwise silent.
+    /// when an update addresses something this feed's own inventory does not
+    /// carry at that version; [`PoiError::NotInAcceptedTable`] or
+    /// [`PoiError::RateNotInAcceptedTable`] when it addresses something the
+    /// accepted table does not — the failure that is otherwise silent.
     pub fn status(
         &self,
+        accepted: &Published,
         updates: &[PointUpdate],
         published_at: time::OffsetDateTime,
     ) -> Result<StatusPublication> {
         check(&self.sites, updates)?;
+        resolves(accepted, updates)?;
         Ok(status::publication(
             &self.publisher,
             self.information_status,
@@ -130,6 +153,44 @@ impl Feed<'_> {
             published_at,
         ))
     }
+}
+
+/// Check that every status update resolves against the table the access point
+/// **accepted**.
+///
+/// The mirror of [`check`], one party out: that one asks the operator's own
+/// inventory whether the update describes something real, this asks the
+/// consumer's copy whether it describes something it holds.
+///
+/// # Errors
+///
+/// [`PoiError::NotInAcceptedTable`] for a facility reference the accepted table
+/// cannot resolve, and [`PoiError::RateNotInAcceptedTable`] for a price update
+/// addressed to a rate it never named.
+pub fn resolves(accepted: &Published, updates: &[PointUpdate]) -> Result<()> {
+    for update in updates {
+        for facility in [&update.site, &update.station, &update.point] {
+            let published = accepted.version_of(&facility.id);
+            if published != Some(facility.version.to_string().as_str()) {
+                return Err(PoiError::NotInAcceptedTable {
+                    facility: facility.id.clone(),
+                    referenced: facility.version.to_string(),
+                    accepted: published.map(ToOwned::to_owned),
+                });
+            }
+        }
+        // A price change is addressed to a rate the table already named, by the
+        // `idG` it gave out. Nothing else in this crate checks that name, and
+        // an unresolvable one is the same silence as an unresolvable version.
+        if let Some(price) = &update.price
+            && !accepted.carries_rate(&price.rate_id)
+        {
+            return Err(PoiError::RateNotInAcceptedTable {
+                rate_id: price.rate_id.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Check that every status update resolves against a published inventory.

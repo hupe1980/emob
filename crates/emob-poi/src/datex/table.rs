@@ -14,6 +14,8 @@
               these structs exist to prevent"
 )]
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::Serialize;
 
 use emob_core::CurrentType;
@@ -69,6 +71,85 @@ impl InformationStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct TablePublication {
     payload: Payload,
+    /// What this document says it published, read back off the document.
+    ///
+    /// Not serialised — it is the table's own contents, not a field of the
+    /// profile. It is here because a status publication addresses a facility
+    /// **at the version the table published it at**, and the only party that
+    /// can answer *which* version that was is the document that carried it. A
+    /// service holding its own second copy of the inventory answers a different
+    /// question: what it runs now (D308).
+    #[serde(skip)]
+    published: Published,
+    /// The instant this document was written for.
+    ///
+    /// Carried rather than re-supplied by the caller: a service recording what
+    /// the access point accepted was passing this in beside the publication,
+    /// which is a fact the document already states and a caller could state
+    /// differently.
+    #[serde(skip)]
+    published_at: time::OffsetDateTime,
+}
+
+/// What one [`TablePublication`] put on the record.
+///
+/// Every facility it carried, at the version it carried it at, and every rate
+/// it gave an `idG` to. This is what a dynamic update has to resolve against:
+/// `[DATEX-II-Profil]` gives a consumer no way to ask about a version it never
+/// received, so a status message referencing one is dropped in silence.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Published {
+    /// Facility `idG` → the `versionG` this table published it at, as written.
+    facilities: BTreeMap<String, String>,
+    /// Every rate `idG` a price update may address.
+    rates: BTreeSet<String>,
+}
+
+impl Published {
+    /// The version this table published a facility at, if it carried it.
+    #[must_use]
+    pub fn version_of(&self, facility: &str) -> Option<&str> {
+        self.facilities.get(facility).map(String::as_str)
+    }
+
+    /// Whether this table gave a rate that `idG`.
+    #[must_use]
+    pub fn carries_rate(&self, rate_id: &str) -> bool {
+        self.rates.contains(rate_id)
+    }
+
+    /// Read back off the table this publication actually built.
+    ///
+    /// Off the built document rather than off the inventory it was built from,
+    /// so there is no second walk to disagree with the first.
+    fn of(table: &Table) -> Self {
+        let mut published = Self::default();
+        published
+            .facilities
+            .insert(table.id.clone(), table.version.clone());
+        for site in &table.sites {
+            published
+                .facilities
+                .insert(site.id.clone(), site.version.clone());
+            for station in &site.stations {
+                published
+                    .facilities
+                    .insert(station.id.clone(), station.version.clone());
+                for refill in &station.refill_points {
+                    let point = &refill.point;
+                    published
+                        .facilities
+                        .insert(point.id.clone(), point.version.clone());
+                    for energy in &point.electric_energy {
+                        for rate in &energy.energy_rate {
+                            published.rates.insert(rate.id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        published
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +469,18 @@ pub fn publication(
     rate_for: &dyn Fn(&ChargingPoint) -> Option<Rate>,
 ) -> TablePublication {
     let now = timestamp(published_at);
+    let built = Table {
+        id: table.id.clone(),
+        version: table.version.to_string(),
+        table_name: table_name.map(ToOwned::to_owned),
+        sites: sites
+            .iter()
+            .map(|site| site_of(site, &publisher.language, &now, published_at, rate_for))
+            .collect(),
+    };
+    // Read off the table that was just built, not off the inventory it was
+    // built from. See `Published`.
+    let manifest = Published::of(&built);
     TablePublication {
         payload: Payload {
             model_base_version: MODEL_BASE_VERSION,
@@ -395,7 +488,7 @@ pub fn publication(
             profile_version: PROFILE_VERSION,
             publication: Publication {
                 lang: publisher.language.clone(),
-                publication_time: now.clone(),
+                publication_time: now,
                 publication_creator: Creator {
                     country: publisher.country.clone(),
                     national_identifier: publisher.national_identifier.clone(),
@@ -404,23 +497,28 @@ pub fn publication(
                     confidentiality: Enumerated::new("noRestriction"),
                     information_status: Enumerated::new(status.as_profile_str()),
                 },
-                tables: vec![Table {
-                    id: table.id.clone(),
-                    version: table.version.to_string(),
-                    table_name: table_name.map(ToOwned::to_owned),
-                    sites: sites
-                        .iter()
-                        .map(|site| {
-                            site_of(site, &publisher.language, &now, published_at, rate_for)
-                        })
-                        .collect(),
-                }],
+                tables: vec![built],
             },
         },
+        published: manifest,
+        published_at,
     }
 }
 
 impl TablePublication {
+    /// What this document put on the record, for a status publication to
+    /// resolve its references against.
+    #[must_use]
+    pub const fn published(&self) -> &Published {
+        &self.published
+    }
+
+    /// The instant this document was written for.
+    #[must_use]
+    pub const fn published_at(&self) -> time::OffsetDateTime {
+        self.published_at
+    }
+
     /// The publication as the JSON the national access point ingests.
     ///
     /// # Errors

@@ -152,12 +152,12 @@ checking rather than assuming.
 
 ## What is not here
 
-**The wire, and the timers on it.** A setpoint arrives over EEBUS SHIP/SPINE and
-an allocation leaves as an OCPP charging profile; the heartbeats that decide when
-a site has gone quiet are counted by the protocol engine. None of it is this
-crate's: the rule lives where a test can run it and the socket lives in a daemon,
-which is the same seam `emob-ocpp` sits on for metering. This crate reads no
-clock and opens nothing.
+**The wire, and the timers on it.** A setpoint arrives over EEBUS SHIP/SPINE —
+`emob-eebus` — and an allocation leaves as an OCPP charging profile —
+`emob-ocpp`; the clock that decides when a site has gone quiet is `sited`'s. None
+of it is this crate's: the rule lives where a test can run it, and the socket
+lives in a daemon. This crate reads no clock and opens nothing, which is also
+what lets `mako` and `hems` consume it without a protocol stack.
 
 **The other three device families.** The Festlegung also names heat pumps, space
 cooling and storage, and the minimum has a limb for a heat pump over 11 kW on the

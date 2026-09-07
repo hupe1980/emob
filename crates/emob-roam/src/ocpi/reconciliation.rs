@@ -126,9 +126,18 @@ pub struct Reconciled {
     /// What the records this side holds come to, gross — the figure to compare
     /// the invoice's own total against.
     ///
-    /// `None` when nothing could be summed: no record was found, or the ones
-    /// that were are in more than one currency, which is a total that means
-    /// nothing beside a single invoice amount.
+    /// `None` for **three** different absences, and [`Self::currencies`] is what
+    /// tells them apart: no record was found and there was nothing to sum
+    /// (empty); the records are in more than one currency, which is a total
+    /// that means nothing beside a single invoice amount (more than one); or
+    /// the sum itself could not be taken (exactly one).
+    ///
+    /// The third is not hypothetical. Every figure summed here comes off a
+    /// record a **partner** sent, `Decimal` panics on overflow rather than
+    /// saturating, and `Money`'s addition therefore refuses rather than
+    /// panicking (D305) — so a ledger holding two absurd records produces no
+    /// total at all. [`Self::is_conclusive`] is what stops that reading as
+    /// agreement.
     pub total: Option<Money>,
     /// Ids the record names that this ledger does not hold at all.
     ///
@@ -163,10 +172,16 @@ impl Reconciled {
     }
 
     /// Whether the check answers the question the module exists to ask:
-    /// complete, and in one currency.
+    /// complete, in one currency, **and holding a figure**.
+    ///
+    /// The third clause is not redundant. A sum that could not be taken leaves
+    /// one currency and an empty total, and without it this returned `true`
+    /// while [`Self::difference_from`] returned `None` — a check calling itself
+    /// conclusive with nothing to conclude from, which a caller reading the two
+    /// in order takes for agreement.
     #[must_use]
     pub fn is_conclusive(&self) -> bool {
-        self.is_complete() && self.currencies.len() == 1
+        self.is_complete() && self.currencies.len() == 1 && self.total.is_some()
     }
 
     /// What the invoice asks for, less what the records come to.
@@ -410,6 +425,50 @@ mod tests {
             vec![("cdr-1".to_owned(), "cdr-2".to_owned())]
         );
         assert_eq!(checked.total, None, "nothing was summed");
+    }
+
+    /// **A check with no figure is not a conclusive check.**
+    ///
+    /// `total` is `None` for three different absences and `currencies` is what
+    /// tells them apart. The third — one currency, every id found and rated, and
+    /// still no sum — is the one that has no list of its own: every figure here
+    /// comes off a record a partner sent, and `Money`'s addition refuses rather
+    /// than panicking on a figure `Decimal` cannot carry (D305). Before this
+    /// clause the check called itself conclusive while `difference_from`
+    /// returned `None`, which a caller reading the two in order takes for
+    /// agreement (D311).
+    #[test]
+    fn a_check_that_could_not_take_its_own_sum_is_not_conclusive() {
+        let unsummable = Reconciled {
+            invoice_id: "R-2026-0001".to_owned(),
+            total: None,
+            unknown: Vec::new(),
+            superseded: Vec::new(),
+            unrated: Vec::new(),
+            currencies: vec!["EUR".to_owned()],
+        };
+        assert!(unsummable.is_complete(), "every id was found and rated");
+        assert!(
+            !unsummable.is_conclusive(),
+            "one currency and no figure is not an answer"
+        );
+        assert_eq!(
+            unsummable.difference_from(Money::new(
+                rust_decimal::Decimal::ONE,
+                emob_core::Currency::EUR
+            )),
+            None
+        );
+
+        // …and the ordinary case still is one.
+        let summed = Reconciled {
+            total: Some(Money::new(
+                rust_decimal::Decimal::TEN,
+                emob_core::Currency::EUR,
+            )),
+            ..unsummable
+        };
+        assert!(summed.is_conclusive());
     }
 
     /// An id nobody here holds is an incomplete check, not a wrong invoice.

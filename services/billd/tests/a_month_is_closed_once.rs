@@ -654,3 +654,256 @@ fn a_cancellation_cannot_reach_the_books_before_the_invoice_it_reverses() {
         .expect("both halves are posted");
     assert_eq!(receivable.debits, receivable.credits);
 }
+
+#[test]
+fn a_replacement_cannot_reach_the_books_while_the_invoice_it_replaces_still_stands() {
+    // The mirror of the test above, and the half that was missing. A re-billing
+    // is two documents; booking only the second leaves the original standing,
+    // and the customer is debited twice for one June — 31.04 and 24.70 — in a
+    // journal whose every entry balances, because double entry balances
+    // whatever it is told (D307).
+    let ledger = month("0.49");
+    let mut billd = service();
+    billd.issue("2026-06", closing(&ledger, driver())).unwrap();
+    billd
+        .accepted("R-2026-0001", date!(2026 - 07 - 02), None)
+        .unwrap();
+    billd.book("R-2026-0001").unwrap();
+
+    let rerated = month("0.39");
+    let (credit, replacement) = billd
+        .rebill(
+            "R-2026-0001",
+            date!(2026 - 07 - 20),
+            "re-rated",
+            closing(&rerated, driver()),
+        )
+        .unwrap();
+
+    billd
+        .accepted(&replacement, date!(2026 - 07 - 21), None)
+        .unwrap();
+    let posted = billd.book(&replacement);
+    assert!(
+        matches!(
+            posted,
+            Err(ClosingError::OriginalNotReversed { ref standing, ref credit, .. })
+                if standing == "R-2026-0001" && credit == "R-2026-0002"
+        ),
+        "{posted:?}"
+    );
+
+    // …and with the reversal in the books it goes through, and the receivable
+    // holds the replacement alone.
+    billd
+        .accepted(&credit, date!(2026 - 07 - 21), None)
+        .unwrap();
+    billd.book(&credit).unwrap();
+    billd.book(&replacement).unwrap();
+    let (direction, amount) = billd
+        .balance_of("assets:receivable", "EUR")
+        .unwrap()
+        .unwrap()
+        .net()
+        .unwrap();
+    assert_eq!(direction, doubleentry::Direction::Debit);
+    assert_eq!(amount.to_string(), "24.70");
+}
+
+#[test]
+fn a_corrected_period_is_closed_by_the_document_that_closes_it_now() {
+    // `AlreadyClosed` names the invoice in force. Left pointing at the
+    // original, it named a cancelled document, and an operator following that
+    // name would correct a document that had already been corrected (D307).
+    let ledger = month("0.49");
+    let mut billd = service();
+    billd.issue("2026-06", closing(&ledger, driver())).unwrap();
+    let rerated = month("0.39");
+    let (_, replacement) = billd
+        .rebill(
+            "R-2026-0001",
+            date!(2026 - 07 - 20),
+            "re-rated",
+            closing(&rerated, driver()),
+        )
+        .unwrap();
+
+    let again = billd.issue("2026-06", closing(&rerated, driver()));
+    assert!(
+        matches!(again, Err(ClosingError::AlreadyClosed { ref number, .. }) if *number == replacement),
+        "the period is closed by {replacement}, not by the invoice it replaced: {again:?}"
+    );
+}
+
+// ── The invariants hold whatever order the calls arrive in ──────────────────
+//
+// Every test above is an example: a sequence somebody thought of, asserted at
+// its end. `roamd` learned in D297–D299 that a service's rules are about the
+// **pair** — what was true before a call and what may be true after — and that
+// no property over a single value can see one. That lesson produced exactly one
+// sequence property, in `roamd`, and the three defects below survived in this
+// service because it was never carried here (D307).
+//
+// So this drives the books with a generated sequence of calls — issue, accept,
+// reject, book, cancel-and-re-bill, in whatever order a recipient's platform
+// and an operator produce between them — and checks the invariants after every
+// one of them.
+
+/// SplitMix64 — the workspace takes no `rand`, and a replayable property test
+/// wants a seeded sequence anyway.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, high: usize) -> usize {
+        usize::try_from(self.next() % high as u64).unwrap_or(0)
+    }
+}
+
+/// What the books hold for the customer, in cents, as a signed figure.
+fn receivable(billd: &Billd) -> i128 {
+    let Some(balance) = billd.balance_of("assets:receivable", "EUR").unwrap() else {
+        return 0;
+    };
+    let Ok((direction, amount)) = balance.net() else {
+        return 0;
+    };
+    let cents: i128 = amount
+        .to_string()
+        .replace('.', "")
+        .parse()
+        .expect("a whole number of cents");
+    match direction {
+        doubleentry::Direction::Debit => cents,
+        doubleentry::Direction::Credit => -cents,
+    }
+}
+
+/// Stated once rather than at every call site, because the point is that they
+/// hold after **every** call and not at the end of a story.
+fn books_hold(billd: &Billd) -> Result<(), String> {
+    // 1. The journal balances. Weak on its own — double entry balances whatever
+    //    it is told — and it is the floor everything else stands on.
+    let trial = billd.trial_balance().map_err(|e| e.to_string())?;
+    let totals = trial
+        .totals(doubleentry::Currency::EUR, doubleentry::Layer::Settled)
+        .map_err(|e| e.to_string())?;
+    if !totals.is_balanced() {
+        return Err(format!("the journal does not balance: {totals:?}"));
+    }
+
+    // 2. Nothing is in the books that the recipient did not accept. `book`
+    //    refuses one, and a late refusal used to overwrite the field behind it.
+    for document in billd.documents() {
+        if document.booked && !document.submission.is_accepted() {
+            return Err(format!(
+                "{} is booked and not accepted: {:?}",
+                document.invoice.number, document.submission
+            ));
+        }
+    }
+
+    // 3. **One period is charged once.** The receivable is one document's gross
+    //    or nothing — never the sum of an invoice and the invoice that replaced
+    //    it, which is what a replacement posted over a standing original comes
+    //    to, in a journal whose every entry balances (D307).
+    let mut lawful = vec![0_i128];
+    for document in billd.documents() {
+        if document.invoice.kind.is_credit_note() {
+            continue;
+        }
+        let gross = (document.invoice.gross_total().amount() * dec("100"))
+            .round()
+            .to_string();
+        lawful.push(gross.parse().expect("a whole number of cents"));
+    }
+    let held = receivable(billd);
+    if !lawful.contains(&held) {
+        return Err(format!(
+            "the receivable holds {held} cents, which is not one document's gross: {lawful:?}"
+        ));
+    }
+
+    // 4. The period is closed by a document that has not been cancelled — the
+    //    name `AlreadyClosed` gives an operator has to be the one in force, and
+    //    it went on naming the invoice a correction had already reversed.
+    if let Some(closing) = billd.closes("2026-06") {
+        let number = &closing.invoice.number;
+        if closing.invoice.kind.is_credit_note() {
+            return Err(format!("{number} closes the period and is a credit note"));
+        }
+        if billd
+            .documents()
+            .any(|d| d.cancels.as_deref() == Some(number.as_str()))
+        {
+            return Err(format!("{number} closes the period and has been cancelled"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_books_hold_under_any_order_of_calls() {
+    let ledger = month("0.49");
+    let rerated = month("0.39");
+
+    for seed in 0..128_u64 {
+        let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) | 1);
+        let mut billd = service();
+        billd
+            .issue("2026-06", closing(&ledger, driver()))
+            .expect("the first closing");
+        books_hold(&billd).unwrap_or_else(|broken| panic!("seed {seed}, at issue: {broken}"));
+
+        for step in 0..32 {
+            let numbers: Vec<String> = billd
+                .documents()
+                .map(|d| d.invoice.number.clone())
+                .collect();
+            let number = numbers[rng.below(numbers.len())].clone();
+            match rng.below(5) {
+                0 => {
+                    let _ = billd.accepted(&number, date!(2026 - 07 - 10), None);
+                }
+                1 => {
+                    let _ = billd.rejected(&number, date!(2026 - 07 - 10), "schema");
+                }
+                2 | 3 => {
+                    let _ = billd.book(&number);
+                }
+                _ => {
+                    let _ = billd.rebill(
+                        &number,
+                        date!(2026 - 07 - 20),
+                        "re-rated",
+                        closing(&rerated, driver()),
+                    );
+                }
+            }
+            books_hold(&billd).unwrap_or_else(|broken| {
+                let story: Vec<String> = billd
+                    .documents()
+                    .map(|d| {
+                        format!(
+                            "{} kind={:?} booked={} cancels={:?} replaces={:?} gross={}",
+                            d.invoice.number,
+                            d.invoice.kind,
+                            d.booked,
+                            d.cancels,
+                            d.replaces,
+                            d.invoice.gross_total()
+                        )
+                    })
+                    .collect();
+                panic!("seed {seed}, step {step}: {broken}\n{}", story.join("\n"))
+            });
+        }
+    }
+}

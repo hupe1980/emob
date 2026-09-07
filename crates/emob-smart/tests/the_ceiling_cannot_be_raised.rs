@@ -623,3 +623,59 @@ fn the_anspruch_holds_against_a_failsafe_as_it_holds_against_a_setpoint() {
         );
     }
 }
+
+/// The two parties on either side of a setpoint have to agree about what is
+/// behind the connection, and only one of them can say when they do not.
+#[test]
+fn a_demand_for_a_point_this_site_does_not_control_is_named_rather_than_dropped() {
+    // A demand for an EVSE that is not one of this site's steuerbare
+    // Verbrauchseinrichtungen falls out of the seating loop with nothing to
+    // seat it against — correctly, because this crate has no floor, no
+    // connection rating and no `Control` for it, and seating it on a guess
+    // would put a number under the ceiling that no rule produced.
+    //
+    // What it must not do is fall out *silently*. The point draws whatever it
+    // draws, `within_ceiling` cannot see it, and `[BK6-22-300 Ziff. 4.6]`'s
+    // ceiling is then being judged against a smaller site than the one that
+    // exists. That is a fact about the **site** rather than about a box, which
+    // is why it is a third note beside `HeldAtZero` and `Curtailed`.
+    let device = depot(1, Decimal::from(11), Control::Ems);
+    let site = Site {
+        connection_kw: Decimal::from(22),
+        devices: vec![device.clone()],
+    };
+    let plan = [
+        Demand {
+            evse_id: device.evse_id().clone(),
+            wanted_kw: Decimal::from(11),
+        },
+        Demand {
+            evse_id: evse(99),
+            wanted_kw: Decimal::from(11),
+        },
+    ];
+
+    let allocation = allocate(&site, &plan, &GridLimit::Uncontrolled);
+    assert!(
+        allocation.notes().iter().any(|note| matches!(
+            note,
+            SmartNote::NotOnThisSite { evse_id } if evse_id == &evse(99).to_string()
+        )),
+        "{:?}",
+        allocation.notes()
+    );
+    // …and the point it does not control is given nothing, because there is
+    // nothing lawful to give it.
+    assert_eq!(allocation.for_point(&evse(99)), Decimal::ZERO);
+    assert!(allocation.within_ceiling());
+
+    // The reason reaches an operator as prose, with the paragraph on it.
+    assert!(
+        allocation
+            .reasons()
+            .any(|reason| reason.contains("[BK6-22-300 Ziff. 4.6]")
+                && reason.contains("disagree about what is behind the connection")),
+        "{:?}",
+        allocation.reasons().collect::<Vec<_>>()
+    );
+}

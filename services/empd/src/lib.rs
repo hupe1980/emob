@@ -58,7 +58,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use emob_billing::Subscription;
-use emob_core::{ContractId, Currency, Money, PartyId};
+use emob_core::{ContractId, Currency, Money, PartyId, SessionId};
 use emob_roam::{RoamingToken, TokenType};
 use emob_session::TokenRef;
 use rust_decimal::Decimal;
@@ -457,24 +457,45 @@ pub enum ProviderError {
         partner: String,
     },
 
-    /// More was invoiced against a contract than it has run up.
+    /// A closing named a session this contract has nothing outstanding for.
     ///
-    /// Either the closing counted a session twice, or it counted one this
-    /// provider has no record of. Both are worth stopping at: the running total
-    /// is what the credit limit is judged against, and a subtraction that takes
-    /// it below zero would hand the driver back a limit they have not paid for.
+    /// Which is one of three things and all of them are wrong: the session has
+    /// been invoiced before, it belongs to another contract, or this provider
+    /// never saw it. The ledger is keyed by session precisely so that the
+    /// question has an answer — a running total could only compare figures, and
+    /// two sessions that cost the same are indistinguishable to a total (D309).
     #[error(
-        "{contract} has run up {outstanding} and {invoiced} was invoiced against it: a closing \
-         that bills more than the ledger holds has counted a session twice or counted one this \
-         provider never saw"
+        "the closing for {contract} bills session {session}, which is not outstanding on it: \
+         either it has been invoiced already, or it belongs to another contract, or this \
+         provider never saw it"
     )]
-    MoreInvoicedThanRunUp {
+    InvoicedSessionNotCounted {
         /// Which contract.
         contract: String,
-        /// What the closing says it billed.
-        invoiced: String,
-        /// What this provider holds outstanding, in the currency it holds it in.
-        outstanding: String,
+        /// Which session.
+        session: String,
+    },
+}
+
+/// What a contract's running total did with one session.
+///
+/// Named rather than a boolean because the third answer matters: a session
+/// offered again at a *different* figure is a re-rating, and the total moves by
+/// the difference rather than by the whole of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counted {
+    /// Counted for the first time.
+    Added,
+    /// Already on the total, at the same figure. A replay, and the ordinary
+    /// shape of a redelivered record.
+    Already,
+    /// Already on the total at a different figure, and the total has moved by
+    /// the difference.
+    Restated {
+        /// What it was counted at before.
+        from: Money,
+        /// What it is counted at now.
+        to: Money,
     },
 }
 
@@ -485,8 +506,17 @@ pub struct Empd {
     contracts: BTreeMap<String, Contract>,
     tokens: BTreeMap<String, Token>,
     markups: BTreeMap<String, Markup>,
-    /// What each contract has run up that nobody has invoiced yet.
-    unbilled: BTreeMap<String, Money>,
+    /// What each contract has run up that nobody has invoiced yet, **by
+    /// session**.
+    ///
+    /// A running total alone cannot say whether a figure has already been
+    /// counted, so a session offered twice — a replayed CDR, a retried
+    /// dispatch, a re-rated record — was added twice, and the phantom stayed
+    /// on the contract for ever: `invoiced` bills the true amount, the residue
+    /// never clears, and the driver is refused against a limit they are not
+    /// over. Every other ledger in this workspace is keyed by the thing it
+    /// holds; this one was keyed by the contract (D309).
+    unbilled: BTreeMap<String, BTreeMap<String, Money>>,
     /// The key the token store is hashed under.
     key: Vec<u8>,
     /// The operators whose meters this provider bills on and from whom it holds
@@ -715,8 +745,24 @@ impl Empd {
         Ok(self.decide(stored, on))
     }
 
-    /// Record what a session ran up, against the contract that has not been
-    /// invoiced for it yet.
+    /// Record what **one session** ran up, against the contract that has not
+    /// been invoiced for it yet.
+    ///
+    /// # The session names itself, because a total cannot
+    ///
+    /// This used to take a bare amount and add it. A running total has no way
+    /// to tell a second session that cost the same from the same session
+    /// offered twice, and a session offered twice is the ordinary shape of this
+    /// seam: a CDR redelivered by a roaming partner, a dispatch retried, a
+    /// record re-rated after a tariff correction. Counted twice, the phantom
+    /// never leaves — [`Self::invoiced`] takes off what the document billed,
+    /// which is the true figure, and the difference sits on the contract
+    /// refusing a driver against a limit they are not over (D309).
+    ///
+    /// So the session is the key, and offering it again is answered rather than
+    /// added: [`Counted::Already`] for the same figure, [`Counted::Restated`]
+    /// for a different one, where the total moves by the **difference** and the
+    /// re-rating is what it should be.
     ///
     /// # Errors
     ///
@@ -726,78 +772,105 @@ impl Empd {
     pub fn ran_up(
         &mut self,
         contract: &ContractId,
+        session: &SessionId,
         amount: Money,
-    ) -> Result<(), emob_core::CoreError> {
+    ) -> Result<Counted, emob_core::CoreError> {
         let key = contract.to_string();
-        let total = match self.unbilled.get(&key) {
-            Some(running) => running.checked_add(amount)?,
-            None => amount,
-        };
-        self.unbilled.insert(key, total);
-        Ok(())
+        // One contract, one currency — asked **before** anything is written, so
+        // a refusal leaves the ledger as it found it. `unbilled` is a sum, and
+        // a sum it could not take would report `None`: nothing outstanding, on
+        // a contract that has money on it.
+        if let Some(held) = self.unbilled.get(&key).and_then(|s| s.values().next()) {
+            // Through `Money` itself, so the refusal has one spelling.
+            held.checked_add(amount)?;
+        }
+        let sessions = self.unbilled.entry(key).or_default();
+        match sessions.insert(session.to_string(), amount) {
+            None => Ok(Counted::Added),
+            Some(before) if before == amount => Ok(Counted::Already),
+            Some(before) => Ok(Counted::Restated {
+                from: before,
+                to: amount,
+            }),
+        }
     }
 
     /// What a contract has outstanding that nobody has invoiced.
+    ///
+    /// The sum of the sessions counted against it and not yet billed. `None`
+    /// for a contract with nothing outstanding, which is a different statement
+    /// from a balance of zero.
+    ///
+    /// # Panics
+    ///
+    /// Never. Every session on one contract is in that contract's currency,
+    /// because [`Self::ran_up`] refuses one that is not — and a sum this could
+    /// not take would come back `None`, which reads as *nothing outstanding* on
+    /// a contract that has money on it.
     #[must_use]
     pub fn unbilled(&self, contract: &ContractId) -> Option<Money> {
-        self.unbilled.get(&contract.to_string()).copied()
+        let sessions = self.unbilled.get(&contract.to_string())?;
+        sessions.values().copied().reduce(|running, amount| {
+            running
+                .checked_add(amount)
+                .expect("ran_up refuses a session in another currency")
+        })
     }
 
-    /// Take what an invoice billed off a contract's running total.
+    /// Take the sessions an invoice billed off a contract's running total.
     ///
-    /// # Why this is a subtraction rather than a clear
+    /// # Why this names the sessions rather than an amount
     ///
-    /// It used to remove the entry outright, on the reading that a month which
-    /// has been invoiced is a month with nothing outstanding. That is true only
-    /// at the instant the document was assembled. A session authorised while the
-    /// closing runs is added by [`Self::ran_up`] and then **wiped**: money this
-    /// provider will not collect, and — because [`Self::authorize`] judges the
-    /// credit limit against this total — a driver handed back a limit they have
-    /// not paid for (D299). Every other ledger in this workspace is written the
-    /// way that makes a lost update unrepresentable, and this one was written
-    /// the way that invites it.
+    /// It used to remove the whole entry, on the reading that a month which has
+    /// been invoiced is a month with nothing outstanding. That is true only at
+    /// the instant the document was assembled: a session authorised while the
+    /// closing runs is added by [`Self::ran_up`] and then **wiped** — money this
+    /// provider will not collect, and, because [`Self::authorize`] judges the
+    /// credit limit against this total, a driver handed back a limit they have
+    /// not paid for (D299).
     ///
-    /// So the caller states **what the invoice billed**, and what remains
-    /// remains. `None` is a contract with nothing outstanding, which is a
-    /// different statement from a balance of zero and is why the entry is
-    /// removed at exactly that point.
+    /// The fix for that was a subtraction, and a subtraction is a figure the
+    /// caller states. *"How much did the invoice bill"* is answerable two ways
+    /// and only one of them is the ledger's — which is the shape this workspace
+    /// keeps finding: a check fed by a caller is not a check. So the closing
+    /// names the **sessions** the document covers, and what comes off is what
+    /// this ledger holds for them. There is no figure to disagree about (D309).
     ///
     /// # Errors
     ///
-    /// [`ProviderError::MoreInvoicedThanRunUp`] where the amount exceeds the
-    /// running total or is in another currency — a closing that bills more than
-    /// the ledger holds has counted a session twice, or counted one this
+    /// [`ProviderError::InvoicedSessionNotCounted`] where the document covers a
+    /// session this contract has nothing outstanding for — a closing that bills
+    /// a session twice, bills one against the wrong contract, or bills one this
     /// provider never saw.
     pub fn invoiced(
         &mut self,
         contract: &ContractId,
-        amount: Money,
+        sessions: &[SessionId],
     ) -> Result<Option<Money>, ProviderError> {
         let key = contract.to_string();
-        let outstanding = self.unbilled.get(&key).copied();
-        let too_much = || ProviderError::MoreInvoicedThanRunUp {
-            contract: key.clone(),
-            invoiced: amount.to_string(),
-            outstanding: outstanding.map_or_else(|| "nothing".to_owned(), |m| m.to_string()),
-        };
-
-        let Some(outstanding) = outstanding else {
-            return if amount.is_zero() {
-                Ok(None)
-            } else {
-                Err(too_much())
-            };
-        };
-        let left = outstanding.checked_sub(amount).map_err(|_| too_much())?;
-        if left.amount().is_sign_negative() {
-            return Err(too_much());
+        // Checked before anything is removed: a closing that names one session
+        // it may not must not take the others off either.
+        for session in sessions {
+            if !self
+                .unbilled
+                .get(&key)
+                .is_some_and(|counted| counted.contains_key(&session.to_string()))
+            {
+                return Err(ProviderError::InvoicedSessionNotCounted {
+                    contract: key,
+                    session: session.to_string(),
+                });
+            }
         }
-        if left.is_zero() {
-            self.unbilled.remove(&key);
-            return Ok(None);
+        if let Some(counted) = self.unbilled.get_mut(&key) {
+            for session in sessions {
+                counted.remove(&session.to_string());
+            }
+            if counted.is_empty() {
+                self.unbilled.remove(&key);
+            }
         }
-        self.unbilled.insert(key, left);
-        Ok(Some(left))
+        Ok(self.unbilled(contract))
     }
 
     /// What a driver is told before they plug in.
@@ -961,10 +1034,11 @@ impl Empd {
         if !contract.is_in_force(on) {
             return Allowed::Expired;
         }
-        if let (Some(limit), Some(outstanding)) = (
-            contract.credit_limit,
-            self.unbilled.get(&token.contract.to_string()),
-        ) && outstanding.currency() == limit.currency()
+        // Off the same sum `unbilled` reports, so the figure a driver is
+        // refused against is the figure an operator can read back.
+        if let (Some(limit), Some(outstanding)) =
+            (contract.credit_limit, self.unbilled(&token.contract))
+            && outstanding.currency() == limit.currency()
             && outstanding.amount() >= limit.amount()
         {
             return Allowed::NoCredit;

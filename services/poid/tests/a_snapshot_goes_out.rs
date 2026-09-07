@@ -117,7 +117,7 @@ fn a_snapshot_is_built_from_the_operators_own_inventory_and_recorded_when_accept
 
     // …and the push comes back accepted. That is the daemon's socket; what the
     // service owns is the record, and it is written after the answer.
-    poid.accepted(at(0), at(1));
+    poid.accepted(&snapshot, at(1));
     assert!(poid.stale(at(30), time::Duration::hours(24)).is_none());
     assert_eq!(poid.last_accepted().unwrap().published_at, at(0));
 }
@@ -135,7 +135,10 @@ fn a_feed_nobody_refreshed_is_named_rather_than_read_as_current() {
         vec![site("Europe/Berlin")],
         &rate_for,
     );
-    poid.accepted(at(0), at(0));
+    let snapshot = poid
+        .snapshot(at(0))
+        .expect("a coherent inventory publishes");
+    poid.accepted(&snapshot, at(0));
 
     let within = time::Duration::hours(1);
     assert!(
@@ -189,7 +192,10 @@ fn a_status_message_before_a_snapshot_is_refused_rather_than_dropped_in_silence(
     assert!(err.to_string().contains("publish the table first"), "{err}");
 
     // Once the table is out, the same update publishes.
-    poid.accepted(at(0), at(1));
+    let snapshot = poid
+        .snapshot(at(0))
+        .expect("a coherent inventory publishes");
+    poid.accepted(&snapshot, at(1));
     let status = poid
         .status(&updates, at(2))
         .expect("references that resolve");
@@ -244,4 +250,131 @@ fn a_test_feed_and_a_real_one_are_different_documents() {
     let test = poid.snapshot(at(0)).unwrap().to_json().unwrap();
     assert!(test.contains("\"test\""));
     assert_ne!(real, test, "the two are different documents");
+}
+
+#[test]
+fn a_status_for_a_version_the_access_point_never_received_is_refused() {
+    // The sharper half, and the one the service used to answer with a shrug.
+    // "Has a snapshot been accepted" is not the question a status message
+    // asks — *which* snapshot is. Between the last push and this update sits
+    // every change the operator made, and an update built against the estate
+    // resolves against the estate perfectly while naming a version the access
+    // point has never had. `[DATEX-II-Profil]` gives that consumer no way to
+    // ask for it, so it drops the message without a word (D308).
+    let (published, _) = rate::publish(&tariff("Europe/Berlin"), "RATE-1");
+    let rate_for = move |_: &ChargingPoint| Some(published.clone());
+    let mut poid = Poid::new(
+        publisher(),
+        Facility::new("TABLE-1"),
+        vec![site("Europe/Berlin")],
+        &rate_for,
+    );
+
+    let snapshot = poid
+        .snapshot(at(0))
+        .expect("a coherent inventory publishes");
+    poid.accepted(&snapshot, at(1));
+
+    // The operator revises the point — a new connector, a corrected power, a
+    // renamed station. The facility goes to version 2, and no table has gone
+    // out since.
+    poid.sites[0].stations[0].points[0].facility = Facility::new("SITE-1-POINT-1").at_version(2);
+
+    let updates = vec![PointUpdate {
+        site: Facility::new("SITE-1"),
+        station: Facility::new("SITE-1-STATION"),
+        point: Facility::new("SITE-1-POINT-1").at_version(2),
+        report: poid.sites[0]
+            .points()
+            .next()
+            .expect("one point")
+            .report(PointStatus::Available)
+            .expect("an operating point may report `available`"),
+        price: None,
+    }];
+
+    let refused = poid
+        .status(&updates, at(2))
+        .expect_err("the access point holds version 1");
+    let PublishError::Feed(emob_poi::PoiError::NotInAcceptedTable {
+        ref facility,
+        ref referenced,
+        ref accepted,
+    }) = refused
+    else {
+        panic!("{refused:?}");
+    };
+    assert_eq!(facility, "SITE-1-POINT-1");
+    assert_eq!(referenced, "2");
+    assert_eq!(accepted.as_deref(), Some("1"));
+    assert!(
+        refused.to_string().contains("publish the table before"),
+        "the remedy is on the error: {refused}"
+    );
+
+    // …and publishing the table is the remedy, exactly as the message says.
+    let republished = poid
+        .snapshot(at(3))
+        .expect("the revised inventory publishes");
+    poid.accepted(&republished, at(4));
+    let status = poid
+        .status(&updates, at(5))
+        .expect("references that resolve");
+    assert!(status.to_json().expect("JSON").contains("SITE-1-POINT-1"));
+}
+
+#[test]
+fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
+    // `[AFIR Art. 20(2)(c)]` makes the ad-hoc price dynamic, so a change at noon
+    // is a status message addressed to a rate the table already named by `idG`.
+    // Nothing checked that name, and one that resolves against nothing is
+    // dropped in the same silence as a version — leaving the public price the
+    // old one (D308).
+    let (published, _) = rate::publish(&tariff("Europe/Berlin"), "RATE-1");
+    let rate_for = move |_: &ChargingPoint| Some(published.clone());
+    let mut poid = Poid::new(
+        publisher(),
+        Facility::new("TABLE-1"),
+        vec![site("Europe/Berlin")],
+        &rate_for,
+    );
+    let snapshot = poid
+        .snapshot(at(0))
+        .expect("a coherent inventory publishes");
+    poid.accepted(&snapshot, at(1));
+
+    let update = |rate_id: &str| {
+        vec![PointUpdate {
+            site: Facility::new("SITE-1"),
+            station: Facility::new("SITE-1-STATION"),
+            point: Facility::new("SITE-1-POINT-1"),
+            report: poid.sites[0]
+                .points()
+                .next()
+                .expect("one point")
+                .report(PointStatus::Available)
+                .expect("an operating point may report `available`"),
+            price: Some(emob_poi::datex::PriceUpdate {
+                rate_id: rate_id.to_owned(),
+                price_type: "pricePerKWh",
+                value: dec("0.37"),
+            }),
+        }]
+    };
+
+    let refused = poid
+        .status(&update("RATE-2"), at(2))
+        .expect_err("no table named RATE-2");
+    assert!(
+        matches!(
+            refused,
+            PublishError::Feed(emob_poi::PoiError::RateNotInAcceptedTable { ref rate_id })
+                if rate_id == "RATE-2"
+        ),
+        "{refused:?}"
+    );
+
+    // The name the table gave out resolves.
+    poid.status(&update("RATE-1"), at(2))
+        .expect("the rate the table named");
 }

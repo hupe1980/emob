@@ -7,10 +7,10 @@
 //! not yet invoiced, and a price list read as a whole rather than one quote at a
 //! time.
 
-use emob_core::{ContractId, Currency, Money, PartyId};
+use emob_core::{ContractId, Currency, Money, PartyId, SessionId};
 use emob_roam::TokenType;
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
-use empd::{Allowed, ChargedBy, Contract, Empd, Fee, Markup, ProviderError, Whitelist};
+use empd::{Allowed, ChargedBy, Contract, Counted, Empd, Fee, Markup, ProviderError, Whitelist};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use time::macros::{date, datetime};
@@ -160,16 +160,27 @@ fn no_credit_is_a_question_about_sessions_nobody_has_invoiced() {
         .issue_token(&contract(), "04A1", TokenType::AppUser, Whitelist::Allowed)
         .unwrap();
 
-    provider
-        .ran_up(&contract(), Money::new(dec("31.04"), Currency::EUR))
-        .unwrap();
+    let first: SessionId = "s-1".parse().unwrap();
+    let second: SessionId = "s-2".parse().unwrap();
+    let late: SessionId = "s-3".parse().unwrap();
+
+    assert_eq!(
+        provider
+            .ran_up(&contract(), &first, Money::new(dec("31.04"), Currency::EUR))
+            .unwrap(),
+        Counted::Added
+    );
     assert_eq!(
         provider.authorize(&token, date!(2026 - 06 - 01)).unwrap(),
         Allowed::Allowed
     );
 
     provider
-        .ran_up(&contract(), Money::new(dec("24.70"), Currency::EUR))
+        .ran_up(
+            &contract(),
+            &second,
+            Money::new(dec("24.70"), Currency::EUR),
+        )
         .unwrap();
     assert_eq!(
         provider.unbilled(&contract()).unwrap().to_string(),
@@ -184,14 +195,13 @@ fn no_credit_is_a_question_about_sessions_nobody_has_invoiced() {
     // for **what the invoice billed**, and no more. A session authorised while
     // the closing runs is added to this total and would be wiped by a clear:
     // money nobody collects, and a credit limit handed back unpaid (D299).
-    let outstanding = Money::new(dec("12.30"), Currency::EUR);
     provider
-        .ran_up(&contract(), outstanding)
+        .ran_up(&contract(), &late, Money::new(dec("12.30"), Currency::EUR))
         .expect("a session started while the month was closing");
     assert_eq!(
         provider
-            .invoiced(&contract(), Money::new(dec("55.74"), Currency::EUR))
-            .expect("the closing billed what it had")
+            .invoiced(&contract(), &[first.clone(), second])
+            .expect("the closing billed the sessions the document covers")
             .map(|left| left.to_string()),
         Some("12.30 EUR".to_owned()),
         "the session that arrived after the document survives it"
@@ -202,13 +212,16 @@ fn no_credit_is_a_question_about_sessions_nobody_has_invoiced() {
         "and the driver is under the limit again"
     );
 
-    // …and a closing that bills more than the ledger holds has counted a
-    // session twice, or counted one this provider never saw.
+    // …and a closing that bills a session twice is refused by name, rather than
+    // taking a figure off a total that no longer holds it.
     let error = provider
-        .invoiced(&contract(), Money::new(dec("99.00"), Currency::EUR))
-        .expect_err("a running total cannot go below zero");
+        .invoiced(&contract(), std::slice::from_ref(&first))
+        .expect_err("that session has been invoiced already");
     assert!(
-        matches!(error, ProviderError::MoreInvoicedThanRunUp { .. }),
+        matches!(
+            error,
+            ProviderError::InvoicedSessionNotCounted { ref session, .. } if session == "s-1"
+        ),
         "{error}"
     );
 
@@ -216,11 +229,67 @@ fn no_credit_is_a_question_about_sessions_nobody_has_invoiced() {
     // statement from a balance of zero.
     assert_eq!(
         provider
-            .invoiced(&contract(), outstanding)
+            .invoiced(&contract(), &[late])
             .expect("the remainder"),
         None
     );
     assert!(provider.unbilled(&contract()).is_none());
+}
+
+#[test]
+fn a_session_offered_twice_is_counted_once_and_a_re_rating_moves_the_difference() {
+    // A running total cannot tell a second session that cost the same from the
+    // same session offered twice — and offered twice is the ordinary shape of
+    // this seam: a CDR redelivered by a partner, a dispatch retried, a record
+    // re-rated after a tariff correction. Counted twice, the phantom never
+    // leaves: `invoiced` takes off what the document billed, which is the true
+    // figure, and the difference sits on the contract refusing a driver against
+    // a limit they are not over (D309).
+    let mut provider = Empd::new(me(), *b"key").with(
+        Contract::new(contract(), date!(2026 - 01 - 01))
+            .limited_to(Money::new(dec("50.00"), Currency::EUR)),
+    );
+    let token = provider
+        .issue_token(&contract(), "04A1", TokenType::AppUser, Whitelist::Allowed)
+        .unwrap();
+    let session: SessionId = "s-1".parse().unwrap();
+    let amount = Money::new(dec("31.04"), Currency::EUR);
+
+    assert_eq!(
+        provider.ran_up(&contract(), &session, amount).unwrap(),
+        Counted::Added
+    );
+    assert_eq!(
+        provider.ran_up(&contract(), &session, amount).unwrap(),
+        Counted::Already,
+        "the same record delivered again is not a second session"
+    );
+    assert_eq!(
+        provider.unbilled(&contract()).unwrap().to_string(),
+        "31.04 EUR"
+    );
+
+    // A re-rating moves the total by the **difference**, not by the whole of it.
+    let corrected = Money::new(dec("24.70"), Currency::EUR);
+    assert_eq!(
+        provider.ran_up(&contract(), &session, corrected).unwrap(),
+        Counted::Restated {
+            from: amount,
+            to: corrected
+        }
+    );
+    assert_eq!(
+        provider.unbilled(&contract()).unwrap().to_string(),
+        "24.70 EUR"
+    );
+    assert_eq!(
+        provider.authorize(&token, date!(2026 - 06 - 01)).unwrap(),
+        Allowed::Allowed,
+        "and the driver is not refused against a total the phantom inflated"
+    );
+
+    // …and the closing takes off exactly what this ledger holds for it.
+    assert_eq!(provider.invoiced(&contract(), &[session]).unwrap(), None);
 }
 
 #[test]

@@ -163,6 +163,22 @@ pub struct Session {
     /// A vector rather than one series because a bidirectional session has two
     /// registers counting two quantities, and they never net.
     pub series: Vec<MeterSeries>,
+    /// The vehicle-communication generation this session actually negotiated.
+    ///
+    /// # A different fact from the one the compliance calendar reads
+    ///
+    /// `emob_core::V2gCommunication` says what a **charger implements**, which
+    /// is what every `[DA-656 Anh. 2.1.x]` duty is judged on. This says what
+    /// two parties agreed on the wire, once, at an instant. A point that
+    /// implements -2 and -20 and negotiates -2 with a 2018 car is compliant and
+    /// had a -2 session, and until there was a Plug & Charge crate there was
+    /// nothing to put the second fact on.
+    ///
+    /// `None` for a session that negotiated nothing high-level — an RFID card
+    /// on a PWM point — which is not the same as *"nobody recorded it"* and is
+    /// why [`Self::contradicts_its_own_protocol`] asks about the pair rather
+    /// than about this field alone.
+    pub negotiated: Option<emob_core::V2gProtocol>,
 }
 
 impl Session {
@@ -186,7 +202,36 @@ impl Session {
                 at: started_at,
             }],
             series: Vec::new(),
+            negotiated: None,
         }
+    }
+
+    /// Record which vehicle-communication generation this session negotiated.
+    #[must_use]
+    pub fn negotiated(mut self, protocol: emob_core::V2gProtocol) -> Self {
+        self.negotiated = Some(protocol);
+        self
+    }
+
+    /// Whether the session's authorisation and its negotiated protocol are two
+    /// stories about one event.
+    ///
+    /// Plug & Charge is ISO 15118's. DIN SPEC 70121 is external identification
+    /// only — a card or an app — so a session recorded as `din70121` and
+    /// authorised by a contract certificate is a claim no charger can have
+    /// made, and the pair is the only place it becomes checkable: each half on
+    /// its own is a perfectly ordinary value.
+    ///
+    /// The same shape as the cross-check between an authorisation path and a
+    /// signed record's identification level, one field along — and it answers
+    /// `false` where the protocol was not recorded, because a fact nobody
+    /// stated contradicts nothing.
+    #[must_use]
+    pub fn contradicts_its_own_protocol(&self) -> bool {
+        self.authorization.path == crate::AuthPath::PlugAndCharge
+            && self
+                .negotiated
+                .is_some_and(|protocol| !protocol.carries_plug_and_charge())
     }
 
     /// Where the session is now.

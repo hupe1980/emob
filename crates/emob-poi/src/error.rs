@@ -87,6 +87,56 @@ pub enum PoiError {
         facility: String,
     },
 
+    /// A status message references a facility version the **published** table
+    /// does not carry.
+    ///
+    /// The sharper half of [`Self::VersionNotPublished`], and the one an
+    /// inventory cannot answer. That one compares a reference against the
+    /// operator's own points; this compares it against the table publication
+    /// the national access point actually took. The two differ exactly when the
+    /// estate has moved on since — a point added, a facility revised — and that
+    /// is the ordinary state of an operator between snapshots.
+    ///
+    /// A consumer holding the table it was last sent has no version 2 to attach
+    /// a version 2 status to, and `[DATEX-II-Profil]` gives it no way to ask for
+    /// one. So the message is dropped in silence: a charger reporting
+    /// `available` to nobody, with nothing failing anywhere, until somebody
+    /// notices it missing from a map (D308).
+    ///
+    /// The remedy is not to weaken the reference. It is to publish the table
+    /// first.
+    #[error(
+        "status references {facility} at version {referenced}, and the table the access point \
+         accepted carries {}: publish the table before the status that references it \
+         [DATEX-II-Profil]",
+        accepted.as_deref().unwrap_or("no version of it at all")
+    )]
+    NotInAcceptedTable {
+        /// Which facility.
+        facility: String,
+        /// The version the status message cites.
+        referenced: String,
+        /// The version the accepted table published, where it published one.
+        accepted: Option<String>,
+    },
+
+    /// A price update addresses a rate `idG` the published table never gave out.
+    ///
+    /// `[AFIR Art. 20(2)(c)]` makes the ad-hoc price dynamic, so a tariff that
+    /// changes at noon travels as a status message addressed to a rate the
+    /// table already named. One addressed to a name no table carried resolves
+    /// against nothing and is dropped the same silent way — and the price the
+    /// public sees stays the old one (D308).
+    #[error(
+        "price update addresses rate {rate_id}, which the table the access point accepted does \
+         not carry: a price change is addressed to a rate the table already named \
+         [DATEX-II-Profil]"
+    )]
+    RateNotInAcceptedTable {
+        /// The dangling rate reference.
+        rate_id: String,
+    },
+
     /// A rate is published at a site whose wall clock runs on a different zone.
     ///
     /// A tariff's `22:00` is local civil time at the charge point

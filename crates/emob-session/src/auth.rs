@@ -196,6 +196,33 @@ impl Authorization {
         }
     }
 
+    /// A Plug & Charge authorisation, off a verified contract certificate.
+    ///
+    /// # Both halves come from the certificate
+    ///
+    /// `emaid` is the identifier `[V2G2-108]` puts in the leaf's Common Name,
+    /// and `emob_pnc::verify_contract` is what reads it there — never a value a
+    /// caller supplied beside the chain. What the caller does supply is the
+    /// **contract** it maps to in this platform's own books, which is a
+    /// commercial fact no certificate carries.
+    ///
+    /// [`Self::token_ref`] is left empty on purpose. An eMAID is a lifelong
+    /// identifier of a person's contract, and the keyed digest that may be
+    /// stored in its place needs a key this crate does not have — see
+    /// [`TokenRef`], and `empd`, which holds it.
+    #[must_use]
+    pub const fn plug_and_charge(id: ContractId, emaid: Emaid) -> Self {
+        Self {
+            path: AuthPath::PlugAndCharge,
+            subject: Subject::Contract {
+                id,
+                emaid: Some(emaid),
+            },
+            token_ref: None,
+            authorization_reference: None,
+        }
+    }
+
     /// Whether this session may be billed against an ad-hoc tariff.
     ///
     /// Both halves have to agree. A session on the ad-hoc *path* that carries a

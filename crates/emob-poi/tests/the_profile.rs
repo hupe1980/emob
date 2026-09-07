@@ -383,8 +383,17 @@ fn every_path_the_status_publication_emits_is_one_the_reference_instance_contain
         },
     ];
 
+    // The references resolve against the table this feed actually published,
+    // which is the only inventory the access point has.
+    let table = feed
+        .table(time::macros::datetime!(2026-04-14 12:00 UTC))
+        .expect("a coherent inventory publishes");
     let json = feed
-        .status(&updates, time::macros::datetime!(2026-04-14 12:00 UTC))
+        .status(
+            table.published(),
+            &updates,
+            time::macros::datetime!(2026-04-14 12:00 UTC),
+        )
         .expect("references that resolve")
         .to_json()
         .expect("serialisable");

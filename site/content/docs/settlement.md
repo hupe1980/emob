@@ -852,6 +852,23 @@ whose original has not been booked is refused by name, in `billd`, because which
 document cancels which is a service's fact: neither the crate that builds the
 cancellation nor the journal that seals the entry holds it (D298).
 
+**The replacement is the same rule pointed the other way.** A re-billing produces
+two documents; booking only the second leaves the first standing, and one June is
+debited at 31.04 and again at 24.70 in a journal whose every entry balances. The
+rule is stated over the whole correction chain — an invoice, its
+*Stornorechnung*, the replacement, and however many times that repeats — because
+the order the calls arrive in is not the operator's to choose: booking the
+original *after* its replacement is the same double charge running backwards. So
+**one invoice in a chain stands in the books at a time**.
+
+That one came from a property rather than a reading. Every test above is an
+example, asserted at its end, and a service's rules are about the pair: what was
+true before a call and what may be true after. `billd`'s suite drives the books
+with a generated sequence — issue, accept, reject, book, cancel-and-re-bill —
+and checks after **every** call that the journal balances, that nothing in it was
+refused by its recipient, and that the receivable is one document's gross rather
+than the sum of two (D307).
+
 ### A roaming settlement is not taxed where the charge point stands
 
 Recharging an EV is a single composite supply of **goods** — the electricity —

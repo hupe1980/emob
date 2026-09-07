@@ -12,11 +12,11 @@ value survives in, and the driver contract all of it turns into an invoice.
 [The Eichrecht chain](https://hupe1980.github.io/emob/docs/eichrecht/) ·
 [Architecture](https://hupe1980.github.io/emob/docs/architecture/)
 
-> 🚧 **Status: early.** Thirteen domain crates and seven daemons are built, tested
+> 🚧 **Status: early.** Fifteen domain crates and eight daemons are built, tested
 > and green. Everything else is designed and marked 📐 rather than blurred into
 > it.
 
-**959 tests.** The ones that are hard to fake:
+**1040 tests.** The ones that are hard to fake:
 
 - **A real message, end to end.** The Open Charge Alliance's own published OCPP
   example goes in at the wire and comes out as a taxable amount — and again as a
@@ -31,6 +31,13 @@ value survives in, and the driver contract all of it turns into an invoice.
 - **A month, and a year.** A month closes into a validated EN 16931 invoice, a
   SEPA collection and balanced postings; a year files its THG-Quote notification
   with every ineligible point refused by name.
+- **A PKI this workspace does not run.** Hubject's own published Plug & Charge
+  test environment validates against ISO 15118's Annex F profiles — and a
+  contract minted in a *second* ecosystem validates impeccably in the pool that
+  minted it and reaches nothing in this one.
+- **A setpoint over a real wire.** Two SPINE engines and datagrams encoded and
+  decoded between them: the watts bind the allocation *exactly*, and no charge
+  point ends up above the ceiling.
 - **A hundred stations that reconcile exactly.** `billed + refused == metered`,
   with the residual zero rather than small.
 - **Properties over generated input**, not examples — because an example is a
@@ -39,11 +46,14 @@ value survives in, and the driver contract all of it turns into an invoice.
   a bound published in the basis the prices are *not* quoted in still binding, a
   record its own validator accepts, a month that adds up under the standard's
   own 317 rules, and one price on all three wires.
-- **…and a property over generated *sequences*, not values.** Every one above
+- **…and properties over generated *sequences*, not values.** Every one above
   builds one thing and asks a question of it. A service holds what happened, and
   its rules are about the pair — what was true before a call and what may be true
   after — so the roaming node is driven with generated orderings of consign,
-  accept, refuse and credit, and its invariants are checked after every step.
+  accept, refuse and credit, and the books with generated orderings of issue,
+  accept, reject, book and cancel-and-re-bill, with the invariants checked after
+  every step. The second one found two defects on its first run: one month
+  debited twice, in a journal where every entry balanced.
 
 ## Why
 
@@ -193,22 +203,24 @@ older and considerably wider than the European one everybody models.
 | [`emob-poi`](crates/emob-poi) | The register and the national access point feed: DATEX II AFIR Recharging, with the published price carried from the tariff that rates the session | ✅ |
 | [`emob-roam`](crates/emob-roam) | The roaming edge, on both wires: the canonical record onto OCPI 2.3.0 and 2.2.1 in both directions, and onto **OICP 2.3** through Hubject — where the record carries no money at all, so the price crosses separately as a pricing product and the account says the amount did not. Routing read out of the contract identifier itself. eMIP is still 📐 | ✅ |
 | [`emob-sim`](crates/emob-sim) | A deterministic fleet: virtual stations that sign genuine OCMF, eight seeded faults, and a day that reconciles exactly — assembled from OCPP events | ✅ |
-| `emob-pnc` | Plug & Charge contracts, OPCP pools, multi-PKI | 📐 |
 | [`emob-smart`](crates/emob-smart) | **`[EnWG §14a]` as executable law.** Which charge points a grid operator may switch down — a *publicly accessible* one is not a steuerbare Verbrauchseinrichtung at all `[BK6-22-300 Ziff. 2.4.1]`, the condition every summary drops — what their operator keeps a claim to, and an allocation that cannot exceed the setpoint because the ceiling is the only door one exists through | ✅ |
+| [`emob-eebus`](crates/emob-eebus) | **The § 14a wire.** A grid operator's setpoint off the SPINE datagram's own `ScaledNumber` as an exact decimal — sixty watts is the distance between the Mindestleistung and three-phase 6 A, and a scale no decimal holds is a NACK rather than a substituted figure — and which of `[LPC §2.3.2]`'s five states a silence has put the site in, `[LPC-022]`'s release included | ✅ |
+| [`emob-pnc`](crates/emob-pnc) | **Plug & Charge, from the platform's side.** Which ecosystem a contract belongs to, because one minted elsewhere *validates* `[V2G2-925]`; whether anything on its path has been withdrawn, which the protocol libraries name as what they do not answer; the eMAID read **off the certificate** and the vehicle's PCID off its own; and the several contracts one car holds | ✅ |
 | [`emob-thg`](crates/emob-thg) | The greenhouse-gas quota: `[38k §6(3)]`'s four conditions per point, and a notification built only from energy a meter signed. Notified is not published, and no factor is a constant | ✅ |
 | [`emob-billing`](crates/emob-billing) | Rated CDRs → an EN 16931 e-invoice and the verdict on it, a SEPA collection, and postings addressed by role. The rounding happens once, at the line, and the residual is reported | ✅ |
 | [`emob-service`](crates/emob-service) | The daemon shell, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature | ✅ |
 
 | Service | What it does | State |
 |---|---|---|
-| [`csmsd`](services/csmsd) | The CSMS a station connects to: OCPP 1.6J/2.0.1/2.1 on `ocpp-kit` transport, the two ledgers side by side, the chain from a signed value to a settled record | ✅ |
+| [`csmsd`](services/csmsd) | The CSMS a station connects to: OCPP 1.6J/2.0.1/2.1 on `ocpp-kit` transport, the two ledgers side by side — with the operational one's verdict **read**, so a retry is not a second session — and the chain from a signed value to a settled record | ✅ |
+| [`sited`](services/sited) | The site controller, and the only service here meant to run **at a site**: a controller behind a broken WAN link is a site held at 4.2 kW because this process could not be reached rather than because a grid operator asked. It holds no rule — only the clock that tells a setpoint from a silence, and the record `[LPC §4.1.5]` calls the operator's evidence | ✅ |
 | [`agentd`](services/agentd) | The advisory plane on `agentplane` — specialists that correlate across many exact answers, and cannot move money by construction. Evidence triage, the tariff sweep, and a compliance sweep that answers **which duties this estate will fail on the day they start** | ✅ |
-| [`poid`](services/poid) | The national access point feed `[AFIR Art. 20(2)]`: the DATEX II snapshot, the updates that reference it, and a feed nobody refreshed named rather than read as current | ✅ |
+| [`poid`](services/poid) | The national access point feed `[AFIR Art. 20(2)]`: the DATEX II snapshot, the updates that reference it — resolved against the table the access point actually **has**, not against the estate they were built from — and a feed nobody refreshed named rather than read as current | ✅ |
 | [`tarifd`](services/tarifd) | Publishing a tariff version to the three audiences owed it, from one decimal, **before** it takes effect — and to none of them if the stations cannot be given it | ✅ |
 | [`roamd`](services/roamd) | The roaming node: **who** a record goes to, routed out of the contract's own issuer; **when** it is late, against the window that partner agreed to; and **what to do** with one that arrives — accept, dispute, or refuse, with a retry told apart from a restatement. A record the partner has taken is sealed `[OCPI 2.3.0 §mod_cdrs]`, and a correction may not overtake its own reversal | ✅ |
-| [`billd`](services/billd) | The service that closes a month: what number the invoice carries, that the period closes **once** and a re-closing is a correction rather than a second demand, which document supersedes which — the reversal first — and which account each role-addressed posting lands in. The only manifest that may declare `doubleentry`, with the place of supply in the account path because a VAT liability has a creditor. Posting is a separate act from issuing: a platform that books on issue holds a trial balance the recipient's own records disagree with | ✅ |
-| [`empd`](services/empd) | The provider side: the keyed token store `emob-roam` asks for by name, because OCPI wants an RFID uid on every outgoing CDR and a session refuses to hold one; `[OCPI 2.3.0 §mod_tokens]`'s five answers and the whitelist read as the two-sided rule it is; `[AFIR Art. 5(5)]`'s quote with the operator's price passed through **unchanged**, over a price list with no country in it; and the C-60/23 fee owed by a contract that charged nothing all month | ✅ |
-| `pncd`, `opsd`, `sited` | | 📐 |
+| [`billd`](services/billd) | The service that closes a month: what number the invoice carries, that the period closes **once** and a re-closing is a correction rather than a second demand, which document supersedes which — the reversal first — and which account each role-addressed posting lands in. The only manifest that may declare `doubleentry`, with the place of supply in the account path because a VAT liability has a creditor. Posting is a separate act from issuing: a platform that books on issue holds a trial balance the recipient's own records disagree with — and a correction is a **pair**, so the books hold both sides of it or neither | ✅ |
+| [`empd`](services/empd) | The provider side: the keyed token store `emob-roam` asks for by name, because OCPI wants an RFID uid on every outgoing CDR and a session refuses to hold one; `[OCPI 2.3.0 §mod_tokens]`'s five answers and the whitelist read as the two-sided rule it is; `[AFIR Art. 5(5)]`'s quote with the operator's price passed through **unchanged**, over a price list with no country in it; and the C-60/23 fee owed by a contract that charged nothing all month, over a running total keyed by session because a total cannot tell one record redelivered from two that cost the same | ✅ |
+| `pncd`, `opsd` | The OPCP pool client, and availability reporting | 📐 |
 
 `emob-roam` is the one crate whose MSRV is not the workspace's. Everything that
 decides money promises **1.94**, which is the floor the sibling workspaces
@@ -246,13 +258,15 @@ dispute about a two-year-old session is replayed exactly as it happened — and
 builds each from its own tarball. Pushing a `vX.Y.Z` tag runs
 [`release.yml`](.github/workflows/release.yml), which re-runs the whole gate
 against the tagged revision, refuses a tag whose version the manifests do not
-carry, and then publishes the thirteen crates one step at a time in dependency
+carry, and then publishes the fifteen crates one step at a time in dependency
 order.
 
-A publish is thirteen uploads and can stop in the middle, leaving the version spent
+A publish is fifteen uploads and can stop in the middle, leaving the version spent
 for some crates and free for the rest — so each step treats *already uploaded* as
 the upload having already happened, and a re-run finishes the release instead of
-needing a version bump. Every other failure still stops the run.
+needing a version bump. Every other failure still stops the run. `cargo xtask
+check-manifests` holds that list to the workspace, because a release that
+publishes only some of it **succeeds**.
 
 It needs a `CARGO_REGISTRY_TOKEN` secret on a `crates-io` environment, which is
 also where a required reviewer goes: a version number is spent the moment

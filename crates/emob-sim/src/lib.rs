@@ -11,4 +11,4 @@ pub mod station;
 pub use day::{DayOutcome, ReferenceDay, ReferenceDayBuilder, Refused};
 pub use fault::{Fault, FaultPlan, Rate};
 pub use rng::Rng;
-pub use station::{ChargedSession, SessionPlan, VirtualStation};
+pub use station::{ChargedSession, Identification, SessionPlan, VirtualStation};

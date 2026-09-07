@@ -479,6 +479,24 @@ impl V2gCommunication {
         self.iso15118_2 || self.iso15118_20
     }
 
+    /// The generations this point implements, as values a **session** can
+    /// carry.
+    ///
+    /// [`Self::protocol_names`] answers a datasheet question and answers it in
+    /// strings, which is right for a compliance report and wrong for a record:
+    /// a CDR that says a session negotiated `iso15118-2` has to be able to
+    /// become a `V2gProtocol` again when a dispute arrives, and a `String`
+    /// becomes whatever was typed. See [`V2gProtocol`].
+    pub fn protocols(self) -> impl Iterator<Item = V2gProtocol> {
+        [
+            (self.din70121, V2gProtocol::Din70121),
+            (self.iso15118_2, V2gProtocol::Iso15118_2),
+            (self.iso15118_20, V2gProtocol::Iso15118_20),
+        ]
+        .into_iter()
+        .filter_map(|(present, protocol)| present.then_some(protocol))
+    }
+
     /// The high-level generations this point implements, by their stable
     /// names.
     ///
@@ -512,6 +530,108 @@ impl V2gCommunication {
         ]
         .into_iter()
         .filter_map(|(present, name)| present.then_some(name))
+    }
+}
+
+/// A vehicle-communication generation, as a value rather than a string.
+///
+/// # Why this exists beside [`V2gCommunication`]
+///
+/// They answer different questions and the difference is the one
+/// `[DATEX-II-Profil Tab. A.130]` gets wrong. `V2gCommunication` is a fact
+/// about a **charger** — what the equipment implements, which is what every
+/// `[DA-656 Anh. 2.1.x]` duty is judged on. This is a fact about a **session**:
+/// which generation two parties actually negotiated on the wire, once, at an
+/// instant.
+///
+/// A point that implements -2 and -20 and negotiates -2 with a 2018 car is
+/// compliant and had a -2 session, and a record that carried only the first of
+/// those cannot answer what the second one asked. The two facts live on
+/// different objects for that reason, and a Plug & Charge session is where the
+/// second one finally has somewhere to go.
+///
+/// # The spelling is `iso15118`'s
+///
+/// `as_str` and [`FromStr`](core::str::FromStr) round-trip on the same tokens
+/// `iso15118::Protocol` uses, and `crates/emob-core/tests/the_kits_agree.rs`
+/// asserts it against that crate rather than trusting this comment. A bare
+/// `iso15118` is refused for the reason the profile's own literal is dangerous:
+/// it names no generation, and guessing one is how a point claims a duty from
+/// 2027 that it does not meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+#[non_exhaustive]
+pub enum V2gProtocol {
+    /// DIN SPEC 70121 — high-level DC, external identification only.
+    ///
+    /// `din70121` on the wire and in a record. It satisfies no
+    /// `[DA-656 Anh. 2.1.x]` duty, and it is most of the European DC fleet
+    /// commissioned before roughly 2020.
+    #[cfg_attr(feature = "serde", serde(rename = "din70121"))]
+    Din70121,
+    /// EN ISO 15118-2:2016 — `iso15118-2`.
+    #[cfg_attr(feature = "serde", serde(rename = "iso15118-2"))]
+    Iso15118_2,
+    /// EN ISO 15118-20:2022 — `iso15118-20`.
+    #[cfg_attr(feature = "serde", serde(rename = "iso15118-20"))]
+    Iso15118_20,
+}
+
+impl V2gProtocol {
+    /// The stable token, as `iso15118::Protocol` spells it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Din70121 => "din70121",
+            Self::Iso15118_2 => "iso15118-2",
+            Self::Iso15118_20 => "iso15118-20",
+        }
+    }
+
+    /// Whether this generation is one `[DA-656 Anh. 2.1.x]` names.
+    ///
+    /// DIN SPEC 70121 is not, and the distinction is the whole reason
+    /// [`V2gCommunication::is_high_level`] and
+    /// [`V2gCommunication::is_iso15118`] are two methods.
+    #[must_use]
+    pub const fn is_iso15118(self) -> bool {
+        matches!(self, Self::Iso15118_2 | Self::Iso15118_20)
+    }
+
+    /// Whether a contract certificate can authorise a session on it.
+    ///
+    /// Plug & Charge is ISO 15118's. DIN SPEC 70121 is *"EIM only"* — external
+    /// identification, a card or an app — so a session recorded as DIN and
+    /// authorised by a contract certificate is two stories about one event, and
+    /// `emob_session::Session::negotiated` is where the pair becomes checkable.
+    #[must_use]
+    pub const fn carries_plug_and_charge(self) -> bool {
+        self.is_iso15118()
+    }
+}
+
+impl core::fmt::Display for V2gProtocol {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl core::str::FromStr for V2gProtocol {
+    type Err = crate::CoreError;
+
+    /// Reads back exactly what [`Self::as_str`] writes, and **refuses a bare
+    /// `iso15118`** — the literal `[DATEX-II-Profil Tab. A.130]` defines as -20
+    /// and which a reader will take for -2 half the time.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "din70121" => Ok(Self::Din70121),
+            "iso15118-2" => Ok(Self::Iso15118_2),
+            "iso15118-20" => Ok(Self::Iso15118_20),
+            other => Err(crate::CoreError::UnknownV2gProtocol {
+                given: other.to_owned(),
+            }),
+        }
     }
 }
 

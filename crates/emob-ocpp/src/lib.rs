@@ -113,10 +113,12 @@
 pub mod error;
 pub mod fixtures;
 pub mod kit;
+pub mod setpoint;
 pub mod tariff;
 pub mod transaction;
 
 pub use error::SeamError;
+pub use setpoint::{Setpoint, to_charging_profiles};
 pub use tariff::{cost_updated, to_ocpp};
 pub use transaction::{
     Assembled, EventKind, SignedReading, Transaction, TransactionEvent, record_of,

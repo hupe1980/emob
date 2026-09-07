@@ -1305,10 +1305,30 @@ fn serialisable_structs(source: &str) -> Vec<(String, String, String)> {
 fn struct_fields(body: &str) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     let mut attrs = String::new();
+    // How deep inside an attribute's brackets the scan is. An attribute
+    // `rustfmt` wrapped continues on lines that do **not** start with `#[`, and
+    // reading each of those as "not an attribute" threw the whole thing away —
+    // so a field whose `serde(with = …)` was one character too long to fit on a
+    // line was reported as having none. A guard that fails on correctly written
+    // code is one that gets switched off, which is the failure mode this
+    // workspace names about every over-broad check (D312).
+    let mut depth: i32 = 0;
     for line in body.lines() {
         let trimmed = line.trim();
+        if depth > 0 {
+            attrs.push_str(trimmed);
+            depth += i32::try_from(trimmed.matches('[').count()).unwrap_or(0)
+                + i32::try_from(trimmed.matches('(').count()).unwrap_or(0)
+                - i32::try_from(trimmed.matches(']').count()).unwrap_or(0)
+                - i32::try_from(trimmed.matches(')').count()).unwrap_or(0);
+            continue;
+        }
         if trimmed.starts_with("#[") {
             attrs.push_str(trimmed);
+            depth = i32::try_from(trimmed.matches('[').count()).unwrap_or(0)
+                + i32::try_from(trimmed.matches('(').count()).unwrap_or(0)
+                - i32::try_from(trimmed.matches(']').count()).unwrap_or(0)
+                - i32::try_from(trimmed.matches(')').count()).unwrap_or(0);
             continue;
         }
         if trimmed.starts_with("///") || trimmed.starts_with("//") || trimmed.is_empty() {
@@ -1650,6 +1670,12 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
         "BNetzA BK6-22-300 (§ 14a EnWG), Anlage 1",
         "hems/specs/bnetza/bk6-22-300-anlage1",
     ),
+    // …and the statute beside it. `[EEG §9]` is where a curtailment stops being
+    // a control question and becomes a payment one: the reduced figure is what
+    // a feed-in tariff is computed against, which is why an exact decimal
+    // matters on a wire that carries watts. In the sibling `hems` workspace,
+    // beside the EnWG.
+    ("[EEG ", "Erneuerbare-Energien-Gesetz", "hems/specs"),
     // …and the use case the Festlegung is carried over: EEBUS's Limitation of
     // Power Consumption, whose §2.3.2 gives a controllable system five states
     // where a summary gives it two, and whose numbered requirements say what a
@@ -1659,6 +1685,25 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
         "[LPC",
         "EEBUS UC TS Limitation of Power Consumption 1.0.0",
         "EEBus_UC_TS_LimitationOfPowerConsumption",
+    ),
+    // Plug & Charge, and its two documents. `[OPCP …]` is Hubject's Open
+    // Plug&Charge Protocol — the four pools a contract certificate is actually
+    // issued through, and the only place the ecosystem's own rules about PCIDs,
+    // per-MO separation and revocation are written down.
+    (
+        "[OPCP",
+        "Hubject's Open Plug&Charge Protocol",
+        "opcp-main.zip",
+    ),
+    // …and `[V2G2-…]` are ISO 15118-2's numbered requirements. The standard is
+    // paywalled, so the corpus is the sibling kit's — which quotes each
+    // requirement beside the code that implements it, and is why a citation
+    // here is followed to a sentence rather than to a page number nobody can
+    // open.
+    (
+        "[V2G2-",
+        "ISO 15118-2's numbered requirements",
+        "iso15118/specs",
     ),
 ];
 
@@ -1823,7 +1868,7 @@ fn array_field(text: &str, field: &str) -> Option<Vec<String>> {
 /// there — after the version has already been consumed on the registry.
 /// The crates that promise to read no clock, open no socket and touch no
 /// filesystem — the same list `just purity` greps.
-const PURE_CRATES: [&str; 12] = [
+const PURE_CRATES: [&str; 14] = [
     "emob-core",
     "emob-eichrecht",
     "emob-session",
@@ -1836,6 +1881,12 @@ const PURE_CRATES: [&str; 12] = [
     "emob-roam",
     "emob-sim",
     "emob-smart",
+    // The two seams M6c added, and the two the guard has most to say about.
+    // `emob-pnc` links ISO 15118's Annex F path validation, and `emob-eebus`
+    // links SHIP and SPINE — both of which have runtimes a feature flag away,
+    // and neither of which may reach a crate that promises replay.
+    "emob-eebus",
+    "emob-pnc",
 ];
 
 /// Crates whose presence in a graph means an ambient-state path was activated.
@@ -2461,6 +2512,13 @@ fn check_constructors(root: &Path) -> Result<()> {
 fn derived_deserialize_types(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     for (index, line) in src.lines().enumerate() {
+        // A comment that *names* the thing this looks for is prose, not an
+        // attribute — and a type whose documentation explains why it does not
+        // derive `Deserialize` was reported for deriving it, which is the same
+        // shape as a guard that has to exempt its own source (D312).
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
         if !line.contains("derive(") || !line.contains("Deserialize") {
             continue;
         }
@@ -2543,12 +2601,12 @@ fn has_fallible_constructor(src: &str, name: &str) -> bool {
             let Some(open) = after_fn.find('(') else {
                 continue;
             };
-            // A method, not a constructor.
-            if after_fn[open + 1..].trim_start().starts_with("self")
-                || after_fn[open + 1..].trim_start().starts_with("&self")
-                || after_fn[open + 1..].trim_start().starts_with("&mut self")
-                || after_fn[open + 1..].trim_start().starts_with("mut self")
-            {
+            // A method, not a constructor. Read past the borrow, the **named
+            // lifetime** and the `mut`, because `&'a self` is a receiver
+            // spelled three characters longer — and reading it as a parameter
+            // made `validate_in` look like a fallible constructor and reported
+            // a type whose rules the wire does not walk past (D312).
+            if takes_self(&after_fn[open + 1..]) {
                 continue;
             }
             // …and one that can refuse says so in the arrow, which may sit a few
@@ -2563,6 +2621,25 @@ fn has_fallible_constructor(src: &str, name: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether a parameter list begins with a receiver.
+///
+/// `self`, `&self`, `&mut self`, `mut self`, and every spelling with a named
+/// lifetime: `&'a self`, `&'a mut self`. Anything that is not a receiver makes
+/// the function a constructor for the purposes of this guard.
+fn takes_self(params: &str) -> bool {
+    let mut rest = params.trim_start();
+    rest = rest.strip_prefix('&').unwrap_or(rest).trim_start();
+    if rest.starts_with('\'') {
+        // A named lifetime, up to the whitespace that ends it.
+        rest = rest
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, after)| after)
+            .trim_start();
+    }
+    rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+    rest.starts_with("self")
 }
 
 /// The text of every `impl <name>` block in a file, brace-matched.
@@ -2671,6 +2748,7 @@ fn check_manifests(root: &Path) -> Result<()> {
     }
     let mut problems = Vec::new();
     let mut checked = 0;
+    let mut publishable: Vec<String> = Vec::new();
 
     for entry in std::fs::read_dir(&crates_dir)? {
         let dir = entry?.path();
@@ -2680,6 +2758,13 @@ fn check_manifests(root: &Path) -> Result<()> {
         }
         checked += 1;
         let text = std::fs::read_to_string(&manifest)?;
+        if !text
+            .lines()
+            .any(|l| l.trim_start().starts_with("publish") && l.contains("false"))
+            && let Some(name) = dir.file_name().and_then(|n| n.to_str())
+        {
+            publishable.push(name.to_owned());
+        }
 
         for field in ["readme", "description", "license", "repository", "keywords"] {
             let declared = text
@@ -2750,6 +2835,28 @@ fn check_manifests(root: &Path) -> Result<()> {
         }
     }
 
+    // …and that the release actually publishes every one of them.
+    //
+    // The workflow is one step per crate on purpose — a run that stops halfway
+    // has to be resumable, and `cargo publish --workspace` refuses that state
+    // outright — so the list is hand-maintained, and a hand-maintained list
+    // drifts. Six publishable crates were missing from it for four milestones
+    // and nothing said so, because a release that uploads nine of fifteen
+    // crates **succeeds**: the version is spent, the tag exists, and the six
+    // that never went out look exactly like six that were never written (D317).
+    let release = root.join(".github/workflows/release.yml");
+    if let Ok(workflow) = std::fs::read_to_string(&release) {
+        for name in &publishable {
+            if !workflow.contains(&format!("cargo publish -p {name} ")) {
+                problems.push(format!(
+                    ".github/workflows/release.yml never publishes `{name}`: a release that \
+                     uploads some of the workspace succeeds, and the crates it skipped are \
+                     indistinguishable from crates nobody wrote"
+                ));
+            }
+        }
+    }
+
     if !problems.is_empty() {
         eprintln!("❌ manifests that cannot be published:");
         for p in &problems {
@@ -2757,7 +2864,11 @@ fn check_manifests(root: &Path) -> Result<()> {
         }
         bail!("{} manifest problem(s)", problems.len());
     }
-    println!("📦 check-manifests: {checked} crate(s) can be packaged");
+    println!(
+        "📦 check-manifests: {checked} crate(s) can be packaged, and the release publishes all {} \
+         that are publishable",
+        publishable.len()
+    );
     Ok(())
 }
 

@@ -1,0 +1,46 @@
+[package]
+name        = "emob-pnc"
+description = "ISO 15118 Plug & Charge contract lifecycle: OPCP pools as plural from day one, contract certificates validated against the pool that issued them, and the revocation answer the protocol libraries leave to their callers"
+keywords    = ["iso15118", "plug-and-charge", "ev-charging", "pki", "emaid"]
+categories  = ["cryptography", "authentication"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+base64    = { workspace = true }
+emob-core = { workspace = true }
+# The artefacts, and nothing else. `pnc` is the signature profile and the Annex F
+# path validation; it pulls **no** cryptography — the curve is a trait the caller
+# implements, which is what lets this crate stay on the workspace's own
+# RustCrypto generation (D304) instead of importing a second one.
+iso15118  = { workspace = true, features = ["pnc"] }
+p256      = { workspace = true }
+p521      = { workspace = true }
+serde     = { workspace = true, optional = true }
+thiserror = { workspace = true }
+time      = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize the contract and pool types.
+serde = ["dep:serde", "emob-core/serde", "iso15118/serde", "time/serde-well-known"]
+
+[dev-dependencies]
+# The end-to-end demonstration M6c is measured by: a contract verified here, a
+# station that signs for real, and the chain from the plug to a settled record.
+# Dev-only, so nothing a downstream links carries a simulator (`emob-core` makes
+# the same arrangement with `iso15118` for the same reason).
+emob-cdr       = { workspace = true }
+emob-eichrecht = { workspace = true }
+emob-ocpp      = { workspace = true }
+emob-session   = { workspace = true }
+emob-sim       = { workspace = true }
+emob-tariff    = { workspace = true }
+ocmf           = { workspace = true }
+rust_decimal   = { workspace = true }
+serde_json     = { workspace = true }

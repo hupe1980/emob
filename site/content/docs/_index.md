@@ -7,9 +7,11 @@ template = "section.html"
 
 # Documentation
 
-Nine pages, in the order they build on each other — the chain a kilowatt-hour
+Eleven pages, in the order they build on each other — the chain a kilowatt-hour
 travels, from the meter to the money, out to everyone owed a copy of it, and on
-to the invoice somebody pays.
+to the invoice somebody pays. Two of them are about the wires either side of that
+chain: the contract a car presents before it starts, and the grid operator's
+ceiling the site draws under while it runs.
 
 ```mermaid
 flowchart LR
@@ -22,14 +24,17 @@ flowchart LR
     T -->|"OCPP 2.1"| O
     S --> INV["invoice ·<br/>SEPA · books"]
     R --> INV
+    PNC["Plug & Charge<br/>contracts"] -->|"who"| S
+    G["§ 14a<br/>the grid"] -->|"how much"| O
     C["compliance"] -.->|"binds every step"| E
     C -.-> S
     C -.-> T
     C -.-> R
+    C -.-> G
 
     classDef step fill:#b8410f22,stroke:#b8410f
     classDef rule fill:#88888818,stroke:#888,stroke-dasharray:4 3
-    class E,O,S,T,L,R,INV step
+    class E,O,S,T,L,R,INV,PNC,G step
     class C rule
 ```
 

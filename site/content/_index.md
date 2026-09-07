@@ -137,11 +137,12 @@ sessions unverifiable.
 
 ## Where it stands
 
-Thirteen domain crates are real, tested and green — `emob-core`,
+Fifteen domain crates are real, tested and green — `emob-core`,
 `emob-eichrecht`, `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`,
 `emob-poi`, `emob-roam`, `emob-billing`, `emob-thg`, `emob-smart`,
-`emob-service` and `emob-sim` — with seven daemons on top of them and
-**969 tests**. The domain crates do no I/O, read no clock and
+`emob-eebus`, `emob-pnc`, `emob-service` and `emob-sim` — with eight daemons on
+top of them and
+**1040 tests**. The domain crates do no I/O, read no clock and
 hold no binary floats.
 
 What that buys, concretely:
@@ -168,26 +169,33 @@ What that buys, concretely:
   where the charge point stands;
 - the closing itself is a decision rather than a batch: the invoice number is
   spent once, a period that has been closed is not closed again, a re-rated month
-  cancels before it re-bills, and nothing reaches the books until the recipient's
-  platform has accepted the document;
+  cancels before it re-bills, nothing reaches the books until the recipient's
+  platform has accepted the document — and a correction chain holds **one**
+  invoice in the books at a time, whichever end of it is posted first, which is
+  the property a generated sequence of calls checks after every one of them;
 - the year's greenhouse-gas quota is filed from the same records, by both the
   routes the Verordnung gives — a public point's metered kilowatt-hours and a
   depot's registered vehicles — and a point that fails one of the four conditions
   between a kilowatt-hour and the quota is refused by name rather than missing
   from the file;
 - a hundred-station fleet run reconciles exactly;
-- a § 14a site shares its grid operator's setpoint out under a ceiling nothing
-  can raise — the allocation has no constructor and a market plan is an input —
-  and it holds the minimum draw the Festlegung guarantees even when the control
-  box has gone silent;
+- a § 14a setpoint arrives as a **real SPINE datagram**, binds the allocation as
+  an exact decimal, and leaves as an OCPP charging profile at the one purpose a
+  market optimiser cannot outrank — while the site holds the minimum draw the
+  Festlegung guarantees even after the control box goes silent;
+- a Plug & Charge contract authorises a session that settles, with the identifier
+  read **off the certificate** and the meter's own signed record stating the same
+  strength of assignment — neither side told the other's answer. A contract from
+  a second ecosystem validates impeccably in the pool that minted it and reaches
+  nothing in this one;
 - a roaming peer's credential reaches its own party's records and no others, and
   the advisory plane beside the daemons **cannot move money** — its output type
   is a leaf nothing consumes, and its principal cannot hold a capability that
   writes.
 
-Plug & Charge contracts and the § 14a **wire** — the EEBUS session a setpoint
-arrives over — are designed and not yet built. Every page here marks ✅ built and
-📐 designed, and the gap between the two is never blurred.
+The OPCP pool client, the availability reporting service and eMIP are designed
+and not built. Every page here marks ✅ built and 📐 designed, and the gap between
+the two is never blurred.
 
 <div class="cta">
 

@@ -98,6 +98,6 @@ pub use station::{
     ChargingMode, ConnectorType, CurrentType, DataPublication, EnergyMeasurementPoint,
     FurtherIdentifiers, MeteringPosture, Nis2Class, Notice, OperatorChange, Ownership,
     PriceConduct, PriceTransparency, ProviderProfile, QuotaPosture, RegisterPublication,
-    Registration, RiskManagement, UndertakingProfile, V2gCommunication,
+    Registration, RiskManagement, UndertakingProfile, V2gCommunication, V2gProtocol,
 };
 pub use zone::{Local, TimeZone, ZoneError};

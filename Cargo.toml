@@ -9,6 +9,8 @@ members = [
     "crates/emob-tariff",
     "crates/emob-thg",
     "crates/emob-ocpp",
+    "crates/emob-eebus",
+    "crates/emob-pnc",
     "crates/emob-poi",
     "crates/emob-sim",
     "crates/emob-smart",
@@ -20,6 +22,7 @@ members = [
     "services/empd",
     "services/poid",
     "services/roamd",
+    "services/sited",
     "services/tarifd",
     "xtask",
 ]
@@ -106,18 +109,31 @@ ocpi-kit = { version = "0.3", default-features = false, features = ["v2_3_0", "v
 oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp", "eichrecht"] }
 
 # ── The vehicle wire ────────────────────────────────────────────────────────
-# A **dev**-dependency of `emob-core`, and only that, until `emob-pnc` is built.
-# `emob-core` decides money and carries no protocol implementation in its tree,
-# but the two crates name the same generations — and 0.3 is where that spelling
-# got an owner (`Protocol::as_str`, `Display`, `FromStr`, and a `FromStr` that
-# refuses a bare `iso15118` because the DATEX II profile defines that literal as
-# -20 and has no literal for -2). `crates/emob-core/tests/the_kits_agree.rs`
-# asserts the two spellings are one spelling, which is a test rather than a hope.
-# 0.4 is taken for `emob-pnc` rather than for this dev-dependency: certificate
-# chains validated against ISO 15118's own Annex F profiles, and the encrypted
-# contract private key out of its envelope, are the artefact half that crate
-# would otherwise have written.
+# Two consumers, and they take different things.
+#
+# `emob-core` takes it as a **dev**-dependency and nothing more: that crate
+# decides money and carries no protocol implementation in its tree, but the two
+# name the same generations, and a `FromStr` that refuses a bare `iso15118` is
+# the spelling this workspace has to share. `the_kits_agree.rs` asserts it.
+#
+# `emob-pnc` takes it for real, with **`pnc` and nothing else**: the Annex F
+# certificate profiles and the path validation behind them. That feature pulls
+# no cryptography — the curve and the hash are traits a caller implements — which
+# is what lets ISO 15118 chain validation live in a domain crate without a second
+# RustCrypto generation beside `ocmf`'s (D304). The EXI codec, the message sets
+# and the session engines are a station's and a vehicle's; nothing speaks to a
+# car.
 iso15118 = { version = "0.4", default-features = false }
+
+# ── The § 14a wire ──────────────────────────────────────────────────────────
+# SHIP, SPINE and the use-case descriptors, **without `runtime`**: no tokio, no
+# rustls, no mDNS. `emob-eebus` is a domain crate and `cargo xtask check-graph`
+# is what keeps it one — the sockets belong to `sited`.
+#
+# What this workspace takes is the *protocol*. The **rule** — what a site draws
+# while nobody is telling it anything — is `emob-smart`'s, read from
+# `[LPC §2.3.2]` and decided there (D302).
+eebus = { version = "0.9", default-features = false, features = ["std"] }
 
 # ── The money leaves the platform ───────────────────────────────────────────
 # Only `emob-billing` sees these. Three standards this workspace has no business
@@ -179,6 +195,11 @@ ocmf = { version = "0.1", default-features = false, features = [
 # moves, this moves.
 sha2      = "0.10"
 p256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
+# The other curve `[V2G2-884]`'s Annex F admits, and the one ISO 15118-20 raises
+# to: secp521r1. On the same `ecdsa` 0.16 / `elliptic-curve` 0.13 generation as
+# `p256` above, so taking it costs no second implementation of anything —
+# which is the whole of D304's rule and the reason the check was worth making.
+p521      = { version = "0.13", default-features = false, features = ["ecdsa"] }
 hex       = "0.4"
 base64    = "0.23"
 
@@ -189,6 +210,8 @@ emob-session   = { path = "crates/emob-session",   version = "0.1" }
 emob-cdr       = { path = "crates/emob-cdr",       version = "0.1" }
 emob-tariff    = { path = "crates/emob-tariff",    version = "0.1" }
 emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.1" }
+emob-eebus     = { path = "crates/emob-eebus",     version = "0.1" }
+emob-pnc       = { path = "crates/emob-pnc",       version = "0.1" }
 emob-poi       = { path = "crates/emob-poi",       version = "0.1" }
 emob-sim       = { path = "crates/emob-sim",       version = "0.1" }
 emob-smart     = { path = "crates/emob-smart",     version = "0.1" }
@@ -234,7 +257,7 @@ cedar-policy = { version = "4.12", default-features = false, features = ["dateti
 # performed at most once, written to an append-only hash-chained log, and read
 # back on replay. `manifest` because what an agent may do has to be a file a
 # reviewer sees in a diff rather than a builder call nobody reads.
-agentplane = { version = "0.28", default-features = false, features = ["redb", "manifest"] }
+agentplane = { version = "0.30", default-features = false, features = ["redb", "manifest"] }
 
 [profile.release]
 opt-level     = 3

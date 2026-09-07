@@ -267,6 +267,30 @@ pub enum SmartNote {
         minimum_kw: Decimal,
     },
 
+    /// A demand named a point this site does not control.
+    ///
+    /// The third answer beside [`Self::HeldAtZero`] and [`Self::Curtailed`],
+    /// and the only one that is about the *site* rather than about a box. A
+    /// demand reaching here for an EVSE that is not one of this site's
+    /// steuerbare Verbrauchseinrichtungen means the energy-management system
+    /// and the site controller disagree about what is behind the connection —
+    /// and the disagreement is one-directional in the dangerous sense: the
+    /// point draws whatever it draws, [`Allocation::within_ceiling`] cannot see
+    /// it, and the ceiling `[BK6-22-300 Ziff. 4.6]` makes binding is being
+    /// judged against a smaller site than the one that exists.
+    ///
+    /// Nothing here can fix that — a point this crate has no [`SteuVe`] for is
+    /// a point it has no floor, no connection rating and no `Control` for, and
+    /// seating it on a guess would put a number under the ceiling that no rule
+    /// produced. So it is named, which is the whole of what the rule allows
+    /// (D310).
+    ///
+    /// [`SteuVe`]: crate::SteuVe
+    NotOnThisSite {
+        /// Which point was asked for.
+        evse_id: String,
+    },
+
     /// A point could not be seated and is held at zero.
     ///
     /// Not a fault. `DIN EN 61851-1` cannot signal less than 6 A, so a point
@@ -339,6 +363,10 @@ impl core::fmt::Display for SmartNote {
             } => write!(
                 f,
                 "the grid operator asked for {setpoint_kw} kW and this site is owed {minimum_kw} kW [BK6-22-300 Ziff. 4.5]: it is held at the minimum, because obeying a setpoint below the Anspruch is giving up a claim nobody would ever find out had been given up"
+            ),
+            Self::NotOnThisSite { evse_id } => write!(
+                f,
+                "{evse_id} was asked for and is not a steuerbare Verbrauchseinrichtung of this site: the energy-management system and the site controller disagree about what is behind the connection, and a point this allocation cannot see is one the [BK6-22-300 Ziff. 4.6] ceiling is not being judged against"
             ),
             Self::HeldAtZero { evse_id, floor_kw } => write!(
                 f,
@@ -538,6 +566,23 @@ pub fn allocate(site: &Site, demand: &[Demand], limit: &GridLimit) -> Allocation
     // — `[BK6-22-300 Ziff. 4.5.2]` makes that the operator's to decide. A point
     // whose floor does not fit is held at zero, because there is no duty cycle
     // between zero and 6 A.
+    // Asked before anything is seated, because a demand for a point this site
+    // has no `SteuVe` for is a fact about the site rather than about the
+    // budget: it drops out of the loop below silently, and the ceiling is then
+    // judged against a smaller site than the one that exists. See
+    // `SmartNote::NotOnThisSite`.
+    for want in demand {
+        if !site
+            .devices
+            .iter()
+            .any(|device| device.evse_id() == &want.evse_id)
+        {
+            notes.push(SmartNote::NotOnThisSite {
+                evse_id: want.evse_id.to_string(),
+            });
+        }
+    }
+
     let mut budget = ceiling_kw;
     let mut seats: Vec<(EvseId, Decimal)> = Vec::new();
     for device in &site.devices {
