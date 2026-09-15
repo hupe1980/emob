@@ -32,10 +32,10 @@
 //! why [`Poid::status`] refuses to produce one before a snapshot has been
 //! accepted, rather than sending it and hoping.
 //!
-//! **And "a snapshot" is not the question — *which* snapshot is.** This service
-//! used to record only that one had been taken, and then check an update's
-//! references against its own current inventory. Between those two facts sits
-//! every change an operator makes: a point added, a facility revised, a station
+//! **And "a snapshot" is not the question — *which* snapshot is.** Recording
+//! only that one was taken, and checking an update's references against the
+//! service's own current inventory, leaves every change an operator makes
+//! between the two facts: a point added, a facility revised, a station
 //! renumbered. The update resolved perfectly against the estate and named
 //! versions the access point had never received, and the consumer dropped it in
 //! the silence the paragraph above describes — the very failure this service
@@ -58,6 +58,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
+pub mod record;
+
+pub use record::{Event, Ledger};
+
 use emob_poi::datex::{
     InformationStatus, PointUpdate, Published, Publisher, StatusPublication, TablePublication,
 };
@@ -65,14 +69,16 @@ use emob_poi::site::{ChargingPoint, Facility, Site};
 use emob_poi::{Feed, PoiError, Rate};
 
 /// What a national access point was last told, and when.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Accepted {
     /// When the publication this service built was written.
     ///
     /// The document's own instant, read off it rather than supplied beside it:
     /// a caller that stated this separately could state it differently.
+    #[serde(with = "time::serde::rfc3339")]
     pub published_at: time::OffsetDateTime,
     /// When the access point accepted it.
+    #[serde(with = "time::serde::rfc3339")]
     pub at: time::OffsetDateTime,
     /// What that publication put on the record — the facility versions and rate
     /// names a status message may address.
@@ -248,6 +254,15 @@ impl<'a> Poid<'a> {
             at,
             published: publication.published().clone(),
         });
+    }
+
+    /// Put back what the journal says the access point took.
+    ///
+    /// The fold's half of [`Self::accepted`]. Not a second way to state the
+    /// answer: [`crate::Ledger`] is the only caller, and what it hands over is
+    /// what a publication already put on the record.
+    pub fn restore(&mut self, accepted: Accepted) {
+        self.accepted = Some(accepted);
     }
 
     /// What the access point last took.

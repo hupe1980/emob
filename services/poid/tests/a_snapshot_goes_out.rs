@@ -378,3 +378,119 @@ fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
     poid.status(&update("RATE-1"), at(2))
         .expect("the rate the table named");
 }
+
+// ── …and which snapshot the access point holds survives the process ─────────
+//
+// The one fact this service decides. Forgotten on restart it reads as *"no
+// snapshot has ever been accepted"* — which is the **safe** direction, because
+// `status` then refuses rather than addressing a version nobody holds (D308).
+//
+// Safe is not right. A publisher that republishes its whole estate after every
+// restart is one an access point rate-limits, and a fleet restarting through a
+// rollout publishes nothing correct in between. This is the fourth of the four
+// ledgers, and it is journalled last for exactly that reason.
+
+use emob_service::journal::{File, Journal as _};
+use poid::Ledger;
+
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir()
+            .join(format!("emob-poid-{}-{name}", std::process::id()))
+            .join("poid.ndjson");
+        let _ = std::fs::remove_dir_all(path.parent().expect("a parent"));
+        Self(path)
+    }
+
+    fn ledger(&self) -> Ledger<File> {
+        Ledger::open(File::open(&self.0).expect("the journal opens")).expect("the journal folds")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0.parent().expect("a parent"));
+    }
+}
+
+#[test]
+fn the_snapshot_the_access_point_holds_is_the_one_a_restart_reads_back() {
+    let scratch = Scratch::new("held");
+    let (published, _) = rate::publish(&tariff("Europe/Berlin"), "RATE-1");
+    let rate_for = move |_: &ChargingPoint| Some(published.clone());
+
+    {
+        let mut poid = Poid::new(
+            publisher(),
+            Facility::new("TABLE-1"),
+            vec![site("Europe/Berlin")],
+            &rate_for,
+        );
+        let snapshot = poid
+            .snapshot(at(0))
+            .expect("a coherent inventory publishes");
+        scratch
+            .ledger()
+            .accepted(&mut poid, &snapshot, at(1))
+            .expect("the access point took it");
+    }
+
+    // The process is gone.
+    let ledger = scratch.ledger();
+    let held = ledger
+        .last_accepted()
+        .expect("the journal folds")
+        .expect("the access point holds a snapshot");
+    assert_eq!(held.published_at, at(0));
+    assert_eq!(held.at, at(1));
+
+    // …and the service built around it can address a status message again,
+    // which is the whole reason the version is a fact and not a flag.
+    let mut poid = Poid::new(
+        publisher(),
+        Facility::new("TABLE-1"),
+        vec![site("Europe/Berlin")],
+        &rate_for,
+    );
+    poid.restore(held);
+    assert!(
+        poid.stale(at(30), time::Duration::hours(24)).is_none(),
+        "a feed the access point refreshed an hour ago is not stale because this process restarted"
+    );
+    poid.status(&[], at(31))
+        .expect("a status message resolves against the snapshot the access point holds");
+}
+
+#[test]
+fn a_journal_edited_in_the_middle_will_not_start_the_publisher() {
+    let scratch = Scratch::new("tamper");
+    let (published, _) = rate::publish(&tariff("Europe/Berlin"), "RATE-1");
+    let rate_for = move |_: &ChargingPoint| Some(published.clone());
+    {
+        let mut poid = Poid::new(
+            publisher(),
+            Facility::new("TABLE-1"),
+            vec![site("Europe/Berlin")],
+            &rate_for,
+        );
+        let mut ledger = scratch.ledger();
+        for minute in 0..3 {
+            let snapshot = poid.snapshot(at(minute)).expect("publishes");
+            ledger
+                .accepted(&mut poid, &snapshot, at(minute + 1))
+                .expect("taken");
+        }
+        assert_eq!(ledger.journal().records().expect("chained").len(), 3);
+    }
+
+    let text = std::fs::read_to_string(&scratch.0).expect("read");
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.remove(1);
+    std::fs::write(&scratch.0, format!("{}\n", lines.join("\n"))).expect("written");
+
+    let refused = Ledger::open(File::open(&scratch.0).expect("opens"))
+        .expect_err("a journal with a record removed is not this publisher's ledger");
+    assert!(refused.to_string().contains("does not chain"), "{refused}");
+}

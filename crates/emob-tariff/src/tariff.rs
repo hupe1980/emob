@@ -891,10 +891,10 @@ mod tests {
 
     #[test]
     fn a_tariff_that_states_no_rate_is_not_a_tariff_that_cannot_answer() {
-        // The distinction the crossings turn on. Both used to be `None`, and a
-        // gross price list naming no VAT rate anywhere could not publish a
-        // `min_price` to OCPI or to a 2.1 station — refused with a diagnostic
-        // about a second rate it did not have.
+        // The distinction the crossings turn on. Read as one answer, a gross
+        // price list naming no VAT rate anywhere cannot publish a `min_price`
+        // to OCPI or to a 2.1 station: refused with a diagnostic about a second
+        // rate it does not have.
         let unstated = Tariff::simple(
             "t".parse().unwrap(),
             Currency::EUR,

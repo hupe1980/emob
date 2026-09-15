@@ -141,8 +141,7 @@ Fifteen domain crates are real, tested and green — `emob-core`,
 `emob-eichrecht`, `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`,
 `emob-poi`, `emob-roam`, `emob-billing`, `emob-thg`, `emob-smart`,
 `emob-eebus`, `emob-pnc`, `emob-service` and `emob-sim` — with eight daemons on
-top of them and
-**1040 tests**. The domain crates do no I/O, read no clock and
+top of them and **1075 tests**. The domain crates do no I/O, read no clock and
 hold no binary floats.
 
 What that buys, concretely:
@@ -179,6 +178,15 @@ What that buys, concretely:
   between a kilowatt-hour and the quota is refused by name rather than missing
   from the file;
 - a hundred-station fleet run reconciles exactly;
+- every one of those decisions survives the process that made it: the four
+  daemons that hold a ledger fold it from a hash-chained journal, so a restart
+  is a replay — and a journal somebody edited stops the daemon rather than being
+  folded into a past it cannot account for;
+- a partner **registers** with this node through the module OCPI makes mandatory
+  of every implementation, and from that moment a record leaves for it over a
+  real socket — with the seal `[OCPI 2.3.0]` puts on a sent CDR written **after**
+  the answer, and a partner's refusal told apart from a partner nobody reached,
+  because only one of them means the record is not coming back;
 - a § 14a setpoint arrives as a **real SPINE datagram**, binds the allocation as
   an exact decimal, and leaves as an OCPP charging profile at the one purpose a
   market optimiser cannot outrank — while the site holds the minimum draw the
@@ -193,9 +201,11 @@ What that buys, concretely:
   is a leaf nothing consumes, and its principal cannot hold a capability that
   writes.
 
-The OPCP pool client, the availability reporting service and eMIP are designed
-and not built. Every page here marks ✅ built and 📐 designed, and the gap between
-the two is never blurred.
+What is not built: the clients for four of the five outbound wires — the
+Mobilithek snapshot, the tariff push to a 2.1 estate, the SHIP session and the
+OICP broker — the OPCP pool client, the availability reporting service, and
+eMIP. Every page here marks ✅ built and 📐 designed, and the gap between the two
+is never blurred.
 
 <div class="cta">
 

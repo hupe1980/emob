@@ -21,6 +21,58 @@ use axum::routing::get;
 use crate::health::{Identity, Readiness};
 use crate::shutdown::Shutdown;
 
+/// Where a daemon listens, from the environment.
+///
+/// Three answers in order, and the order is the point.
+///
+/// 1. `<DAEMON>_HTTP_BIND` — the specific one, for an operator running two of
+///    something on one host.
+/// 2. `EMOB_HTTP_BIND` — the estate-wide one. A container image sets this, and
+///    it is the reason it exists: **the default is loopback, and loopback
+///    inside a container is unreachable.** A daemon that came up healthy,
+///    logged that it was listening, and answered nothing is the failure this
+///    closes — found by running the image rather than by reading it.
+/// 3. `fallback` — the daemon's own default, which is a **local** address on
+///    purpose. A platform that decides money should not become reachable
+///    because somebody forgot to configure it.
+///
+/// # Errors
+///
+/// [`ServerError::Bind`] when whichever value was found is not a socket
+/// address, naming the variable it came from — because "invalid socket address"
+/// with three possible sources is a message that costs an hour.
+pub fn bind_address(daemon: &str, fallback: &str) -> Result<SocketAddr, ServerError> {
+    let specific = format!("{}_HTTP_BIND", daemon.to_ascii_uppercase());
+    let (from, text) = std::env::var(&specific)
+        .map(|value| (specific.clone(), value))
+        .or_else(|_| {
+            std::env::var("EMOB_HTTP_BIND").map(|value| ("EMOB_HTTP_BIND".to_owned(), value))
+        })
+        .unwrap_or_else(|_| ("the default".to_owned(), fallback.to_owned()));
+    text.parse()
+        .map_err(|_| ServerError::BadAddress { from, text })
+}
+
+/// Where a daemon's **second** socket listens — a CSMS's OCPP endpoint, a site
+/// controller's SHIP session.
+///
+/// Its own variable and **not** `EMOB_HTTP_BIND`: the estate-wide one names the
+/// address the shell answers on, and a daemon that applied it to two sockets
+/// would bind the second to the first's port and fail at start-up with a
+/// message about an address already in use.
+///
+/// # Errors
+///
+/// [`ServerError::BadAddress`] when the value is not a socket address.
+pub fn bind_socket(variable: &str, fallback: &str) -> Result<SocketAddr, ServerError> {
+    let (from, text) = std::env::var(variable).map_or_else(
+        |_| ("the default".to_owned(), fallback.to_owned()),
+        |value| (variable.to_owned(), value),
+    );
+    text.parse()
+        .map_err(|_| ServerError::BadAddress { from, text })
+}
+
 /// What the infrastructure routes read.
 #[derive(Debug, Clone)]
 struct Infra {
@@ -143,6 +195,18 @@ pub enum ServerError {
         /// Why.
         #[source]
         source: std::io::Error,
+    },
+    /// A configured bind address is not a socket address.
+    #[error(
+        "{from} is {text:?}, which is not a socket address — a bind is \
+         `<host>:<port>`, and inside a container the host has to be `0.0.0.0` \
+         because loopback there is reachable by nothing"
+    )]
+    BadAddress {
+        /// Which variable it came from, or "the default".
+        from: String,
+        /// What it said.
+        text: String,
     },
     /// The server stopped with an error.
     #[error("the server stopped: {source}")]

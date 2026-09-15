@@ -45,8 +45,20 @@ ocpi-kit = { workspace = true }
 oicp-kit = { workspace = true }
 
 rust_decimal = { workspace = true }
+serde        = { workspace = true, optional = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }
+
+[features]
+default = ["serde"]
+## Serialize/deserialize the routing facts a node has to write down.
+##
+## Not the documents: those are the kits' types and cross a wire already. What
+## is here is `Wire` and `Reach` — **which partner a record was addressed to,
+## and over what** — because `roamd`'s consignment ledger is the one thing in
+## this workspace that has to survive the process that wrote it, and a fact
+## about routing is part of it.
+serde = ["dep:serde", "emob-cdr/serde", "emob-core/serde"]
 
 [dev-dependencies]
 ocmf           = { workspace = true }

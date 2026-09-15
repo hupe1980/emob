@@ -866,3 +866,868 @@ fn a_partner_onboarded_at_runtime_is_decided_by_a_policy_an_operator_wrote() {
         Err(DispatchError::NoPolicies)
     ));
 }
+
+// ── …and over a real socket, which is the leg that was described as untestable
+//
+// Four documents called the outbound push *"somebody else's server, behind
+// credentials"*. That was true of Hubject and true of a peer's production
+// endpoint, and it was never the reason this leg had no test: the daemon took
+// `ocpi-kit` **without its transport feature**, so there was no client to give
+// credentials to (D322).
+//
+// A peer is an HTTP server. One runs here, on a real port, and answers the way
+// `[OCPI 2.3.0 §mod_cdrs]` says a receiver answers.
+
+use emob_service::journal::{Journal as _, Memory};
+use ocpi_kit::VersionNumber;
+use ocpi_kit::client::ClientConfig;
+use roamd::{Answer, Dispatcher, Node};
+use std::sync::{Arc, Mutex as StdMutex};
+
+/// A receiver that records what it was given and answers as the specification
+/// prescribes.
+async fn receiver(
+    status: u16,
+    body: serde_json::Value,
+    location: Option<&'static str>,
+) -> (std::net::SocketAddr, Arc<StdMutex<Vec<serde_json::Value>>>) {
+    let seen: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let app = axum::Router::new().route(
+        "/ocpi/cdrs",
+        axum::routing::post(move |axum::Json(payload): axum::Json<serde_json::Value>| {
+            let recorded = Arc::clone(&recorded);
+            let body = body.clone();
+            async move {
+                recorded.lock().expect("not poisoned").push(payload);
+                let mut response = axum::response::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json");
+                if let Some(location) = location {
+                    response = response.header("location", location);
+                }
+                response
+                    .body(axum::body::Body::from(body.to_string()))
+                    .expect("a well-formed response")
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let addr = listener.local_addr().expect("a bound address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, seen)
+}
+
+fn ok_envelope() -> serde_json::Value {
+    serde_json::json!({ "status_code": 1000, "timestamp": "2026-06-01T10:31:00Z" })
+}
+
+fn dispatcher() -> Dispatcher {
+    Dispatcher::new(
+        &PartyId::new("DE", "ABC").expect("a valid party"),
+        // Localhost and plain HTTP, which the default policy refuses on
+        // purpose: a production client that would `POST` a charge detail record
+        // over cleartext is a client sending a driver's movements in the open.
+        ClientConfig::for_testing(),
+    )
+    .expect("a client")
+}
+
+/// What a completed handshake leaves behind, which is the only description of a
+/// partner this node keeps.
+fn registered_at(addr: std::net::SocketAddr) -> roamd::Registration {
+    roamd::Registration {
+        peer_id: "NL*TNM".to_owned(),
+        incoming: "TOKEN-C-THIS-NODE-ISSUED".to_owned(),
+        outgoing: "a-test-credentials-token".to_owned(),
+        versions_url: format!("http://{addr}/ocpi/versions"),
+        version: "2.3.0".to_owned(),
+        endpoints: vec![roamd::peering::Endpoint {
+            module: "cdrs".to_owned(),
+            role: "RECEIVER".to_owned(),
+            url: format!("http://{addr}/ocpi/cdrs"),
+        }],
+        parties: vec![("NL".to_owned(), "TNM".to_owned())],
+    }
+}
+
+/// The consigned record, its rendered document, and the node holding both.
+fn queued() -> (Node<Memory>, CdrKey, Outbound) {
+    let mut node = Node::open(node(), Memory::new()).expect("an empty journal folds");
+    let cdr = issued("cdr-77", None);
+    let token = token();
+    let context = Context {
+        token: &token,
+        location: location(),
+        signed: payloads(),
+        public_key: None,
+        last_updated: at(31),
+    };
+    let key = node
+        .consign(&cdr, &token, Some(&context))
+        .expect("a routable record");
+    let document = node
+        .state()
+        .document(&key)
+        .expect("the outbox holds the document the account describes")
+        .clone();
+    (node, key, document)
+}
+
+#[tokio::test]
+async fn a_record_reaches_a_partner_over_a_real_socket_and_is_sealed_after_the_answer() {
+    let (addr, seen) = receiver(
+        200,
+        ok_envelope(),
+        Some("https://emsp.example/ocpi/cdrs/77"),
+    )
+    .await;
+    let (mut node, key, document) = queued();
+
+    // Before the send, nothing is sealed.
+    assert!(
+        !node
+            .state()
+            .consignment(&key)
+            .expect("queued")
+            .delivery
+            .is_accepted()
+    );
+
+    let answer = dispatcher().deliver(&registered_at(addr), &document).await;
+    assert_eq!(
+        answer,
+        Answer::Accepted {
+            location: Some("https://emsp.example/ocpi/cdrs/77".to_owned())
+        },
+        "the receiver's `Location` is the URL the paragraph makes it return so the sender can read \
+         back what it sent"
+    );
+
+    node.answered(&key, &answer, at(40)).expect("recorded");
+    assert!(
+        node.state()
+            .consignment(&key)
+            .expect("held")
+            .delivery
+            .is_accepted()
+    );
+
+    // …and the bytes that arrived are the bytes this workspace rendered — not a
+    // second downgrade the kit would have done at the wire, which would leave
+    // the crossing's account pointing into a copy nobody received.
+    let arrived = seen.lock().expect("not poisoned");
+    assert_eq!(arrived.len(), 1, "one record, one POST");
+    let Outbound::V2_3_0(sent) = &document else {
+        panic!("this partner speaks 2.3.0");
+    };
+    assert_eq!(
+        arrived[0],
+        serde_json::to_value(sent.as_ref()).expect("the document serialises"),
+        "the wire must carry the document the account describes, byte for byte"
+    );
+}
+
+#[tokio::test]
+async fn a_receiver_that_refuses_is_a_verdict_and_is_recorded_as_one() {
+    // The specification's own shape for a refusal: HTTP 200 with an OCPI status
+    // code that is not 1000 is *also* a refusal, and so is a 4xx. This is the
+    // second, which is what a peer sends for a malformed push.
+    let (addr, _) = receiver(
+        422,
+        serde_json::json!({
+            "status_code": 2001,
+            "status_message": "the charging periods do not sum to the total",
+            "timestamp": "2026-06-01T10:31:00Z"
+        }),
+        None,
+    )
+    .await;
+    let (mut node, key, document) = queued();
+
+    let answer = dispatcher().deliver(&registered_at(addr), &document).await;
+    let Answer::Refused { reason } = &answer else {
+        panic!("a receiver that answered has seen the record: {answer:?}");
+    };
+    assert!(
+        reason.contains("2001") || reason.contains("periods"),
+        "the reason a person has to read must survive the wire: {reason}"
+    );
+
+    node.answered(&key, &answer, at(40)).expect("recorded");
+    let held = node.state().consignment(&key).expect("held");
+    assert!(!held.delivery.is_accepted());
+    assert!(
+        matches!(held.delivery, roamd::Delivery::Refused { .. }),
+        "a refusal is a verdict, and a refused record is not waiting for a socket"
+    );
+}
+
+#[tokio::test]
+async fn nobody_answering_is_not_a_refusal_and_leaves_the_record_owed() {
+    // A platform that registered and published no CDRs Receiver — which is the
+    // same reading as a connection that times out: the partner may hold the
+    // record and may not, and the only safe answer is that this node still owes
+    // it.
+    let (mut node, key, document) = queued();
+    let mut silent = registered_at("127.0.0.1:1".parse().expect("an address"));
+    silent.endpoints.clear();
+
+    let answer = dispatcher().deliver(&silent, &document).await;
+    assert!(matches!(answer, Answer::Unreached { .. }), "{answer:?}");
+
+    node.answered(&key, &answer, at(40))
+        .expect("an unreachable partner records nothing");
+    assert!(
+        node.state()
+            .pending()
+            .any(|consignment| consignment.key == key),
+        "a record nobody answered for is still owed, and the next drain sends it again"
+    );
+    assert_eq!(
+        node.journal().records().expect("the chain holds").len(),
+        1,
+        "only the consignment is on the record: a timeout is not a fact about the partner"
+    );
+}
+
+// ── …and the half that makes this an OCPI implementation ────────────────────
+//
+// `[OCPI 2.3.0 §credentials]`: *"The Credentials module is symmetric and has to
+// be implemented by all OCPI implementations: all implementations need to be
+// able to call this module on any other platform and handle receiving requests
+// from another party."*
+//
+// A node that can push a document and cannot be **registered with** is not one.
+// These run the handshake against this node over a real socket, from the other
+// side, and then push a record through it.
+
+use ocpi_kit::ModuleId;
+use ocpi_kit::client::{ClientConfig as KitConfig, OcpiClient, OcpiRequest};
+use ocpi_kit::server::InMemoryTokenStore;
+use ocpi_kit::transport::CredentialsToken;
+use ocpi_kit::types::{OcpiString, Url as KitUrl};
+use ocpi_kit::v2_3_0::credentials::Credentials;
+use roamd::inbound::{Handshake, router};
+use roamd::peering::Registry;
+
+/// The peer's own side: a versions endpoint this node can read back during the
+/// `POST`, which `[OCPI 2.3.0 §credentials]` makes a precondition of the
+/// registration rather than a courtesy.
+async fn peer_platform() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let addr = listener.local_addr().expect("bound");
+    let base = format!("http://{addr}/ocpi");
+    // The peer accepts the token it hands over, which is the whole point of the
+    // step this node takes before it answers: `[OCPI 2.3.0 §credentials]` makes
+    // the receiver read the client's versions **with that token**, and a peer
+    // that does not accept it has not registered.
+    let tokens = Arc::new(InMemoryTokenStore::new());
+    tokens.insert(
+        CredentialsToken::new("TOKEN-B-FROM-THE-PEER").expect("a token"),
+        ocpi_kit::testkit::registered_peer("NL*TNM", vec![ocpi_kit::testkit::test_cpo()]),
+    );
+    let inner =
+        ocpi_kit::server::OcpiRouter::new(VersionNumber::V2_3_0, KitUrl::new_lenient(base), tokens)
+            .build();
+    let app = axum::Router::new().nest("/ocpi", inner);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    addr
+}
+
+/// This node, listening.
+async fn this_node() -> (std::net::SocketAddr, Arc<StdMutex<Node<Memory>>>) {
+    let node = Arc::new(StdMutex::new(
+        Node::open(node(), Memory::new()).expect("an empty journal folds"),
+    ));
+    // The bootstrap token, handed to the platform out of band — which is what
+    // `[OCPI 2.3.0 §credentials]` says happens before any of this.
+    node.lock()
+        .expect("not poisoned")
+        .offer("NL*TNM", "TOKEN-A-HANDED-OVER-BY-EMAIL")
+        .expect("recorded");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let addr = listener.local_addr().expect("bound");
+    let base = KitUrl::new_lenient(format!("http://{addr}/ocpi"));
+
+    let me = Credentials::builder()
+        .token(OcpiString::<64>::new("unused-until-we-answer").expect("a token"))
+        .url(base.clone())
+        .roles(vec![
+            ocpi_kit::v2_3_0::credentials::CredentialsRole::builder()
+                .role(ocpi_kit::v2_3_0::types::Role::Cpo)
+                .business_details(
+                    ocpi_kit::v2_3_0::locations::BusinessDetails::builder()
+                        .name("emob")
+                        .build(),
+                )
+                .party_id(ocpi_kit::types::CiString::new("ABC").expect("a party"))
+                .country_code(ocpi_kit::types::CiString::new("DE").expect("a country"))
+                .build(),
+        ])
+        .build();
+
+    // Deterministic on purpose: a handshake replayed in a test has to produce
+    // the same bytes, and a token reached through ambient randomness is the one
+    // thing in it that cannot be replayed.
+    let mint: roamd::inbound::MintToken = Arc::new(|peer: &str| format!("TOKEN-C-FOR-{peer}"));
+    let handshake =
+        Handshake::new(me, Arc::clone(&node), mint, KitConfig::for_testing()).expect("a client");
+    let app = router(
+        base,
+        "/ocpi",
+        Arc::clone(&node),
+        Registry::new(Arc::clone(&node)),
+        handshake,
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, node)
+}
+
+#[tokio::test]
+async fn a_peer_discovers_this_node_registers_with_it_and_then_pushes_a_record() {
+    let peer = peer_platform().await;
+    let (mine, node) = this_node().await;
+
+    let client = OcpiClient::with_config(KitConfig::for_testing()).expect("a client");
+    let token_a = CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").expect("a token");
+
+    // 1. The peer discovers this node with the bootstrap token.
+    let discovered = ocpi_kit::client::Registration::new(
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+        token_a.clone(),
+    )
+    .discover(client.transport())
+    .await
+    .expect("this node publishes its versions");
+    assert!(
+        discovered
+            .versions()
+            .iter()
+            .any(|v| v.version == VersionNumber::V2_3_0),
+        "a node that advertises no version cannot be registered with: {:?}",
+        discovered.versions()
+    );
+
+    // 2. …and registers, through the kit's own client: it selects a version,
+    //    reads the version details, and POSTs to the credentials URL **that
+    //    document advertises**. A hand-written URL here would pass while every
+    //    real peer read a document pointing at 404s.
+    let selected = ocpi_kit::client::Registration::new(
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+        token_a.clone(),
+    )
+    .discover(client.transport())
+    .await
+    .expect("versions")
+    .select_best(client.transport())
+    .await
+    .expect("this node publishes details for a version it speaks");
+
+    // The check `[OCPI 2.3.0 §credentials]` says a party makes before it
+    // registers: *"a CPO could want to connect only when the CDRs endpoint is
+    // available at an eMSP"*.
+    selected
+        .require(&[
+            // Credentials is symmetric, so the kit advertises it as `Sender`
+            // on both sides — there is no second role for a module every
+            // implementation both calls and answers.
+            (ModuleId::Credentials, ocpi_kit::InterfaceRole::Sender),
+            (ModuleId::Cdrs, ocpi_kit::InterfaceRole::Receiver),
+        ])
+        .expect("this node advertises the modules it mounts");
+
+    let theirs = ocpi_kit::testkit::sample::credentials(
+        "TOKEN-B-FROM-THE-PEER",
+        &format!("http://{peer}/ocpi/versions"),
+    )
+    .expect("a credentials object");
+
+    let registered_peer = selected
+        .register(client.transport(), &theirs)
+        .await
+        .expect("the handshake completes");
+    // The peer now holds a token this node issued, and presents it on every
+    // later request. What it is, is asserted against the node's own ledger
+    // below rather than against this handle: `CredentialsToken` redacts itself.
+    let _ = registered_peer.token();
+
+    // 3. …and it is on the record, not only in memory.
+    {
+        let held = node.lock().expect("not poisoned");
+        let registered: Vec<_> = held.state().peers().registered().collect();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].incoming, "TOKEN-C-FOR-NL*TNM");
+        assert_eq!(registered[0].outgoing, "TOKEN-B-FROM-THE-PEER");
+        assert!(
+            held.journal()
+                .records()
+                .expect("the chain holds")
+                .iter()
+                .any(|r| r.kind == "registered"),
+            "a registration is a fact about the past: a node that forgot it answers 401 to every \
+             partner it has onboarded"
+        );
+    }
+
+    // 4. The bootstrap token is spent. `[OCPI 2.3.0 §credentials]` makes
+    //    `Token A` valid only until the exchange is finished.
+    let repeat = OcpiRequest::new(
+        http::Method::POST,
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/credentials")),
+        ModuleId::Credentials,
+    )
+    .with_body(&theirs)
+    .expect("encodes");
+    let again = client
+        .transport()
+        .send_with_headers::<Credentials>(&repeat, &token_a, &Default::default())
+        .await;
+    assert!(
+        again.is_err(),
+        "a spent bootstrap token must not open a second registration"
+    );
+}
+
+#[tokio::test]
+async fn a_registration_survives_a_restart_because_the_token_is_a_fact() {
+    let peer = peer_platform().await;
+    let (mine, running) = this_node().await;
+    let client = OcpiClient::with_config(KitConfig::for_testing()).expect("a client");
+    let token_a = CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").expect("a token");
+    let theirs = ocpi_kit::testkit::sample::credentials(
+        "TOKEN-B-FROM-THE-PEER",
+        &format!("http://{peer}/ocpi/versions"),
+    )
+    .expect("a credentials object");
+    ocpi_kit::client::Registration::new(
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+        token_a.clone(),
+    )
+    .discover(client.transport())
+    .await
+    .expect("versions")
+    .select_best(client.transport())
+    .await
+    .expect("details")
+    .register(client.transport(), &theirs)
+    .await
+    .expect("the handshake completes");
+
+    // The journal is the node's; fold it into a fresh one, which is what a
+    // restart is.
+    let records = running
+        .lock()
+        .expect("not poisoned")
+        .journal()
+        .records()
+        .expect("the chain holds");
+    let replay = Memory::new();
+    for record in &records {
+        replay
+            .append(&record.kind, &record.body)
+            .expect("the same facts");
+    }
+    let restarted = Node::open(node(), replay).expect("the journal folds");
+
+    let registered: Vec<_> = restarted.state().peers().registered().collect();
+    assert_eq!(
+        registered.len(),
+        1,
+        "a node that forgot its registrations answers 401 to every partner it has onboarded"
+    );
+    assert_eq!(registered[0].incoming, "TOKEN-C-FOR-NL*TNM");
+    assert!(
+        restarted
+            .state()
+            .peers()
+            .for_party(&PartyId::new("NL", "TNM").expect("a valid party"))
+            .is_some(),
+        "and it still knows which platform speaks for which party"
+    );
+}
+
+/// The loop the two halves close: **registering is what makes a partner
+/// reachable**.
+///
+/// Before this, a registration went into one map and the client read another,
+/// so a partner could complete the handshake and still be unreachable — and the
+/// endpoints the handshake fetched were thrown away, so the node knew where the
+/// peer's directory was and not where to push (D330). One inventory, two
+/// audiences.
+#[tokio::test]
+async fn a_partner_that_registers_is_reachable_from_that_moment() {
+    let seen: Arc<StdMutex<Vec<serde_json::Value>>> = Arc::new(StdMutex::new(Vec::new()));
+
+    // The peer's platform: a versions endpoint this node reads during the
+    // handshake, and a CDRs receiver it advertises there.
+    let recorded = Arc::clone(&seen);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let peer_addr = listener.local_addr().expect("bound");
+    let tokens = Arc::new(InMemoryTokenStore::new());
+    tokens.insert(
+        CredentialsToken::new("TOKEN-B-FROM-THE-PEER").expect("a token"),
+        ocpi_kit::testkit::registered_peer("NL*TNM", vec![ocpi_kit::testkit::test_cpo()]),
+    );
+    let inner = ocpi_kit::server::OcpiRouter::new(
+        VersionNumber::V2_3_0,
+        KitUrl::new_lenient(format!("http://{peer_addr}/ocpi")),
+        tokens,
+    )
+    .cdrs_receiver(Collecting(recorded))
+    .build();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, axum::Router::new().nest("/ocpi", inner)).await;
+    });
+
+    // This node, and the handshake.
+    let (mine, node) = this_node().await;
+    let client = OcpiClient::with_config(KitConfig::for_testing()).expect("a client");
+    let theirs = ocpi_kit::testkit::sample::credentials(
+        "TOKEN-B-FROM-THE-PEER",
+        &format!("http://{peer_addr}/ocpi/versions"),
+    )
+    .expect("a credentials object");
+    ocpi_kit::client::Registration::new(
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+        CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").expect("a token"),
+    )
+    .discover(client.transport())
+    .await
+    .expect("versions")
+    .select_best(client.transport())
+    .await
+    .expect("details")
+    .register(client.transport(), &theirs)
+    .await
+    .expect("the handshake completes");
+
+    // The endpoints the handshake read are on the record, which is the half
+    // that was being thrown away.
+    let to = {
+        let held = node.lock().expect("not poisoned");
+        let registration = held
+            .state()
+            .peers()
+            .for_party(&PartyId::new("NL", "TNM").expect("a valid party"))
+            .expect("the platform that just registered speaks for this party")
+            .clone();
+        assert!(
+            registration.endpoint("cdrs", "RECEIVER").is_some(),
+            "a node that kept the versions URL and dropped the endpoints knows where a peer's \
+             directory is and not where to push a record to it: {:?}",
+            registration.endpoints
+        );
+        registration
+    };
+
+    // …and a record reaches it, with no peer configured anywhere.
+    let (_, _, document) = queued();
+    let answer = dispatcher().deliver(&to, &document).await;
+    assert!(
+        matches!(answer, Answer::Accepted { .. }),
+        "registering is what makes a partner reachable: {answer:?}"
+    );
+    assert_eq!(
+        seen.lock().expect("not poisoned").len(),
+        1,
+        "one record, at the endpoint the peer published when it registered"
+    );
+}
+
+/// A CDRs receiver that keeps what it was given.
+struct Collecting(Arc<StdMutex<Vec<serde_json::Value>>>);
+
+impl ocpi_kit::server::CdrsReceiver for Collecting {
+    async fn cdr(
+        &self,
+        cdr_id: String,
+        _context: ocpi_kit::server::RequestContext,
+    ) -> ocpi_kit::server::Handled<ocpi_kit::v2_3_0::cdrs::Cdr> {
+        Err(ocpi_kit::transport::OcpiError::NotFound(cdr_id))
+    }
+
+    async fn post_cdr(
+        &self,
+        cdr: ocpi_kit::v2_3_0::cdrs::Cdr,
+        _context: ocpi_kit::server::RequestContext,
+    ) -> ocpi_kit::server::Handled<KitUrl> {
+        let id = cdr.id.as_str().to_owned();
+        self.0
+            .lock()
+            .expect("not poisoned")
+            .push(serde_json::to_value(&cdr).expect("serialises"));
+        Ok(KitUrl::new_lenient(format!(
+            "https://emsp.example/cdrs/{id}"
+        )))
+    }
+}
+
+/// The test whose absence hid a defect that broke every inbound document.
+///
+/// Every other test here builds a `Cdr` in Rust and hands it to the node. None
+/// of them **parsed** one, and a partner's record arrives as bytes — so a
+/// workspace-wide `serde_json` feature could make every numeric field in every
+/// OCPI document undeserialisable, and nothing would say so (D331). That is
+/// rule 4 in the direction nobody was looking: not *a fixture this workspace
+/// signed*, but *a fixture this workspace never parsed*.
+#[test]
+fn a_partners_document_parses_from_the_bytes_it_arrives_as() {
+    // Fractional, because an integer would pass under the defect.
+    let wire = r#"{
+        "country_code": "NL", "party_id": "TNM", "id": "cdr-parse-1",
+        "start_date_time": "2026-06-01T10:00:00Z", "end_date_time": "2026-06-01T10:31:00Z",
+        "cdr_token": {"country_code":"NL","party_id":"TNM","uid":"045F2C9A","type":"RFID","contract_id":"NL-TNM-C00122045-K"},
+        "auth_method": "AUTH_REQUEST",
+        "cdr_location": {"id":"LOC1","address":"Hauptstraße 12","city":"Berlin","country":"DEU",
+            "coordinates":{"latitude":"52.520008","longitude":"13.404954"},
+            "evse_uid":"EVSE1","evse_id":"DE*AB7*E840*6487","connector_id":"1",
+            "connector_standard":"IEC_62196_T2_COMBO","connector_format":"CABLE","connector_power_type":"DC"},
+        "currency": "EUR",
+        "charging_periods": [
+            {"start_date_time":"2026-06-01T10:00:00Z",
+             "dimensions":[{"type":"ENERGY","volume":18.512},{"type":"TIME","volume":0.5166}]}
+        ],
+        "total_cost": {"before_taxes": 8.82},
+        "total_energy": 18.512,
+        "total_time": 0.5166,
+        "last_updated": "2026-06-01T10:31:00Z"
+    }"#;
+
+    let parsed: ocpi_kit::v2_3_0::cdrs::Cdr =
+        serde_json::from_str(wire).expect("a partner's record has to parse from its own bytes");
+    assert_eq!(parsed.id.as_str(), "cdr-parse-1");
+    // Every figure at the scale an OCPI document carries — a meter's three
+    // decimals, an hour's four, a currency's two — survives the parse exactly.
+    assert_eq!(parsed.total_energy.to_string(), "18.512");
+    assert_eq!(parsed.total_time.to_string(), "0.5166");
+    assert_eq!(
+        parsed.total_cost.before_taxes.to_string(),
+        "8.82",
+        "money above all: a cent read through a binary float is a cent two companies argue about"
+    );
+}
+
+/// `[OCPI 2.3.0 §mod_cdrs]` makes a Receiver return a `Location` so the sender
+/// can read back **what it sent** — which is the sender's document, not this
+/// side's canonical model rebuilt.
+#[tokio::test]
+async fn a_pushed_record_can_be_read_back_as_the_document_that_arrived() {
+    let (mine, node) = this_node().await;
+    let client = OcpiClient::with_config(KitConfig::for_testing()).expect("a client");
+
+    // Registered, so the push is authenticated the way a real one is.
+    let peer = peer_platform().await;
+    let theirs = ocpi_kit::testkit::sample::credentials(
+        "TOKEN-B-FROM-THE-PEER",
+        &format!("http://{peer}/ocpi/versions"),
+    )
+    .expect("a credentials object");
+    ocpi_kit::client::Registration::new(
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+        CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").expect("a token"),
+    )
+    .discover(client.transport())
+    .await
+    .expect("versions")
+    .select_best(client.transport())
+    .await
+    .expect("details")
+    .register(client.transport(), &theirs)
+    .await
+    .expect("the handshake completes");
+
+    let token_c = CredentialsToken::new("TOKEN-C-FOR-NL*TNM").expect("a token");
+
+    // A document owned by the platform that is pushing it. Anything else is
+    // refused a step earlier — see the test below.
+    let document: ocpi_kit::v2_3_0::cdrs::Cdr = {
+        let (_, _, rendered) = queued();
+        let Outbound::V2_3_0(cdr) = rendered else {
+            panic!("this partner speaks 2.3.0");
+        };
+        let mut cdr = *cdr;
+        cdr.country_code = ocpi_kit::types::CiString::new("NL").expect("a country");
+        cdr.party_id = ocpi_kit::types::CiString::new("TNM").expect("a party");
+        cdr
+    };
+    let cdrs = advertised(
+        &client,
+        mine,
+        &token_c,
+        ModuleId::Cdrs,
+        ocpi_kit::InterfaceRole::Receiver,
+    )
+    .await;
+    let push = OcpiRequest::new(
+        http::Method::POST,
+        KitUrl::new_lenient(cdrs),
+        ModuleId::Cdrs,
+    )
+    .with_body(&document)
+    .expect("encodes");
+    let (pushed, headers) = client
+        .transport()
+        .send_with_headers::<serde_json::Value>(&push, &token_c, &Default::default())
+        .await
+        .expect("the push reaches this node");
+    assert!(pushed.is_success(), "{pushed:?}");
+    let location =
+        ocpi_kit::transport::header_str(&headers, &ocpi_kit::transport::headers::LOCATION)
+            .expect("the paragraph makes the Location mandatory on the response")
+            .to_owned();
+
+    // …and reading that URL back gives the sender its own document.
+    let back = OcpiRequest::new(
+        http::Method::GET,
+        KitUrl::new_lenient(location),
+        ModuleId::Cdrs,
+    );
+    let read: ocpi_kit::v2_3_0::cdrs::Cdr = client
+        .transport()
+        .send(&back, &token_c, &Default::default())
+        .await
+        .expect("the URL the Location named answers");
+    assert_eq!(
+        serde_json::to_value(&read).expect("serialises"),
+        serde_json::to_value(&document).expect("serialises"),
+        "a sender reading back what it sent must get what it sent, not a rebuild of it"
+    );
+
+    // …and it is a fact on the record, so a restart answers the same.
+    assert!(
+        node.lock()
+            .expect("not poisoned")
+            .journal()
+            .records()
+            .expect("the chain holds")
+            .iter()
+            .any(|r| r.kind == "received")
+    );
+}
+
+/// The leak the authority model exists to prevent, at the wire.
+///
+/// A platform speaks for the parties its credentials listed. A record naming a
+/// different one is refused — and with a **404**, because
+/// `[OCPI 2.3.0 §transport_and_format]` says a receiver may block access this
+/// way rather than reveal whether the object exists.
+///
+/// The check that matters is the inner one: `Inbox::post_cdr` builds its
+/// principal from the **credential**, never from the document. Built from the
+/// document, `Roamd::receive` would compare a claim with itself and every push
+/// would self-authorise — a partner settling records in any operator's name by
+/// writing that name in the payload (D332).
+#[tokio::test]
+async fn a_platform_cannot_push_a_record_that_names_another_party() {
+    let (mine, _node) = this_node().await;
+    let client = OcpiClient::with_config(KitConfig::for_testing()).expect("a client");
+    let peer = peer_platform().await;
+    let theirs = ocpi_kit::testkit::sample::credentials(
+        "TOKEN-B-FROM-THE-PEER",
+        &format!("http://{peer}/ocpi/versions"),
+    )
+    .expect("a credentials object");
+    ocpi_kit::client::Registration::new(
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+        CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").expect("a token"),
+    )
+    .discover(client.transport())
+    .await
+    .expect("versions")
+    .select_best(client.transport())
+    .await
+    .expect("details")
+    .register(client.transport(), &theirs)
+    .await
+    .expect("the handshake completes");
+
+    // The platform registered for NL*TNM. This record says DE*ABC.
+    let (_, _, rendered) = queued();
+    let Outbound::V2_3_0(document) = rendered else {
+        panic!("this partner speaks 2.3.0");
+    };
+    assert_eq!(document.country_code.as_str(), "DE");
+
+    let token_c = CredentialsToken::new("TOKEN-C-FOR-NL*TNM").expect("a token");
+    let cdrs = advertised(
+        &client,
+        mine,
+        &token_c,
+        ModuleId::Cdrs,
+        ocpi_kit::InterfaceRole::Receiver,
+    )
+    .await;
+    let push = OcpiRequest::new(
+        http::Method::POST,
+        KitUrl::new_lenient(cdrs),
+        ModuleId::Cdrs,
+    )
+    .with_body(document.as_ref())
+    .expect("encodes");
+    let refused = client
+        .transport()
+        .send_with_headers::<serde_json::Value>(&push, &token_c, &Default::default())
+        .await
+        .expect_err("a platform may not write another party's records");
+    // The **authority model** answers, not the transport: the grant is judged
+    // against the credential and the record's owner, and it says so by name.
+    // That is the check D332 is about — built from the document instead, it
+    // would have compared a claim with itself and passed.
+    let said = refused.to_string();
+    assert!(
+        said.contains("emob.cdr.write") && said.contains("DE*ABC"),
+        "the refusal has to name the grant and the owner it does not reach: {said}"
+    );
+}
+
+/// The URL this node **advertises** for a module, read out of its own
+/// version-details document.
+///
+/// Never a hand-written path. The kit mounts Receiver routes under a prefix and
+/// advertises them with it, so a test that guessed `/ocpi/cdrs` would fail
+/// against a node that is behaving correctly — which is the failure
+/// `inbound::router` exists to make impossible and which this helper is how a
+/// peer avoids.
+async fn advertised(
+    client: &OcpiClient,
+    mine: std::net::SocketAddr,
+    token: &CredentialsToken,
+    module: ModuleId,
+    role: ocpi_kit::InterfaceRole,
+) -> String {
+    let selected = ocpi_kit::client::Registration::new(
+        KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+        token.clone(),
+    )
+    .discover(client.transport())
+    .await
+    .expect("versions")
+    .select_best(client.transport())
+    .await
+    .expect("details");
+    selected
+        .details()
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.identifier == module && endpoint.role == role)
+        .unwrap_or_else(|| panic!("this node advertises no {module}/{role}"))
+        .url
+        .as_str()
+        .to_owned()
+}

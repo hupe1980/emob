@@ -58,10 +58,7 @@ async fn main() -> Result<()> {
     let me: Identity = identity!();
     emob_service::telemetry::init(me, "info,sited=debug", false);
 
-    let http: SocketAddr = std::env::var("SITED_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9584".to_owned())
-        .parse()
-        .context("SITED_HTTP_BIND is not a socket address")?;
+    let http: SocketAddr = emob_service::serve::bind_address("sited", "127.0.0.1:9586")?;
 
     let readiness = Readiness::new().expecting(INVENTORY);
     let shutdown = Shutdown::new();

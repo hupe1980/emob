@@ -39,13 +39,14 @@ rust-version = "1.94"
 # ── External ────────────────────────────────────────────────────────────────
 thiserror  = "2"
 serde      = { version = "1", features = ["derive"] }
-# `arbitrary_precision` is not optional for this workspace: without it
-# `serde_json` parses every number through `f64`, and OCMF's `2935.600` — three
-# decimals the meter is *stating* as its accuracy — comes back as `2935.6`. With
-# it, `Number` keeps the literal and `emob-eichrecht` reads the exact decimal the
-# station wrote. `preserve_order` matters for the same reason one layer up: a
-# document that is re-emitted must not silently reorder what a peer sent.
-serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
+# `raw_value`, not `arbitrary_precision`. Both carry a decimal's own digits into
+# a JSON number slot, which `emob_poi::datex::Exact` needs; `arbitrary_precision`
+# does it **globally** — it changes how `serde_json` presents every number to
+# every deserialiser in the build, so a type with a numeric visitor sees a map
+# and a partner's OCPI document stops parsing from bytes (D331). `raw_value` is
+# one type. `preserve_order` so a re-emitted document does not reorder what a
+# peer sent.
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 time       = { version = "0.3", features = ["std", "macros", "parsing", "formatting"] }
 
 # A tariff's "0.30 from 22:00" is local civil time at the charge point, and an
@@ -70,42 +71,32 @@ rust_decimal = { version = "1", features = ["macros", "serde-with-str"] }
 # money, and a crate that imported it in order to convert away from it would
 # have the wrong types in scope exactly where it matters.
 #
-# 0.2 is the first release that can carry money: every OCPP `number` is an exact
-# decimal rather than an `f64`, and `metering` reads the signed meter record —
-# the value §33 MessEG lets a customer check — out of both the 2.x field and the
-# 1.6 `SignedData` string that holds the same object. Only `emob-ocpp` and
-# `csmsd` depend on it; everything that decides money does not.
-ocpp-kit = { version = "0.2", default-features = false }
+# Every OCPP `number` is an exact decimal rather than an `f64`, and `metering`
+# reads the signed meter record — the value §33 MessEG lets a customer check —
+# out of both the 2.x field and the 1.6 `SignedData` string that holds the same
+# object. Every verdict type is `#[must_use]`, which is the compiler reaching
+# across a repository boundary that no guard here can (D306, D327).
+ocpp-kit = { version = "0.3", default-features = false }
 
 # ── The OCPI wire ───────────────────────────────────────────────────────────
-# Only `emob-roam` sees these types. `convert` is not an extra: a partner on
-# 2.2.1 is the ordinary case, and the point of the crossing is that what the
-# downgrade cost is reported rather than decided silently.
+# The wire *model* for `emob-roam`; `roamd` adds `client` on top, because the
+# socket is a daemon's and the crossing is a crate's.
 #
-# Invoice Reconciliation is the module 2.3.0 added for the half this workspace
-# is about. A CDR and its invoice line cannot disagree inside one process, and
-# between two *companies* nothing tied them together at all: the records go over
-# OCPI and the invoice over an access point, and neither document says which
-# records the other is about. That is the seam `emob-billing` ends at and the one
-# `emob-roam` now carries. It needs no feature: upstream moved the module into
-# core 2.3.0 in July 2026 — in place, on a released branch, with no version bump
-# — and `payments` went the other way, out of core onto a branch. This workspace
-# does not take `payments`: a pre-authorisation hold is the acquirer's and
-# `Tariff.preauthorize_amount` decides nothing `emob-tariff` computes.
-ocpi-kit = { version = "0.3", default-features = false, features = ["v2_3_0", "v2_2_1", "convert"] }
+# `convert` is not an extra: a partner on 2.2.1 is the ordinary case, and the
+# point of the crossing is that the downgrade's cost is reported rather than
+# decided silently. `payments` is deliberately absent — a pre-authorisation hold
+# is the acquirer's, and `Tariff.preauthorize_amount` decides nothing
+# `emob-tariff` computes.
+ocpi-kit = { version = "0.4", default-features = false, features = ["v2_3_0", "v2_2_1", "convert"] }
 
 # ── The OICP wire ───────────────────────────────────────────────────────────
-# Also only `emob-roam`. OICP is hub-and-spoke where OCPI is peer-to-peer —
-# every partner talks to Hubject and Hubject calls back — so the crossing is the
-# same shape and the transport is not, which is why `transport`, `client` and
-# `server` stay off: those are `roamd`'s and they carry `reqwest`, `axum` and
-# `tokio` behind them. A domain crate takes `cpo` and `emp`, which are the wire
-# *model*, and `eichrecht`, which is the CDR pre-flight Hubject and an EMP each
-# run against a record before it is billed.
+# The wire model only: `cpo` and `emp` for the crossing, `eichrecht` for the CDR
+# pre-flight Hubject and an EMP each run before a record is billed. The
+# transport is a broker behind mutual TLS and belongs to the daemon.
 #
-# Every OICP `number` is an exact decimal in this kit, which is what lets
-# `ConsumedEnergy` be the difference between the two register readings rather
-# than nearly it — the same promise `no-floats` makes on this side of the seam.
+# Every OICP `number` is an exact decimal here, which is what lets
+# `ConsumedEnergy` be the difference between two register readings rather than
+# nearly it — the promise `no-floats` makes on this side of the seam.
 oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp", "eichrecht"] }
 
 # ── The vehicle wire ────────────────────────────────────────────────────────
@@ -123,7 +114,7 @@ oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp"
 # RustCrypto generation beside `ocmf`'s (D304). The EXI codec, the message sets
 # and the session engines are a station's and a vehicle's; nothing speaks to a
 # car.
-iso15118 = { version = "0.4", default-features = false }
+iso15118 = { version = "0.5", default-features = false }
 
 # ── The § 14a wire ──────────────────────────────────────────────────────────
 # SHIP, SPINE and the use-case descriptors, **without `runtime`**: no tokio, no

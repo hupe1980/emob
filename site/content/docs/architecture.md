@@ -84,7 +84,7 @@ evidence — so going multi-party changes the transport and never the arithmetic
 | `roamd` | The roaming node: who a record goes to, whether it may go at all, when it is late, and what to do with one that arrives. Every document is `emob-roam`'s; what is here is the ledger of what was sent to whom — the one thing no crate can hold, because `[OCPI 2.3.0 §mod_cdrs]` seals a record once the eMSP has it and gives a correction an order, and neither rule is a property of a document |
 | `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
 
-**1040 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
+**1075 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
 `emob-service` is the one shared place that stops being true, and everything
 above it is a daemon. `just ci` green.
 
@@ -272,6 +272,107 @@ specialists read data a daemon already holds. When one lands the rule is `hems`'
 unchanged: **server side only** — a daemon that could *call* a model is a daemon
 whose answers depend on one, and none of these answers may.
 
+## The state a daemon holds, and the journal it is folded from ✅
+
+The domain crates hold no state, which is the whole of the purity argument. The
+daemons hold the rules that are about a **pair** — what was true before a call
+and what may be true after — because no value can carry one:
+`[UStG §14(4) Nr. 4]` spends an invoice number *once*;
+`[OCPI 2.3.0 §mod_cdrs]` seals a record the moment the eMSP has it; a card is
+blocked; a contract has run up these sessions.
+
+Each of those is a fact about the **past**, and a service that held one only in
+memory answers a restart with the wrong one. A counter that starts again at one
+hands a second document a number the first already carries. An empty consignment
+ledger re-opens every record already sent, to partners who have billed them. A
+running total of zero authorises every session past the credit limit that was
+the point of holding it — and raises nothing, because a limit that is never
+reached looks exactly like a limit that is never exceeded.
+
+**Enforcement is about a call; keeping is about where the answer lives.**
+
+`emob_service::journal` is where. A service does not persist its aggregate: it
+appends the facts it decided, in order, and the service on the way up is the
+fold of those facts. That is sound here for the reason the purity rule exists —
+every instant and every key is an argument, never a reading, so the fold gives
+the same answer twice.
+
+- **Facts, not commands.** An entry says what was decided, not what was asked. A
+  command log re-decides at replay, re-reading the tariff, the parties and the
+  clock that decided the first time; a platform whose invoice numbers move when
+  a tariff is corrected is not one anybody can keep books with.
+- **The records chain**, the way a meter's do. A record edited in place or
+  removed from the middle breaks every digest after it, and a daemon whose
+  journal does not chain refuses to start. It is a newline-delimited file, so a
+  reader who does not trust the platform can check it with `sha256sum`.
+- **A write that fails halts the service.** The record is appended after the
+  decision and before the caller is told: killed between the two, both are lost,
+  which is the safe direction. A journal that *refuses* leaves the state ahead
+  of the record, and a platform that keeps issuing invoices it cannot account
+  for is worse than one that stops and says so.
+
+What the chain cannot do is said rather than implied: it proves nothing was
+**rewritten** and cannot prove nothing was removed from the **end**, because a
+truncated journal is byte-for-byte one that was never written. `Journal::head`
+is the digest the file ends on; recorded outside the process, a head that has
+gone backwards is a truncated tail.
+
+All four ledgers are folded this way — `billd`, `roamd`, `empd` and `poid` — in
+the order of what losing each costs: a document, a double settlement, a credit
+limit, then a republished snapshot. The last is why that order mattered. Losing
+`poid`'s manifest makes a status message **refuse**, which is the safe direction
+and still a gap, because a publisher that re-sends its whole estate after every
+restart is one an access point rate-limits.
+
+## It ships ✅
+
+One `Dockerfile` for all eight daemons, selected by a build argument, because
+they are the same binary shape and eight copies of six lines is seven chances
+for the wrong one to be the one nobody re-reads. The runtime is
+`distroless/cc` — no shell, no package manager. `docker-bake.hcl` builds them
+all; `compose.yaml` brings the estate up on one machine with a **named volume
+per journal**, declared rather than defaulted, because a container without one
+is a daemon whose ledger dies with it.
+
+A daemon with a journal is a **single writer** by construction: two processes
+behind one file interleave two chains into one. So the compose file carries no
+replica count, and says why.
+
+## One wire dials out ✅
+
+`roamd` pushes a charge detail record to the peer the contract identifier named,
+over a real socket, with three integration tests against a receiver that answers
+the way `[OCPI 2.3.0 §mod_cdrs]` says a receiver answers: one that takes it and
+returns a `Location`, one that refuses it with an OCPI envelope, and one that is
+not there.
+
+**An outbox holds the message, not a recipe for one.** The crossing that
+produces the partner's copy also produces *the account of what carrying it there
+cost*, by JSON Pointer into that copy. The document is rendered once, when the
+record is routed, and journalled with the decision — a second rendering at send
+time, from a session that may since have been re-rated, puts a document on the
+wire that the account does not describe. Both are valid, both validate, and
+nothing downstream fails.
+
+**A push has three outcomes, not two.** A receiver that answered has *seen* the
+record: it leaves the queue and a person reads the reason. A connection that
+died is not an answer, so nothing is recorded and the next drain sends it again
+— safe because the paragraph above keys a CDR and makes the receiver treat the
+second copy as the first. Reading the first as the second retries a partner for
+ever with a document it has already judged; reading the second as the first
+drops a record nobody received.
+
+## Four wires do not 📐
+
+`tarifd`'s `SetDefaultTariff` onto a 2.1 estate, `poid`'s Mobilithek
+subscription, `sited`'s SHIP session, and the OICP broker behind mutual TLS —
+for which the **document** is built already, because the crossing refuses what
+that wire cannot carry rather than flattening it, so what is missing is a socket
+and a credential.
+
+The drain loop **warns** for a wire it has no client for: a queue that silently
+holds a record it cannot send is a backlog nobody is told about.
+
 ## An agent proposes; it cannot move money ✅
 
 Every crate below answers a question about **one** thing: is this chain sound,
@@ -378,7 +479,10 @@ seated is held at zero and named.
 | `emob-sim` (the rest) | MockHubject and an OCPI peer-in-a-process. The Plug & Charge half is built: a station signs `ISO15118_PNC` into the payload its private key covers, so the contract a session claims and the assignment its meter record states are two independent claims that can be compared |
 
 Services — `csmsd`, `agentd`, `poid`, `tarifd`, `roamd`, `billd`, `empd` and the
-edge controller `sited` are built; `pncd` and `opsd` are 📐.
+edge controller `sited` are built; `pncd`, `opsd` and `thgd` are 📐. What is
+built is their **decisions**, a journal those decisions survive a restart in for
+each of the four that hold a ledger, and — on the roaming wire — the socket that
+puts a record on somebody else's server.
 
 ## One inventory, three audiences
 
@@ -513,7 +617,13 @@ a station and has its own fix.
 No guard here could have found that: `check-reach` asks whether anything in this
 workspace names a public function, and a *sibling's* return value discarded at a
 call site needs no binding to discard. The one mechanism that reaches across is
-the compiler's, and it is filed upstream as a request for `#[must_use]` (D306).
+the compiler's, and it is the sibling's to apply — `ocpp-kit` 0.3 marks every
+verdict `#[must_use]` (D306).
+
+The attribute catches the easy half. A verdict that is **bound** and swept into
+a catch-all is a value nothing dropped: `AppliedWithGap` carries the `seqNo`s
+that never arrived, and matching it beside `Applied` consumes the value while
+discarding the list (D327).
 
 **One funnel, three versions.** `observe_v16`, `observe_v201` and `observe_v21`
 all produce the same observation, so the billing path is one function for all
@@ -542,16 +652,17 @@ register, and the record that comes out bills **0.636 kWh**.
 
 ## Standing on the kits
 
-emob does not implement charging protocols. Five sibling workspaces already do,
-and they are the hard sixty per cent of a platform:
+emob does not implement charging protocols. **Six** sibling workspaces already
+do, and they are the hard sixty per cent of a platform:
 
 | Sibling | What emob takes |
 |---|---|
-| `ocpp-kit` | OCPP 1.6J / 2.0.1 / 2.1 payloads, a sans-I/O engine, transport, the CSMS ledger |
-| `ocpi-kit` | OCPI 2.1.1 / 2.2.1 / 2.3.0 models, client and server, hub pieces, the tariff engine |
+| `ocmf` | The Open Charge Metering Format itself — parsed without disturbing the bytes the signature covers, seven signature algorithms, and the S.A.F.E. transparency container. It refuses to decide money, which is exactly the seam `emob-eichrecht` sits on |
+| `ocpp-kit` | OCPP 1.6J / 2.0.1 / 2.1 payloads, a sans-I/O engine, transport, the CSMS ledger — whose verdicts are `#[must_use]`, the compiler reaching across a repository boundary no guard here can |
+| `ocpi-kit` | OCPI 2.1.1 / 2.2.1 / 2.3.0 models, version translation at the edge, and the client `roamd` pushes with. **Not** its tariff engine: `emob-tariff` decides what a session costs, and a second engine that could produce a different number for the same session is the drift this workspace exists to prevent |
 | `oicp-kit` | Hubject, both halves, delta-sync, CDR pre-flight, and a mock hub for CI |
-| `iso15118` | The EXI codec, the -2/-20 message sets, the Plug & Charge signature profile. Already a **dev**-dependency of `emob-core`: it owns the unambiguous spelling of a vehicle-communication generation, and a test asserts ours is its spelling — the DATEX II profile's own literal `iso15118` means -20 and has no name for -2, so an ambiguous one published in the official record is a claim of compliance with a 2027 duty |
-| `eebus` | The § 14a wire: SHIP, SPINE and the four use cases certifiable since July 2026, on both sides. Not a dependency yet, and already load-bearing — `emob-smart` reads its Limitation of Power Consumption use case for the five states a controllable site can be in, because *what a site draws while nobody is telling it anything* is a rule, and the socket that notices the silence is a daemon's |
+| `iso15118` | The EXI codec, the -2/-20 message sets, and the Annex F path validation `emob-pnc` is built on — taken with `pnc` and nothing else, which pulls no cryptography at all. Also a **dev**-dependency of `emob-core`, where it owns the unambiguous spelling of a vehicle-communication generation |
+| `eebus` | The § 14a wire: SHIP, SPINE and the four certifiable use cases, on both sides. Taken **without `runtime`**, so `emob-eebus` stays a domain crate and the sockets are `sited`'s |
 
 The billing half comes from `en16931` (+ formats) and `sepa`, with
 `doubleentry` reserved for the daemon that holds a journal; the
@@ -560,8 +671,9 @@ market-communication half — German pass-through charging under NZR-EMob — fr
 hard part of an OCPI tariff is which element prices which second and a second
 pricing engine is the drift `emob-tariff` exists to prevent; `rubo4e`, because
 the seam it would serve consumes `mako-emob`'s own `Ladevorgang` rather than a
-BO4E object; and `rutmf`, because the contract model a TM Forum surface would
-expose does not exist yet. Each is recorded with its reason in the concepts, so
+BO4E object; and `rutmf`, because the contract model a TM Forum surface
+would expose is four types in `empd` rather than a product catalogue, and an API
+model adopted before the domain it exposes is the daemon deciding *what*. Each is recorded with its reason in the concepts, so
 nobody reaches for it twice.
 
 ### Why the CDR depends on the Eichrecht crate

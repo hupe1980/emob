@@ -184,6 +184,16 @@ never ran and a swapped meter behind an unreadable key was never named. The
 session still bills — being unable to check a claim is not a reason to refuse the
 measurement — and the operator is told, because the fix is a provisioning one.
 
+## Configuration
+
+| Variable | Default | What |
+|---|---|---|
+| `CSMSD_HTTP_BIND` | `127.0.0.1:9001` | the readiness and health endpoint |
+| `CSMSD_BIND` | `127.0.0.1:9000` | the OCPP endpoint a station dials. Its **own** variable: the estate-wide address names the shell's socket, and one address applied to both would bind the second to the first's port |
+| `CSMSD_TIME_ZONE` | `Europe/Berlin` | the zone a tariff's `22:00` is read in — a fact about the **site**, not about this process. Judged in the wrong one, the same session costs a different amount (D175) |
+| `EMOB_JOURNAL_DIR` | `var` | where a daemon folds its ledger from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `CSMSD_HTTP_BIND` wins over. Every default is **loopback**, and loopback inside a container is reachable by nothing |
+
 ## License
 
 MIT OR Apache-2.0.

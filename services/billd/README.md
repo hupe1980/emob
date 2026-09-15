@@ -153,12 +153,51 @@ The submission is the one leg CI cannot run: a *Rechnungseingangsplattform* is
 somebody else's endpoint behind a registration, exactly as `csmsd`'s WebSocket and
 the Mobilithek subscription are.
 
+## The fifth thing: that what was decided outlives the process
+
+Every rule above is about a **pair** — what was true before a call and what may
+be true after. All four were enforced, tested, and driven by a generated
+sequence of calls that checks the invariant after every one. And all four were
+held in one process, so a restart handed the next document the number the first
+one carries, which is exactly what `[UStG §14(4) Nr. 4]` forbids by name.
+
+`Books` is `Billd` folded from a hash-chained journal. Every decision is written
+down as a **fact** — `issued`, `submitted`, `booked` — and the service on the
+way up is the fold of those facts. Facts and not commands, because a command log
+re-decides at replay, and a platform whose invoice numbers move when a tariff is
+corrected is not one anybody can keep books with.
+
+```rust,ignore
+let mut books = Books::open(
+    "emob",
+    Numbering::series("R", 2026),
+    ChartOfAccounts::new(),
+    emob_service::journal::for_daemon("billd")?,
+)?;
+
+// `R-2026-0001` before the restart is not `R-2026-0001` after it.
+let number = books.issue("2026-06", closing)?;
+```
+
+The record is appended after the decision and before the caller is told: a
+process killed between the two loses both, which is the safe direction. A
+journal that **refuses** a write leaves the state ahead of the record, and the
+service halts — a platform that keeps issuing invoices it cannot account for is
+worse than one that stops and says so.
+
+A journal edited in the middle breaks the chain and `Books::open` refuses to
+start. A journal with its **last** record cut off does not, and cannot: it is
+byte-for-byte a journal that was never written. `Journal::head`, recorded
+somewhere this process cannot reach, is the only witness to that.
+
 ## Configuration
 
 | Variable | Default | What |
 |---|---|---|
 | `BILLD_HTTP_BIND` | `127.0.0.1:9584` | the readiness and health endpoint |
 | `BILLD_SERIES` | `R` | the number series' prefix |
+| `EMOB_JOURNAL_DIR` | `var` | where the journal is folded from and appended to. **Not** a temporary directory by default: a service that silently journalled to `/tmp` would come back from a reboot with an empty ledger and no error |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `BILLD_HTTP_BIND` wins over. A container image sets it, because every default here is **loopback** and loopback inside a container is reachable by nothing |
 
 ## License
 

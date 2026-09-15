@@ -29,8 +29,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
 use emob_core::PartyId;
+use emob_service::journal::Journal as _;
 use emob_service::{Identity, Readiness, Server, Shutdown, identity};
-use empd::Empd;
+use empd::{Book, Empd};
 
 /// What the daemon waits for before it takes traffic.
 ///
@@ -47,10 +48,7 @@ async fn main() -> Result<()> {
     let me: Identity = identity!();
     emob_service::telemetry::init(me, "info,empd=debug", false);
 
-    let http: SocketAddr = std::env::var("EMPD_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9585".to_owned())
-        .parse()
-        .context("EMPD_HTTP_BIND is not a socket address")?;
+    let http: SocketAddr = emob_service::serve::bind_address("empd", "127.0.0.1:9585")?;
 
     // The key the token store is hashed under. A deployment supplies it; a
     // default would be a store whose digests anybody holding this source can
@@ -61,11 +59,24 @@ async fn main() -> Result<()> {
     let readiness = Readiness::new().expecting(CONTRACTS);
     let shutdown = Shutdown::new();
 
-    // A real deployment loads contracts, tokens and the price list from its
-    // store. Everything the service answers is derived from them, so answering
-    // a readiness probe first is answering with an empty book.
+    // The contracts, the tokens and the running totals come back from the
+    // journal. Everything this service answers is derived from them, so the
+    // fold runs **before** the readiness probe goes up: answering first is
+    // answering with an empty book, which refuses every driver, admits every
+    // card an owner reported stolen, and authorises every session past the
+    // credit limit that was the point of holding one.
     let party = PartyId::new("DE", "MSP").context("the provider's own party id")?;
-    let service = Arc::new(Mutex::new(Empd::new(party, key.into_bytes())));
+    let journal = emob_service::journal::for_daemon("empd")
+        .context("opening empd's journal — see EMOB_JOURNAL_DIR")?;
+    tracing::info!(path = %journal.path().display(), "folding the journal");
+    let book = Book::open(Empd::new(party, key.into_bytes()), journal)
+        .context("folding empd's journal")?;
+    tracing::info!(
+        contracts = book.state().contracts().count(),
+        head = %book.journal().head().unwrap_or_default(),
+        "the book is what the journal says it is"
+    );
+    let service = Arc::new(Mutex::new(book));
     readiness.up(CONTRACTS);
 
     let calendar = Arc::clone(&service);
@@ -95,14 +106,14 @@ async fn main() -> Result<()> {
 ///
 /// Split out because the only two things this daemon schedules are here: the
 /// fees a period owes, and the compliance answer the price list itself gives.
-fn report_the_price_list(service: &Mutex<Empd>) {
+fn report_the_price_list(service: &Mutex<Book<emob_service::journal::File>>) {
     let provider = lock(service);
 
     // `emob_core::ProviderProfile` takes four booleans and this derives them, so
     // an operator's compliance report is a fact about the price list rather than
     // a claim somebody entered. A provider with no price list discloses nothing,
     // and `[AFIR Art. 5(5)]` binds it from the day the Regulation applied.
-    let profile = provider.provider_profile();
+    let profile = provider.state().provider_profile();
     let assessment =
         emob_core::obligation::assess_provider(&profile, time::OffsetDateTime::now_utc().date());
     for breach in assessment.breaches() {
@@ -118,7 +129,7 @@ fn report_the_price_list(service: &Mutex<Empd>) {
     // has turned, handed to `billd` as the `Subscription` on each driver's
     // document. The list is derived from the contracts in force, so a driver who
     // charged nothing is still on it.
-    tracing::debug!(contracts = provider.contracts().count(), "in force");
+    tracing::debug!(contracts = provider.state().contracts().count(), "in force");
 }
 
 /// A lock that survives a panic elsewhere.
@@ -126,7 +137,9 @@ fn report_the_price_list(service: &Mutex<Empd>) {
 /// The guarded value is a book of contracts, and a provider that answered a
 /// poisoned lock by refusing every authorisation is a worse failure than the one
 /// it is avoiding — the same reasoning `csmsd` states for its ledgers.
-fn lock(service: &Mutex<Empd>) -> std::sync::MutexGuard<'_, Empd> {
+fn lock(
+    service: &Mutex<Book<emob_service::journal::File>>,
+) -> std::sync::MutexGuard<'_, Book<emob_service::journal::File>> {
     service
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

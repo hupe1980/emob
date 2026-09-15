@@ -71,6 +71,16 @@ pub enum Outcome {
         /// wants to know about, and the number is invisible once the duplicates
         /// are dropped.
         retries: usize,
+        /// `seqNo`s the station never delivered, when the link lost some.
+        ///
+        /// Empty on a complete transaction. The record still settles and its
+        /// energy is still the signed register's — a gap that swallowed a
+        /// signed value would have broken the chain's own pagination and been
+        /// refused — but the transaction's **shape** has a hole in it, and the
+        /// occupancy `[AFIR Art. 5(4)]` prices per minute is read off that
+        /// shape. An operator holding a disputed occupancy fee needs to know
+        /// this record is one of these.
+        gap: Vec<i32>,
     },
     /// The transaction reached no billable record, and why.
     ///
@@ -117,8 +127,8 @@ pub enum Outcome {
     /// A billable event arrived for a transaction that had already ended.
     ///
     /// The operational ledger answers this — `[ocpp_kit::csms::Ingested]`'s
-    /// `AfterEnd` — and `csmsd` used to throw the answer away, so a straggler
-    /// re-opened a transaction that had already settled and the chain built a
+    /// `AfterEnd` — and the answer has to be **read**: dropped, a straggler
+    /// re-opens a transaction that had already settled and the chain builds a
     /// second record from whatever that one message carried. On 1.6 that is a
     /// **refusal** naming a metrology fault that does not exist; on 2.x it is a
     /// restated total, which is the one outcome that needs a human (D306).
@@ -168,6 +178,31 @@ struct Open {
     /// [`Csmsd::accept`]. Both are what a flaky link cost, and
     /// [`Outcome::Settled`] reports their sum.
     retried_messages: usize,
+    /// `seqNo`s the operational ledger says never arrived.
+    ///
+    /// A different fact from a retry, and the opposite one: a retry is a
+    /// message delivered twice, this is a message delivered **none**. Almost
+    /// always an offline period whose queue overflowed.
+    ///
+    /// What it does and does not threaten is the whole of why it is kept.
+    /// The **energy** is safe: it comes from the signed OCMF register, whose
+    /// own pagination refuses a chain with a record missing from it, so a gap
+    /// that swallowed a signed value is already a refusal. What is not safe is
+    /// the transaction's **shape** — a `SuspendedEV` nobody received is
+    /// occupancy `[AFIR Art. 5(4)]` prices per minute and this side never knew
+    /// about. So the gap is reported rather than billed on.
+    missing_messages: Vec<i32>,
+}
+
+impl Open {
+    /// A transaction nobody has sent an event into yet.
+    fn new(id: &emob_core::SessionId, evse: &emob_core::EvseId) -> Self {
+        Self {
+            transaction: Transaction::new(id.clone(), evse.clone(), Authorization::ad_hoc()),
+            retried_messages: 0,
+            missing_messages: Vec::new(),
+        }
+    }
 }
 
 /// The CSMS.
@@ -244,6 +279,17 @@ impl Csmsd {
     /// So a duplicate reaches nothing: it opens no transaction, appends to none
     /// and closes none. It is counted, because a link that retries constantly is
     /// worth knowing about.
+    ///
+    /// # …and the verdict beside it, which the attribute cannot catch
+    ///
+    /// `Ingested` is `#[must_use]` since `ocpp-kit` 0.3, which closes the shape
+    /// above for good. It does not close `AppliedWithGap`: a verdict **bound**
+    /// and swept into a catch-all is a value nothing dropped, so no attribute
+    /// fires, and its `missing` list — *"the `seqNo`s that have never
+    /// arrived"* — goes with it (D327).
+    ///
+    /// The energy is safe either way; it was never this ledger's. What a gap
+    /// costs is the transaction's **shape**, and the occupancy read off it.
     fn accept(
         &self,
         ctx: &Ctx,
@@ -302,20 +348,34 @@ impl Csmsd {
                 });
                 return;
             }
-            // `Applied`, `AppliedWithGap`, no ledger event at all — and a
-            // verdict a later `ocpp-kit` adds, because `Ingested` is
-            // `#[non_exhaustive]`. All of them are a fresh delivery here: a
-            // signed kilowatt-hour dropped on an unrecognised verdict is
-            // unbilled energy, and a record offered twice is a question the
-            // CDR ledger already answers by name.
+            // Recorded, and `seqNo`s before it never arrived. **Not** a
+            // refusal — the event in hand is real and the energy under it is
+            // signed — but the transaction's shape now has a hole, and
+            // `[ocpp_kit::csms::Ingested]` says in as many words that a
+            // consumer which discards this bills a transaction with one.
+            Some(Ingested::AppliedWithGap { missing }) => {
+                lock(&self.inflight)
+                    .entry(key.clone())
+                    .or_insert_with(|| Open::new(&id, &point.evse_id))
+                    .missing_messages
+                    .extend(missing);
+            }
+            // `Applied`, no ledger event at all — and a verdict a later
+            // `ocpp-kit` adds, because `Ingested` is `#[non_exhaustive]`. All
+            // of them are a fresh delivery here. The upstream documentation
+            // names the precondition for falling this way — *"treating it as a
+            // fresh delivery risks a double-settlement unless something
+            // further on deduplicates"* — and this side has one: `CdrLedger`
+            // is idempotent on the record's key. The other direction has no
+            // such backstop, because a signed kilowatt-hour dropped on an
+            // unrecognised verdict is unbilled energy nothing reports.
             _ => {}
         }
 
         let mut inflight = lock(&self.inflight);
-        let open = inflight.entry(key.clone()).or_insert_with(|| Open {
-            transaction: Transaction::new(id, point.evse_id.clone(), Authorization::ad_hoc()),
-            retried_messages: 0,
-        });
+        let open = inflight
+            .entry(key.clone())
+            .or_insert_with(|| Open::new(&id, &point.evse_id));
         open.transaction.events.push(event);
 
         if closing && let Some(finished) = inflight.remove(&key) {
@@ -397,6 +457,7 @@ impl Csmsd {
                 // Both halves of what the link cost: records the transport
                 // delivered twice, and messages it delivered twice.
                 let retries = assembled.duplicates_dropped + open.retried_messages;
+                let gap = open.missing_messages.clone();
                 let stored = lock(&self.cdrs).accept(cdr);
                 {
                     let mut outcomes = lock(&self.outcomes);
@@ -406,6 +467,7 @@ impl Csmsd {
                             key: &key,
                             energy: &energy,
                             retries,
+                            gap: &gap,
                             identity: &identity.to_string(),
                             transaction: transaction_id,
                         },
@@ -557,6 +619,7 @@ struct Accepted<'a> {
     key: &'a str,
     energy: &'a str,
     retries: usize,
+    gap: &'a [i32],
     identity: &'a str,
     transaction: &'a str,
 }
@@ -584,6 +647,7 @@ fn outcome_of(acceptance: &Acceptance, record: Accepted<'_>) -> Outcome {
             key: record.key.to_owned(),
             energy: record.energy.to_owned(),
             retries: record.retries,
+            gap: record.gap.to_vec(),
         },
         Acceptance::Duplicate => Outcome::AlreadySettled {
             key: record.key.to_owned(),
@@ -783,6 +847,7 @@ mod tests {
             key: "DE*ABC/CP-1-42",
             energy: "0.636 kWh",
             retries: 2,
+            gap: &[],
             identity: "CP-1",
             transaction: "42",
         }
@@ -811,6 +876,35 @@ mod tests {
         assert!(
             matches!(outcome, Outcome::Settled { retries: 2, .. }),
             "{outcome:?}"
+        );
+    }
+
+    /// The verdict `[ocpp_kit::csms::Ingested]` says a consumer must not
+    /// discard, and the reason it is not a refusal.
+    ///
+    /// *"A consumer that discards it bills a transaction with a hole in it."*
+    /// The hole is not in the **energy** — that is the signed register's, and a
+    /// gap that swallowed a signed value breaks the chain's own pagination and
+    /// is refused long before here. It is in the transaction's **shape**: a
+    /// `SuspendedEV` nobody received is occupancy `[AFIR Art. 5(4)]` prices per
+    /// minute and this side never knew about. So the record settles and the
+    /// gap travels with it.
+    #[test]
+    fn a_transaction_with_a_hole_in_it_still_settles_and_says_where_the_hole_is() {
+        let outcome = outcome_of(
+            &Acceptance::Stored,
+            Accepted {
+                gap: &[7, 8],
+                ..record()
+            },
+        );
+        let Outcome::Settled { gap, energy, .. } = &outcome else {
+            panic!("a gap is not a refusal: the event in hand is real: {outcome:?}");
+        };
+        assert_eq!(gap, &[7, 8], "the seqNos that never arrived travel with it");
+        assert_eq!(
+            energy, "0.636 kWh",
+            "and the energy is unchanged, because it was never the ledger's to begin with"
         );
     }
 

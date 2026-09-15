@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use emob_core::PartyId;
 use emob_service::{Identity, Readiness, Server, Shutdown, identity};
 use tarifd::{Audience, Tarifd};
@@ -43,10 +43,7 @@ async fn main() -> Result<()> {
     let me: Identity = identity!();
     emob_service::telemetry::init(me, "info,tarifd=debug", false);
 
-    let http: SocketAddr = std::env::var("TARIFD_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9581".to_owned())
-        .parse()
-        .context("TARIFD_HTTP_BIND is not a socket address")?;
+    let http: SocketAddr = emob_service::serve::bind_address("tarifd", "127.0.0.1:9581")?;
 
     let readiness = Readiness::new().expecting(TARIFFS);
     let shutdown = Shutdown::new();

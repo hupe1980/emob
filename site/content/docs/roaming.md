@@ -267,6 +267,58 @@ question, an id this side has corrected is a **settlement** one, an id held
 **unrated** is a partner's own record priced by nobody, and a second currency is a
 total that means nothing beside a single invoice amount.
 
+## A node you can register with ✅
+
+> *The Credentials module is symmetric and has to be implemented by all OCPI
+> implementations.* `[OCPI 2.3.0 §credentials]`
+
+A platform that can push a document and cannot be **registered with** is not an
+OCPI implementation. `roamd` serves `versions`, `credentials` and the CDRs
+receiver, and four things about the receiving half are decisions rather than
+transcription.
+
+- **The reach-back is a precondition, not a courtesy.** A `POST credentials` is
+  not answered until this node has read the client's versions *with the token it
+  was just handed* — `3001` when it cannot. Skipping it leaves a credential for
+  a platform this node cannot reach: it looks like a registration and fails the
+  day a record is owed.
+- **A registration is a fact about the past**, so it is journalled before the
+  peer is told. A node that forgot the tokens answers `401` to every partner it
+  has onboarded, and re-issues values partners are still presenting.
+- **The principal comes from the credential, never from the document.** A push
+  is judged by asking whether the caller may write records for the party the
+  document names; built from that same document, the question compares a claim
+  with itself and passes for everything.
+- **The path served, the URL advertised and the `Location` returned are one
+  computation.** Work any of them out separately and the node answers on paths
+  nobody was told about, or hands back a `Location` that 404s. Every byte
+  well-formed, nothing working, nothing logged.
+
+And the two halves close a loop: **registering is what makes a partner
+reachable**. The handshake keeps the endpoints it reads off the peer's version
+details — the only moment they are on offer — and the outbound client holds no
+peer list at all. A second one beside the registrations would be a second answer
+to *where does a record go*, stale the moment a token is rotated.
+
+The tests run the handshake from the other side through the client's own
+implementation and read every URL out of this node's version-details document,
+because a test against paths this workspace chose would pass while a real peer
+failed.
+
+## A number has to survive the parse
+
+Every test here once built its OCPI documents in Rust and handed them over as
+values. None of them read one from bytes — and a `serde_json` feature chosen
+elsewhere in the workspace made every numeric field of every inbound document
+undeserialisable, while the suite stayed green. One test even compared the bytes
+that arrived against a re-serialisation of what was sent, and passed: both sides
+were wrong the same way.
+
+The rule is the workspace's own, in the direction nobody was looking. It already
+said a format you *read* needs an artefact somebody else wrote, and a format you
+*write* needs its consumer read. This is the third: **a document you receive
+needs a test that starts from a string.**
+
 ## Routing comes out of the identifier
 
 A contract identifier names its issuer in its first five characters, and that is

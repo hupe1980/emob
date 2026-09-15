@@ -284,9 +284,9 @@ mod tests {
     }
 
     fn update(point: Facility) -> PointUpdate {
-        // Through the published point, because that is the only constructor —
-        // and the one the deleted `Report::operating` used to let every test
-        // walk around (D217).
+        // Through the published point, because that is the only constructor:
+        // a status a caller can state beside a point is one every test walks
+        // around (D217).
         let sites = inventory();
         let published = &sites[0].stations[0].points[0];
         PointUpdate {

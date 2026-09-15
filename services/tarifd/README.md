@@ -83,6 +83,14 @@ been told about — the same argument `Cdr::was_priced_with` makes one layer dow
 Everything above is a pure function of a `TariffHistory`, a clock reading and a
 record of deliveries. The daemon holds the sockets and the schedule.
 
+## Configuration
+
+| Variable | Default | What |
+|---|---|---|
+| `TARIFD_HTTP_BIND` | `127.0.0.1:9581` | the readiness and health endpoint |
+| `EMOB_JOURNAL_DIR` | `var` | where a daemon folds its ledger from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `TARIFD_HTTP_BIND` wins over. Every default is **loopback**, and loopback inside a container is reachable by nothing |
+
 ## License
 
 MIT OR Apache-2.0.

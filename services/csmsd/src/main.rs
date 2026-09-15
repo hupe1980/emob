@@ -47,14 +47,11 @@ async fn main() -> Result<()> {
     let me: Identity = identity!();
     emob_service::telemetry::init(me, "info,csmsd=debug", false);
 
-    let ocpp: SocketAddr = std::env::var("CSMSD_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9000".to_owned())
-        .parse()
-        .context("CSMSD_BIND is not a socket address")?;
-    let http: SocketAddr = std::env::var("CSMSD_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9001".to_owned())
-        .parse()
-        .context("CSMSD_HTTP_BIND is not a socket address")?;
+    // The station's socket, and the second address a container has to be told
+    // about: the default is loopback on purpose, and loopback inside a
+    // container is reachable by nothing.
+    let ocpp: SocketAddr = emob_service::serve::bind_socket("CSMSD_BIND", "127.0.0.1:9000")?;
+    let http: SocketAddr = emob_service::serve::bind_address("csmsd", "127.0.0.1:9001")?;
 
     let readiness = Readiness::new()
         .expecting(PROVISIONING)
@@ -82,7 +79,15 @@ async fn main() -> Result<()> {
         "ad-hoc".parse()?,
         Currency::EUR,
         TariffKind::AdHoc,
-        emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+        // The zone a tariff's `22:00` is read in, which is a fact about the
+        // **site** and not about this process: judged in the wrong one, the
+        // same session costs a different amount (D175). It is configuration
+        // here for the same reason, and the `?` rather than an `unwrap` is the
+        // difference between a daemon that refuses a zone it cannot resolve and
+        // one that dies with a backtrace at an operator.
+        emob_core::TimeZone::new(
+            &std::env::var("CSMSD_TIME_ZONE").unwrap_or_else(|_| "Europe/Berlin".to_owned()),
+        )?,
         vec![PriceComponent::new(
             Dimension::Energy,
             Decimal::from_str_exact("0.49")?,

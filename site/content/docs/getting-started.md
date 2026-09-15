@@ -575,13 +575,30 @@ See [Sessions and settlement](@/docs/settlement.md).
 just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs
 just guards     # no-floats, check-citations, check-manifests, check-wire,
-                # check-prose, check-concepts, check-reach,
+                # check-prose, check-concepts, check-reach, check-api,
                 # check-constructors, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
 ```
 
 `just ci` is what CI runs, in CI order.
+
+## Running the estate
+
+```console
+just images     # all eight daemons, from one Dockerfile
+just up         # the estate on one machine, a volume per journal
+just down       # …and back down, keeping the journals
+```
+
+`EMPD_TOKEN_KEY` has no default and `just up` refuses without it: a token
+reference is a keyed digest of an RFID uid, and a key everybody has is a store
+whose digests anybody can recompute.
+
+| Variable | Default | What |
+|---|---|---|
+| `EMOB_JOURNAL_DIR` | `var` | where a daemon folds its ledger from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address; a daemon's own `<DAEMON>_HTTP_BIND` wins over it. Every default is **loopback**, because a platform that decides money should not become reachable by somebody forgetting to configure it |
 
 The MSRV is checked separately because it is not one number. Everything that
 decides money promises **1.94** — the floor the sibling workspaces carry and

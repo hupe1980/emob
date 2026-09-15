@@ -729,7 +729,7 @@ fn check_cost(cdr: &Cdr, cost: &crate::cdr::Cost, findings: &mut Vec<Finding>) {
     for dimension in [Dimension::Time, Dimension::ParkingTime] {
         // The same account the energy check reads, and for the same reason: a
         // block rounding is an excess the rating declares, so it is subtracted
-        // rather than treated as a blanket excuse. The excuse used to be the
+        // rather than treated as a blanket excuse. A per-record excuse is the
         // mere *presence* of a note, which let a partner declaring a `step_size`
         // bill any number of minutes it liked (D258).
         let accounted_by_the_price = cost.rated.accounted_quantity_for(dimension);
@@ -1465,7 +1465,7 @@ mod tests {
     #[test]
     fn a_declared_block_excuses_the_block_and_not_whatever_sits_beside_it() {
         // The mirror of the case above. A `step_size` bills up to one block
-        // more than was delivered, lawfully — and the excuse used to be the
+        // more than was delivered, lawfully — and a per-record excuse is the
         // mere *presence* of the note, so a partner declaring a block on the
         // dimension could over-bill it without bound. The block a rating
         // declares is now subtracted, exactly, and the remainder is the fault
@@ -1733,7 +1733,7 @@ mod tests {
 
     #[test]
     fn a_block_on_the_occupancy_fee_does_not_excuse_the_kilowatt_hours() {
-        // The excuse above is per dimension, and it used to be per record: any
+        // The excuse above is per dimension rather than per record, because any
         // `RoundedToBlock` note anywhere suppressed `CostEnergyMismatch`, which
         // is the one blocking finding here that catches a partner pricing a
         // different session's energy. A tariff with a block on its occupancy fee

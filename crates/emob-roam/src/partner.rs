@@ -82,6 +82,7 @@ impl core::fmt::Display for OcpiVersion {
 /// peer is neither a hub nor on OICP. A service that inferred the wire from
 /// `Role::Hub` would send an OCPI document to a broker that parses none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Wire {
     /// Peer to peer, or to a hub that speaks it.
     #[default]
@@ -110,6 +111,7 @@ impl core::fmt::Display for Wire {
 
 /// How a record reaches the party that will pay it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Reach {
     /// Straight to the provider that holds the contract.
     Direct(PartyId),

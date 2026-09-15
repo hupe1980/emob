@@ -20,18 +20,29 @@ emob-roam    = { workspace = true }
 emob-service = { workspace = true, features = ["policy"] }
 emob-tariff  = { workspace = true }
 
-# Only to name the payload types the daemon puts on a socket. Nothing here
-# builds one: every document is `emob-roam`'s.
-ocpi-kit     = { workspace = true }
+# The sockets, both ways: `client` pushes a record to a peer, `server` is the
+# credentials module `[OCPI 2.3.0]` makes mandatory and the CDRs receiver. No
+# document is built here — every one of them is `emob-roam`'s.
+ocpi-kit     = { workspace = true, features = ["client", "server"] }
 oicp-kit     = { workspace = true }
 
 anyhow       = { workspace = true }
+axum         = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+# The HTTP method and header types, which `ocpi-kit` takes in its own signatures.
+# Version-pinned here rather than in the workspace because this is the only
+# crate that names them.
+http         = "1"
 thiserror    = { workspace = true }
 time         = { workspace = true }
 tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
 tracing      = { workspace = true }
 
 [dev-dependencies]
+ocpi-kit      = { workspace = true, features = ["client", "server", "testkit"] }
+tokio         = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+serde_json    = { workspace = true }
 emob-eichrecht = { workspace = true }
 emob-poi       = { workspace = true }
 emob-session   = { workspace = true }

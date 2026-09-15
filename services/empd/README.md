@@ -152,12 +152,36 @@ taxes under `[UStG §3a(1)]` rather than `[UStG §3g]`.
 Nothing in the library opens a socket or reads a clock. Every date and instant is
 an argument, so two runs of one authorisation give one answer.
 
+## Three ledgers, and each fails in a different direction when it is forgotten
+
+A lost token store refuses every driver — loud, and fixed in an hour. A lost
+**block** admits a card its owner reported stolen. A lost **running total** reads
+zero, so every session is authorised past the credit limit that was the point of
+holding one, and nothing raises: a limit that is never reached looks exactly like
+a limit that is never exceeded.
+
+`Book` is `Empd` folded from a hash-chained journal — `contracted`, `issued`,
+`ran_up`, `invoiced`, `blocked` — with two rules the fold had to get right:
+
+- A session offered twice at the **same** figure records nothing, because a
+  journal growing by one line per partner retry makes a replay's cost
+  proportional to somebody else's flakiness. A session offered again at a
+  **different** figure is a re-rated record and does record, because it moves the
+  total, and a fold that skipped it would rebuild a contract owing a number
+  nothing in the system still believes.
+- The key the token store is hashed under is **not** in the journal. A file that
+  carried it would make every digest in itself reversible, for ever, by anybody
+  who restored a backup — which is the whole property `TokenRef` exists for. It
+  stays an argument to `Book::open`.
+
 ## Configuration
 
 | Variable | Default | What |
 |---|---|---|
 | `EMPD_HTTP_BIND` | `127.0.0.1:9585` | the readiness and health endpoint |
 | `EMPD_TOKEN_KEY` | *required* | the key the token store is hashed under |
+| `EMOB_JOURNAL_DIR` | `var` | where the journal is folded from and appended to. **Not** a temporary directory by default: a service that silently journalled to `/tmp` would come back from a reboot with an empty ledger and no error |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `EMPD_HTTP_BIND` wins over. A container image sets it, because every default here is **loopback** and loopback inside a container is reachable by nothing |
 
 `EMPD_TOKEN_KEY` has no default on purpose. A default is a store whose digests
 anybody holding this source can recompute, which is the property `TokenRef`

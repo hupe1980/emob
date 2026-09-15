@@ -59,6 +59,18 @@ The `snapshotPush` to the Mobilithek itself is the one leg CI cannot run: it is
 somebody else's server, behind credentials. Everything up to the socket is under
 test.
 
+## Configuration
+
+| Variable | Default | What |
+|---|---|---|
+| `POID_HTTP_BIND` | `127.0.0.1:9582` | the readiness and health endpoint |
+| `POID_NAP_IDENTIFIER` | `DE-NAP-0000` | the operator's national identifier, which every publication carries |
+| `EMOB_JOURNAL_DIR` | `var` | where a daemon folds its ledger from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `POID_HTTP_BIND` wins over. Every default is **loopback**, and loopback inside a container is reachable by nothing |
+
+The `snapshotPush` to the Mobilithek is a subscription a deployment supplies;
+this daemon opens no client for it yet (M12).
+
 ## License
 
 MIT OR Apache-2.0.

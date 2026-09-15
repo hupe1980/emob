@@ -97,7 +97,7 @@ pub struct TablePublication {
 /// it gave an `idG` to. This is what a dynamic update has to resolve against:
 /// `[DATEX-II-Profil]` gives a consumer no way to ask about a version it never
 /// received, so a status message referencing one is dropped in silence.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Published {
     /// Facility `idG` → the `versionG` this table published it at, as written.
     facilities: BTreeMap<String, String>,

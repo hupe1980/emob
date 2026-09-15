@@ -206,6 +206,60 @@ that could not be evaluated is a refusal that silently did not happen.
 refused and the **old one keeps deciding**, since default deny makes an empty
 policy set a total outage rather than a degraded state.
 
+## The state a daemon holds, and the journal it is folded from
+
+The domain crates hold no state. The daemons hold the rules that are about a
+**pair** — what was true before a call and what may be true after — because no
+value can carry one: a number is spent once; a record is sealed once sent; a
+card is blocked; a contract has run up these sessions.
+
+Each is a fact about the **past**, and a service that held one only in memory
+answers a restart with the wrong one. `journal` is where they are kept, and it
+is the workspace's purity rule collected one layer out: the domain crates take
+every instant and every key as an argument, so a fold over them gives the same
+answer twice.
+
+```rust
+use emob_service::journal::{Folded, Journal as _, Kinded, Memory};
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+enum Fact { Counted(u32) }
+
+impl Kinded for Fact {
+    fn kind(&self) -> &'static str { "counted" }
+}
+
+fn apply(total: &mut u64, fact: Fact) {
+    let Fact::Counted(n) = fact;
+    *total += u64::from(n);
+}
+
+// On the way up, the state is what the journal says it is. `File` — or
+// `journal::for_daemon("billd")` — is the same call with a disk behind it.
+let mut folded = Folded::open(0_u64, Memory::new(), apply)?;
+
+// A decision, then the record of it — and the caller is told last.
+folded.record(Fact::Counted(7))?;
+assert_eq!(*folded.state(), 7);
+```
+
+- **Facts, not commands.** An entry says what was decided, not what was asked. A
+  command log re-decides at replay, re-reading the tariff, the parties and the
+  clock that decided the first time.
+- **The records chain.** A record edited in place or removed from the middle
+  breaks every digest after it, and `Folded::open` refuses to start rather than
+  folding a past it cannot account for.
+- **A write that fails stops the service.** The record is appended after the
+  decision and before the caller is told: killed between the two, both are lost,
+  which is the safe direction. A journal that *refuses* leaves the state ahead
+  of the record.
+
+What it cannot do is said out loud: a chain proves nothing was **rewritten** and
+cannot prove nothing was removed from the **end**, because a truncated journal
+is byte-for-byte one that was never written. `Journal::head` is the digest the
+file ends on; recorded outside the process, a head that has gone backwards is a
+truncated tail.
+
 ## Why this is not `mako-service`
 
 Extracting it was considered and rejected, for the reason `hems-service` gives

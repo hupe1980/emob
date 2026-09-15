@@ -55,6 +55,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
+pub mod book;
+
+pub use book::{Book, BookError, Event};
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use emob_billing::Subscription;
@@ -69,7 +73,7 @@ use rust_decimal::Decimal;
 /// **instructions to the operator**, not preferences: `Always` says never ask,
 /// `Never` says always ask, and each of them is a rule with a matching refusal
 /// on this side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Whitelist {
     /// Start the session from the list; never ask.
     Always,
@@ -108,7 +112,7 @@ impl Whitelist {
 /// is an ordinary commercial difference — their roaming costs differ — and the
 /// point's country never reaches the arithmetic, which is what lets
 /// [`Empd::provider_profile`] state the answer instead of being told it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Markup {
     /// Added to the operator's price per kilowatt-hour.
     pub energy: Decimal,
@@ -172,7 +176,7 @@ impl Markup {
 /// whether the user actually purchased electricity during the relevant period"*.
 /// A month with no sessions still owes it, and that is a sentence no ledger of
 /// records can say.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Fee {
     /// What it is called on the invoice.
     pub description: String,
@@ -192,13 +196,15 @@ impl Fee {
 }
 
 /// One driver's contract with this provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Contract {
     /// The contract identifier a CDR routes on.
     pub id: ContractId,
     /// The day it takes effect.
+    #[serde(with = "emob_core::wire::date")]
     pub from: time::Date,
     /// …and the day after which it does not, when it has one.
+    #[serde(with = "emob_core::wire::date::option")]
     pub until: Option<time::Date>,
     /// The periodic fee, when the contract carries one.
     pub fee: Option<Fee>,
@@ -258,7 +264,7 @@ impl Contract {
 }
 
 /// A token this provider issued, and how the operator may treat it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Token {
     /// The contract it bills against.
     pub contract: ContractId,
@@ -750,9 +756,8 @@ impl Empd {
     ///
     /// # The session names itself, because a total cannot
     ///
-    /// This used to take a bare amount and add it. A running total has no way
-    /// to tell a second session that cost the same from the same session
-    /// offered twice, and a session offered twice is the ordinary shape of this
+    /// A running total has no way to tell a second session that cost the same
+    /// from the same session offered twice, and a session offered twice is the ordinary shape of this
     /// seam: a CDR redelivered by a roaming partner, a dispatch retried, a
     /// record re-rated after a tariff correction. Counted twice, the phantom
     /// never leaves — [`Self::invoiced`] takes off what the document billed,
@@ -821,15 +826,14 @@ impl Empd {
     ///
     /// # Why this names the sessions rather than an amount
     ///
-    /// It used to remove the whole entry, on the reading that a month which has
-    /// been invoiced is a month with nothing outstanding. That is true only at
-    /// the instant the document was assembled: a session authorised while the
+    /// *A month which has been invoiced is a month with nothing outstanding* is
+    /// true only at the instant the document was assembled: a session authorised while the
     /// closing runs is added by [`Self::ran_up`] and then **wiped** — money this
     /// provider will not collect, and, because [`Self::authorize`] judges the
     /// credit limit against this total, a driver handed back a limit they have
     /// not paid for (D299).
     ///
-    /// The fix for that was a subtraction, and a subtraction is a figure the
+    /// Nor is a subtraction the answer, because a subtraction is a figure the
     /// caller states. *"How much did the invoice bill"* is answerable two ways
     /// and only one of them is the ledger's — which is the shape this workspace
     /// keeps finding: a check fed by a caller is not a check. So the closing

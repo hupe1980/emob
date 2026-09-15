@@ -21,6 +21,7 @@ emob-service = { workspace = true }
 doubleentry  = { workspace = true }
 
 anyhow       = { workspace = true }
+serde        = { workspace = true }
 rust_decimal = { workspace = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }

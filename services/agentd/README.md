@@ -178,6 +178,14 @@ quota is money, not law, so an estate that declines it reads "lawful, and worth
 money" rather than "fail". A queue that cries wolf about a subsidy is a queue
 that teaches its reader to discount the findings that matter.
 
+## Configuration
+
+| Variable | Default | What |
+|---|---|---|
+| `AGENTD_HTTP_BIND` | `127.0.0.1:9580` | the readiness and health endpoint |
+| `EMOB_JOURNAL_DIR` | — | **unused here.** A journal keeps the facts a service decided, and this plane decides nothing: its `agentplane` store holds specialist runs, in memory, and is not a ledger |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `AGENTD_HTTP_BIND` wins over. Every default is **loopback**, and loopback inside a container is reachable by nothing |
+
 ## Licence
 
 MIT OR Apache-2.0

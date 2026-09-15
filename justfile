@@ -124,6 +124,43 @@ pnc-fixtures:
     cd crates/emob-pnc && ./scripts/make-test-pki.sh
     cargo fmt -p emob-pnc
 
+# The eight daemons, from one Dockerfile. `docker-bake.hcl` carries the list, so
+# `just images -- --print` is the answer to *what does this workspace ship*.
+#
+# `-f` is not tidiness. `bake` reads `compose.yaml` as a bake definition when it
+# is not told otherwise, and that file requires `EMPD_TOKEN_KEY` — correctly, so
+# that a missing secret refuses the estate rather than crash-looping one
+# container. Building an **image** needs no secret, and a build that demanded
+# one would teach an operator to set a throwaway value for the run that matters.
+#
+# 📦 Build every daemon image
+images *ARGS:
+    docker buildx bake -f docker-bake.hcl {{ ARGS }}
+
+# The estate on one machine, with a volume per journal. A daemon whose journal
+# is not on a volume is one whose ledger dies with the container, which is the
+# whole failure the journal exists to prevent.
+#
+# 🚀 Bring the estate up locally
+#
+# `EMPD_TOKEN_KEY` has no default and compose refuses without it: a token
+# reference is a keyed digest of an RFID uid, and a key everybody has is a store
+# whose digests anybody can recompute.
+up:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    if [ -z "${EMPD_TOKEN_KEY:-}" ]; then
+        echo "❌ EMPD_TOKEN_KEY is unset — the token store is keyed, and a default key is a store whose digests anybody can recompute." >&2
+        echo "   for a local run:  export EMPD_TOKEN_KEY=\$(openssl rand -hex 32)" >&2
+        exit 1
+    fi
+    docker compose up --build -d
+    echo "🚀 up — probes on :8080…:8087, OCPP on :9000"
+
+# 🛑 Take it down, keeping the journals
+down:
+    docker compose down
+
 # 🌐 Serve the documentation site locally
 site:
     cd site && zola serve

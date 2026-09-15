@@ -470,10 +470,10 @@ impl ClaimBuilder {
             // whether an `EvidenceRef` exists asks the weaker half of it. A
             // record whose chain did not hold up carries one, says
             // `energy_billable: false`, and is refused for money by the CDR
-            // builder and by `priced` — and used to be counted here, in a file
-            // whose whole claim is that only signed kilowatt-hours reach it.
-            // Evidence that is present and failed is worse than evidence that is
-            // absent, and this is the third place that had to learn it (D231).
+            // builder and by `priced`. Asking whether an `EvidenceRef` merely
+            // **exists** admits it — into a file whose whole claim is that only
+            // signed kilowatt-hours reach it. Evidence that is present and
+            // failed is worse than evidence that is absent (D231).
             let signed = cdr
                 .evidence
                 .as_ref()

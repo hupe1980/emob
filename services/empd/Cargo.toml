@@ -19,6 +19,7 @@ emob-session = { workspace = true }
 emob-tariff  = { workspace = true }
 
 anyhow       = { workspace = true }
+serde        = { workspace = true }
 rust_decimal = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }

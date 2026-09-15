@@ -60,6 +60,8 @@ pub mod authority;
 pub mod config;
 pub mod events;
 pub mod health;
+#[cfg(feature = "serde")]
+pub mod journal;
 #[cfg(feature = "policy")]
 pub mod policy;
 pub mod serve;
@@ -73,6 +75,8 @@ pub use authority::{Capabilities, PartyScope, Principal, Token, caps};
 pub use config::{ConfigError, Secret, load, load_from};
 pub use emob_core::Role;
 pub use health::{Identity, Probe, Readiness};
+#[cfg(feature = "serde")]
+pub use journal::{Folded, Journal, JournalError, Kinded, Record};
 pub use serve::{Server, ServerError};
 pub use shutdown::Shutdown;
 pub use webhook::{Delivery, SecretError};

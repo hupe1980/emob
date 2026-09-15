@@ -16,6 +16,7 @@ emob-service = { workspace = true }
 emob-tariff  = { workspace = true }
 
 anyhow       = { workspace = true }
+serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }

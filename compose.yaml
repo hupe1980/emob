@@ -1,0 +1,124 @@
+# The estate, on one machine.
+#
+# Not a production topology and deliberately not pretending to be one: there is
+# no replica count here, because a service that folds a journal on a local
+# volume is a **single writer** by construction, and two of them behind one
+# volume would interleave two chains into one file. Scaling out is a design
+# question the roadmap names (R24); scaling up is `deploy.resources`.
+#
+# Every daemon takes its journal on a named volume. A container without one is a
+# service whose ledger dies with it — the whole failure the journal exists to
+# prevent — so each is declared rather than defaulted.
+
+name: emob
+
+# Deliberately no `healthcheck:`. Compose runs one by executing a command
+# *inside* the container, and a distroless image has no shell and no HTTP
+# client to run — a check written here would either need a second binary in the
+# image or would be a line that always passes, and a probe that cannot fail is
+# worse than none. The daemons expose `/health/live` and `/health/ready` over
+# HTTP, which is what an orchestrator that probes from outside — a Kubernetes
+# `httpGet`, a load balancer — is given them for. `ready` names what it is
+# waiting for; `live` only says the process is up.
+
+x-daemon: &daemon
+  restart: unless-stopped
+  environment:
+    EMOB_JOURNAL_DIR: /var/lib/emob
+    # The one a container cannot do without. Every daemon defaults to
+    # loopback — which is right on a laptop and reachable by nothing inside a
+    # container — so the estate-wide address is set here rather than in eight
+    # places. A daemon's own `<DAEMON>_HTTP_BIND` still wins over it.
+    EMOB_HTTP_BIND: 0.0.0.0:8080
+    RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  csmsd:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-csmsd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: csmsd } }
+    environment:
+      # The second socket has its own variable: the estate-wide one names the
+      # shell's address, and applying it to both would bind them to one port.
+      CSMSD_BIND: 0.0.0.0:9000
+    ports:
+      - "8080:8080"   # the shell
+      - "9000:9000"   # the OCPP WebSocket a station dials
+    volumes: [csmsd:/var/lib/emob]
+
+  roamd:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-roamd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: roamd } }
+    ports: ["8081:8080"]
+    volumes: [roamd:/var/lib/emob]
+
+  billd:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-billd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: billd } }
+    ports: ["8082:8080"]
+    volumes: [billd:/var/lib/emob]
+
+  empd:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-empd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: empd } }
+    environment:
+      # The key the token store is hashed under, and the one value in this file
+      # with no default. A token reference is a keyed digest of an RFID uid
+      # precisely so that a store which leaks does not confirm a card by
+      # guessing — and a default key here would be one every reader of this
+      # repository holds. `:?` makes compose refuse to start the estate with a
+      # message, rather than leaving a container to crash-loop behind a probe
+      # nobody is watching.
+      EMPD_TOKEN_KEY: ${EMPD_TOKEN_KEY:?set EMPD_TOKEN_KEY — the token store is keyed, and a default key is a store whose digests anybody can recompute}
+    ports: ["8083:8080"]
+    volumes: [empd:/var/lib/emob]
+
+  poid:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-poid:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: poid } }
+    ports: ["8084:8080"]
+    volumes: [poid:/var/lib/emob]
+
+  tarifd:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-tarifd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: tarifd } }
+    ports: ["8085:8080"]
+    volumes: [tarifd:/var/lib/emob]
+
+  agentd:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-agentd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: agentd } }
+    ports: ["8086:8080"]
+    volumes: [agentd:/var/lib/emob]
+
+  # The one that is not deployed with the others. `sited` runs **at a site**,
+  # beside the connection point, because `[LPC-912]` puts a site into its
+  # failsafe when the Energy Guard goes quiet and a controller behind a broken
+  # WAN link is a site held at 4.2 kW because this process could not be reached.
+  # It is here so the estate can be brought up whole for a demonstration, and
+  # that is the only reason.
+  sited:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-sited:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: sited } }
+    # No SHIP port: the session `[LPC §3.3]` prescribes is a socket a
+    # deployment supplies, and this daemon does not open one yet (M12). A
+    # mapping here would be a port with nothing behind it.
+    ports: ["8087:8080"]
+    volumes: [sited:/var/lib/emob]
+
+volumes:
+  csmsd: {}
+  roamd: {}
+  billd: {}
+  empd: {}
+  poid: {}
+  tarifd: {}
+  agentd: {}
+  sited: {}

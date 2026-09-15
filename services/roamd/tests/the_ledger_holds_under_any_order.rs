@@ -374,3 +374,198 @@ fn the_seal_and_the_correction_order_hold_under_any_sequence_of_calls() {
         }
     }
 }
+
+// ── …and it holds across a restart, which is a step the sequence never took ──
+//
+// Every invariant above is checked after every call **in one process**. The
+// property that produced them cannot express the step that matters most,
+// because the step is not a call: a node that is stopped and started again.
+//
+// `[OCPI 2.3.0 §mod_cdrs]` seals a record the moment the eMSP has it, and
+// `consign` enforces that by reading a delivery this node recorded. A ledger
+// that lived only in memory answered *"nobody has this"* to every question
+// after a restart, which re-opens every record the node had already sent — and
+// the partner has already billed them. The seal is exactly as durable as the
+// place the answer is kept (D297, one layer down).
+
+use emob_service::journal::{File, Journal};
+use roamd::{Node, NodeError};
+
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir()
+            .join(format!("emob-roamd-{}-{name}", std::process::id()))
+            .join("roamd.ndjson");
+        let _ = std::fs::remove_dir_all(path.parent().expect("a parent"));
+        Self(path)
+    }
+
+    fn node(&self) -> Node<File> {
+        Node::open(node(), File::open(&self.0).expect("the journal opens"))
+            .expect("the journal folds")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0.parent().expect("a parent"));
+    }
+}
+
+#[test]
+fn a_record_the_partner_has_taken_is_still_sealed_after_a_restart() {
+    let scratch = Scratch::new("seal");
+    let cdr = issued("one", None);
+    let token = token();
+
+    let key = {
+        let mut node = scratch.node();
+        let key = node.consign(&cdr, &token, None).expect("it is routed");
+        node.accepted(&key, at(30), Some("https://emsp/cdrs/one".to_owned()))
+            .expect("the partner took it");
+        key
+    };
+
+    // The node is gone. What it sent is in one file.
+    let mut node = scratch.node();
+
+    let refused = node
+        .consign(&cdr, &token, None)
+        .expect_err("a CDR cannot be changed or replaced once sent");
+    assert!(
+        matches!(
+            refused,
+            NodeError::Dispatch(ref e) if matches!(**e, DispatchError::AlreadyAccepted { .. })
+        ),
+        "{refused:?}"
+    );
+
+    // …and the node still knows where the partner put it, which is the URL
+    // `[OCPI 2.3.0 §mod_cdrs]` makes the receiver return so the sender can read
+    // back what it sent.
+    let held = node.state().consignment(&key).expect("the ledger holds it");
+    assert!(held.delivery.is_accepted());
+}
+
+#[test]
+fn a_replacement_still_cannot_overtake_its_reversal_after_a_restart() {
+    let scratch = Scratch::new("correction");
+    let original = issued("two", None);
+    let token = token();
+
+    let key = {
+        let mut node = scratch.node();
+        let key = node.consign(&original, &token, None).expect("routed");
+        node.accepted(&key, at(30), None).expect("taken");
+        key
+    };
+
+    let mut node = scratch.node();
+    let replacement = issued("two-r", Some(key.clone()));
+    let refused = node
+        .consign(&replacement, &token, None)
+        .expect_err("the Credit CDR has not been taken");
+    assert!(
+        matches!(
+            refused,
+            NodeError::Dispatch(ref e) if matches!(**e, DispatchError::CreditNotAcceptedYet { .. })
+        ),
+        "a restart must not forget that the original is out and unreversed: {refused:?}"
+    );
+}
+
+#[test]
+fn a_refused_record_may_still_be_sent_again_after_a_restart() {
+    let scratch = Scratch::new("refused");
+    let cdr = issued("three", None);
+    let token = token();
+
+    {
+        let mut node = scratch.node();
+        let key = node.consign(&cdr, &token, None).expect("routed");
+        node.refused(&key, at(30), "the periods do not sum")
+            .expect("the partner said why");
+    }
+
+    // A refusal is not a seal: the record was never billed, and correcting and
+    // re-sending it is the whole remedy. A restart must not turn a refusal into
+    // one.
+    let mut node = scratch.node();
+    node.consign(&cdr, &token, None)
+        .expect("a refused record is still this node's to send");
+}
+
+#[test]
+fn a_journal_edited_in_the_middle_will_not_start_the_node() {
+    let scratch = Scratch::new("tamper");
+    {
+        let mut node = scratch.node();
+        for id in ["four", "five", "six"] {
+            let cdr = issued(id, None);
+            let key = node.consign(&cdr, &token(), None).expect("routed");
+            node.accepted(&key, at(30), None).expect("taken");
+        }
+    }
+
+    // Somebody removes an acceptance from the middle — the edit that would let
+    // a settled record be sent a second time.
+    let text = std::fs::read_to_string(&scratch.0).expect("read");
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.remove(1);
+    std::fs::write(&scratch.0, format!("{}\n", lines.join("\n"))).expect("written");
+
+    let refused = Node::open(node(), File::open(&scratch.0).expect("opens"))
+        .expect_err("a journal with a record removed is not this node's ledger");
+    assert!(refused.to_string().contains("does not chain"), "{refused}");
+}
+
+/// The half a chain cannot prove about itself, asserted so that nobody reads
+/// the test above as more than it is.
+///
+/// A journal with its **last** record cut off is byte-for-byte a journal that
+/// was never written — the same file a process killed mid-append leaves — and
+/// `records` has to tolerate the second, so it cannot refuse the first. The
+/// remedy is a witness outside the process: `head` is the digest the journal
+/// ends on, and a head that went backwards between two observations is a
+/// truncated tail. That is an operator's monitoring, not this node's
+/// arithmetic, and the honest thing is to say so in a test rather than to let a
+/// reader assume the chain covers it.
+#[test]
+fn a_truncated_tail_is_not_detectable_from_the_file_and_the_head_is_the_witness() {
+    let scratch = Scratch::new("truncated");
+    let cdr = issued("seven", None);
+
+    let witnessed = {
+        let mut node = scratch.node();
+        let key = node.consign(&cdr, &token(), None).expect("routed");
+        node.accepted(&key, at(30), None).expect("taken");
+        // What an operator would have written down somewhere else.
+        node.journal().head().expect("a head")
+    };
+
+    let text = std::fs::read_to_string(&scratch.0).expect("read");
+    let lines: Vec<&str> = text.lines().collect();
+    std::fs::write(&scratch.0, format!("{}\n", lines[0])).expect("written");
+
+    // The node starts, because nothing in the file is wrong.
+    let node = Node::open(node(), File::open(&scratch.0).expect("opens"))
+        .expect("a truncated journal is indistinguishable from a shorter one");
+    assert!(
+        !node
+            .state()
+            .consignment(&cdr.key)
+            .expect("the consignment survived")
+            .delivery
+            .is_accepted(),
+        "the acceptance is gone, which is the damage the file cannot report"
+    );
+
+    // …and the witness is what reports it.
+    let now = node.journal().head().expect("a head");
+    assert_ne!(
+        now, witnessed,
+        "a head that has moved backwards is the only evidence a tail was cut"
+    );
+}

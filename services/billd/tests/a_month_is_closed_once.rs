@@ -907,3 +907,231 @@ fn the_books_hold_under_any_order_of_calls() {
         }
     }
 }
+
+// ── …and the same four facts, across a restart ──────────────────────────────
+//
+// Every property above holds inside one process. Each of them is a fact about
+// the **past** — this number is spent, this period is closed, this document
+// reverses that one, this month is in the books — and a service that held them
+// only in memory answered every one of them correctly until it was restarted,
+// and then answered them all wrongly at once. `[UStG §14(4) Nr. 4]` is the
+// sharp end: a counter that came back at `R-2026-0001` hands a second document
+// the number the first one carries, and both documents are individually
+// perfect.
+//
+// `Books` is `Billd` folded from a journal. These run the same decisions, drop
+// the process between them, and ask the questions again.
+
+use billd::Books;
+use emob_service::journal::{File, Journal};
+
+/// A journal file of this test's own, removed when it is done.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir()
+            .join(format!("emob-billd-{}-{name}", std::process::id()))
+            .join("billd.ndjson");
+        let _ = std::fs::remove_dir_all(path.parent().expect("a parent"));
+        Self(path)
+    }
+
+    fn books(&self) -> Books<File> {
+        Books::open(
+            "emob",
+            Numbering::series("R", 2026),
+            ChartOfAccounts::new(),
+            File::open(&self.0).expect("the journal opens"),
+        )
+        .expect("the journal folds")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0.parent().expect("a parent"));
+    }
+}
+
+#[test]
+fn a_number_spent_before_a_restart_is_not_spent_again() {
+    let scratch = Scratch::new("numbers");
+    let june = month("0.49");
+
+    let first = {
+        let mut books = scratch.books();
+        books
+            .issue("2026-06", closing(&june, driver()))
+            .expect("June closes")
+    };
+    assert_eq!(first, "R-2026-0001");
+
+    // The process is gone. Everything it decided is in one file.
+    let mut books = scratch.books();
+
+    // The period is still closed, by the document that closed it.
+    let refused = books
+        .issue("2026-06", closing(&june, driver()))
+        .expect_err("June was closed before the restart");
+    assert!(
+        matches!(
+            refused,
+            billd::BooksError::Closing(ref e)
+                if matches!(**e, ClosingError::AlreadyClosed { ref number, .. } if number == "R-2026-0001")
+        ),
+        "{refused:?}"
+    );
+
+    // …and the counter resumed where the journal says it was, which is the one
+    // thing the statute names.
+    let july = month("0.49");
+    let next = books
+        .issue("2026-07", closing(&july, driver()))
+        .expect("July closes");
+    assert_eq!(
+        next, "R-2026-0002",
+        "a counter that restarted at one issues a number a document already carries"
+    );
+}
+
+#[test]
+fn a_correction_survives_a_restart_with_the_reversal_still_first() {
+    let scratch = Scratch::new("correction");
+    let june = month("0.49");
+    let corrected = month("0.39");
+
+    let (original, credit, replacement) = {
+        let mut books = scratch.books();
+        let original = books
+            .issue("2026-06", closing(&june, driver()))
+            .expect("June closes");
+        let (credit, replacement) = books
+            .rebill(
+                &original,
+                date!(2026 - 07 - 10),
+                "re-rated at the contracted price",
+                closing(&corrected, driver()),
+            )
+            .expect("the month re-bills");
+        (original, credit, replacement)
+    };
+
+    let books = scratch.books();
+    let state = books.state();
+
+    // Both halves came back, and each still knows which half it is.
+    assert_eq!(
+        state.issued(&credit).and_then(|d| d.cancels.as_deref()),
+        Some(original.as_str())
+    );
+    assert_eq!(
+        state
+            .issued(&replacement)
+            .and_then(|d| d.replaces.as_deref()),
+        Some(original.as_str())
+    );
+
+    // …and the period is closed by the document that closes it **now**, which
+    // is the question D307 exists for and the one a naive fold gets wrong.
+    assert_eq!(
+        state.closes("2026-06").map(|d| d.invoice.number.as_str()),
+        Some(replacement.as_str()),
+        "after a restart the period must name the replacement, not the reversed original"
+    );
+}
+
+#[test]
+fn the_books_come_back_balanced_and_a_month_is_not_posted_twice() {
+    let scratch = Scratch::new("books");
+    let june = month("0.49");
+
+    let number = {
+        let mut books = scratch.books();
+        let number = books
+            .issue("2026-06", closing(&june, driver()))
+            .expect("June closes");
+        books
+            .accepted(&number, date!(2026 - 07 - 02), Some("BE-1".to_owned()))
+            .expect("the recipient took it");
+        books.book(&number).expect("it reaches the books");
+        number
+    };
+
+    let books = scratch.books();
+    books
+        .state()
+        .trial_balance()
+        .expect("a replayed journal still totals its own postings");
+
+    // The receivable is the month's gross, **once**. A fold that re-posted on
+    // replay would double it in a journal every entry of which still balances,
+    // which is exactly the failure D298 and D307 are about.
+    let receivable = books
+        .state()
+        .balance_of("assets:receivable", "EUR")
+        .expect("the books total")
+        .expect("the receivable was opened by the posting");
+    let (direction, amount) = receivable.net().expect("a net");
+    assert_eq!(direction, doubleentry::Direction::Debit);
+    assert_eq!(
+        amount.to_string(),
+        "31.04",
+        "the replay posted the month a second time"
+    );
+    assert!(
+        books.state().issued(&number).is_some_and(|d| d.booked),
+        "the replay must remember that this document is in the books"
+    );
+}
+
+#[test]
+fn a_journal_somebody_edited_is_refused_rather_than_folded() {
+    let scratch = Scratch::new("tamper");
+    let june = month("0.49");
+    {
+        let mut books = scratch.books();
+        books
+            .issue("2026-06", closing(&june, driver()))
+            .expect("June closes");
+    }
+
+    // The amount on the recorded document is changed and the digest is not —
+    // which is what an edit made to change an answer looks like.
+    let text = std::fs::read_to_string(&scratch.0).expect("read");
+    let edited = text.replacen("R-2026-0001", "R-2026-9999", 1);
+    assert_ne!(edited, text, "the fixture must actually change the record");
+    std::fs::write(&scratch.0, edited).expect("written");
+
+    let refused = Books::open(
+        "emob",
+        Numbering::series("R", 2026),
+        ChartOfAccounts::new(),
+        File::open(&scratch.0).expect("opens"),
+    )
+    .expect_err("a rewritten journal is not a record of what this service decided");
+    assert!(refused.to_string().contains("does not chain"), "{refused}");
+}
+
+#[test]
+fn the_journal_names_what_kind_of_fact_each_record_is() {
+    let scratch = Scratch::new("kinds");
+    let june = month("0.49");
+    let mut books = scratch.books();
+    let number = books
+        .issue("2026-06", closing(&june, driver()))
+        .expect("June closes");
+    books
+        .accepted(&number, date!(2026 - 07 - 02), None)
+        .expect("taken");
+    books.book(&number).expect("booked");
+
+    let kinds: Vec<String> = books
+        .journal()
+        .records()
+        .expect("the chain holds")
+        .into_iter()
+        .map(|r| r.kind)
+        .collect();
+    assert_eq!(kinds, ["issued", "submitted", "booked"]);
+}

@@ -55,6 +55,10 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
+pub mod books;
+
+pub use books::{Books, BooksError, Event};
+
 use std::collections::BTreeMap;
 
 use doubleentry::{
@@ -73,13 +77,15 @@ use emob_billing::postings::{Postings, Role, Side};
 pub const SCALE: u8 = 2;
 
 /// Where a document has got to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Submission {
     /// Numbered and built, and not yet sent.
     Issued,
     /// The recipient's platform took it, and said where it lives.
     Accepted {
         /// When.
+        #[serde(with = "emob_core::wire::date")]
         at: time::Date,
         /// The reference the platform returned, when it returned one.
         reference: Option<String>,
@@ -90,6 +96,7 @@ pub enum Submission {
     /// number reused after a rejection is one two documents can carry.
     Rejected {
         /// When.
+        #[serde(with = "emob_core::wire::date")]
         at: time::Date,
         /// What the platform said.
         reason: String,
@@ -364,6 +371,28 @@ impl Numbering {
     pub const fn resuming_after(mut self, issued: u32) -> Self {
         self.next = issued + 1;
         self
+    }
+
+    /// Advance the counter past a number the journal says was issued.
+    ///
+    /// The fold's half of [`Self::resuming_after`]: a replay does not re-decide
+    /// which number a document got, it reads the one the document carries and
+    /// makes sure nothing later can be given it again. A number this series
+    /// does not recognise — a document imported from a predecessor system,
+    /// under another prefix — moves nothing, because a counter that jumped to
+    /// follow a foreign series would issue numbers under a prefix it does not
+    /// own.
+    pub(crate) fn resume_past(&mut self, number: &str) {
+        let Some(tail) = number.rsplit('-').next() else {
+            return;
+        };
+        let expected = format!("{}-{}-", self.prefix, self.year);
+        if !number.starts_with(&expected) {
+            return;
+        }
+        if let Ok(issued) = tail.parse::<u32>() {
+            self.next = self.next.max(issued.saturating_add(1));
+        }
     }
 
     /// The next number, which is then spent.

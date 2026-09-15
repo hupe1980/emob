@@ -30,7 +30,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use billd::{Billd, Numbering};
+use billd::{Books, ChartOfAccounts, Numbering};
+use emob_service::journal::Journal as _;
 use emob_service::{Identity, Readiness, Server, Shutdown, identity};
 
 /// What the daemon waits for before it takes traffic.
@@ -53,24 +54,35 @@ async fn main() -> Result<()> {
     let me: Identity = identity!();
     emob_service::telemetry::init(me, "info,billd=debug", false);
 
-    let http: SocketAddr = std::env::var("BILLD_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9584".to_owned())
-        .parse()
-        .context("BILLD_HTTP_BIND is not a socket address")?;
+    let http: SocketAddr = emob_service::serve::bind_address("billd", "127.0.0.1:9584")?;
 
     let readiness = Readiness::new().expecting(NUMBERING);
     let shutdown = Shutdown::new();
 
-    // A real deployment reads the last number it issued out of its store and
-    // resumes after it. `Numbering::series` alone is a fresh counter, and a
-    // fresh counter against a store that already holds `R-2026-0007` is the one
-    // failure the statute names.
+    // The counter resumes from the journal, not from one. `Numbering::series`
+    // alone is a fresh counter, and a fresh counter against a journal that
+    // already holds `R-2026-0007` is the one failure `[UStG §14(4) Nr. 4]`
+    // names — so the fold runs **before** the readiness probe goes up, and a
+    // journal that does not chain stops the process here rather than letting it
+    // serve from a past it cannot account for.
     let series = std::env::var("BILLD_SERIES").unwrap_or_else(|_| "R".to_owned());
     let year = time::OffsetDateTime::now_utc().year();
-    let service = Arc::new(Mutex::new(Billd::new(
+    let journal = emob_service::journal::for_daemon("billd")
+        .context("opening billd's journal — see EMOB_JOURNAL_DIR")?;
+    tracing::info!(path = %journal.path().display(), "folding the journal");
+    let books = Books::open(
         "emob",
         Numbering::series(series, year),
-    )));
+        ChartOfAccounts::new(),
+        journal,
+    )
+    .context("folding billd's journal")?;
+    tracing::info!(
+        documents = books.state().documents().count(),
+        head = %books.journal().head().unwrap_or_default(),
+        "the books are what the journal says they are"
+    );
+    let service = Arc::new(Mutex::new(books));
     readiness.up(NUMBERING);
 
     let calendar = Arc::clone(&service);
@@ -100,15 +112,14 @@ async fn main() -> Result<()> {
 ///
 /// Split out because it is the whole of what the daemon does, and because the
 /// only thing that must never happen here is a second number for one month.
-fn close_what_is_due(service: &Mutex<Billd>) {
+fn close_what_is_due(service: &Mutex<Books<emob_service::journal::File>>) {
     let books = lock(service);
 
-    // A real deployment asks its store which periods are over and unclosed,
-    // assembles each with `emob_billing::InvoiceBuilder`, and hands the closure
-    // to `Billd::issue` — which refuses a period it has already closed rather
-    // than issuing a second invoice for it. Submission and `accepted` follow;
-    // `book` only after that.
-    for document in books.documents() {
+    // Which periods are over and unclosed is an operator's question and the
+    // assembly is `emob_billing::InvoiceBuilder`'s; what is here is the tick
+    // that notices. `Books::issue` refuses a period it has already closed —
+    // across a restart, because the closing is a record rather than a field.
+    for document in books.state().documents() {
         tracing::debug!(
             number = %document.invoice.number,
             booked = document.booked,
@@ -119,7 +130,7 @@ fn close_what_is_due(service: &Mutex<Billd>) {
     // The list an operator is paged for: accepted, and still not in the books.
     // Not a backlog item — a document the recipient holds and the ledger does
     // not, which nothing else in the system will notice.
-    for document in books.documents() {
+    for document in books.state().documents() {
         if document.submission.is_accepted() && !document.booked {
             tracing::error!(
                 number = %document.invoice.number,
@@ -134,7 +145,9 @@ fn close_what_is_due(service: &Mutex<Billd>) {
 /// The guarded value is a map and a journal, and a service that answered a
 /// poisoned lock by refusing to close a month is a worse failure than the one it
 /// is avoiding — the same reasoning `csmsd` states for its ledgers.
-fn lock(service: &Mutex<Billd>) -> std::sync::MutexGuard<'_, Billd> {
+fn lock(
+    service: &Mutex<Books<emob_service::journal::File>>,
+) -> std::sync::MutexGuard<'_, Books<emob_service::journal::File>> {
     service
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

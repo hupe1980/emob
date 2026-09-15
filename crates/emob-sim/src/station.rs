@@ -556,7 +556,7 @@ fn ocpp_events(
 
     // …and `Charging`, some seconds after the opening, with no reading — the
     // event a real station sends when the vehicle starts drawing, and the one a
-    // straight-line interpolation used to invent energy in front of. Appended
+    // straight-line interpolation would invent energy in front of. Appended
     // rather than inserted: `Transaction::assemble` orders events by instant.
     events.push(TransactionEvent::updated(plan.charging_from(), vec![]));
     events

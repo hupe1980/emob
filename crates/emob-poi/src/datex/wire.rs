@@ -98,11 +98,18 @@ pub struct LocalisedText {
 /// 0.2` does not, and neither does a coordinate's sixth decimal place at some
 /// latitudes.
 ///
-/// `serde_json` is built with `arbitrary_precision` across this workspace
-/// precisely so a number can be carried as the digits somebody wrote. This
-/// writes the decimal's own string representation into that slot, so the value
-/// in the national access point feed is the value the rating engine charges
-/// with, digit for digit.
+/// `serde_json`'s `raw_value` carries a value into the output verbatim, so this
+/// writes the decimal's own digits into the number slot and the value in the
+/// national access point feed is the value the rating engine charges with,
+/// digit for digit.
+///
+/// # Why not `arbitrary_precision`
+///
+/// It would do the same job and it is **global**: it changes how `serde_json`
+/// presents every number to every deserialiser in the build, so a type with a
+/// numeric visitor sees a map and refuses — and a partner's OCPI document stops
+/// parsing from bytes anywhere in the workspace (D331). `RawValue` is one type
+/// used in one place.
 ///
 /// Serializing to a format other than JSON falls back to the decimal's string
 /// form, which is lossless but is a string. The profile is JSON.
@@ -111,13 +118,12 @@ pub struct Exact(pub Decimal);
 
 impl Serialize for Exact {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // The round trip through `Value` is what reaches `arbitrary_precision`'s
-        // raw-number representation with only public API. It is not on a hot
-        // path: a publication is built once per export.
         let literal = self.0.normalize().to_string();
-        match serde_json::from_str::<serde_json::Value>(&literal) {
-            Ok(number @ serde_json::Value::Number(_)) => number.serialize(serializer),
-            _ => serializer.serialize_str(&literal),
+        // `from_string` validates that the text is JSON, so a decimal whose
+        // `Display` is not a JSON number cannot reach the wire as one.
+        match serde_json::value::RawValue::from_string(literal.clone()) {
+            Ok(raw) => raw.serialize(serializer),
+            Err(_) => serializer.serialize_str(&literal),
         }
     }
 }
@@ -165,6 +171,34 @@ pub fn time_of_day(at: time::Time) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// The half of the `serde_json` decision this crate is the reason for.
+    ///
+    /// €2.50 an hour is `0.041666…` a minute and `Decimal` states twenty-eight
+    /// places of it. The feed carries what the tariff charges with, digit for
+    /// digit — and as a **number**, because a feed that quoted its prices would
+    /// fail every consumer's schema (D331).
+    #[test]
+    fn an_exact_price_reaches_the_feed_digit_for_digit_and_as_a_number() {
+        let awkward: Decimal = "0.0416666666666666666666666667".parse().expect("a decimal");
+        let written = serde_json::to_string(&Exact(awkward)).expect("the profile is JSON");
+        assert_eq!(written, "0.0416666666666666666666666667");
+        assert!(
+            !written.contains('"'),
+            "a JSON number, not a string: {written}"
+        );
+    }
+
+    /// …and a decimal whose text is not a JSON number does not reach the wire
+    /// as one.
+    #[test]
+    fn a_value_that_is_not_a_json_number_is_written_as_text_rather_than_smuggled() {
+        // `Decimal`'s `Display` is always a JSON number, so this asserts the
+        // fallback exists rather than that it fires — the branch is there
+        // because `from_string` is what decides, not this crate.
+        let plain = serde_json::to_string(&Exact(Decimal::ONE)).expect("serialises");
+        assert_eq!(plain, "1");
+    }
     use super::*;
 
     #[test]

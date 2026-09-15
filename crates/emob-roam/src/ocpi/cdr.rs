@@ -928,6 +928,7 @@ pub fn key_of(cdr: &ocpi_kit::v2_3_0::Cdr) -> Option<emob_cdr::CdrKey> {
 /// travels with the document either way, folded into the same [`Crossing`] as
 /// everything else the translation could not carry.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum Outbound {
     /// The canonical version.

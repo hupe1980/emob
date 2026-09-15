@@ -49,6 +49,7 @@ use crate::error::RoamError;
 /// narrower question than [`AuthPath`](emob_session::AuthPath) asks: the path
 /// is *how the session was authorised*, this is *what was held up*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TokenType {
     /// A one-time id generated for a driver with no contract.
     AdHocUser,

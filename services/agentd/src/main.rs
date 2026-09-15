@@ -21,15 +21,16 @@ async fn main() -> Result<()> {
     let me: Identity = identity!();
     emob_service::telemetry::init(me, "info,agentd=debug", false);
 
-    let http: SocketAddr = std::env::var("AGENTD_HTTP_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:9580".to_owned())
-        .parse()
-        .context("AGENTD_HTTP_BIND is not a socket address")?;
+    let http: SocketAddr = emob_service::serve::bind_address("agentd", "127.0.0.1:9580")?;
 
     let readiness = Readiness::new().expecting(JOURNAL).expecting(PRINCIPAL);
     let shutdown = Shutdown::new();
 
-    // A real deployment opens a file, or a database several instances share.
+    // In memory on purpose, and it is not `emob_service::journal`: that one
+    // keeps the facts a service **decided**, and this plane decides nothing —
+    // its output is a leaf nothing consumes. What `agentplane` stores is the
+    // run of a specialist, which is worth keeping across a restart only where
+    // several instances share it, and that is a deployment's choice.
     let store: Arc<dyn JournalStore> =
         Arc::new(RedbStore::open_in_memory().context("opening the journal")?);
     let plane = runtime(Arc::clone(&store));

@@ -17,11 +17,9 @@ insert_anchor_links = "heading"
 repository = "https://github.com/hupe1980/emob"
 tagline    = "open-source charging operations for the European market"
 msrv       = "1.94"
-# The landing page's five numbers. They live here rather than in the template so
-# that changing one is a one-line diff against the thing that produced it — and
-# `cargo xtask check-concepts` now holds the first three against their sources,
-# because the comment below was true, unenforced, and wrong in three of five
-# places for four milestones (D288):
+# The landing page's five numbers, and where each comes from. `cargo xtask
+# check-concepts` holds the first three against their sources; a number that
+# does not match its source is worse than no number (D288).
 #
 #   stat_obligations  emob_core::obligation::CALENDAR — one entry per `id:`
 #   stat_tests        cargo test --workspace --all-features
@@ -29,10 +27,8 @@ msrv       = "1.94"
 #   stat_floats       cargo xtask no-floats
 #   stat_curves       the ECDSA curves the pure-Rust build verifies — OCMF's
 #                     four (p192, p256, p384, k256) plus ISO 15118 Annex F's p521
-#
-# A number here that no longer matches its source is worse than no number.
 stat_obligations = "49"
-stat_tests       = "1040"
+stat_tests       = "1075"
 stat_crates      = "15"
 stat_floats      = "0"
 stat_curves      = "5"

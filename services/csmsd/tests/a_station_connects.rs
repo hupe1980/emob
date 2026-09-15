@@ -230,6 +230,7 @@ async fn a_station_connects_and_its_signed_kilowatt_hours_reach_a_cdr() {
             energy,
             key,
             retries,
+            gap,
         } => {
             assert_eq!(
                 energy, "0.636 kWh",
@@ -237,6 +238,7 @@ async fn a_station_connects_and_its_signed_kilowatt_hours_reach_a_cdr() {
             );
             assert!(key.contains("CP-1"), "{key}");
             assert_eq!(*retries, 0, "a quiet link retries nothing");
+            assert!(gap.is_empty(), "…and drops nothing: {gap:?}");
         }
         other => panic!("the session did not settle: {other:?}"),
     }

@@ -13,10 +13,17 @@ value survives in, and the driver contract all of it turns into an invoice.
 [Architecture](https://hupe1980.github.io/emob/docs/architecture/)
 
 > 🚧 **Status: early.** Fifteen domain crates and eight daemons are built, tested
-> and green. Everything else is designed and marked 📐 rather than blurred into
-> it.
+> and green; all four daemons that hold a ledger fold it from a hash-chained
+> journal, so what they decided outlives the process that decided it, and the
+> estate comes up from one `compose.yaml`. The **OCPI** wire is connected in
+> both directions — a partner registers with this node through the module the
+> specification makes mandatory, and a CDR crosses either way with the seal
+> written after the answer. Four wires are not: the Mobilithek snapshot, the tariff push to a 2.1
+> estate, the SHIP session and the OICP broker each build the document and log
+> where a `POST` would go. Everything else is designed and marked 📐 rather than
+> blurred into it.
 
-**1040 tests.** The ones that are hard to fake:
+**1075 tests.** The ones that are hard to fake:
 
 - **A real message, end to end.** The Open Charge Alliance's own published OCPP
   example goes in at the wire and comes out as a taxable amount — and again as a
@@ -40,6 +47,19 @@ value survives in, and the driver contract all of it turns into an invoice.
   point ends up above the ceiling.
 - **A hundred stations that reconcile exactly.** `billed + refused == metered`,
   with the residual zero rather than small.
+- **A record on somebody else's socket, and a peer on ours.** A receiver runs on
+  a real port and answers the way the specification says one answers: the record
+  is pushed, the `Location` comes back, and the seal reaches the ledger **after**
+  it. A refusal and a partner nobody reached are different answers, and only one
+  is written down. In the other direction a peer discovers this node, requires
+  the modules a CPO will not connect without, registers, and pushes — through the
+  client's own implementation, so what is tested is the document this node
+  publishes rather than paths it chose.
+- **A restart, in the middle.** Four daemons are stopped between two calls and
+  started again: an invoice number spent before the restart is not spent after
+  it, a record the partner took is still sealed, a card reported stolen is still
+  blocked, and a journal somebody edited stops the daemon rather than being
+  folded into a past it cannot account for.
 - **Properties over generated input**, not examples — because an example is a
   shape somebody already thought of: one price however finely a session is
   sliced, every quantity priced or named, no VAT category owed a negative amount,
@@ -64,8 +84,8 @@ the billing — as one system that agrees with itself about what a kilowatt-hour
 was worth.
 
 That other half is what this workspace is, and it is built on protocol stacks
-that already exist as siblings rather than re-implemented: [`ocpp-kit`],
-[`ocpi-kit`], [`oicp-kit`], [`iso15118`], [`eebus`].
+that already exist as siblings rather than re-implemented: [`ocmf`],
+[`ocpp-kit`], [`ocpi-kit`], [`oicp-kit`], [`iso15118`], [`eebus`].
 
 ```mermaid
 flowchart LR
@@ -89,6 +109,7 @@ Every arrow is a place a kilowatt-hour can quietly become the wrong number.
 [SteVe]: https://github.com/steve-community/steve
 [EVerest]: https://everest.github.io
 [`ocpp-kit`]: https://github.com/hupe1980/ocpp-kit
+[`ocmf`]: https://github.com/hupe1980/ocmf
 [`ocpi-kit`]: https://github.com/hupe1980/ocpi-kit
 [`oicp-kit`]: https://github.com/hupe1980/oicp-kit
 [`iso15118`]: https://github.com/hupe1980/iso15118
@@ -122,6 +143,25 @@ There is no second route. A caller who wants to bill anyway has to write code
 that visibly ignores the answer — which is the point, because German calibration
 law lets you invoice a measured value only if the customer can check it, long
 after the session `[MessEG §33]`.
+
+### Running the estate
+
+```console
+just up          # eight daemons, distroless, a volume per journal
+just images      # build them all from one Dockerfile, two architectures
+```
+
+| Variable | Default | What |
+|---|---|---|
+| `EMOB_JOURNAL_DIR` | `var` | where a daemon's journal is folded from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
+| `EMOB_HTTP_BIND` | — | the estate-wide bind address; a daemon's own `<DAEMON>_HTTP_BIND` wins over it. Every default is **loopback**, because a platform that decides money should not become reachable by somebody forgetting to configure it — and loopback inside a container is reachable by nothing, which is what the image sets this for |
+
+Each daemon that holds a ledger folds it from a hash-chained journal, so a
+restart is a replay: an invoice number
+`[UStG §14(4) Nr. 4]` spends *once* is still spent, and a record
+`[OCPI 2.3.0 §mod_cdrs]` sealed the moment the partner took it is still sealed.
+A journal that does not chain stops the daemon rather than being folded into a
+past it cannot account for.
 
 **[Getting started](https://hupe1980.github.io/emob/docs/getting-started/)** takes
 that session the rest of the way: across the quarter hours the market settles on,
@@ -208,7 +248,7 @@ older and considerably wider than the European one everybody models.
 | [`emob-pnc`](crates/emob-pnc) | **Plug & Charge, from the platform's side.** Which ecosystem a contract belongs to, because one minted elsewhere *validates* `[V2G2-925]`; whether anything on its path has been withdrawn, which the protocol libraries name as what they do not answer; the eMAID read **off the certificate** and the vehicle's PCID off its own; and the several contracts one car holds | ✅ |
 | [`emob-thg`](crates/emob-thg) | The greenhouse-gas quota: `[38k §6(3)]`'s four conditions per point, and a notification built only from energy a meter signed. Notified is not published, and no factor is a constant | ✅ |
 | [`emob-billing`](crates/emob-billing) | Rated CDRs → an EN 16931 e-invoice and the verdict on it, a SEPA collection, and postings addressed by role. The rounding happens once, at the line, and the residual is reported | ✅ |
-| [`emob-service`](crates/emob-service) | The daemon shell, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature | ✅ |
+| [`emob-service`](crates/emob-service) | The daemon shell: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature, operator-authored Cedar policies over the same entity types — and the **journal** a daemon's ledger is folded from, so what a service decided outlives the process that decided it | ✅ |
 
 | Service | What it does | State |
 |---|---|---|
@@ -217,10 +257,10 @@ older and considerably wider than the European one everybody models.
 | [`agentd`](services/agentd) | The advisory plane on `agentplane` — specialists that correlate across many exact answers, and cannot move money by construction. Evidence triage, the tariff sweep, and a compliance sweep that answers **which duties this estate will fail on the day they start** | ✅ |
 | [`poid`](services/poid) | The national access point feed `[AFIR Art. 20(2)]`: the DATEX II snapshot, the updates that reference it — resolved against the table the access point actually **has**, not against the estate they were built from — and a feed nobody refreshed named rather than read as current | ✅ |
 | [`tarifd`](services/tarifd) | Publishing a tariff version to the three audiences owed it, from one decimal, **before** it takes effect — and to none of them if the stations cannot be given it | ✅ |
-| [`roamd`](services/roamd) | The roaming node: **who** a record goes to, routed out of the contract's own issuer; **when** it is late, against the window that partner agreed to; and **what to do** with one that arrives — accept, dispute, or refuse, with a retry told apart from a restatement. A record the partner has taken is sealed `[OCPI 2.3.0 §mod_cdrs]`, and a correction may not overtake its own reversal | ✅ |
+| [`roamd`](services/roamd) | The roaming node, both directions of the OCPI wire — including the credentials module `[OCPI 2.3.0]` makes mandatory for every implementation. **Who** a record goes to, routed out of the contract's own issuer; **when** it is late, against the window that partner agreed to; and **what to do** with one that arrives — accept, dispute, or refuse, with a retry told apart from a restatement. A record the partner has taken is sealed `[OCPI 2.3.0 §mod_cdrs]`, and a correction may not overtake its own reversal | ✅ |
 | [`billd`](services/billd) | The service that closes a month: what number the invoice carries, that the period closes **once** and a re-closing is a correction rather than a second demand, which document supersedes which — the reversal first — and which account each role-addressed posting lands in. The only manifest that may declare `doubleentry`, with the place of supply in the account path because a VAT liability has a creditor. Posting is a separate act from issuing: a platform that books on issue holds a trial balance the recipient's own records disagree with — and a correction is a **pair**, so the books hold both sides of it or neither | ✅ |
 | [`empd`](services/empd) | The provider side: the keyed token store `emob-roam` asks for by name, because OCPI wants an RFID uid on every outgoing CDR and a session refuses to hold one; `[OCPI 2.3.0 §mod_tokens]`'s five answers and the whitelist read as the two-sided rule it is; `[AFIR Art. 5(5)]`'s quote with the operator's price passed through **unchanged**, over a price list with no country in it; and the C-60/23 fee owed by a contract that charged nothing all month, over a running total keyed by session because a total cannot tell one record redelivered from two that cost the same | ✅ |
-| `pncd`, `opsd` | The OPCP pool client, and availability reporting | 📐 |
+| `pncd`, `opsd`, `thgd` | The OPCP pool client, availability reporting, and the greenhouse-gas filing | 📐 |
 
 `emob-roam` is the one crate whose MSRV is not the workspace's. Everything that
 decides money promises **1.94**, which is the floor the sibling workspaces
@@ -246,11 +286,15 @@ just guards     # no-floats, check-citations, check-manifests, check-wire,
                 # check-constructors, check-graph
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
+just images     # all eight daemons, from one Dockerfile
+just up         # the estate on one machine, a volume per journal
 ```
 
 The domain crates take time and keys as arguments and never read a clock, so a
 dispute about a two-year-old session is replayed exactly as it happened — and
-`just purity` fails the build if that stops being true.
+`just purity` fails the build if that stops being true. The daemons inherit it:
+a service whose state is a fold of those functions over a record of what it
+decided replays for the same reason.
 
 ### Releasing
 

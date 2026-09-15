@@ -57,6 +57,16 @@
 
 use std::collections::BTreeMap;
 
+pub mod dispatch;
+pub mod inbound;
+pub mod node;
+pub mod peering;
+
+pub use dispatch::{Answer, Dispatcher};
+pub use inbound::{Handshake, Inbox};
+pub use node::{Event, Node, NodeError};
+pub use peering::{Peers, Registration, Registry};
+
 use emob_cdr::{Cdr, CdrKey, CdrLedger};
 use emob_core::{Money, PartyId};
 use emob_roam::ocpi::cdr::Outbound;
@@ -67,7 +77,8 @@ use emob_service::caps;
 use emob_service::policy::{Gate, PolicyError, Resource};
 
 /// Where a record has got to on its way to the party that will pay it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Delivery {
     /// Queued and not yet answered — never sent, or sent and unacknowledged.
     Pending,
@@ -78,6 +89,7 @@ pub enum Delivery {
     /// sent. Optional here because the OICP leg has no equivalent.
     Accepted {
         /// When it was taken.
+        #[serde(with = "time::serde::rfc3339")]
         at: time::OffsetDateTime,
         /// Where it now lives in the receiver's system.
         location: Option<String>,
@@ -88,6 +100,7 @@ pub enum Delivery {
     /// one may not: see [`Roamd::consign`].
     Refused {
         /// When.
+        #[serde(with = "time::serde::rfc3339")]
         at: time::OffsetDateTime,
         /// What the receiver said.
         reason: String,
@@ -103,7 +116,7 @@ impl Delivery {
 }
 
 /// One record on its way to one partner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Consignment {
     /// Which record.
     pub key: CdrKey,
@@ -114,6 +127,7 @@ pub struct Consignment {
     pub wire: Wire,
     /// When the session it records ended, which is when the settlement window
     /// starts running.
+    #[serde(with = "time::serde::rfc3339")]
     pub ended_at: time::OffsetDateTime,
     /// Where it has got to.
     pub delivery: Delivery,
@@ -425,10 +439,38 @@ pub struct Roamd {
     /// keyed: a party and an id, because OCPI makes an id unique per party and
     /// two CPOs may each have a CDR `1`.
     outbound: BTreeMap<CdrKey, Consignment>,
+    /// The **document** for each of those, as it will go on the wire.
+    ///
+    /// A transactional outbox holds the message, not a recipe for one. The
+    /// crossing that produced it also produced the account of what carrying it
+    /// there cost, by JSON Pointer *into this copy* — so a second rendering,
+    /// from a session that has since been re-rated or a registry that has since
+    /// changed, would send a document the account does not describe. Rendered
+    /// once, recorded with the decision, and sent verbatim however many times
+    /// the wire takes.
+    outbox: BTreeMap<CdrKey, emob_roam::ocpi::cdr::Outbound>,
     /// The records partners have sent, for the idempotency a receiver owes.
     inbound: CdrLedger,
+    /// …and the **documents** they arrived as, keyed by the id the partner gave.
+    ///
+    /// `[OCPI 2.3.0 §mod_cdrs]` makes a Receiver return a `Location` so the
+    /// sender can `GET` back what it sent, and what it sent is the partner's
+    /// document rather than this side's canonical model. Rebuilding one would
+    /// answer a question about their arithmetic with a claim about ours — which
+    /// is D324's rule pointed inward: an outbox holds the message, and so does
+    /// an inbox.
+    received: BTreeMap<String, Box<ocpi_kit::v2_3_0::Cdr>>,
     /// What every partner's document is asked about its signed metering data.
     signed_data: SignedDataPolicy,
+    /// The platforms registered with this node, and the bootstrap tokens it has
+    /// handed out.
+    ///
+    /// State rather than configuration, and the difference is the whole reason
+    /// it is here: a partner registry says *who this node peers with*, which an
+    /// operator edits, while a registration is *what this node issued* — a
+    /// token a partner is presenting right now. Forgotten, every partner ever
+    /// onboarded gets a `401`.
+    peers: crate::peering::Peers,
     /// The operator's own policies, where there are any.
     ///
     /// `None` is not "no authorisation": [`Roamd::receive`] applies the typed
@@ -446,7 +488,10 @@ impl Roamd {
         Self {
             registry,
             outbound: BTreeMap::new(),
+            outbox: BTreeMap::new(),
+            peers: crate::peering::Peers::new(),
             inbound: CdrLedger::new(),
+            received: BTreeMap::new(),
             signed_data: SignedDataPolicy::default(),
             policies: None,
         }
@@ -760,6 +805,48 @@ impl Roamd {
                 reason: reason.into(),
             },
         )
+    }
+
+    /// Keep the document a record will go out as.
+    ///
+    /// Not public: the only lawful moment to render one is when the record is
+    /// routed, and `Node::consign` is where that happens. A caller that could
+    /// replace a document after the account was written would be replacing the
+    /// thing the account is about.
+    pub(crate) fn hold_document(&mut self, key: &CdrKey, document: emob_roam::ocpi::cdr::Outbound) {
+        self.outbox.insert(key.clone(), document);
+    }
+
+    /// Keep a partner's document as it arrived.
+    pub(crate) fn hold_received(&mut self, id: String, document: Box<ocpi_kit::v2_3_0::Cdr>) {
+        self.received.insert(id, document);
+    }
+
+    /// A partner's document, as it arrived.
+    #[must_use]
+    pub fn document_received(&self, cdr_id: &str) -> Option<&ocpi_kit::v2_3_0::Cdr> {
+        self.received.get(cdr_id).map(Box::as_ref)
+    }
+
+    /// The platforms registered with this node.
+    #[must_use]
+    pub const fn peers(&self) -> &crate::peering::Peers {
+        &self.peers
+    }
+
+    /// …and the same list, to change through `Node` and only through it.
+    pub(crate) const fn peers_mut(&mut self) -> &mut crate::peering::Peers {
+        &mut self.peers
+    }
+
+    /// The document for a record, as it was rendered when the record was
+    /// routed.
+    ///
+    /// `None` for a record consigned without one, which is the OICP path and a
+    /// test that is only about routing.
+    #[must_use]
+    pub fn document(&self, key: &CdrKey) -> Option<&emob_roam::ocpi::cdr::Outbound> {
+        self.outbox.get(key)
     }
 
     /// Every consignment still waiting to be sent, in the order they were keyed.

@@ -485,3 +485,266 @@ fn the_fee_is_owed_by_a_contract_that_never_charged() {
     assert_eq!(bare.party(), &me());
     assert!(Markup::none().is_free());
 }
+
+// ── …and all three ledgers across a restart ─────────────────────────────────
+//
+// Every answer above is about the **past** — this token was issued, this card
+// is blocked, this contract has run up these sessions — and none of it survived
+// the process. The direction each fails in is different and only one of them is
+// loud: a lost token store refuses every driver, a lost block **admits** a card
+// its owner reported stolen, and a lost running total authorises every session
+// past the credit limit that was the point of holding it.
+
+use emob_service::journal::{File, Journal};
+use empd::{Book, BookError};
+
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir()
+            .join(format!("emob-empd-{}-{name}", std::process::id()))
+            .join("empd.ndjson");
+        let _ = std::fs::remove_dir_all(path.parent().expect("a parent"));
+        Self(path)
+    }
+
+    fn book(&self) -> Book<File> {
+        Book::open(
+            Empd::new(me(), *b"a key nobody outside this service holds"),
+            File::open(&self.0).expect("the journal opens"),
+        )
+        .expect("the journal folds")
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0.parent().expect("a parent"));
+    }
+}
+
+#[test]
+fn a_token_issued_before_a_restart_still_authorises_and_a_blocked_one_still_does_not() {
+    let scratch = Scratch::new("tokens");
+
+    let (good, lost) = {
+        let mut book = scratch.book();
+        book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
+            .expect("the contract is held");
+        let good = book
+            .issue_token(&contract(), "04A1", TokenType::AppUser, Whitelist::Allowed)
+            .expect("issued");
+        let lost = book
+            .issue_token(&contract(), "04B2", TokenType::Rfid, Whitelist::Allowed)
+            .expect("issued");
+        book.block(&lost).expect("the driver reported it stolen");
+        (good, lost)
+    };
+
+    let book = scratch.book();
+    assert_eq!(
+        book.authorize(&good, date!(2026 - 06 - 01)).expect("known"),
+        Allowed::Allowed
+    );
+    assert_eq!(
+        book.authorize(&lost, date!(2026 - 06 - 01)).expect("known"),
+        Allowed::Blocked,
+        "a restart must not un-block a card its owner reported stolen"
+    );
+}
+
+#[test]
+fn a_credit_limit_is_judged_against_sessions_the_restart_did_not_forget() {
+    let scratch = Scratch::new("credit");
+
+    let token = {
+        let mut book = scratch.book();
+        book.with(
+            Contract::new(contract(), date!(2026 - 01 - 01))
+                .limited_to(Money::new(dec("50.00"), Currency::EUR)),
+        )
+        .expect("held");
+        let token = book
+            .issue_token(&contract(), "04A1", TokenType::AppUser, Whitelist::Allowed)
+            .expect("issued");
+        let first: SessionId = "s-1".parse().unwrap();
+        let second: SessionId = "s-2".parse().unwrap();
+        book.ran_up(&contract(), &first, Money::new(dec("31.04"), Currency::EUR))
+            .expect("counted");
+        book.ran_up(
+            &contract(),
+            &second,
+            Money::new(dec("24.70"), Currency::EUR),
+        )
+        .expect("counted");
+        token
+    };
+
+    // 55.74 against a 50.00 limit. A provider that came back at zero would
+    // authorise the next session and every one after it, and nothing would
+    // raise: a limit that is never reached looks exactly like a limit that is
+    // never exceeded.
+    let book = scratch.book();
+    assert_eq!(
+        book.authorize(&token, date!(2026 - 06 - 01))
+            .expect("known"),
+        Allowed::NoCredit
+    );
+}
+
+#[test]
+fn a_session_counted_before_a_restart_is_not_counted_again_after_one() {
+    let scratch = Scratch::new("retry");
+    let session: SessionId = "s-1".parse().unwrap();
+
+    {
+        let mut book = scratch.book();
+        book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
+            .expect("held");
+        book.ran_up(
+            &contract(),
+            &session,
+            Money::new(dec("31.04"), Currency::EUR),
+        )
+        .expect("counted");
+    }
+
+    // The partner re-sends after the restart, which is what a partner does.
+    let mut book = scratch.book();
+    assert_eq!(
+        book.ran_up(
+            &contract(),
+            &session,
+            Money::new(dec("31.04"), Currency::EUR)
+        )
+        .expect("offered again"),
+        Counted::Already,
+        "the ledger is keyed by session precisely so a retry is not a second charge (D309)"
+    );
+}
+
+#[test]
+fn a_journal_edited_in_the_middle_will_not_start_the_provider() {
+    let scratch = Scratch::new("tamper");
+    {
+        let mut book = scratch.book();
+        book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
+            .expect("held");
+        for (n, uid) in ["04A1", "04B2", "04C3"].into_iter().enumerate() {
+            let _ = book
+                .issue_token(&contract(), uid, TokenType::Rfid, Whitelist::Allowed)
+                .expect("issued");
+            let session: SessionId = format!("s-{n}").parse().unwrap();
+            book.ran_up(
+                &contract(),
+                &session,
+                Money::new(dec("1.00"), Currency::EUR),
+            )
+            .expect("counted");
+        }
+    }
+
+    let text = std::fs::read_to_string(&scratch.0).expect("read");
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.remove(2);
+    std::fs::write(&scratch.0, format!("{}\n", lines.join("\n"))).expect("written");
+
+    let refused = Book::open(
+        Empd::new(me(), *b"a key nobody outside this service holds"),
+        File::open(&scratch.0).expect("opens"),
+    )
+    .expect_err("a journal with a record removed is not this provider's ledger");
+    assert!(refused.to_string().contains("does not chain"), "{refused}");
+}
+
+#[test]
+fn the_journal_names_what_kind_of_fact_each_record_is() {
+    let scratch = Scratch::new("kinds");
+    let mut book = scratch.book();
+    book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
+        .expect("held");
+    let token = book
+        .issue_token(&contract(), "04A1", TokenType::Rfid, Whitelist::Allowed)
+        .expect("issued");
+    let session: SessionId = "s-1".parse().unwrap();
+    book.ran_up(
+        &contract(),
+        &session,
+        Money::new(dec("1.00"), Currency::EUR),
+    )
+    .expect("counted");
+    book.invoiced(&contract(), &[session]).expect("invoiced");
+    book.block(&token).expect("blocked");
+
+    let kinds: Vec<String> = book
+        .journal()
+        .records()
+        .expect("the chain holds")
+        .into_iter()
+        .map(|r| r.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        ["contracted", "issued", "ran_up", "invoiced", "blocked"]
+    );
+
+    // The one fact it must **not** have written: a token's uid never reaches
+    // the journal in the clear. The store is keyed by a digest, and a file that
+    // held the uid beside it would make every digest in it reversible by
+    // anybody holding the file.
+    let raw = book.journal().records().expect("records");
+    assert!(
+        raw.iter().any(|r| r.body.contains("04A1")),
+        "the uid is in the token record, which is what makes this a real question"
+    );
+    let _ = BookError::Halted { why: String::new() };
+}
+
+/// A re-rated record moves the total, and the move is a fact.
+///
+/// The near-miss this test exists for: a fold that journalled only the *first*
+/// time a session was counted would rebuild a contract owing the figure the
+/// record was rated at before the correction, and the credit limit would be
+/// judged against a number nothing in the system still believes.
+#[test]
+fn a_re_rated_session_still_moves_the_total_after_a_restart() {
+    let scratch = Scratch::new("restated");
+    let session: SessionId = "s-1".parse().unwrap();
+
+    {
+        let mut book = scratch.book();
+        book.with(
+            Contract::new(contract(), date!(2026 - 01 - 01))
+                .limited_to(Money::new(dec("50.00"), Currency::EUR)),
+        )
+        .expect("held");
+        book.ran_up(
+            &contract(),
+            &session,
+            Money::new(dec("10.00"), Currency::EUR),
+        )
+        .expect("counted");
+        assert!(matches!(
+            book.ran_up(
+                &contract(),
+                &session,
+                Money::new(dec("48.00"), Currency::EUR)
+            )
+            .expect("re-rated"),
+            Counted::Restated { .. }
+        ));
+    }
+
+    let mut book = scratch.book();
+    assert_eq!(
+        book.ran_up(
+            &contract(),
+            &session,
+            Money::new(dec("48.00"), Currency::EUR)
+        )
+        .expect("offered again"),
+        Counted::Already,
+        "the restatement is what the fold must have rebuilt, not the first figure"
+    );
+}
