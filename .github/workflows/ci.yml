@@ -141,25 +141,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
-      # The toolchain is rust-toolchain.toml's; the target is added to it here.
-      - run: rustup target add wasm32-unknown-unknown
       # `csmsd` compiles the module in with `include_bytes!`, so the committed
-      # asset is what every receipt serves. Rebuilt here from source with the
-      # paths remapped, and a module that differs from the committed one is a
-      # verifier nobody reviewed.
+      # asset is what every receipt serves. Rebuilt here from source in the same
+      # pinned container `just wasm` uses locally, and a module that differs
+      # from the committed one is a verifier nobody reviewed.
       - run: cp services/csmsd/assets/emob_verify.wasm "$RUNNER_TEMP/committed.wasm"
       - run: just wasm
       - run: git diff --exit-code services/csmsd/assets/emob_verify.wasm
-      # When they differ, say how: the toolchain this runner resolved and what
-      # the two modules embed — enough to make the build reproducible again.
+      # When they differ, say how: what the two modules embed.
       - if: failure()
         run: |
-          rustc -vV
           sha256sum "$RUNNER_TEMP/committed.wasm" services/csmsd/assets/emob_verify.wasm
           diff <(strings -n 6 "$RUNNER_TEMP/committed.wasm") <(strings -n 6 services/csmsd/assets/emob_verify.wasm) | head -60 || true
 

@@ -112,13 +112,21 @@ release-check:
 # 🔏 Build the in-browser verifier and measure it
 wasm:
     #!/usr/bin/env bash
+    # Built in the Dockerfile's pinned Rust image, at /emob, as linux/amd64, so
+    # every machine produces the same bytes: cargo folds a path crate's absolute
+    # location into its symbol hashes, and a different checkout path reorders
+    # the code. CI rebuilds it the same way and fails on any difference.
     set -euo pipefail
-    sysroot="$(rustc --print sysroot)"
-    commit="$(rustc -vV | sed -n 's/commit-hash: //p')"
-    RUSTFLAGS="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/emob --remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$commit" \
-        cargo build -q -p emob-verify --target wasm32-unknown-unknown --profile wasm
-    mkdir -p services/csmsd/assets
-    cp target/wasm32-unknown-unknown/wasm/emob_verify.wasm services/csmsd/assets/emob_verify.wasm
+    image="$(sed -n 's/^FROM \(rust:[^ ]*\) AS build$/\1/p' Dockerfile)"
+    docker run --rm --platform linux/amd64 -v "$PWD":/emob -w /emob \
+        -e CARGO_TARGET_DIR=/emob/target/wasm-build "$image" sh -ec '
+            rustup target add wasm32-unknown-unknown >/dev/null
+            commit="$(rustc -vV | sed -n "s/commit-hash: //p")"
+            sysroot="$(rustc --print sysroot)"
+            RUSTFLAGS="--remap-path-prefix=/usr/local/cargo=/cargo --remap-path-prefix=/emob=/emob --remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$commit" \
+                cargo build -q --locked -p emob-verify --target wasm32-unknown-unknown --profile wasm
+            mkdir -p services/csmsd/assets
+            cp target/wasm-build/wasm32-unknown-unknown/wasm/emob_verify.wasm services/csmsd/assets/emob_verify.wasm'
     raw=$(wc -c < services/csmsd/assets/emob_verify.wasm | tr -d ' ')
     gz=$(gzip -9c services/csmsd/assets/emob_verify.wasm | wc -c | tr -d ' ')
     echo "🔏 services/csmsd/assets/emob_verify.wasm: ${raw} bytes, ${gz} gzipped (budget 200000)"

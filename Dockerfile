@@ -31,7 +31,7 @@ COPY crates ./crates
 COPY services ./services
 COPY xtask ./xtask
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p "${DAEMON}" \
  && cp "target/release/${BIN}" /usr/local/bin/daemon

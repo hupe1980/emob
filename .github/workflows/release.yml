@@ -228,10 +228,12 @@ jobs:
       - name: Package, SBOM, checksums
         run: |
           set -euo pipefail
-          cargo package --workspace --locked --no-verify
+          # Only the published crates: the daemons and tools are publish = false
+          # and some depend on path-only crates, which `cargo package` refuses.
+          cargo package --locked --no-verify $(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | "-p " + .name')
           just sbom
           mkdir -p dist
-          # `cargo package` packs every member; only the `emob-*` crates are published.
           cp target/package/emob-*.crate target/sbom/*.cdx.json dist/
           (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
 
