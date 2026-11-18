@@ -10,6 +10,23 @@ renames something says so under **Removed** or **Changed** instead.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-18
+
+The first release published through crates.io trusted publishing. The crates'
+code is unchanged from 0.3.0; this release completes what 0.3.0's release run
+could not.
+
+### Fixed
+
+- The release workflow packages only the published crates, so the GitHub
+  release carries its SBOM, checksums and build provenance.
+- Container images build in parallel without two builds unpacking the same
+  crate into the shared cargo cache.
+- The receipt verifier (WebAssembly) is built in the pinned Rust container, so
+  every machine produces the same bytes and CI can hold the committed module
+  to its source.
+- `just a11y` starts headless Chrome reliably on CI runners.
+
 ## [0.3.0] - 2026-11-18
 
 ### Added
@@ -198,6 +215,7 @@ renames something says so under **Removed** or **Changed** instead.
 First release: fifteen crates from the signed meter value to the ledger posting,
 and eight daemons.
 
-[Unreleased]: https://github.com/hupe1980/emob/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/hupe1980/emob/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/hupe1980/emob/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hupe1980/emob/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/hupe1980/emob/releases/tag/v0.1.0
