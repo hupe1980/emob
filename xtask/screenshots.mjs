@@ -59,13 +59,23 @@ const proc = spawn(chrome, ["--headless=new", "--disable-gpu", "--hide-scrollbar
   // GitHub's Ubuntu runners restrict the unprivileged user namespaces Chrome's
   // sandbox needs; the pages are our own, served on loopback, so CI runs
   // without it. A developer's machine keeps the sandbox.
-  ...(process.env.CI ? ["--no-sandbox"] : []),
-  `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
+  // …and their /dev/shm is small, which crashes a renderer under load.
+  ...(process.env.CI ? ["--no-sandbox", "--disable-dev-shm-usage"] : []),
+  `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: ["ignore", "ignore", "pipe"] });
+// Chrome's own complaint is the only clue when it does not come up; keep the tail.
+let chromeErr = "";
+proc.stderr.on("data", (chunk) => { chromeErr = (chromeErr + chunk).slice(-4000); });
 let target;
-for (let i = 0; i < 50 && !target; i++) {
+// A cold start on a shared CI runner can take well over ten seconds.
+for (let i = 0; i < 150 && !target; i++) {
   try { target = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find((t) => t.type === "page"); } catch { await sleep(200); }
 }
-if (!target) { proc.kill(); console.error("Chrome did not start"); process.exit(69); }
+if (!target) {
+  proc.kill();
+  console.error(`Chrome did not start within 30 s (${chrome})`);
+  if (chromeErr) console.error(chromeErr);
+  process.exit(69);
+}
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise((resolve) => (ws.onopen = resolve));
 let next = 0;

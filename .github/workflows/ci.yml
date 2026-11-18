@@ -152,8 +152,16 @@ jobs:
       # asset is what every receipt serves. Rebuilt here from source with the
       # paths remapped, and a module that differs from the committed one is a
       # verifier nobody reviewed.
+      - run: cp services/csmsd/assets/emob_verify.wasm "$RUNNER_TEMP/committed.wasm"
       - run: just wasm
       - run: git diff --exit-code services/csmsd/assets/emob_verify.wasm
+      # When they differ, say how: the toolchain this runner resolved and what
+      # the two modules embed — enough to make the build reproducible again.
+      - if: failure()
+        run: |
+          rustc -vV
+          sha256sum "$RUNNER_TEMP/committed.wasm" services/csmsd/assets/emob_verify.wasm
+          diff <(strings -n 6 "$RUNNER_TEMP/committed.wasm") <(strings -n 6 services/csmsd/assets/emob_verify.wasm) | head -60 || true
 
   doc:
     name: Docs
