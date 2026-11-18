@@ -76,7 +76,7 @@
       "codeRepository": "{{ config.extra.repository }}",
       "programmingLanguage": "Rust",
       "runtimePlatform": "Rust {{ config.extra.msrv }}",
-      "license": "https://spdx.org/licenses/Apache-2.0.html",
+      "license": ["https://spdx.org/licenses/MIT.html", "https://spdx.org/licenses/Apache-2.0.html"],
       "applicationCategory": "BusinessApplication",
       "applicationSubCategory": "Electric vehicle charging operations (CPO / eMSP)",
       "operatingSystem": "Linux, macOS, Windows",
@@ -156,24 +156,71 @@ footer nav{padding:0 0 .8rem;max-width:none}
 .cta a:hover{text-decoration:none;filter:brightness(1.08)}
 .cta a+a{background:transparent;color:var(--accent)}
 .pager{display:flex;gap:1rem;justify-content:space-between;margin-top:3rem;padding-top:1.2rem;border-top:1px solid var(--line);font-size:.94rem}
-.zola-anchor{opacity:0;margin-left:.35rem;font-weight:400;text-decoration:none}
-h2:hover .zola-anchor,h3:hover .zola-anchor,.zola-anchor:focus{opacity:.55}
+.zola-anchor{color:inherit;text-decoration:none}
+.zola-anchor:hover{text-decoration:none}
+.zola-anchor::after{content:"#";margin-left:.4rem;color:var(--muted);font-weight:400;opacity:0;transition:opacity .12s ease}
+h2:hover .zola-anchor::after,h3:hover .zola-anchor::after,.zola-anchor:focus-visible::after{opacity:.7}
 .mermaid{margin:1.6rem 0;text-align:center;overflow-x:auto}
 .mermaid:not([data-processed]){opacity:0}
 figure.diagram{margin:1.6rem 0}
+main.wide{max-width:68rem}
+.hero-inner{max-width:68rem;display:grid;grid-template-columns:minmax(0,1fr);gap:2.5rem;align-items:center}
+@media(min-width:62rem){.hero-inner{grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr)}}
+html,body{overflow-x:clip}
+.hero-title{font-size:clamp(2.1rem,4.6vw,3.2rem);max-width:18ch;text-wrap:balance}
+.hero{background:radial-gradient(60rem 22rem at 85% -10%,color-mix(in srgb,var(--accent) 14%,transparent),transparent),linear-gradient(180deg,var(--soft),var(--bg))}
+.term{margin:0;border:1px solid var(--line);border-radius:12px;background:var(--code);box-shadow:0 12px 40px -18px rgba(0,0,0,.35);overflow:hidden;min-width:0}
+.term-bar{display:flex;gap:.4rem;align-items:center;padding:.55rem .8rem;border-bottom:1px solid var(--line);font-size:.75rem;color:var(--muted)}
+.term-bar i{width:.65rem;height:.65rem;border-radius:50%;background:var(--line)}
+.term-bar span{margin-left:.5rem}
+.term pre{margin:0;border-radius:0;background:transparent;font-size:.82rem}
+.term .k{color:var(--accent);font-weight:600}.term .c{color:var(--muted)}
+.term figcaption{padding:.55rem .9rem;border-top:1px solid var(--line);font-size:.82rem;color:var(--muted)}
+.stats-inner{max-width:68rem}
+.band{border-bottom:1px solid var(--line)}
+.band-inner{max-width:68rem;margin:0 auto;padding:2.6rem 1.25rem}
+.eyebrow-h{border:0;margin:0 0 1.2rem;padding:0;font-size:.8rem;letter-spacing:.09em;text-transform:uppercase;color:var(--muted)}
+.audiences{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(17rem,1fr))}
+.aud,.feature{display:block;border:1px solid var(--line);border-radius:12px;padding:1.2rem 1.25rem;background:var(--soft);color:var(--fg);transition:border-color .15s ease,transform .15s ease,box-shadow .15s ease}
+.aud:hover,.feature:hover{text-decoration:none;border-color:var(--accent);transform:translateY(-2px);box-shadow:0 10px 30px -20px var(--accent)}
+.aud h3,.feature h3{margin:.2rem 0 .4rem;font-size:1.05rem}
+.aud p,.feature p{margin:0;color:var(--muted);font-size:.94rem;line-height:1.55}
+.aud-icon{font-size:1.4rem}
+.aud .more{display:inline-block;margin-top:.8rem;color:var(--accent);font-weight:600;font-size:.9rem}
+.features{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));margin:1.5rem 0}
+.faq details{border-bottom:1px solid var(--line);padding:.8rem 0}
+.faq summary{cursor:pointer;font-weight:600;list-style-position:outside}
+.faq details p{margin:.6rem 0 0;color:var(--muted)}
+.closing{margin-top:3rem;padding:2rem;border:1px solid var(--line);border-radius:14px;background:var(--soft);text-align:center}
+.closing h2{border:0;margin-top:0;padding:0}
+.closing .hero-cta{justify-content:center}
+nav .gh{font-weight:600}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 figure.diagram figcaption{font-size:.88rem;color:var(--muted);text-align:center;margin-top:.5rem}
+main img{max-width:100%;height:auto}
+.shots{display:grid;gap:1.25rem;grid-template-columns:minmax(0,3fr) minmax(0,1fr);align-items:start;margin:1.5rem 0}
+.shots figure,figure.shot{margin:0}
+.shots img,figure.shot img{border:1px solid var(--line);border-radius:10px}
+.shots figcaption,figure.shot figcaption{font-size:.88rem;color:var(--muted);margin-top:.5rem}
+figure.shot{margin:1.5rem 0}
+figure.shot.phone{max-width:390px}
+.shot-pair{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));margin:1.5rem 0}
+.shot-pair figure.shot{margin:0}
+@media(max-width:44rem){.shots{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <a class="skip" href="#content">Skip to content</a>
 <header><nav>
   <a class="brand" href="{{ get_url(path='@/_index.md') }}">🔌 emob</a>
-  <a href="{{ get_url(path='@/docs/_index.md') }}">Documentation</a>
+  <a href="{{ get_url(path='@/docs/_index.md') }}">Docs</a>
+  <a href="{{ get_url(path='@/docs/getting-started.md') }}">Get started</a>
   <span class="spacer"></span>
-  <a href="{{ config.extra.repository }}" rel="noopener">GitHub</a>
+  <a class="gh" href="{{ config.extra.repository }}" rel="noopener" aria-label="emob on GitHub">GitHub ↗</a>
 </nav></header>
 {% block prelude %}{% endblock %}
-<main id="content">{% block content %}{% endblock %}</main>
+<main id="content" class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
 <footer>
   <nav>
     {%- set docs = get_section(path="docs/_index.md") %}

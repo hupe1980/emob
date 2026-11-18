@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+mod actions;
+use actions::check_actions;
+
 fn main() -> Result<()> {
     let root = workspace_root()?;
     match std::env::args().nth(1).as_deref() {
@@ -22,8 +25,10 @@ fn main() -> Result<()> {
         Some("check-reach") => check_reach(&root),
         Some("check-api") => check_api(&root),
         Some("check-constructors") => check_constructors(&root),
+        Some("check-actions") => check_actions(&root),
         Some("check-all") => {
             no_floats(&root)?;
+            check_actions(&root)?;
             check_citations(&root)?;
             check_manifests(&root)?;
             check_wire(&root)?;
@@ -54,7 +59,7 @@ cargo xtask <task>
                     either is money or becomes money, and a binary float
                     cannot represent 0.10
   check-citations   every regulatory citation in the code *and the docs* names a
-                    document that specs/README.md actually indexes
+                    document that concepts/REFERENCES.md actually indexes
   check-manifests   every publishable crate can be packaged *and accepted*: the
                     files its manifest promises exist, and its keywords and
                     categories are within what the registry takes
@@ -92,6 +97,10 @@ cargo xtask <task>
                     constructor that states a rule has to be the door the wire
                     comes through, or the rule is enforced everywhere except
                     where the values arrive from
+  check-actions     every `uses:` in a workflow names a commit SHA, every
+                    `FROM` in the Dockerfile a digest, and every workflow
+                    declares its token `permissions:` — a tag is a pointer its
+                    owner can move under a release
   check-all         all of the above
 "
     );
@@ -940,6 +949,21 @@ fn owner_of(target: &str, members: &[Member]) -> Option<usize> {
                 .iter()
                 .position(|m| m.dir.join("tests").join(format!("{target}.rs")).exists())
         })
+        .or_else(|| {
+            // A binary's own unit tests run under the binary's name (`emob` is
+            // `emob-cli`'s), which its manifest's `[[bin]]` states.
+            members.iter().position(|m| {
+                std::fs::read_to_string(m.dir.join("Cargo.toml")).is_ok_and(|manifest| {
+                    manifest.split("[[bin]]").skip(1).any(|bin| {
+                        bin.lines().any(|line| {
+                            line.split_once('=').is_some_and(|(key, value)| {
+                                key.trim() == "name" && value.trim().trim_matches('"') == target
+                            })
+                        })
+                    })
+                })
+            })
+        })
 }
 
 /// A workspace member: the name `cargo` knows it by, and where its manifest is.
@@ -1391,8 +1415,10 @@ fn rust_sources(root: &Path) -> Result<Vec<PathBuf>> {
 /// A citation in a document is the same promise as a citation in a comment —
 /// "this rule comes from that paragraph of that text" — and a reader who cannot
 /// follow it is in exactly the position the guard exists to prevent. `concepts/`
-/// and `specs/` are gitignored, so this finds them on a working copy and skips
-/// them on a fresh clone.
+/// is gitignored, so this finds the notes on a working copy and skips them on a
+/// fresh clone. The third-party corpus under `concepts/reference/` and its index,
+/// `concepts/REFERENCES.md`, are not this workspace's prose and are left out —
+/// a vendored README is not a claim emob makes.
 fn prose_sources(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let readme = root.join("README.md");
@@ -1402,6 +1428,9 @@ fn prose_sources(root: &Path) -> Result<Vec<PathBuf>> {
     for top in ["crates", "services", "site/content", "concepts"] {
         collect(&root.join(top), "md", &mut files)?;
     }
+    let corpus = root.join("concepts/reference");
+    let index = root.join("concepts/REFERENCES.md");
+    files.retain(|file| !file.starts_with(&corpus) && *file != index);
     files.sort();
     Ok(files)
 }
@@ -1609,7 +1638,7 @@ fn is_requirement_id(phrase: &str) -> bool {
 // ── check-citations ─────────────────────────────────────────────────────────
 
 /// Which document each citation prefix belongs to, and a string that must
-/// appear in `specs/README.md` for that document to count as indexed.
+/// appear in `concepts/REFERENCES.md` for that document to count as indexed.
 ///
 /// A family is added here only once the document is actually indexed. An entry
 /// whose needle is broad enough to match anything is worse than no entry: it
@@ -1643,23 +1672,27 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
     ("[NIS2", "NIS2", "nis2-2022-2555"),
     ("[CRA", "Cyber Resilience Act", "cra-2024-2847"),
     // The NZR-EMob corpus lives in the sibling `mako` workspace, which
-    // specs/README.md points at rather than duplicating.
+    // concepts/REFERENCES.md points at rather than duplicating.
     ("[A6 ", "BK6-20-160 Anlage 6", "mako/regulatories"),
     ("[M2 ", "BDEW AWH „Zum Modell 2\"", "mako/regulatories"),
-    // The protocol corpora live in the sibling kits, which specs/README.md
+    // The protocol corpora live in the sibling kits, which concepts/REFERENCES.md
     // points at rather than duplicating.
     ("[OCPI ", "the OCPI specifications", "ocpi-kit/specs"),
     ("[OICP ", "the OICP specifications", "oicp-kit/specs"),
-    ("[OCPP ", "the OCPP specifications", "ocpp-kit/specs"),
+    (
+        "[OCPP ",
+        "the OCPP specifications",
+        "ocpp-kit/concepts/reference",
+    ),
     ("[BGB ", "Bürgerliches Gesetzbuch", "bgb.pdf"),
     // § 14a's dimmable consumer devices are the reason a charge point can be
     // held at zero by its operator, which is a fact about *money* here and a
     // fact about the grid there. The statute lives in the sibling `hems`
-    // workspace, which specs/README.md points at rather than duplicating.
+    // workspace, which concepts/REFERENCES.md points at rather than duplicating.
     (
         "[EnWG ",
         "Energiewirtschaftsgesetz",
-        "hems/specs/law/enwg.pdf",
+        "hems/concepts/reference/law/enwg.pdf",
     ),
     // …and the Festlegung that says what § 14a means in numbers: which devices
     // it reaches, what they are owed back, and that the grid operator's
@@ -1668,14 +1701,28 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
     (
         "[BK6-22-300 ",
         "BNetzA BK6-22-300 (§ 14a EnWG), Anlage 1",
-        "hems/specs/bnetza/bk6-22-300-anlage1",
+        "hems/concepts/reference/bnetza/bk6-22-300-anlage1",
     ),
     // …and the statute beside it. `[EEG §9]` is where a curtailment stops being
     // a control question and becomes a payment one: the reduced figure is what
     // a feed-in tariff is computed against, which is why an exact decimal
     // matters on a wire that carries watts. In the sibling `hems` workspace,
     // beside the EnWG.
-    ("[EEG ", "Erneuerbare-Energien-Gesetz", "hems/specs"),
+    (
+        "[EEG ",
+        "Erneuerbare-Energien-Gesetz",
+        "hems/concepts/reference",
+    ),
+    // …and the Festlegung that decides what a bidirectional point's fed-back
+    // kilowatt-hour is worth: MiSpeL, BNetzA 618-25-02 of 01.10.2026 — Anlage 1
+    // (Abgrenzungsoption), Anlage 2 (Pauschaloption) and the Tenor in Amtsblatt
+    // 19/2026. In the sibling `hems` workspace, which settled the household
+    // side from the same three files.
+    (
+        "[MiSpeL",
+        "BNetzA 618-25-02 (MiSpeL), Anlagen 1 and 2 and the Tenor",
+        "bnetza/mispel-",
+    ),
     // …and the use case the Festlegung is carried over: EEBUS's Limitation of
     // Power Consumption, whose §2.3.2 gives a controllable system five states
     // where a summary gives it two, and whose numbered requirements say what a
@@ -1703,7 +1750,7 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
     (
         "[V2G2-",
         "ISO 15118-2's numbered requirements",
-        "iso15118/specs",
+        "iso15118/concepts/reference",
     ),
 ];
 
@@ -1717,7 +1764,7 @@ const CITATION_MARKERS: &[&str] = &["§", "Art. ", "Tab. ", "Anh. ", "Ziff. "];
 
 /// Every regulatory claim in emob cites its source in the form `[AFIR Art. 5(1)]`
 /// or `[OCMF Tab. 7]`. This checks that the documents those refer to are indexed
-/// in `specs/README.md`, so a citation can always be followed to a file and a
+/// in `concepts/REFERENCES.md`, so a citation can always be followed to a file and a
 /// retrieval URL — in the **documentation** as well as the code, because a
 /// README that cites a paragraph is making the same promise a comment does and
 /// is read by more people.
@@ -1725,22 +1772,22 @@ const CITATION_MARKERS: &[&str] = &["§", "Art. ", "Tab. ", "Anh. ", "Ziff. "];
 /// The failure it prevents: a rule that cites a Verordnung nobody can produce,
 /// which is indistinguishable from a rule somebody invented.
 fn check_citations(root: &Path) -> Result<()> {
-    // `specs/` is gitignored — the documents are third-party and copyrighted —
+    // `concepts/` is gitignored — the documents are third-party and copyrighted —
     // so a clone has no index, and CI builds a clone. Returning here was the
     // whole guard skipping in the one environment that gates a merge (D228).
     //
-    // Only *half* of it needs the index. "Does `specs/README.md` list this
+    // Only *half* of it needs the index. "Does `concepts/REFERENCES.md` list this
     // document" cannot be asked without the file; "is this citation a form this
     // workspace recognises at all" is asked of `CITATION_SOURCES`, a table
     // compiled into this binary — and that is the half D65 added, because a
     // citation whose prefix is unknown used to be checked by nothing and report
     // success. So the second half runs everywhere and the first says when it did
     // not run.
-    let index_path = root.join("specs/README.md");
+    let index_path = root.join("concepts/REFERENCES.md");
     let index = match std::fs::read_to_string(&index_path) {
         Ok(index) => Some(index),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error).context("reading specs/README.md"),
+        Err(error) => return Err(error).context("reading concepts/REFERENCES.md"),
     };
 
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
@@ -1755,7 +1802,7 @@ fn check_citations(root: &Path) -> Result<()> {
     let mut scanned = 0;
 
     for file in sources {
-        if file.ends_with("xtask/src/main.rs") || file.ends_with("specs/README.md") {
+        if file.ends_with("xtask/src/main.rs") || file.ends_with("concepts/REFERENCES.md") {
             continue;
         }
         scanned += 1;
@@ -1766,7 +1813,7 @@ fn check_citations(root: &Path) -> Result<()> {
                     seen.insert(needle);
                     if index.as_ref().is_some_and(|index| !index.contains(needle)) {
                         missing.push(format!(
-                            "{}:{} cites {document}, which specs/README.md does not index (looking for {needle:?})",
+                            "{}:{} cites {document}, which concepts/REFERENCES.md does not index (looking for {needle:?})",
                             file.strip_prefix(root).unwrap_or(&file).display(),
                             n + 1,
                         ));
@@ -1808,7 +1855,7 @@ fn check_citations(root: &Path) -> Result<()> {
             eprintln!("   {u}");
         }
         eprintln!(
-            "   add the document to specs/README.md and its prefix to CITATION_SOURCES, or the \
+            "   add the document to concepts/REFERENCES.md and its prefix to CITATION_SOURCES, or the \
              citation is a claim nobody can follow"
         );
         bail!("{} unrecognised citation(s)", unknown.len());
@@ -1816,14 +1863,14 @@ fn check_citations(root: &Path) -> Result<()> {
     match index {
         Some(_) => println!(
             "📚 check-citations: {} document families cited across {scanned} files, every one \
-             recognised and indexed in specs/README.md",
+             recognised and indexed in concepts/REFERENCES.md",
             seen.len()
         ),
         // Named rather than silent, for the reason `check_concepts` says at
         // length: a guard that skips without saying so reads as one that passed.
         None => println!(
             "📚 check-citations: {} document families cited across {scanned} files, every one a \
-             form this guard recognises (specs/README.md is absent, so whether each is *indexed* \
+             form this guard recognises (concepts/REFERENCES.md is absent, so whether each is *indexed* \
              was not asked)",
             seen.len()
         ),

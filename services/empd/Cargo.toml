@@ -19,14 +19,16 @@ emob-session = { workspace = true }
 emob-tariff  = { workspace = true }
 
 anyhow       = { workspace = true }
+axum         = { workspace = true }
 serde        = { workspace = true }
 rust_decimal = { workspace = true }
 sha2         = { workspace = true }
 hex          = { workspace = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }
-tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 tracing      = { workspace = true }
 
 [dev-dependencies]
-time = { workspace = true, features = ["macros"] }
+time  = { workspace = true, features = ["macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "io-util"] }

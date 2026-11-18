@@ -20,8 +20,8 @@
 
 use emob_pnc::fixtures;
 use emob_pnc::{
-    Contract, ContractBook, Pcid, PncError, Pool, PoolId, PoolRegistry, RevocationList, Standing,
-    TrustAnchor, Withdrawals, verify_contract, verify_provisioning,
+    Contract, ContractBook, Generation, Pcid, PncError, Pool, PoolId, PoolRegistry, RevocationList,
+    Standing, TrustAnchor, Withdrawals, verify_contract, verify_provisioning,
 };
 use iso15118::pnc::pki::Certificate;
 use time::macros::datetime;
@@ -117,8 +117,15 @@ fn a_contract_is_installed_against_a_vehicle_and_both_halves_are_checked() {
     // *"Before creating the Contract Data package, the MO has to request the
     // current Provisioning Certificate by the Provisioning Certificate ID"*.
     let chain = provisioning_chain();
-    let vehicle = verify_provisioning(&platform, &pool, &refs(&chain), &status, at())
-        .expect("a chain to the root this pool publishes");
+    let vehicle = verify_provisioning(
+        &platform,
+        &pool,
+        Generation::Iso2,
+        &refs(&chain),
+        &status,
+        at(),
+    )
+    .expect("a chain to the root this pool publishes");
     assert_eq!(vehicle.pcid.as_str(), "WVW00000000000001");
     assert_eq!(vehicle.pcid.wmi(), "WVW");
 
@@ -130,8 +137,16 @@ fn a_contract_is_installed_against_a_vehicle_and_both_halves_are_checked() {
     // Then the contract. The identifier comes **off the certificate**: nothing
     // in this call names an eMAID, because a check fed by a caller is not one.
     let chain = contract_chain();
-    let contract = verify_contract(&platform, &pool, &refs(&chain), &status, at(), None)
-        .expect("a chain to the root this pool publishes");
+    let contract = verify_contract(
+        &platform,
+        &pool,
+        Generation::Iso2,
+        &refs(&chain),
+        &status,
+        at(),
+        None,
+    )
+    .expect("a chain to the root this pool publishes");
     assert_eq!(contract.emaid.canonical(), "DE8AACA2B3C4D5L");
     assert_eq!(contract.anchor, "V2G Root CA");
     assert_eq!(contract.valid_until, datetime!(2050-01-01 00:00 UTC));
@@ -165,6 +180,7 @@ fn a_contract_from_another_ecosystem_validates_and_is_still_refused() {
     let ours = verify_contract(
         &platform,
         &PoolId::new("another-scheme"),
+        Generation::Iso2,
         &refs(&chain),
         &status,
         at(),
@@ -178,6 +194,7 @@ fn a_contract_from_another_ecosystem_validates_and_is_still_refused() {
     let refused = verify_contract(
         &platform,
         &PoolId::new("hubject-ccp"),
+        Generation::Iso2,
         &refs(&chain),
         &status,
         at(),
@@ -189,8 +206,8 @@ fn a_contract_from_another_ecosystem_validates_and_is_still_refused() {
 
 #[test]
 fn a_certificate_nobody_can_vouch_for_is_not_read_as_good() {
-    // `iso15118::pnc::pki::validate` says what it does not establish, and this
-    // is it. The default `RevocationList` holds nothing, so every answer is
+    // `iso15118::pnc::pki::validate` is handed no evidence, so revocation is
+    // this crate's question to answer. The default `RevocationList` holds nothing, so every answer is
     // `Unknown` — and `Unknown` is not `Good`, which is the whole reason there
     // are four standings and not a `bool`.
     let platform = platform();
@@ -198,6 +215,7 @@ fn a_certificate_nobody_can_vouch_for_is_not_read_as_good() {
     let refused = verify_contract(
         &platform,
         &PoolId::new("hubject-ccp"),
+        Generation::Iso2,
         &refs(&chain),
         &RevocationList::new(),
         at(),
@@ -228,8 +246,16 @@ fn a_withdrawn_sub_ca_takes_the_contracts_under_it_and_not_only_its_own_leaf() {
         Withdrawals::none_at(at()).and(sub2.serial.to_vec(), Some("keyCompromise".to_owned())),
     );
 
-    let refused = verify_contract(&platform, &pool, &refs(&chain), &status, at(), None)
-        .expect_err("the sub-CA is withdrawn");
+    let refused = verify_contract(
+        &platform,
+        &pool,
+        Generation::Iso2,
+        &refs(&chain),
+        &status,
+        at(),
+        None,
+    )
+    .expect_err("the sub-CA is withdrawn");
     let PncError::Revoked {
         ref subject,
         ref standing,
@@ -257,8 +283,16 @@ fn a_status_older_than_the_operator_vouches_for_is_not_evidence_of_good_standing
 
     let stale =
         nothing_withdrawn(at() - time::Duration::days(180)).fresh_for(time::Duration::hours(24));
-    let refused = verify_contract(&platform, &pool, &refs(&chain), &stale, at(), None)
-        .expect_err("the only status held is six months old");
+    let refused = verify_contract(
+        &platform,
+        &pool,
+        Generation::Iso2,
+        &refs(&chain),
+        &stale,
+        at(),
+        None,
+    )
+    .expect_err("the only status held is six months old");
     let PncError::Revoked { ref standing, .. } = refused else {
         panic!("{refused:?}");
     };
@@ -268,7 +302,18 @@ fn a_status_older_than_the_operator_vouches_for_is_not_evidence_of_good_standing
     // window that covers it. The number is the operator's, not this crate's.
     let generous =
         nothing_withdrawn(at() - time::Duration::days(180)).fresh_for(time::Duration::days(365));
-    assert!(verify_contract(&platform, &pool, &refs(&chain), &generous, at(), None).is_ok());
+    assert!(
+        verify_contract(
+            &platform,
+            &pool,
+            Generation::Iso2,
+            &refs(&chain),
+            &generous,
+            at(),
+            None
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -282,10 +327,29 @@ fn a_contract_that_belongs_to_another_provider_is_refused_by_name() {
     let chain = contract_chain();
     let status = nothing_withdrawn(at());
 
-    assert!(verify_contract(&platform, &pool, &refs(&chain), &status, at(), Some("8AA")).is_ok());
+    assert!(
+        verify_contract(
+            &platform,
+            &pool,
+            Generation::Iso2,
+            &refs(&chain),
+            &status,
+            at(),
+            Some("8AA")
+        )
+        .is_ok()
+    );
 
-    let refused = verify_contract(&platform, &pool, &refs(&chain), &status, at(), Some("8ZZ"))
-        .expect_err("a valid contract, of somebody else's");
+    let refused = verify_contract(
+        &platform,
+        &pool,
+        Generation::Iso2,
+        &refs(&chain),
+        &status,
+        at(),
+        Some("8ZZ"),
+    )
+    .expect_err("a valid contract, of somebody else's");
     assert!(
         matches!(&refused, PncError::NotThisProvider { provider, .. } if provider == "8AA"),
         "{refused}"
@@ -307,6 +371,7 @@ fn a_certificate_outside_its_own_validity_is_refused_and_the_instant_is_an_argum
         verify_contract(
             &platform,
             &pool,
+            Generation::Iso2,
             &refs(&chain),
             &nothing_withdrawn(before),
             before,
@@ -326,6 +391,7 @@ fn one_vehicle_holds_several_contracts_and_retiring_it_takes_all_of_them() {
     let vehicle = verify_provisioning(
         &platform,
         &PoolId::new("hubject-ccp"),
+        Generation::Iso2,
         &refs(&provisioning),
         &status,
         at(),
@@ -337,6 +403,7 @@ fn one_vehicle_holds_several_contracts_and_retiring_it_takes_all_of_them() {
     let one = verify_contract(
         &platform,
         &PoolId::new("hubject-ccp"),
+        Generation::Iso2,
         &refs(&ours),
         &status,
         at(),
@@ -346,6 +413,7 @@ fn one_vehicle_holds_several_contracts_and_retiring_it_takes_all_of_them() {
     let two = verify_contract(
         &platform,
         &PoolId::new("another-scheme"),
+        Generation::Iso2,
         &refs(&theirs),
         &status,
         at(),
@@ -369,7 +437,7 @@ fn one_vehicle_holds_several_contracts_and_retiring_it_takes_all_of_them() {
 
 /// The leg CI cannot repeat, run where the working copy has the archive.
 ///
-/// `specs/` is gitignored — it holds third-party publications, indexed with
+/// `concepts/reference/` is gitignored — it holds third-party publications, indexed with
 /// retrieval URLs so it can be rebuilt — so this skips **by name** rather than
 /// silently, which is the same discipline `check-concepts` keeps about
 /// `concepts/` (D228). A test that quietly passes when its input is missing
@@ -378,13 +446,13 @@ fn one_vehicle_holds_several_contracts_and_retiring_it_takes_all_of_them() {
 fn hubjects_own_published_vehicle_certificate_validates_against_its_own_root() {
     let archive = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../specs/roaming/openplugncharge-master.zip"
+        "/../../concepts/reference/roaming/openplugncharge-master.zip"
     );
     if !std::path::Path::new(archive).exists() {
         eprintln!(
             "skipped by name: {archive} is not in this working copy. It is Hubject's own open \
              Plug & Charge test PKI — a real V2G Root, real OEM sub-CAs and real provisioning \
-             certificates — and specs/README.md carries the URL it is retrieved from. The \
+             certificates — and concepts/REFERENCES.md carries the URL it is retrieved from. The \
              fixtures this file otherwise runs are OpenSSL's, which is a weaker claim and the \
              accurate one to make without it."
         );
@@ -437,8 +505,15 @@ fn hubjects_own_published_vehicle_certificate_validates_against_its_own_root() {
     }
 
     let chain = vec![leaf, oem2, oem1];
-    let vehicle = verify_provisioning(&platform, &pool, &refs(&chain), &status, at)
-        .expect("Hubject's own chain, against Hubject's own root");
+    let vehicle = verify_provisioning(
+        &platform,
+        &pool,
+        Generation::Iso2,
+        &refs(&chain),
+        &status,
+        at,
+    )
+    .expect("Hubject's own chain, against Hubject's own root");
     assert_eq!(vehicle.pcid.as_str(), "HUBJECTOPENPNC0008");
     assert_eq!(vehicle.pcid.wmi(), "HUB");
     assert_eq!(vehicle.anchor, "V2G Root");

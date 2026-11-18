@@ -1,57 +1,120 @@
 # emob-poi
 
-**The charge point register and its national access point feed** — a DATEX II
-AFIR Recharging publication generated from the same tariff that prices the
-session, so the price a route planner shows and the price on the invoice cannot
-disagree.
+The charge point register and its national access point feed, for charge point
+operators: a DATEX II AFIR Recharging publication generated from the same tariff
+that prices the session.
 
-Part of [emob](https://github.com/hupe1980/emob), the open-source e-mobility
-operating stack.
+[![crates.io](https://img.shields.io/crates/v/emob-poi.svg)](https://crates.io/crates/emob-poi) [![docs.rs](https://img.shields.io/docsrs/emob-poi)](https://docs.rs/emob-poi) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-poi.svg)](#license)
+
+`[AFIR Art. 5(2)]` makes the price shown before a session the price that may be
+charged, and `[AFIR Art. 20(2)(c)]` requires operators to publish that ad-hoc
+price, free of charge, through the national access point — in Germany the
+Mobilithek, in the DATEX II Recharging profile, from 14 April 2026
+`[DATEX-II-Profil]`. Most stacks compute that number twice, once for billing and
+once for the feed, and nobody reconciles the feed against an invoice. This crate
+has no price model of its own: it publishes `emob_tariff::Tariff`, the value
+`emob_tariff::rate` charges with, in exact decimal.
 
 ```console
 cargo add emob-poi
 ```
 
-📖 The reasoning behind this crate, with the regulation it cites, is in
-**[Locations and the national access point](https://hupe1980.github.io/emob/docs/locations/)**.
-The signatures are on [docs.rs](https://docs.rs/emob-poi).
-
-
-## One number, two duties
-
-`[AFIR Art. 5(2)]` makes the price a driver is shown before a session the price
-they may be charged for it. `[AFIR Art. 20(2)(c)]` makes that same ad-hoc price
-data an operator must publish, free of charge, through the national access
-point — the Mobilithek in Germany, in the DATEX II Recharging profile, from
-**14 April 2026** `[DATEX-II-Profil]`.
-
-Two duties about one number, and almost every stack in this market computes it
-twice: once in the billing system that rates the CDR, and once in the export job
-that fills the feed. Two computations is two chances to be wrong, and the
-failure is asymmetric — a feed is read by route planners and comparison sites,
-and nobody ever reconciles it against an invoice.
-
-So this crate has no price model. It publishes `emob_tariff::Tariff`, the same
-value `emob_tariff::rate` charges with, in exact decimal from the tariff to the
-JSON number:
+## Example
 
 ```rust
-let (rate, notes) = emob_poi::rate::publish(&tariff, "rate-1");
-// …reaches the feed as `"value": 0.49`, not 0.49000000000000000222.
+use emob_poi::datex::{InformationStatus, Publisher};
+use emob_poi::feed::Feed;
+use emob_poi::rate;
+use emob_poi::site::*;
+use emob_core::{EvseId, PartyId, TimeZone};
+use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+use rust_decimal::Decimal;
+
+let tariff = Tariff::simple(
+    "ad-hoc".parse()?,
+    emob_core::Currency::EUR,
+    TariffKind::AdHoc,
+    TimeZone::new("Europe/Berlin")?,
+    vec![PriceComponent::new(Dimension::Energy, Decimal::from_str_exact("0.49")?)],
+);
+let (published_rate, notes) = rate::publish(&tariff, "rate-1");
+assert!(notes.is_empty());
+
+let point = ChargingPoint::new(
+    Facility::new("point-1"),
+    EvseId::parse("DE*ABC*E00001")?,
+    Connector::new(ConnectorType::Iec62196T2Combo, Decimal::from(150)),
+);
+let site = Site::new(
+    Facility::new("site-1"),
+    "Musterstadt Nord",
+    Coordinates {
+        latitude: Decimal::from_str_exact("50.779599")?,
+        longitude: Decimal::from_str_exact("6.104507")?,
+    },
+    Address::default(),
+    TimeZone::new("Europe/Berlin")?,
+    vec![Station::new(Facility::new("station-1"), PartyId::new("DE", "ABC")?, vec![point])],
+);
+
+let feed = Feed {
+    publisher: Publisher {
+        country: "DE".to_owned(),
+        national_identifier: "DE-NAP-Example".to_owned(),
+        language: "de".to_owned(),
+    },
+    information_status: InformationStatus::Test,
+    table: Facility::new("table-1"),
+    table_name: Some("Region Nord".to_owned()),
+    sites: vec![site],
+    rate_for: &|_| Some(published_rate.clone()),
+};
+
+let json = feed.table(time::macros::datetime!(2026-04-14 00:00 UTC))?.to_json()?;
+assert!(json.contains(r#""value": 0.49"#));              // the tariff's own decimal
+assert!(json.contains(r#""maxPowerAtSocket": 150000"#)); // watts, as the profile asks
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## …and one inventory, two audiences
+## What it guarantees
 
-The same argument reaches the *connectors*. A point states its interfaces to the
-national access point in `[DATEX-II-Profil Tab. A.88]`'s spelling, and to the
-regulator, because `[AFIR Art. 21(1)]` makes the interface a **duty** —
-`[AFIR Anh. II 1.1]` and `[AFIR Anh. II 1.2]` ask for at least Type 2 on AC and
-at least CCS Combo 2 on DC, and `[LSV26 §5(3)]` lets the Bundesnetzagentur forbid
-the operation of a point over it.
+- **The published price is the billed price**, carried as an exact decimal into
+  the JSON number (`0.49`, not `0.49000000000000000222`).
+- **A status the register contradicts cannot be built.** A decommissioned point
+  cannot be reported `available`.
+- **Status references resolve.** A status update that points at a table version
+  the access point does not hold is an error, not a silently dropped update.
+- **What the profile cannot express is reported** as a `RateNote`, never
+  papered over.
+- **Every emitted JSON path exists in the Mobilithek's reference instance**
+  (`tests/the_profile.rs`).
+- **No I/O, no clock.** The publication time is an argument, so an export
+  replayed two years later produces the same bytes.
 
-So `ConnectorType` is `emob-core`'s and re-exported here, and
-`ChargingPoint::profile` builds the compliance profile the calendar judges out of
-the inventory's own list:
+## Where the DATEX II profile falls short
+
+`[DATEX-II-Profil Tab. A.116]` offers six price types: `basePrice`, `flatRate`,
+`free`, `other`, `pricePerKWh`, `pricePerMinute`. Each gap is published as
+truthfully as the profile allows and reported with a `RateNote`:
+
+| Gap | What is published | `RateNote` |
+|---|---|---|
+| No per-hour type; €2.50/h has no exact per-minute decimal | hourly figure under `other`, unit in `additionalInformation` (rounding would be a price not charged `[PAngV]`) | `HourlyPriceHasNoExactMinute` |
+| No occupancy-fee type, though `[AFIR Art. 5(4)]` permits one at 50 kW and above | `other` with a sentence; `combinationWithParkingFee` is only a boolean | `OccupancyFeeHasNoPriceType` |
+| `minimumDeliveryFee` / `maximumDeliveryFee` carry no tax flag | the fee in the tariff's own basis | `DeliveryFeeHasNoTaxBasis` |
+| `FacilityLocation.timeZone` is a fixed UTC offset, wrong half the year for German sites | the offset in force at publication | `DailyWindowHasOnlyAnOffset` |
+| No reservation price — the profile covers delivered energy | the reservation element is omitted | `ReservationPriceNotPublished` |
+| No power or weekday applicability | the price without its condition | `RestrictionNotPublished` |
+| kWh and minute bounds are whole numbers | the band narrowed inward; a band under one unit omitted | `BoundNarrowedToWholeUnits`, `BandTooNarrowToPublish` |
+
+## Connectors and the AFIR interface duty
+
+A point's connectors are both published (`[DATEX-II-Profil Tab. A.88]`) and a
+legal duty: `[AFIR Anh. II 1.1]` and `[AFIR Anh. II 1.2]` require at least
+Type 2 on AC and CCS Combo 2 on DC `[AFIR Art. 21(1)]`, and the regulator may
+forbid operating a point that breaches it `[LSV26 §5(3)]`. `ConnectorType` is
+`emob-core`'s, and `ChargingPoint::profile` builds the compliance profile from
+the inventory:
 
 ```rust
 let profile = point.profile(commissioned_on, Accessibility::Public);
@@ -62,149 +125,74 @@ assert_eq!(
 );
 ```
 
-What the bridge does **not** do is guess. Notice dates, metering posture, price
-indication and the ownership arrangement live in a register export, a type
-approval and a contract; they stay at `ChargePointProfile::bare`'s value for the
-caller to state, because a bridge that invented one would put the fault it exists
-to remove one layer further in.
+Notice dates, metering posture and ownership are not guessed: they stay at
+`ChargePointProfile::bare`'s defaults for the caller to state.
 
-## What the profile cannot say, and is told to say anyway
+## Lifecycle, status and the register
 
-`[DATEX-II-Profil Tab. A.116]` offers six price types: `basePrice`, `flatRate`,
-`free`, `other`, `pricePerKWh`, `pricePerMinute`. Four things follow, and all
-of them are reported rather than papered over.
-
-**There is no per-hour price type.** A tariff is written and displayed per hour;
-the profile only counts minutes. The conversion is a division by sixty, and
-publishing the hourly number under `pricePerMinute` overstates the price
-sixtyfold.
-
-Where the division does not terminate there is no per-minute price to publish at
-all. `2.50` an hour is `0.041666…` a minute; `Decimal` states twenty-eight places
-of it, which is not an amount of money, and rounding to the currency's own two is
-a price the operator does not charge `[PAngV]`. `check_afir` calls such a tariff
-unlawful ad-hoc for exactly that reason and the OCPP 2.1 crossing refuses it
-outright — but a feed cannot refuse, because publishing is the duty
-`[AFIR Art. 20(2)(c)]`. So it states what the price **is**: the hourly figure,
-under `other`, with the unit in `additionalInformation`, and a `RateNote` naming
-the dimension. That is the same answer the occupancy fee below already gives for
-the same reason.
-
-**There is no occupancy price type.** `[AFIR Art. 5(4)]` explicitly permits a
-fee per minute for time connected and *not* charging, at points of 50 kW and
-above. The profile's only hook for it is `EnergyRate.combinationWithParkingFee`
-— a **boolean** saying whether charging and parking are one fee, not what the
-parking costs. The one surcharge the Regulation names cannot be published as a
-number under the profile the same Regulation requires. It goes out as `other`
-with a sentence, and the note is what keeps the gap from being forgotten.
-
-**And a delivery fee cannot say whether tax is in it.** Every `EnergyPrice` in
-the profile carries `taxIncluded` and `taxRate`; `EnergyRate`'s
-`minimumDeliveryFee` and `maximumDeliveryFee` are a bare `AmountOfMoney` with
-neither. So the one figure on a rate that is a session **total** rather than a
-unit price is the one a consumer cannot qualify — and reading a net minimum as
-gross is out by the whole VAT rate, on the number a driver comparing two
-operators looks at first. The fee is published in the basis the tariff states,
-and a note says which that is.
-
-
-**And the zone a daily window is read in is typed as a fixed offset.**
-`FacilityLocation.timeZone` exists, the Mobilithek's own reference instance
-populates it, and the profile types it as a string that "identifies a time zone
-by specifying the difference to UTC in hours and minutes, as defined in
-ISO 8601" — so the reference instance writes `"+01:00"` for a site in Aachen.
-An offset cannot express a zone that observes summer time: that value is wrong
-for that site from the last Sunday in March to the last Sunday in October, and
-it is the field a consumer would read a published `22:00` night rate against.
-
-There is no honest fixed value, so the table publishes the offset **in force at
-the instant of publication** — the one reading that is true of the document when
-it is issued — and `RateNote::DailyWindowHasOnlyAnOffset` names the real zone
-beside it. This is the first of the four gaps that the profile gets *wrong*
-rather than merely omits.
-
-## The register is upstream of the feed
-
-`[LSV26 §4(1)]` makes three events notifiable — commissioning, decommissioning,
-a change of operator — so an operator meeting its notification duty knows, for
-every point, which lifecycle state it is in. `[DATEX-II-Profil Tab. B.45]` has a
-literal for two of them: `planned` and `removed`.
-
-Those facts usually live in different systems, and the feed is usually generated
-from the one that does not know. That is why decommissioned points stay
-published as `available` for months, and it is the commonest defect in European
-charging data. A schema validator has nothing to say about it.
+`[LSV26 §4(1)]` makes commissioning, decommissioning and a change of operator
+notifiable, and `[DATEX-II-Profil Tab. B.45]` has literals for two of them
+(`planned`, `removed`). Decommissioned points published as `available` for months
+are a common defect in European charging data, and a schema validator cannot see
+it:
 
 ```rust
 point.lifecycle = Lifecycle::Decommissioned;
 point.report(PointStatus::Available)      // Err(StatusContradictsRegister)
-point.report(PointStatus::Removed)        // Ok — the register's own answer
+point.report(PointStatus::Removed)        // Ok
 ```
 
-`ChargingPoint::report` is the only constructor, and it reads the lifecycle off
-the point rather than taking it beside the status — a constructor given both is
-one a caller satisfies by handing over the lifecycle that makes the status legal
-. The document cannot be built.
+`ChargingPoint::report` is the only way to build a status, and it reads the
+lifecycle off the point rather than taking it as an argument.
 
-## The silence between the two publications
+## Table and status publications
 
-A status message carries no infrastructure. Every object in it is a reference —
-`targetClass`, `idG`, `versionG` — into a table publication sent separately, on
-a different schedule, usually by a different job.
+A status message carries only versioned references (`targetClass`, `idG`,
+`versionG`) into a separately sent table publication. A reference that does not
+resolve is silently dropped by the consumer, and the point vanishes from every
+map. `Feed` builds both publications from one inventory; `Feed::status` also
+checks each update against the table the access point accepted, and `feed::check`
+serves deployments whose table comes from another system.
 
-A reference that does not resolve is **not an error**. The consumer has nothing
-to attach the status to, so it drops it, and the point's availability disappears
-from every map that reads the feed. No HTTP status changes, no schema validation
-fails, nobody is told. Bump a facility's `versionG` in one job and not the other
-and that is exactly what happens.
+## Other checks
 
-`Feed` builds both publications from one inventory, so the references are right
-by construction. `feed::check` is for a deployment whose table is exported by a
-different system, and wants the disagreement to be an error rather than a
-silence.
+- **Station power is bounded by its points.** `totalMaximumPower` must lie
+  between the largest point and the sum of all points; load management makes
+  anything in between legitimate.
+- **`iso15118` in this profile means ISO 15118-20** `[DATEX-II-Profil Tab. A.130]`.
+  A point speaking only ISO 15118-2 or DIN SPEC 70121 is published as `other`,
+  so the feed does not claim readiness for the duty `[DA-656 Anh. 2.1.3]` phases
+  in from 2027.
 
-## Two more things a validator would accept
+## API at a glance
 
-**A station's total power is bounded by its own points.** `totalMaximumPower` is
-`1..1` and a route planner decides on it. Below the largest point it holds, the
-station is turning traffic away from capacity it has; above their sum, it is
-advertising capacity the sockets cannot deliver whatever the transformer is
-rated at. Load management makes the interval between them genuinely free — two
-150 kW points behind a 200 kW connection is the normal case, not a mistake.
+| Item | Purpose |
+|---|---|
+| `Site`, `Station`, `ChargingPoint`, `Connector`, `Facility` | The register |
+| `ChargingPoint::profile` | Compliance profile for `emob_core::obligation` |
+| `ChargingPoint::report`, `Lifecycle`, `PointStatus`, `Report` | Register-consistent status |
+| `rate::publish`, `Rate`, `RateNote` | Tariff → DATEX II energy rate |
+| `Feed::table`, `Feed::status`, `feed::check` | Table and status publications |
+| `datex` | The DATEX II publication types and JSON |
 
-**`iso15118` in this profile means ISO 15118-**20**.** The dictionary says so in
-as many words `[DATEX-II-Profil Tab. A.130]`, and the enumeration has no literal
-for -2 at all. A point that speaks only the 2016 generation and publishes
-`iso15118` is claiming readiness for exactly the duty `[DA-656 Anh. 2.1.3]`
-phases in from 2027 — in the record a regulator reads to check it. It goes out
-as `other`, and so does a DIN SPEC 70121 point: `none` means "No communication
-between vehicle and the grid", which is false about a charger that talks to the
-car over PLC.
+## Feature flags
 
-The ambiguity is in the profile's vocabulary, not in the protocol.
+None. Serialisation is always enabled, since the crate's output is JSON.
 
-## Checked against the Mobilithek's own reference
+## Standards and sources
 
-There is no XSD in the profile release. The two published example instances are
-the only artefact that says what a conformant message looks like, so they are
-what `tests/the_profile.rs` tests against: **every JSON path this crate emits is
-a path the reference instance also contains**, with array indices collapsed so a
-path names a shape rather than an occurrence. A misspelled key, a level of
-nesting too few, an attribute hung on the wrong class — all of them fail there.
+AFIR (EU 2023/1804) Art. 5, 20, 21 and Annex II; Delegated Regulation (EU)
+2025/656; the German DATEX II AFIR Recharging profile and the Mobilithek
+reference instances; LSV 2026; PAngV.
 
-A short list of attributes is attested by the profile's *dictionary* instead,
-because the example does not exercise them; each one names the class and
-multiplicity it comes from.
+## Part of emob
 
-## No I/O, no clock
-
-Nothing here opens a socket, reads a file or asks the time — the publication
-time is an argument, so an export replayed two years later produces the same
-bytes. `just purity` fails the build if that stops being true. The Mobilithek's
-`snapshotPush` is a service's business; a publication here is a value and a
-string. That service is [`poid`](../../services/poid), which decides *when* a
-snapshot goes out and *whether the access point took it*.
+emob is an open-source e-mobility stack for charge point operators and
+e-mobility service providers. The `poid` service builds its inventory
+from the estate's stations; pushing to the Mobilithek is still to come. See
+[locations and the national access point](https://hupe1980.github.io/emob/docs/locations/)
+on the documentation site and the [root README](https://github.com/hupe1980/emob).
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of Apache License 2.0 or MIT, at your option.

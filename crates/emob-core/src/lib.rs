@@ -95,9 +95,9 @@ pub use period::{ClockResolution, ClockResolutionError, QuarterHour};
 pub use quantity::{APPORTIONED_SCALE, Currency, Direction, Energy, Money, apportion};
 pub use station::{
     Accessibility, AdHocPayment, AdditionalPrices, ArbeitspreisIndication, ChargePointProfile,
-    ChargingMode, ConnectorType, CurrentType, DataPublication, EnergyMeasurementPoint,
-    FurtherIdentifiers, MeteringPosture, Nis2Class, Notice, OperatorChange, Ownership,
-    PriceConduct, PriceTransparency, ProviderProfile, QuotaPosture, RegisterPublication,
+    ChargingMode, ConnectorType, CurrentType, DataPublication, EnergyMeasurementPoint, Formelsatz,
+    FurtherIdentifiers, MeteringPosture, MispelPosture, Nis2Class, Notice, OperatorChange,
+    Ownership, PriceConduct, PriceTransparency, ProviderProfile, QuotaPosture, RegisterPublication,
     Registration, RiskManagement, UndertakingProfile, V2gCommunication, V2gProtocol,
 };
 pub use zone::{Local, TimeZone, ZoneError};

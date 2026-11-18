@@ -20,6 +20,14 @@
 //! and the store is a projection of the journal rather than a second place the
 //! answer lives.
 //!
+//! # Never a token in the journal (SR-044)
+//!
+//! A journal copy must not be a credential. A token presented *to* this node
+//! (`Token A`, `Token C`) is only ever **recognised**, so it is held as a keyed
+//! [`Digest`] under `ROAMD_DATA_KEY`; the token this node presents (`Token B`)
+//! has to be sent again, so it is held [`Sealed`]. The plaintext exists in
+//! memory only while a request is answered or a record is pushed.
+//!
 //! # What `POST credentials` must do before it answers
 //!
 //! `[OCPI 2.3.0 §credentials]` requires the receiver to fetch the client's
@@ -36,6 +44,15 @@ use ocpi_kit::server::{AuthenticatedPeer, TokenStore};
 use ocpi_kit::transport::{CredentialsToken, TokenRole};
 use ocpi_kit::types::PartyRef;
 use ocpi_kit::{ModuleId, VersionNumber};
+
+use emob_service::vault::{DataKey, Digest, Sealed, VaultError};
+
+/// The purpose a token presented **to** this node is digested under — a
+/// `Token A` handed out, a `Token C` issued (SR-044).
+pub const INCOMING: &str = "roamd/incoming-token";
+/// The purpose a token this node presents **to** a peer is sealed under —
+/// `Token B`.
+pub const OUTGOING: &str = "roamd/token-b";
 
 /// One endpoint a peer published.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -54,10 +71,10 @@ pub struct Registration {
     /// The platform's own identifier, for logging and for the ledger.
     pub peer_id: String,
     /// The token **this** node issued, which the peer presents on every later
-    /// request. `CREDENTIALS_TOKEN_C`.
-    pub incoming: String,
-    /// The token the **peer** issued, which this node presents to it.
-    pub outgoing: String,
+    /// request (`CREDENTIALS_TOKEN_C`) — as a keyed digest.
+    pub incoming: Digest,
+    /// The token the **peer** issued, which this node presents to it — sealed.
+    pub outgoing: Sealed,
     /// Where the peer's versions endpoint is.
     pub versions_url: String,
     /// Which version the connection was registered at.
@@ -98,10 +115,14 @@ impl Registration {
     ///
     /// # Errors
     ///
-    /// [`PeerError`] when the token the peer issued is not one the
-    /// specification's character set allows, or its party is not a party.
-    pub fn as_client_peer(&self) -> Result<ocpi_kit::client::Peer, PeerError> {
-        let token = CredentialsToken::new(self.outgoing.clone()).map_err(PeerError::Token)?;
+    /// [`PeerError`] when the sealed token does not open under `key`, when the
+    /// token the peer issued is not one the specification's character set
+    /// allows, or its party is not a party.
+    pub fn as_client_peer(&self, key: &DataKey) -> Result<ocpi_kit::client::Peer, PeerError> {
+        let token = key
+            .open_str(OUTGOING, &self.outgoing)
+            .map_err(PeerError::Sealed)?;
+        let token = CredentialsToken::new(token).map_err(PeerError::Token)?;
         let version = self
             .version
             .parse()
@@ -168,7 +189,7 @@ pub struct Peers {
     /// what a `Token A` may reach is different: `versions` and `credentials`
     /// and nothing else `[OCPI 2.3.0 §transport_and_format]`. One list with a
     /// role field would make that a value somebody has to check.
-    pub(crate) bootstrap: Vec<(String, String)>,
+    pub(crate) bootstrap: Vec<(Digest, String)>,
 }
 
 impl Peers {
@@ -178,9 +199,21 @@ impl Peers {
         Self::default()
     }
 
-    /// Record a bootstrap token handed to a platform out of band.
-    pub fn offer(&mut self, peer_id: impl Into<String>, token: impl Into<String>) {
-        self.bootstrap.push((token.into(), peer_id.into()));
+    /// Record a bootstrap token handed to a platform out of band, by its digest.
+    pub fn offer(&mut self, peer_id: impl Into<String>, token: Digest) {
+        self.bootstrap.push((token, peer_id.into()));
+    }
+
+    /// The first key id a held digest or box names that is not `key`'s — a
+    /// journal written under another `ROAMD_DATA_KEY`.
+    #[must_use]
+    pub fn foreign_key(&self, key: &DataKey) -> Option<emob_service::vault::KeyId> {
+        self.registered
+            .iter()
+            .flat_map(|held| [held.incoming.key(), held.outgoing.key()])
+            .chain(self.bootstrap.iter().map(|(digest, _)| digest.key()))
+            .find(|id| *id != key.id())
+            .cloned()
     }
 
     /// Record a completed registration, replacing any earlier one for the same
@@ -204,7 +237,15 @@ impl Peers {
         self.bootstrap.retain(|(_, peer)| peer != peer_id);
     }
 
-    /// Every registered platform.
+    /// Whether a platform has been handed a `Token A`, or already registered —
+    /// so an estate's offer is journalled once.
+    #[must_use]
+    pub fn has_offer_for(&self, peer_id: &str) -> bool {
+        self.bootstrap.iter().any(|(_, held)| held == peer_id)
+            || self.registered.iter().any(|held| held.peer_id == peer_id)
+    }
+
+    /// Every platform that completed the handshake.
     pub fn registered(&self) -> impl Iterator<Item = &Registration> {
         self.registered.iter()
     }
@@ -223,8 +264,9 @@ impl Peers {
 /// after a restart are the ones this node issued before it. A store beside the
 /// node would be a second place the answer lives, and rule 16's own sentence.
 ///
-/// The lookup is a linear scan with a constant-time comparison per entry, which
-/// is the kit's own trade-off and the right one up to a few thousand peers.
+/// The lookup is a linear scan with a constant-time digest comparison per
+/// entry, which is the kit's own trade-off and the right one up to a few
+/// thousand peers.
 pub struct Registry<J: emob_service::journal::Journal>(Arc<Mutex<crate::Node<J>>>);
 
 impl<J: emob_service::journal::Journal> Clone for Registry<J> {
@@ -253,10 +295,14 @@ impl<J: emob_service::journal::Journal> TokenStore for Registry<J> {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = node.key();
+        let presented = token.expose_secret().as_bytes();
         let peers = node.state().peers();
-        if let Some(registration) = peers.registered.iter().find(|entry| {
-            CredentialsToken::new(entry.incoming.clone()).is_ok_and(|held| &held == token)
-        }) {
+        if let Some(registration) = peers
+            .registered
+            .iter()
+            .find(|entry| key.matches(&entry.incoming, INCOMING, presented))
+        {
             return Some(registration.as_peer());
         }
         // A bootstrap token reaches `versions` and `credentials` and nothing
@@ -265,9 +311,7 @@ impl<J: emob_service::journal::Journal> TokenStore for Registry<J> {
         peers
             .bootstrap
             .iter()
-            .find(|(offered, _)| {
-                CredentialsToken::new(offered.clone()).is_ok_and(|held| &held == token)
-            })
+            .find(|(offered, _)| key.matches(offered, INCOMING, presented))
             .map(|(_, peer_id)| AuthenticatedPeer {
                 peer_id: peer_id.clone(),
                 role: TokenRole::A,
@@ -281,6 +325,10 @@ impl<J: emob_service::journal::Journal> TokenStore for Registry<J> {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PeerError {
+    /// The token this node presents does not open under its data key.
+    #[error("the token this node presents to the peer does not open: {0}")]
+    Sealed(VaultError),
+
     /// The token the peer issued is not one `[OCPI 2.3.0 §credentials]` allows.
     #[error("the credentials token is not one the specification allows: {0}")]
     Token(ocpi_kit::transport::InvalidToken),

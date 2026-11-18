@@ -23,6 +23,7 @@ use ocpi_kit::v2_3_0::credentials::Credentials;
 
 use crate::peering::{Registration, Registry, served};
 use crate::{Node, Verdict};
+use emob_service::Actor;
 
 /// How a registration's own token is minted.
 ///
@@ -39,6 +40,7 @@ pub struct Handshake<J: emob_service::journal::Journal> {
     node: Arc<Mutex<Node<J>>>,
     client: OcpiClient,
     mint: MintToken,
+    reach: crate::reach::ReachBack,
 }
 
 impl<J: emob_service::journal::Journal> Handshake<J> {
@@ -48,17 +50,21 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
     ///
     /// The `reqwest` failure when no TLS backend is available, as text — see
     /// `dispatch::DispatchSetupError` for why the type is not named.
+    /// `reach` is the guard every reach-back passes before a request is made
+    /// (SR-037): the router is never mounted without one.
     pub fn new(
         me: Credentials,
         node: Arc<Mutex<Node<J>>>,
         mint: MintToken,
         config: ClientConfig,
+        reach: crate::reach::ReachBack,
     ) -> Result<Self, String> {
         Ok(Self {
             me,
             node,
             client: OcpiClient::with_config(config).map_err(|error| error.to_string())?,
             mint,
+            reach,
         })
     }
 
@@ -76,6 +82,15 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
         &self,
         credentials: &Credentials,
     ) -> Result<ocpi_kit::client::Selected, OcpiError> {
+        // Before anything is sent: a registrant's URL is a request this node
+        // makes on its behalf.
+        self.reach
+            .admit(credentials.url.as_str())
+            .await
+            .map_err(|why| OcpiError::Remote {
+                status_code: ocpi_kit::transport::StatusCode::new(3001),
+                status_message: Some(why),
+            })?;
         let token = CredentialsToken::new(credentials.token.as_str())
             .map_err(|error| OcpiError::Unauthorized(error.to_string()))?;
         let discovered = ocpi_kit::client::Registration::new(credentials.url.clone(), token)
@@ -116,10 +131,13 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
         selected: &ocpi_kit::client::Selected,
     ) -> Handled<Credentials> {
         let issued = (self.mint)(peer_id);
+        // Digested and sealed before anything is recorded: the journal holds
+        // neither token (SR-044).
+        let key = lock(&self.node).key();
         let registration = Registration {
             peer_id: peer_id.to_owned(),
-            incoming: issued.clone(),
-            outgoing: credentials.token.as_str().to_owned(),
+            incoming: key.digest(crate::peering::INCOMING, issued.as_bytes()),
+            outgoing: key.seal_str(crate::peering::OUTGOING, credentials.token.as_str()),
             versions_url: credentials.url.as_str().to_owned(),
             version: selected.version().to_string(),
             endpoints: selected
@@ -146,8 +164,9 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
         // Journalled before the peer is told, and a journal that refuses halts
         // the node: a token this node has issued and cannot reproduce is one a
         // partner will present to a `401` for ever.
+        let by = partner(peer_id)?;
         lock(&self.node)
-            .register(registration)
+            .register(&by, registration)
             .map_err(|error| OcpiError::Remote {
                 status_code: ocpi_kit::transport::StatusCode::new(3000),
                 status_message: Some(format!(
@@ -159,6 +178,18 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
         mine.token = issued.into();
         Ok(mine)
     }
+}
+
+/// Who a credentials call is from: the party the presented token resolved to
+/// — an estate partner's `Token A`, or the token this node issued it — and
+/// never one the request body names.
+fn partner(peer_id: &str) -> Result<Actor, OcpiError> {
+    peer_id
+        .parse::<emob_core::PartyId>()
+        .map(|party| Actor::partner(&party))
+        .map_err(|error| {
+            OcpiError::Unauthorized(format!("the credential's platform is not a party: {error}"))
+        })
 }
 
 fn lock<T>(held: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -206,8 +237,9 @@ impl<J: emob_service::journal::Journal> CredentialsHandler for Handshake<J> {
     }
 
     async fn delete(&self, context: RequestContext) -> Handled<()> {
+        let by = partner(&context.peer.peer_id)?;
         lock(&self.node)
-            .unregister(&context.peer.peer_id)
+            .unregister(&by, &context.peer.peer_id)
             .map_err(|error| OcpiError::Remote {
                 status_code: ocpi_kit::transport::StatusCode::new(3000),
                 status_message: Some(error.to_string()),
@@ -276,18 +308,20 @@ impl<J: emob_service::journal::Journal> CdrsReceiver for Inbox<J> {
                     .to_owned(),
             )
         })?;
+        let party = emob_core::PartyId::new(
+            speaking_for.country_code.as_str(),
+            speaking_for.party_id.as_str(),
+        )
+        .map_err(|error| OcpiError::Unauthorized(error.to_string()))?;
+        let by = Actor::partner(&party);
         let principal = emob_service::Principal::peer(
-            emob_core::PartyId::new(
-                speaking_for.country_code.as_str(),
-                speaking_for.party_id.as_str(),
-            )
-            .map_err(|error| OcpiError::Unauthorized(error.to_string()))?,
+            party,
             emob_core::Role::Cpo,
             emob_service::Capabilities::of([emob_service::caps::CDR_WRITE]),
         );
         let verdict = {
             let mut node = lock(&self.node);
-            node.receive(&principal, &cdr, None, at)
+            node.receive(&by, &principal, &cdr, None, at)
                 .map_err(|error| OcpiError::Remote {
                     status_code: ocpi_kit::transport::StatusCode::new(3000),
                     status_message: Some(error.to_string()),

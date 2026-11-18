@@ -1,102 +1,64 @@
 # roamd
 
-The roaming node: **who** a record goes to, **who may send one here**, **when**
-it is late, and **what to do** with one that arrives — and never what a record
-says.
+The roaming node: decides who a charge detail record (CDR) goes to, whether it may be sent, when it is late, who may push records here, and what to do with one that arrives — over OCPI 2.3.0/2.2.1 and OICP 2.3.
 
-```console
-cargo run -p roamd
-```
+## Status
 
-## What it decides, and what it must not
+| | |
+|---|---|
+| ✅ library | `roamd::Roamd` and `roamd::Node` implement routing, the OCPI CDR seal and correction order, per-partner settlement windows, Cedar-gated inbound verdicts, settlement against a retail tariff, the OCPI push client (`roamd::Dispatcher`) and the OCPI `versions`/`credentials`/CDRs receiver (`roamd::inbound::router`) — tested in `tests/a_record_reaches_its_partner.rs` and `tests/the_ledger_holds_under_any_order.rs` |
+| ✅ journal | on start the daemon folds its hash-chained journal (`roamd.ndjson` under `EMOB_JOURNAL_DIR`): consignments, deliveries, received records and registrations. Record bodies are sealed under `ROAMD_DATA_KEY`, because consignments carry the CDR's token UID; a journal sealed under another key refuses to start. Every record names its actor; the head is signed under `ROAMD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
+| ✅ OCPI | the inbound OCPI router is mounted at `/ocpi` (versions, credentials, CDRs) behind the reach-back guard. Partners and their Token A come from the estate's `[[partners]]`; Token A and Token C are held as keyed digests, Token B sealed; registration tokens are 32 random bytes |
+| ✅ deliveries | `POST /v1/deliveries` takes the CDRs `csmsd` settles (signed, fresh, from an estate partner) and consigns each to the contract's issuer with the estate station's location and the verbatim OCMF records; a drain loop pushes them |
+| ⏳ not yet | the OICP client (Hubject) — the library builds OICP documents, the daemon does not send them |
 
-Every document is `emob-roam`'s: `for_partner` carries a canonical record onto
-the OCPI version a peer speaks, `to_oicp` onto Hubject's wire where it carries
-no money at all, and `from_ocpi` reads a partner's document back **unpriced**.
-One signed session settles at the same money over three paths.
+Every document is `emob-roam`'s (`for_partner`, `to_oicp`, `from_ocpi`); `roamd`
+keeps the ledger of what was sent to whom and what came back, the operator's
+policies about partners, and the sockets.
 
-None of that is here, and none of it could be: a document is what a domain crate
-says it is. What is here is the half a domain crate cannot have — a **ledger of
-what was sent to whom and what came back**, the policies an operator wrote about
-the partners it peers with, and the sockets either side of both.
+## What it owns
 
-## 1. Who is owed this record
+### 1. Routing by the contract's issuer
 
-Routed out of the **contract identifier's own issuer**, not a map somebody
-maintains. A direct peer claiming that namespace wins; failing that, a hub;
-failing that, it is refused, because a record sent to a party that never had the
-driver is settlement money leaving for the wrong company.
+A record goes to the issuer named in its contract identifier (eMAID): a direct
+peer claiming that namespace first, then a hub, otherwise refused.
 
 ```rust
 let consignment = node.consign(&cdr, &token)?;
 consignment.reach;      // Direct(NL*TNM), or Hub { hub, issuer }
-consignment.wire;       // OCPI or OICP — a field on the partner, not an inference
+consignment.wire;       // OCPI or OICP — a field on the partner, never inferred
 ```
 
-**The wire is a field because it cannot be inferred.** Hubject is a hub *and*
-speaks OICP; GIREVE is a hub and speaks OCPI. A service that read the protocol
-off `Role::Hub` would hand a broker a document it parses none of, so
-`Roamd::prepare` refuses a consignment owed on the other wire rather than
-building it.
+The wire cannot be inferred from the role: Hubject is a hub speaking OICP,
+GIREVE a hub speaking OCPI. `Roamd::prepare` refuses a consignment owed on the
+other wire (`Roamd::prepare_for_broker` builds the OICP document). An unknown
+provider and an undeclared provider namespace are reported as two different
+problems, because they have two different fixes.
 
-**And the two ways a record cannot be routed are two messages.** A contract
-naming a provider nobody peers with wants a *partner* added; one in an eMSP's own
-scheme — which OCPI permits — wants that partner's *namespace* declared. The
-registry answers `None` to both, and an operator told the first when it is the
-second goes looking for something that is not missing.
+### 2. The CDR seal and the correction order
 
-## 2. Whether it may be sent at all
+`[OCPI 2.3.0 §mod_cdrs]`: once an eMSP has a CDR it *"cannot be changed or
+replaced"*; a correction is a Credit CDR, and only *"after having sent the
+Credit CDR"* a new CDR.
 
-`[OCPI 2.3.0 §mod_cdrs]` seals a record the moment the eMSP has it:
+- Consigning a record a partner already **accepted** is refused by name. An
+  acceptance is terminal; a later outcome cannot overwrite it.
+- A replacement is refused until its reversal (`Roamd::credit`) was accepted —
+  otherwise the partner holds and settles two records for one session.
+- A record the partner **refused** needs no reversal: there is nothing to
+  reverse.
 
-> Because a CDR is for billing purposes, it cannot be changed or replaced once
-> sent to the eMSP. Changes are simply not allowed. Instead, a Credit CDR can be
-> sent.
+### 3. Late records, per partner
 
-So consigning a record a partner has already accepted is refused **by name**, and
-the correction has an order the same paragraph gives: *"the CPO has to send a
-Credit CDR for the first CDR … **after having sent the Credit CDR**, the CPO can
-send a new CDR"*. A replacement consigned before its reversal was accepted is
-refused, because sent the other way round the partner holds two records for one
-session and settles both until somebody notices.
+OCPI leaves the CDR cadence to agreement between parties, so a monthly settler
+and a same-day settler need different windows. `Partner::settles_within` sets
+it, and `Roamd::unsettled` lists sessions delivered and settled here that the
+partner has not billed within its own window.
 
-**An acceptance is terminal.** The seal is enforced where a record is consigned,
-by reading the delivery — which made it exactly as durable as that field: one
-`refused` recorded after the fact overwrote the acceptance, and the same record
-could then go to the same partner again. Recording the same outcome twice is
-idempotent, because a location that arrives late is a fact about one delivery
-rather than a second one.
+### 4. Who may push here (Cedar policies)
 
-**And a reversal is owed only where one happened.** A Credit CDR reverses a
-record the eMSP **has**. For one they refused there is nothing to reverse and no
-credit will ever be accepted, so requiring one before every replacement
-deadlocked the correction of every refused record — against the rule this section
-states two paragraphs up, that nothing refused is sealed.
-
-That rule cannot live in a crate. `to_ocpi_credit` builds the reversal,
-`emob_cdr` refuses to bill both halves, and `Cdr::supersedes` names what a record
-replaces — three layers modelling the correction, and none of them knows whether
-the original ever left the building.
-
-## 3. Which records are late
-
-Against the window **that partner** agreed to, because the same paragraph makes
-the cadence a contract rather than a protocol rule:
-
-> there is no requirement to send CDRs in (semi-) realtime, it is seen as good
-> practice to send them as soon as possible. But if there is an agreement between
-> parties to send them, for example, once a month, that is also allowed by OCPI.
-
-A node peering with a monthly settler and a same-day settler therefore has two
-answers to one question, and a single constant would report the first in breach
-every day. `Partner::settles_within` is the figure, and `Roamd::unsettled` is the
-sharp question: not work outstanding, but a session that has been delivered,
-settled on this side, and never billed to anybody.
-
-## 4. Who may send one here
-
-A partner is onboarded while the node runs, and what an operator wants to say
-about one is not a set of dotted capability patterns:
+Partner-specific grants such as *"CDRs until the trial ends"* are Cedar policies
+from `emob_service::policy`:
 
 ```cedar
 @id("nl-tnm-trial")
@@ -111,165 +73,130 @@ unless { context.at > datetime("2027-01-01T00:00:00Z") };
 
 ```rust
 let node = Roamd::new(registry).with_policies(Gate::new(Policies::load(text)?));
-node.reload_policies(&edited)?;   // …while it runs, and never with nothing
+node.reload_policies(&edited)?;   // while running; an invalid set leaves the old one in force
 ```
 
-The policies are `emob_service::policy`'s and the schema is generated from the
-capability list, so this service decides *when* a grant is consulted and never
-what one may say. Three things about the composition are this node's:
+Authorisation is checked **before** the document is read, so an unauthorised
+caller learns nothing about it. The typed ceiling in `emob_service::authority`
+is checked first and its "no" is final: no policy lets a peer push another
+party's record. A node without a gate refuses to load policies at all.
 
-**It is asked before the document is read.** The other five answers are
-information: telling a caller this node does not accept which of its charging
-periods do not sum is telling it about a session it has no business knowing
-exists. So `Verdict::Unauthorised` is a sixth answer and it comes first.
+### 5. Inbound records: six verdicts
 
-**A policy may grant, and it may never widen a delegation.** The typed ceiling in
-`emob_service::authority` is asked first and a `no` there is final, so a peer
-pushing another party's record is refused whatever any policy says — and the
-refusal names the ceiling rather than the policy, because that is the half no
-text can turn off.
+Four gates in order — credential, document (`preflight`), conversion
+(`from_ocpi`), record (`validate`):
 
-**And a reload that does not validate leaves the running set deciding.** Default
-deny makes an empty policy set a total outage rather than a degraded state, so a
-failed reload must not be able to produce one. A node that was never given a gate
-refuses to load policies at all, because a set nothing consults is a grant nobody
-is enforcing.
-
-## 5. What to do with one that arrives
-
-**Four** gates, in the order that makes them mean something — the **credential**
-(above), the **document** (`preflight`), the **conversion** (`from_ocpi`), the
-**record** (`validate`) — and six answers rather than one error:
-
-| Verdict | Means | What the sender does |
+| Verdict | Meaning | Sender's next step |
 |---|---|---|
-| `Unauthorised` | this credential may not push this record here | asks the operator |
-| `Accepted` | the document holds up and the record is new | nothing; settle it |
-| `Disputed` | the document is fine and the claim does not hold here | talks to you |
-| `Duplicate` | already held, unchanged | nothing; the retry was harmless |
-| `Conflicted` | already held, and this one differs | a human answers |
-| `Rejected` | the document does not answer OCPI's own questions | fixes it and re-sends |
+| `Unauthorised` | this credential may not push this record | ask the operator |
+| `Accepted` | valid and new | none |
+| `Disputed` | the document is valid but the claim does not hold here (e.g. signatures fail against **our** key registry) | talk to us — not a retry |
+| `Duplicate` | already held, unchanged | none; the retry was harmless |
+| `Conflicted` | already held, different | a human decides |
+| `Rejected` | fails OCPI's own checks | fix and re-send |
 
-`Rejected` and `Disputed` are deliberately not one error. *"Your document is
-wrong"* is a retry; *"your document is fine and your claim does not hold on our
-side"* — signed records that do not verify against **our** registry, minutes
-charged that the record's own periods do not account for — is a conversation
-between two companies, and a partner told the first when it is the second retries
-something no retry fixes.
-
-A record that is disputed is **not** in the ledger: it has not been settled.
-
-### …and then it is worth two numbers, not one
+A disputed record is not in the ledger. An accepted one is settled to two
+figures through `Cdr::rerated_with`, the same gated door the issuer prices with
+(tariff in force, superseded versions, signed durations, `[REA 6-A §3.1]` clock
+resolution):
 
 ```rust
 let settlement = node.settle(&inbound, &retail)?;
 settlement.owed_to_partner;   // what the CPO's document states
-settlement.owed_by_driver;    // what this side's retail tariff makes of it
-settlement.margin()?;         // and the difference
+settlement.owed_by_driver;    // what our retail tariff makes of it
+settlement.margin()?;
 ```
 
-Re-rated through `Cdr::rerated_with` — the same door the issuing side prices
-with — because reaching for the rating engine directly silently skips every gate
-the issuer applied: a retail tariff that was not in force when the session ran, a
-version the meter says was superseded mid-session, a duration the signed records
-do not vouch for, and the clock resolution `[REA 6-A §3.1]` puts under a
-per-minute fee.
+### 6. The OCPI push client
 
-## 6. …and the socket
-
-`dispatch::Dispatcher` pushes the record to the platform that registered for the
-party the contract names:
-
-```rust,ignore
-let answer = dispatcher.deliver(&registration, &document).await;
-node.answered(&consignment.key, &answer, now)?;   // …and only then
+```rust
+let answer = dispatcher.deliver(&registration, &key, &document).await;
+node.answered(&consignment.key, &answer, now)?;   // record only after the answer
 ```
 
-**What goes out is what the outbox holds.** `for_partner` produces the partner's
-copy *and* the account of what carrying it there cost, by JSON Pointer into that
-copy. The document is rendered once, when the record is routed, and sent
-verbatim — a second rendering at send time, from a session that may since have
-been re-rated, puts a document on the wire the account does not describe (D324).
+- **What is sent is what the outbox holds**: the document is rendered once, at
+  consign time, together with its account of what the crossing cost, and sent
+  verbatim.
+- **Three outcomes**: `Answer::Accepted` (with the returned location),
+  `Answer::Refused` (a person reads the reason), `Answer::Unreached` (records
+  nothing; resent next drain — safe because OCPI keys CDRs so a second copy is
+  treated as the first).
+- **No separate peer list**: reachable platforms are the ones registered in the
+  journalled state, read fresh each tick, so a rotated token is used at once.
 
-**A push has three outcomes, not two.** A receiver that answered has *seen* the
-record: it leaves the queue and a person reads the reason. A connection that
-died is not an answer, so `Answer::Unreached` records **nothing** and the next
-drain sends it again — safe because `[OCPI 2.3.0 §mod_cdrs]` keys a CDR and makes
-the receiver treat the second copy as the first (D325).
+### 7. The OCPI credentials module
 
-**There is no peer list.** Who this node can reach *is* the set of platforms
-registered with it, read from the journalled state each tick. A second map
-beside it is a second answer to *where does a record go*, stale the moment a
-token is rotated (D330).
+`[OCPI 2.3.0 §credentials]` is mandatory and symmetric. `inbound::router`
+serves `versions`, `credentials` and the CDRs receiver:
 
-## 7. …and the module OCPI makes mandatory
+- a `POST credentials` is answered only after this node has read the client's
+  versions with the token it was handed (status `3001` otherwise);
+- a registration is journalled before the peer is told;
+- the principal comes from the credential, never from the pushed document;
+- the served path, advertised URL and returned `Location` come from one
+  computation.
 
-> *The Credentials module is symmetric and has to be implemented by all OCPI
-> implementations.* `[OCPI 2.3.0 §credentials]`
+The tests run the handshake from the other side with `ocpi-kit`'s own client,
+reading every URL from this node's version-details document.
 
-A node that can push and cannot be **registered with** is not an OCPI
-implementation. `inbound::router` serves `versions`, `credentials` and the CDRs
-receiver. Four things about it are decisions:
+### State that survives a restart
 
-- **The reach-back is a precondition.** A `POST credentials` is not answered
-  until this node has read the client's versions *with the token it was just
-  handed* — `3001` when it cannot. Skipping it leaves a credential for a
-  platform this node cannot reach, which looks like a registration and fails the
-  day a record is owed.
-- **A registration is journalled before the peer is told.** The tokens *are* the
-  authentication; forgotten, every partner ever onboarded gets a `401`.
-- **The principal comes from the credential, never from the document.** Built
-  from the document, the question *may this caller write for the party this
-  document names* compares a claim with itself and passes for everything (D332).
-- **The path, the advertised URL and the `Location` are one computation.** Work
-  any of them out separately and this node answers on paths nobody was told
-  about, or returns a `Location` that 404s — every byte well-formed, nothing
-  working (D333).
+`Node` is `Roamd` folded from a journal of `consigned`, `delivered`,
+`received`, `offered`, `registered` and `unregistered` facts. The partner
+registry and the policies are configuration, not journalled, so a replay never
+routes today's records by yesterday's contracts. A delivery is recorded only
+after the receiver answered, so a failed push stays pending across a restart.
 
-The tests run the handshake from the other side through the kit's own client,
-and read every URL out of this node's own version-details document, because a
-test against paths this workspace chose would pass while a real peer failed.
+## The reach-back guard
 
-## Where the answers are kept
-
-Every rule above is about the past — who is owed this, whether it was sent, what
-came back — and `[OCPI 2.3.0 §mod_cdrs]` seals a record the moment the eMSP has
-it. The seal is exactly as durable as the place the answer is kept: a node that
-forgot its deliveries answers *"nobody has this"* to every question and re-opens
-every record it had already sent.
-
-`Node` is `Roamd` folded from a hash-chained journal — `consigned`,
-`delivered`, `received`, `offered`, `registered`, `unregistered`. The **ledger**
-and the **outbox** are journalled; the partner registry and the operator's
-policies are not, because those are configuration an operator edits and a node
-that replayed an old one would route today's records by yesterday's contracts.
-
-`Node::accepted` is called with the `Location` the receiver returned and only
-then, so a delivery that failed stays pending across a restart rather than
-looking sent.
-
-## No I/O
-
-Nothing in the library opens a socket or reads a clock. `prepare` returns the
-document and the daemon sends it; `accepted` records a delivery that **succeeded**
-— with the URL the receiver returned, which `[OCPI 2.3.0 §mod_cdrs]` makes
-mandatory on the response precisely so the sender can fetch back what it sent. A
-push that failed leaves the consignment pending, so it turns up in `unsettled`
-rather than being forgotten, which is the whole reason recording a delivery is a
-separate act from attempting one.
-
-The transport is the one leg CI cannot run: a peer is somebody else's server
-behind a credentials exchange and Hubject is mutual TLS under a contract, exactly
-as `csmsd`'s WebSocket and the Mobilithek subscription are.
+During the credentials handshake a partner names a URL this node then calls.
+`roamd::reach` admits only `https`, and `http` or a private, loopback or
+link-local address only for hosts listed in `[roaming] reach_back_allow` — so a
+registering partner cannot point the node at an internal service. The name is
+resolved once; a DNS-rebinding window between that check and the OCPI client's
+own connect remains (see [THREAT_MODEL.md](../../THREAT_MODEL.md)).
 
 ## Configuration
 
-| Variable | Default | What |
+| Variable | Default | Purpose |
 |---|---|---|
-| `ROAMD_HTTP_BIND` | `127.0.0.1:9583` | the readiness and health endpoint |
-| `EMOB_JOURNAL_DIR` | `var` | where the journal is folded from and appended to. **Not** a temporary directory by default: a service that silently journalled to `/tmp` would come back from a reboot with an empty ledger and no error |
-| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `ROAMD_HTTP_BIND` wins over. A container image sets it, because every default here is **loopback** and loopback inside a container is reachable by nothing |
+| `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[partners]]`, `[[stations]]`, `[roaming]` (`public_url`, `reach_back_allow`), `[services]`, `[[operators]]` |
+| `ROAMD_DATA_KEY` | **required** | 32 bytes, base64; seals the journal and Token B |
+| `ROAMD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head. A `.head` signed under another key refuses the start |
+| `EMOB_PARTNER_<PARTY>_TOKEN_A`, `EMOB_WEBHOOK_SECRET`, `EMOB_OPERATOR_TOKEN` | **required** | the variables the estate names: each partner's Token A, delivery signatures, the read model's bearer |
+| `ROAMD_HTTP_BIND` / `EMOB_HTTP_BIND` | `127.0.0.1:9583` | the shell: probes, OCPI, deliveries, read model |
+| `EMOB_JOURNAL_DIR` | `var` | journal directory — deliberately not a temp directory |
+| `EMOB_LOG_FORMAT` | JSON | `text` for a terminal |
+| `RUST_LOG` | `info,roamd=debug` | log filter |
+
+## Running
+
+```console
+just demo                     # the estate with an OCPI partner registered
+EMOB_ESTATE=deploy/estate.example.toml cargo run -p roamd   # plus the *_env variables
+```
+
+Or `just up` for the whole estate (`roamd`'s shell on `localhost:8081`).
+
+## Endpoints
+
+| Path | Answers |
+|---|---|
+| `/ocpi/…` | OCPI `versions`, `credentials` and `cdrs` for registered partners |
+| `POST /v1/deliveries` | a CDR from `csmsd`: Standard-Webhooks signature, 300 s freshness, size cap |
+| `GET /v1/roamd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
+| `GET /v1/roamd/today?limit=&consignments=` | operator token: partners (registered or not), counts, and the consignments no partner has accepted yet — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page |
+| `GET /health/live` | `200` while the process runs |
+| `GET /health/ready` | `200` once the registry and journal are loaded; `503` listing what is missing |
+| `GET /about` | name and version |
+
+## Built on
+
+`emob-roam` (documents and routing), `emob-cdr`, `emob-service` (shell,
+journal, Cedar policies), [`ocpi-kit`](https://crates.io/crates/ocpi-kit) 0.4
+(client and server). See [Roaming](https://hupe1980.github.io/emob/docs/roaming/)
+and the [workspace README](../../README.md).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

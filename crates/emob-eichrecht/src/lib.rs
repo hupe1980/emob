@@ -106,12 +106,14 @@
 pub mod chain;
 pub mod error;
 pub mod evidence;
+pub mod findings;
 pub mod registry;
 pub mod transparency;
 
 pub use chain::{ChainFinding, ChainReport, Disqualifies, SignedMarker};
 pub use error::{EichrechtError, KeyLookupError};
 pub use evidence::{Evidence, EvidenceProblem, VerifiedRecord};
+pub use findings::{Finding, FindingKind};
 // The format itself is `ocmf`'s. Re-exported so a caller reading this crate's
 // API does not have to discover which crate a `Record` came from, and so that
 // the version of `ocmf` a record was parsed with is the version this crate

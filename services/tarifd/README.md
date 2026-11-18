@@ -1,33 +1,35 @@
 # tarifd
 
-**The service that publishes a tariff version.** It decides *when* a price takes
-effect, and never *what* it says.
+The tariff publication daemon: decides when a tariff version must reach the driver (OCPP 2.1), roaming partners (OCPI 2.3.0) and the national access point (DATEX II), and reports any price in force that somebody was never shown.
 
-## The three audiences
+## Status
 
-A charge point's ad-hoc price is owed to three parties, and each is a duty with
-its own citation:
+| | |
+|---|---|
+| ✅ library | `tarifd::Tarifd` schedules versions by lead time, builds all three payloads at once or none, records confirmed deliveries, and names late versions with the article they breach — tested in `tests/a_version_takes_effect.rs` |
+| ✅ estate | publishes the estate's `[[tariffs]]`, built by the same `TariffSpec::to_tariff` `csmsd` rates with, so the published price and the charged price cannot diverge; the party is the estate's operator |
+| ⏳ not yet | the three push clients: every 60 seconds it asks what is due within a one-hour lead and logs what it would publish — nothing is sent to stations, partners or the access point, and nothing is confirmed. It has no journal |
+
+## What it owns
+
+### One price, three audiences
 
 | Audience | Wire | Duty |
 |---|---|---|
 | the driver at the point, **before** they start | OCPP 2.1 `SetDefaultTariff` | `[AFIR Art. 5(4)]` |
-| the roaming partner that will settle against it | OCPI 2.3.0 | the contract |
+| the roaming partner that settles against it | OCPI 2.3.0 | the roaming contract |
 | the national access point | DATEX II | `[AFIR Art. 20(2)(c)]` |
 
-Almost every stack computes that price three times, in three systems, and
-reconciles none of them against the invoice. This one computes it **none** times:
-each payload is built by the crate that already owns the crossing — `to_ocpp`,
-`ocpi::tariff::to_ocpi`, `rate::publish` — from the one `Tariff` that rates the
-CDR. There is no second computation for the three to drift from, and a test
-asserts the consequence rather than the intention.
+`tarifd` computes no price. Each payload comes from the crate that owns that
+crossing — `emob_ocpp::to_ocpp`, `emob_roam::ocpi::tariff::to_ocpi`,
+`emob_poi::rate::publish` — from the same `Tariff` that rates the CDR, so the
+three cannot drift from the invoice. (OICP pricing products go through
+`roamd`, since they need estate facts such as maximum charging power.)
 
-## A tariff id is a name, and this service publishes content
+### Only content that rates sessions is published
 
-`prepare` refuses a tariff whose **content** no version of that id has.
-`TariffHistory::in_force_at` is what rates a CDR, so an edited object that never
-entered the history is a price no session will ever be billed at — and
-publishing it would put that price in front of the driver, the national access
-point and every roaming partner:
+`Tarifd::prepare` refuses a tariff whose **content** matches no version in its
+`TariffHistory`, because only the history rates CDRs:
 
 ```rust
 tarifd.prepare(&edited, &party, at)?;
@@ -35,62 +37,67 @@ tarifd.prepare(&edited, &party, at)?;
 //      content 9f2c…: publishing it would quote a price no session is rated at
 ```
 
-The rule is `emob_cdr::Cost`'s, which carries a fingerprint beside the id because
-*"a tariff id is a name, and names get reused"*.
+Versions are keyed by content fingerprint, not by id: redeploying the same
+numbers is the same publication; an edit under the same id is a new one.
 
-## Publishing is not what makes a version effective
+### Due versus late
 
-The version in force is decided by its own window; a CDR is priced with whichever
-version covered the instant the session started. Publication is a **duty about**
-that fact, and the duty runs *ahead* of it — `[AFIR Art. 5(4)]` requires the
-price to be "known to end users **before they initiate** a recharging session".
-
-So a publication that goes out when a version takes effect is already late for
-everybody standing at a point at that instant: they were shown the old price and
-will be billed the new one. Two questions, therefore, and they are different:
+A version takes effect by its own window, and `[AFIR Art. 5(4)]` requires the
+price to be known **before** a session starts. Publishing at the moment of
+effect is already late for anyone at a point at that instant.
 
 ```rust
-tarifd.due(now, lead);   // work: takes effect soon, not everyone has been told
-tarifd.late(now);        // breach: in force *now*, and somebody was never told
+tarifd.due(now, lead);   // work: takes effect soon, not everyone told yet
+tarifd.late(now);        // breach: in force now, and an audience was never told
 ```
 
-The second names the article it breaches, because it is not a backlog item — it
-is a price the estate is charging that a driver was never shown.
+### All three audiences, or none
 
-## All three audiences, or none
+`prepare` builds every payload before any is sent and fails as a whole. OCPP 2.1
+refuses a tariff it cannot state without widening the price against the driver
+(an hourly rate with no exact per-minute form, one dimension at two VAT rates);
+publishing to the other two anyway would advertise a price the stations do not
+charge.
 
-`prepare` builds every payload before any is sent, and fails as a whole. OCPP 2.1
-**refuses** a tariff it cannot state without widening the price against the
-driver — an hourly rate with no exact per-minute spelling, a dimension at two VAT
-rates. Publishing the other two anyway would leave the national access point and
-every roaming partner quoting a price the estate's own stations do not charge,
-and a driver comparing on a map would be misled by a document this operator
-signed off. That is worse than publishing nothing.
+### Recording only confirmed deliveries
 
-## Recording a delivery is a separate act from attempting one
-
-The library opens no socket. `prepare` returns the payloads, the daemon sends
-them, and `confirm` records what came back **accepted**. A push that failed
-leaves that audience unconfirmed, so the version turns up in `late` the moment it
-takes effect rather than being forgotten.
-
-Versions are keyed by **content**, not by id: a redeployment of the same numbers
-is the same publication, and an edit under the same id is a new one nobody has
-been told about — the same argument `Cdr::was_priced_with` makes one layer down.
-
-## No I/O in the library
-
-Everything above is a pure function of a `TariffHistory`, a clock reading and a
-record of deliveries. The daemon holds the sockets and the schedule.
+`prepare` returns the payloads; the daemon sends; `Tarifd::confirm` records an
+accepted delivery per audience. An unconfirmed audience makes the version show
+up in `late` as soon as it takes effect.
 
 ## Configuration
 
-| Variable | Default | What |
+| Variable | Default | Purpose |
 |---|---|---|
-| `TARIFD_HTTP_BIND` | `127.0.0.1:9581` | the readiness and health endpoint |
-| `EMOB_JOURNAL_DIR` | `var` | where a daemon folds its ledger from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
-| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `TARIFD_HTTP_BIND` wins over. Every default is **loopback**, and loopback inside a container is reachable by nothing |
+| `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[tariffs]]`, `[[operators]]` |
+| `EMOB_OPERATOR_TOKEN` | **required** | the variable `[[operators]]` names: the read model's bearer |
+| `TARIFD_HTTP_BIND` | `127.0.0.1:9581` | health/readiness shell |
+| `EMOB_HTTP_BIND` | — | estate-wide shell address, used when `TARIFD_HTTP_BIND` is unset; defaults are loopback, unreachable inside a container |
+| `RUST_LOG` | `info,tarifd=debug` | log filter |
+
+## Running
+
+```console
+EMOB_ESTATE=deploy/estate.example.toml EMOB_OPERATOR_TOKEN=… cargo run -p tarifd
+```
+
+Or `just up` for the whole estate (`tarifd`'s shell on `localhost:8085`).
+
+## Endpoints
+
+| Path | Answers |
+|---|---|
+| `GET /v1/tarifd` | operator token: the tariffs it publishes |
+| `GET /health/live` | `200` while the process runs |
+| `GET /health/ready` | `200` once the tariff store is loaded; `503` listing `tariffs` until then |
+| `GET /about` | name and version |
+
+## Built on
+
+`emob-tariff`, `emob-ocpp`, `emob-roam`, `emob-poi`, `emob-service`. See
+[Pricing](https://hupe1980.github.io/emob/docs/pricing/) and the
+[workspace README](../../README.md).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

@@ -487,12 +487,21 @@ impl SessionPlan {
                 let elapsed = (at - charging_from).whole_seconds().clamp(0, total_seconds);
                 PlannedReading {
                     at,
-                    register: opening + taper(energy, elapsed, total_seconds),
+                    register: opening + meter_resolution(taper(energy, elapsed, total_seconds)),
                     context,
                 }
             })
             .collect()
     }
+}
+
+/// What a register displays and signs: whole watt-hours — `"RU":"kWh"` with
+/// three decimals. A meter counts completed units, so the curve is
+/// cut toward zero rather than rounded — a register never reads ahead of the
+/// energy delivered, and it never runs backwards. The plan's energy is whole
+/// watt-hours already, so the closing reading is unchanged.
+fn meter_resolution(delivered: Decimal) -> Decimal {
+    delivered.round_dp_with_strategy(3, rust_decimal::RoundingStrategy::ToZero)
 }
 
 /// The cumulative share of `energy` delivered after `elapsed` of `total`.
@@ -665,6 +674,37 @@ mod tests {
                 plan.energy.kwh(),
                 "the curve must conserve"
             );
+        }
+    }
+
+    #[test]
+    fn every_register_is_signed_in_whole_watt_hours_and_never_runs_backwards() {
+        // A taper computed in `Decimal` carries ~25 significant digits between
+        // the ends, which no meter signs and a receipt clips. Every reading —
+        // interior ones included — is at the meter's resolution.
+        let mut rng = Rng::new(6);
+        for _ in 0..100 {
+            let mut station = VirtualStation::new(0, &mut rng);
+            let mut plan = SessionPlan::draw(day(), &mut rng);
+            plan.clock_aligned = true;
+            let charged = station.charge(&plan, &[]);
+            let readings = charged.series.readings();
+            assert!(readings.len() > 2, "interior readings were drawn");
+            for pair in readings.windows(2) {
+                assert!(pair[1].register.kwh() >= pair[0].register.kwh());
+            }
+            for reading in readings {
+                let kwh = reading.register.kwh();
+                assert_eq!(kwh, kwh.round_dp(3), "{kwh} is finer than a watt-hour");
+            }
+            // …and so is what the signature covers.
+            for record in &charged.records {
+                for value in record.split(r#""RV":"#).skip(1) {
+                    let text = value.split([',', '}']).next().unwrap_or_default();
+                    let decimals = text.split('.').nth(1).map_or(0, str::len);
+                    assert!(decimals <= 3, "the record signs {text}");
+                }
+            }
         }
     }
 

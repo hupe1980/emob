@@ -1,168 +1,110 @@
 # emob-service
 
-**The shell every emob daemon shares** — configuration, structured logging, a
-readiness probe that does not lie, graceful shutdown — and the three pieces that
-are about charging: an **OCPI-party authority model**, the CloudEvents
-catalogue, and one webhook signature.
+The shared shell for emob's daemons — HTTP health and readiness endpoints, graceful shutdown, the one estate file, JSON logs with request ids, a hash-chained journal sealed under a data key whose every record names its actor and whose end is signed for a witness, the server-rendered pages — plus an OCPI-party authority model, the CloudEvents catalogue and Standard Webhooks signing.
+
+[![crates.io](https://img.shields.io/crates/v/emob-service.svg)](https://crates.io/crates/emob-service) [![docs.rs](https://img.shields.io/docsrs/emob-service)](https://docs.rs/emob-service) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-service.svg)](#license)
+
+Every emob domain crate is sans-I/O: it takes instants and keys as arguments and
+opens no socket, so a two-year-old dispute can be replayed exactly. This crate
+is the one shared place where sockets, clocks and disks come in. It also holds
+the pieces every daemon needs to get right the same way: who may read whose
+records, a readiness probe that reports what is missing, a shutdown that drains
+in-flight work, and a journal from which a daemon's state is rebuilt after a
+restart.
 
 ```console
 cargo add emob-service
 ```
 
-📖 The reasoning behind the daemons this carries is in
-**[Architecture](https://hupe1980.github.io/emob/docs/architecture/)**.
+## Example
 
-## The worst thing a roaming node can do
+The skeleton every emob daemon's `main` follows:
 
-It is not losing a session. It is serving party A's CDRs to party B — a
-competitor's charging volumes, its tariffs, and its drivers' movements, out of an
-endpoint that answered a perfectly valid token.
+```rust
+use emob_service::{Identity, Readiness, Server, Shutdown, identity};
 
-That is not a deployment detail to be added later behind a reverse proxy, because
-the proxy does not know which party owns a record. Ownership is a field on the
-record, and the check belongs where that field is in scope.
+let me: Identity = identity!();
+emob_service::telemetry::init(me, "info,mydaemon=debug");   // JSON unless EMOB_LOG_FORMAT=text
+
+// MYDAEMON_HTTP_BIND, else EMOB_HTTP_BIND, else the loopback default.
+let http = emob_service::serve::bind_address("mydaemon", "127.0.0.1:9599")?;
+
+let readiness = Readiness::new().expecting("key-registry");
+let shutdown = Shutdown::new();
+
+// …load what the daemon needs, then:
+readiness.up("key-registry");
+
+let signal = shutdown.clone();
+tokio::spawn(async move { signal.on_signal().await });
+
+// Serves /health/live, /health/ready and /about; add routes with `.with(router)`.
+Server::new(me, readiness, shutdown)
+    .draining_for(std::time::Duration::from_secs(3))
+    .listen(http)
+    .await?;
+```
+
+## What it guarantees
+
+- **Readiness never lies.** A daemon declares what it waits for; it is ready
+  only when every declared dependency is up, and `blockers()` names the rest. A
+  daemon that declares nothing is **not** ready. Liveness is separate, because
+  restarting a CSMS over a missing dependency drops every station's socket.
+- **Shutdown drains in two steps.** On `SIGTERM` the daemon first stops
+  reporting ready, so the orchestrator stops routing to it, then stops serving
+  after a caller-chosen drain window. Killing a CSMS mid-transaction would lose
+  the `StopTransaction` carrying the signed meter record.
+- **Loopback by default.** `serve::bind_address` reads `<DAEMON>_HTTP_BIND`,
+  then `EMOB_HTTP_BIND`, then the daemon's local default, and names the variable
+  in any parse error. A second socket (`serve::bind_socket`) has its own
+  variable so the estate-wide one never binds two listeners to one port.
+- **One party cannot read another's records.** See the authority model below.
+- **State comes back from the journal, and the journal's end is signed.** A
+  daemon refuses to start from a journal shorter than the head it last signed.
+  See below.
+- **Every fact and every request names who caused it** — the authenticated
+  caller, never what the request says about itself.
+
+## How it works
+
+### The authority model: who, what, whose
+
+The worst thing a roaming node can do is serve party A's CDRs to party B from an
+endpoint that accepted a valid token. A reverse proxy cannot prevent that,
+because ownership is a field on the record. So three questions stay separate: a
+`Token` answers **who** (constant-time comparison), `Capabilities` answers
+**what**, and a `PartyScope` answers **whose records**.
 
 ```rust
 let peer = Principal::peer(theirs, Role::Emsp, Capabilities::of([caps::CDR_READ]));
 
 peer.may_act_for(caps::CDR_READ, &theirs);   // true
-peer.may_act_for(caps::CDR_READ, &ours);     // false — a valid token, somebody else's record
+peer.may_act_for(caps::CDR_READ, &ours);     // false — valid token, somebody else's record
 peer.may_act_for(caps::CDR_WRITE, &theirs);  // false — reaching it is not writing it
 ```
 
-Three questions, kept apart: a credential answers **who** (a constant-time token
-comparison), a `Capabilities` set answers **what**, and a `PartyScope` answers
-**whose records**. Collapsing any two produces the same bug — an endpoint that
-checks the token and not the ownership, which is every roaming data leak there
-has ever been.
-
-### Capabilities, not roles — because an agent has to hold less
-
-`mako`'s authorisation is built on Marktrollen because `mako` *is* a market
-participant; `hems`'s is built on capabilities because a household energy manager
-is not. emob is a third thing: its principals are **OCPI parties**, which already
-have a role — and a role is not enough.
-
-An `agentd` specialist acting for an operator must be able to hold **less** than
-that operator. `Role::Cpo` delegated to an agent is still `Role::Cpo`; a
-capability set delegated is a subset:
+Principals are OCPI parties, which already have a role, but a role is not
+enough: an AI or rules-based agent acting for an operator must hold **less**
+than that operator. `Principal::attenuate` derives a subset and returns `None`
+if it would widen either the capabilities or the party scope:
 
 ```rust
 let agent = operator.attenuate(
     Capabilities::of([caps::CDR_READ, caps::EVIDENCE_READ]),
     PartyScope::just(&party),
-)?;                                   // None if it would widen either axis
+)?;
 ```
 
-Two pattern forms and no more — `emob.cdr.read`, or `emob.cdr.*` — because
-attenuation has to be decidable by **containment**, and a richer grammar makes
-containment undecidable in general. A pattern widens at a segment boundary, so
-`emob.cdr.*` does not admit `emob.cdrs.read`: a prefix match on characters is how
-a capability grammar grows holes.
+Capability patterns have two forms only — `emob.cdr.read` or `emob.cdr.*` — so
+attenuation stays decidable by containment. A wildcard widens at a segment
+boundary (`emob.cdr.*` does not admit `emob.cdrs.read`). An empty set permits
+nothing.
 
-An empty set permits nothing rather than everything. The deployment where
-somebody forgot the grants is exactly the one nobody would notice.
+### Operator policies (Cedar), behind the `policy` feature
 
-## The readiness probe that does not lie
-
-Almost every readiness endpoint in this industry returns `200` unconditionally,
-because it was written before there was anything to check. An orchestrator then
-routes stations to a `csmsd` whose key registry has not loaded, and every session
-for the next thirty seconds is refused for want of a key — which looks like a
-fleet fault and is a deployment one.
-
-```rust
-let readiness = Readiness::new().expecting("key-registry").expecting("tariff");
-readiness.is_ready();      // false, and `blockers()` says which
-readiness.up("key-registry");
-readiness.is_ready();      // still false — one is not all
-```
-
-A daemon that declares nothing is **not** ready: an empty set is a daemon that
-has not said what it needs, which is the state to fail in rather than the state
-to pass in. And liveness stays separate, because a liveness probe that failed on
-a dependency makes a restart the cure for something that was never in the
-process — and restarting a CSMS drops every station's socket.
-
-## Stopping without dropping what is in flight
-
-Killing a CSMS mid-transaction does not lose a request. It loses the
-`StopTransaction` that carries the signed meter record, and the session becomes a
-kilowatt-hour nobody can bill.
-
-So a daemon stops in two steps: it stops being **ready**, so the orchestrator
-takes it out of rotation, and only then stops **serving** after a drain window.
-The window is the caller's, because a CSMS holding a two-hour session cannot
-drain it and a tariff publisher can drain in a second.
-
-## The event catalogue is checked at compile time
-
-One `pub const` per CloudEvents type, so a rename is a one-line change and a
-subscription that matches nothing is a build failure rather than a specialist
-that silently never runs.
-
-```rust
-events::cdr::ISSUED;                                  // "de.emob.cdr.issued"
-events::matches("de.emob.cdr.*", events::cdr::ISSUED) // true
-```
-
-Every type's last word is a **past participle**, and a test enforces it: a type
-in the imperative is a command wearing an event's clothes, and a subscriber
-cannot tell the difference at runtime. That test renamed three entries in this
-catalogue before it shipped.
-
-## One webhook signature
-
-[Standard Webhooks]: HMAC-SHA256 over `{id}.{timestamp}.{payload}`, base64, in a
-header that can carry several signatures at once so a secret rotates without a
-flag day.
-
-[Standard Webhooks]: https://www.standardwebhooks.com
-
-```rust
-let header = webhook::sign_with(&delivery, [&outgoing, &incoming]);
-webhook::verify(&delivery, &[outgoing], &header);   // the old end still accepts
-```
-
-Signing reads **no clock** — the instant is an argument — so a delivery replayed
-from an outbox is byte-identical to the first attempt, which is what lets a
-receiver de-duplicate on the signature. The freshness tolerance is the caller's:
-five minutes is right for an interactive callback and wrong for an overnight
-batch, and a library that picked one would be picking it for both.
-
-### …and the secret's encoding is stated, never inferred
-
-Standard Webhooks writes a secret as `whsec_<base64>`, and some deployments
-configure a passphrase instead. A constructor that stripped the prefix, tried
-base64 and fell back to the raw bytes looks accommodating and is **ambiguous for
-exactly the secrets that look like base64**: `"mysecret"` is eight ASCII bytes
-*and* a valid base64 string, so it silently becomes six arbitrary ones, while
-`"hunter2"` is not and stays as it is.
-
-Nothing about a configured value tells an operator which they will get, and a
-sender using the literal bytes and a receiver decoding them disagree on every
-delivery — with `SignatureMismatch` as the only diagnostic, which points at the
-payload rather than at the key.
-
-```rust
-Secret::standard("whsec_bXlzZWNyZXQ=")?;   // the specification's spelling
-Secret::raw("bXlzZWNyZXQ=");                // the bytes as written
-// …and the same string is a different key under each, which is why
-// neither is a default.
-```
-
-## …and a policy an operator wrote, for the question a capability set cannot ask
-
-Behind the `policy` feature, **off by default**. The typed model above already
-takes its values at runtime — a `Principal` is built from configuration, not from
-a `const` — so a policy engine buys nothing until there is a question that model
-has no vocabulary for. Onboarding a partner while a node runs is where one turns
-up:
-
-> charge detail records, **until the trial ends**
-
-A set of dotted capability patterns cannot say *until*, and inventing a grammar
-that can is how a capability model becomes a policy language nobody specified.
+Some grants need a vocabulary capabilities lack — *"CDRs, until the trial
+ends"*. With the `policy` feature, an operator writes Cedar policies:
 
 ```cedar
 @id("nl-tnm-trial")
@@ -176,50 +118,118 @@ unless { context.at > datetime("2027-01-01T00:00:00Z") };
 ```
 
 ```rust
-let gate = Gate::new(Policies::load(text)?);          // parsed and validated, or refused
-gate.verdict(&peer, caps::CDR_READ, &record, at);     // …and the instant is an argument
+let gate = Gate::new(Policies::load(text)?);
+gate.verdict(&peer, caps::CDR_READ, &record, at);   // the instant is an argument
 ```
 
-Four decisions make it more than a dependency.
+- The Cedar schema is generated from `caps::ALL`, so a policy cannot name an
+  action nobody can be granted.
+- The typed ceiling is checked first and its "no" is final: a policy may grant,
+  never widen a delegation.
+- Cedar warnings are errors — they include identifiers that merely look like
+  another party's.
+- An evaluation error is a denial, never a skipped `forbid`.
+- `Gate::reload` refuses an invalid set and keeps the old one deciding.
 
-**The schema is derived from `caps::ALL`**, not written beside it: one action per
-capability and one entity type per family, read out of `emob.<family>.<verb>`. A
-second list would let a policy validate against an action nobody can ever be
-granted — a rule that never matches, which fails open on a `forbid` and silently
-on a `permit`.
+### The CloudEvents catalogue
 
-**A policy may grant, and it may never widen a delegation.** The typed ceiling is
-asked first and a `no` there is final, so a roaming peer still reaches only its
-own records however the text is written — and an agent's principal, *derived* by
-`attenuate` rather than configured, cannot be handed a capability by a file.
-
-**A warning is an error**, because Cedar's warnings are a condition that can
-never be true and an identifier that merely *looks* like another party's. In a
-policy set whose job is keeping one company's records away from another's, the
-second is the leak this crate exists to prevent, spelled in Unicode.
-
-**And what cannot be evaluated is not assumed open.** Cedar skips a policy that
-errors and carries on; here an evaluation error is a denial, because a `forbid`
-that could not be evaluated is a refusal that silently did not happen.
-
-`Gate::reload` is what makes it worth having: a set that does not validate is
-refused and the **old one keeps deciding**, since default deny makes an empty
-policy set a total outage rather than a degraded state.
-
-## The state a daemon holds, and the journal it is folded from
-
-The domain crates hold no state. The daemons hold the rules that are about a
-**pair** — what was true before a call and what may be true after — because no
-value can carry one: a number is spent once; a record is sealed once sent; a
-card is blocked; a contract has run up these sessions.
-
-Each is a fact about the **past**, and a service that held one only in memory
-answers a restart with the wrong one. `journal` is where they are kept, and it
-is the workspace's purity rule collected one layer out: the domain crates take
-every instant and every key as an argument, so a fold over them gives the same
-answer twice.
+One `pub const` per event type, so a misspelt type is a compile error and a
+rename is one line. Every type ends in a past participle, enforced by a test — an
+imperative type is a command posing as an event.
 
 ```rust
+events::cdr::ISSUED;                                   // "de.emob.cdr.issued"
+events::matches("de.emob.cdr.*", events::cdr::ISSUED)  // true
+```
+
+### Webhook signatures
+
+[Standard Webhooks](https://www.standardwebhooks.com): HMAC-SHA256 over
+`{id}.{timestamp}.{payload}`, base64, in a header that can carry several
+signatures so a secret rotates without a flag day.
+
+```rust
+let header = webhook::sign_with(&delivery, [&outgoing, &incoming]);
+webhook::verify(&delivery, &[outgoing], &header);   // the old end still accepts
+```
+
+Signing reads no clock — `Delivery::new` takes the instant — so a delivery
+replayed from an outbox is byte-identical and receivers can de-duplicate on it.
+The freshness tolerance is the caller's. A secret's encoding is always stated:
+`webhook::Secret::standard("whsec_…")` decodes base64, `webhook::Secret::raw`
+takes the bytes as written. Guessing would silently turn `"mysecret"` (valid
+base64) into a different key than the sender used.
+
+### The estate: one file for every daemon
+
+Every daemon reads its own sections of one `estate.toml` (`EMOB_ESTATE`,
+default `./estate.toml`) with `estate::load` / `estate::from_str` into a type it
+declares. The typed sections — `Parties`, `Station` (with its
+`SecurityProfile` and `receipt_display_minutes`), `Csms`, `MeterKey`,
+`TariffSpec`, `Partner`, `BillingSection`, `Billing`, `ContractSeed`,
+`Operator`, `Services`, `Desk`, `Witness`, `Roaming` — are shared, so two
+daemons cannot read one key two ways. An unknown or malformed key refuses the
+start, naming the key. The invoicing types — `InvoiceSpecification` (EN 16931
+or XRechnung), `InvoiceSyntax` (UBL or CII), `InvoiceDelivery`,
+`InvoiceContact` and `MandateSeed` — describe what `billd` writes and where it
+hands it.
+
+Secrets are never in the file: a field ending `_env` is an `EnvRef`, the name of
+an environment variable, resolved through an `Env` (the process environment, or
+a map in tests) — an unset variable refuses the start, naming it.
+`estate::webhook_secret` and `estate::operator_tokens` resolve the two every
+daemon needs. `TariffSpec::to_tariff` builds the `emob_tariff::Tariff` that
+`csmsd` rates with and `tarifd` publishes, in one place, so the published price
+and the charged one cannot diverge `[AFIR Art. 5(4)]`.
+
+### Data at rest: data keys, digests and sealed records
+
+A journal is append-only and the file most likely to leave the building in a
+backup, so a daemon writes no credential and no card UID into it in clear
+(GDPR Article 17, the right to erasure). The `vault` module:
+
+| Type | What it does |
+|---|---|
+| `vault::DataKey` | one 32-byte key per daemon from `<DAEMON>_DATA_KEY` (base64); its key id is the first 8 hex of its SHA-256. Two subkeys are derived, one for HMAC, one for encryption |
+| `vault::Digest` | HMAC-SHA256 for what a daemon only needs to *recognise* (a token a partner presents); purpose-separated, compared in constant time with `DataKey::matches` |
+| `vault::Sealed` | AES-256-GCM (aws-lc-rs) for what it must *use* again (a UID a CDR carries); random nonce, the purpose as associated data so a box cannot be replayed into another field |
+| `vault::Sealing` | a `Journal` whose record bodies are sealed while the hash chain runs over the sealed bytes — the chain verifies without the key, and record kinds stay readable |
+
+A record under another key is told apart from a forgery by its key id: for
+`empd` that is crypto-erasure (the key was destroyed on purpose), for the
+others a refusal to start.
+
+### Operator access and inter-daemon deliveries
+
+- `authority::Operators` is the estate's operator bearer tokens, compared in
+  constant time; an empty set admits nobody. `serve::operator_only` puts a
+  router behind it — every `GET /v1/<daemon>` read model sits there.
+- `webhook::receive` checks a delivery's headers, its 300-second freshness and
+  its Standard-Webhooks signature, and answers the delivery id or a
+  `webhook::Refusal`. `serve::read_bounded` caps a request body before it is
+  read.
+- `Server::serve_on` serves the shell on a listener the caller bound — how a
+  test, or `emob demo`, runs a daemon on port 0.
+
+### Server-rendered pages: `ui`
+
+The operator page (Heute, in `deskd`), the driver receipt (in `csmsd`) and the
+invoice page (in `billd`, with a print layout) share one stylesheet and one set of helpers: `ui::page` and `ui::escape`,
+`Lang::negotiate` (German first, `?lang=en`), `Lang::date` and `Lang::decimal`
+for the reader's conventions, `ui::hardened` for the security headers,
+`ui::script` for a page's same-origin script, and `ui::operator_page` — HTTP
+Basic over `Operators` with a hardened `401` challenge, so a browser can sign
+in.
+
+### The journal: state rebuilt from facts
+
+Domain crates hold no state; daemons hold the rules about a **pair** of states —
+an invoice number is spent once, a record is sealed once sent, a card is
+blocked. Those are facts about the past, so a daemon keeps them in a `journal`
+and folds its state from it on start (requires the default `serde` feature).
+
+```rust
+use emob_service::Actor;
 use emob_service::journal::{Folded, Journal as _, Kinded, Memory};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -234,60 +244,153 @@ fn apply(total: &mut u64, fact: Fact) {
     *total += u64::from(n);
 }
 
-// On the way up, the state is what the journal says it is. `File` — or
-// `journal::for_daemon("billd")` — is the same call with a disk behind it.
+// `journal::for_daemon("billd")` is the same call with a file behind it,
+// under EMOB_JOURNAL_DIR (default `var`).
 let mut folded = Folded::open(0_u64, Memory::new(), apply)?;
-
-// A decision, then the record of it — and the caller is told last.
-folded.record(Fact::Counted(7))?;
+folded.record(&Actor::Timer, Fact::Counted(7))?;   // decide, record, then tell the caller
 assert_eq!(*folded.state(), 7);
 ```
 
-- **Facts, not commands.** An entry says what was decided, not what was asked. A
-  command log re-decides at replay, re-reading the tariff, the parties and the
-  clock that decided the first time.
-- **The records chain.** A record edited in place or removed from the middle
-  breaks every digest after it, and `Folded::open` refuses to start rather than
-  folding a past it cannot account for.
-- **A write that fails stops the service.** The record is appended after the
-  decision and before the caller is told: killed between the two, both are lost,
-  which is the safe direction. A journal that *refuses* leaves the state ahead
-  of the record.
+- **Facts, not commands.** Replaying a command would re-decide against today's
+  tariff and clock.
+- **Records are hash-chained.** An edited or removed record breaks every digest
+  after it, and `Folded::open` refuses to start.
+- **A failed write stops the service**, so the state is never ahead of the
+  record.
+- **Every record names its actor**, inside the digest (below).
 
-What it cannot do is said out loud: a chain proves nothing was **rewritten** and
-cannot prove nothing was removed from the **end**, because a truncated journal
-is byte-for-byte one that was never written. `Journal::head` is the digest the
-file ends on; recorded outside the process, a head that has gone backwards is a
-truncated tail.
+A journal written before 0.3 has no actor field and does not replay: start from
+an empty one.
 
-## Why this is not `mako-service`
+### Who caused it: `Actor`
 
-Extracting it was considered and rejected, for the reason `hems-service` gives
-and one more. `mako`'s authorisation is built on **Marktrollen** and its OIDC
-layer carries a `Sparte` grant; its Cedar schema is those roles. emob's
-principals are OCPI parties scoped by the party that owns each record, and the
-check that matters is one `mako` has no reason to have: *may this credential
-reach a record this other company owns*.
+`[NIS2 Art. 21(2)]` asks for incident handling, and an incident nobody can
+attribute is one nobody can write up. So every journal record carries `actor`
+beside `kind`, covered by the hash chain and readable without the data key
+(`jq -r .actor billd.ndjson`). It is a closed set, set where the caller was
+**authenticated**:
 
-What was left after removing the market model was five domain-free modules, and
-copying five domain-free modules is cheaper than maintaining a diff guard against
-a fork that is *supposed* to diverge. Cedar came back — but over *these* entity
-types, generated from *this* capability list, and behind a feature only the
-roaming node turns on.
+| Actor | Who |
+|---|---|
+| `station:<identity>` | the identity a station's socket authenticated as |
+| `partner:<party>` | the OCPI party a credential belongs to |
+| `operator:<name>` | the estate's `[[operators]] name` — never the token |
+| `service:<daemon>` | another daemon, by a signed delivery or the service token |
+| `timer` | the daemon's own loop: a calendar, a drain, a retry |
+| `estate` | the estate file, read at start |
 
-## Sans-I/O ends here
+The id is 1–64 characters of `[A-Za-z0-9*._:=+|@ -]` — enough for an OCPP
+identity, a party id and a name, and nothing that can carry a token, a newline
+into a log or a quote into a page. An operator name outside it refuses the start.
 
-Every domain crate in this workspace takes its instants as parameters and opens
-no socket, so a dispute two years old is answered by replaying the check exactly
-as it ran. This crate is where that stops being true, and it is the only shared
-place it does.
+### Where the journal ends: the signed head
 
-Three things stay pure even here: `webhook::sign` takes the instant it signs,
-`authority` reads no clock at all — so a credential's reach is a property of the
-credential rather than of when it was asked — and `policy::Gate::verdict` takes
-the instant a grant bounded by a date is judged against, so a decision made last
-March can be replayed rather than re-asked of today's clock.
+A hash chain proves nothing was rewritten or removed from the middle, but not
+that nothing was cut from the **end** — a truncated journal looks like a crash
+mid-append. So `head::Signing` wraps a journal and, after **every** append,
+signs its head (position and hash) with the daemon's Ed25519 key (`aws-lc-rs`)
+into `<journal>.head`, as a [C2SP signed note](https://c2sp.org/signed-note):
 
-## Licence
+```text
+emob/csmsd
+57
+q1Iot…=
+
+— emob/csmsd GrH0…==
+```
+
+On start it refuses a journal shorter than the signed head, one whose record at
+that position differs, one more than a single record past it (a crash between
+append and signature leaves exactly one), and one of more than one record with
+no head beside it — naming both positions. After an intended reset, moving `.head`
+aside is the deliberate operator step.
+
+The key is 32 random bytes, base64, from `<DAEMON>_SIGNING_KEY`
+(`head::SigningKey::for_daemon`); it is never defaulted, and a `.head` signed
+under another key refuses the start. `head::router` serves the latest note at
+`GET /v1/<daemon>/head` (`text/plain`, mount it behind `serve::operator_only`)
+with the verifier key — `<name>+<key hash>+<base64>` — in the
+`Emob-Verifier-Key` header.
+
+### The witness
+
+Whoever can cut the journal can delete its `.head`, and a backup restore brings
+an old head with it. `witness::Witness` is a copy no daemon volume holds: it
+reads each head, checks the signature against the key the estate's
+`[witness] keys` names or the one pinned at first sight, and records every
+observation in its own chained file. A head that comes back **lower** is
+`regressed`, the same position with another hash is a **fork**, another key is a
+**rekey** — each an alarm that stays in the file's history until the file is
+moved aside. `deskd` runs one every 30 seconds; `emob witness` runs one from
+the command line.
+
+What it cannot see: a history rewritten **and** extended past the witnessed
+position. The journal is a chain, not a Merkle tree, so a head that moved
+forward is accepted without a consistency proof.
+
+### Logs
+
+`telemetry::init` writes JSON lines by default (`EMOB_LOG_FORMAT=text` for a
+terminal; `RUST_LOG` filters), with the daemon's name and version. The shell
+gives every HTTP request a span with:
+
+- `id` — the inbound `x-request-id` when it is 1–64 of `[A-Za-z0-9._-]`,
+  otherwise minted; echoed in the response;
+- `method` and the matched `route`, never the raw path (`/r/{token}` is a
+  capability, so the path is a secret);
+- `actor`, set by the handler that authenticated the caller (`serve::acting`).
+
+No token, secret, key, password or card UID is logged; `telemetry::Captured`
+holds a process's lines so a test (and `emob demo --check`) can search them.
+
+## API at a glance
+
+| Item | Purpose |
+|---|---|
+| `Server`, `serve::bind_address`, `serve::bind_socket` | HTTP shell (`/health/live`, `/health/ready`, `/about`) and bind addresses |
+| `Readiness`, `Probe`, `Identity`, `identity!` | declared dependencies; the daemon's name and version |
+| `Shutdown` | signal handling and drain |
+| `telemetry::init`, `telemetry::Captured` | JSON logs (`EMOB_LOG_FORMAT=text`, `RUST_LOG`); captured lines for tests |
+| `Actor` | who caused a record or a request |
+| `head::Signing`, `head::SigningKey`, `head::VerifierKey`, `head::router` | the signed journal head and its route |
+| `witness::Witness`, `witness::Verdict` | the witness: regression, fork and rekey alarms |
+| `serve::acting`, `serve::REQUEST_ID` | the request span's actor and id |
+| `config::load`, `config::load_from`, `Secret` | file + environment configuration |
+| `Principal`, `Capabilities`, `PartyScope`, `Token`, `caps` | the authority model |
+| `events` | CloudEvents type catalogue and pattern matching |
+| `webhook::sign`, `webhook::sign_with`, `webhook::verify`, `Delivery` | Standard Webhooks |
+| `journal::Folded`, `journal::File`, `journal::Memory`, `journal::for_daemon` | hash-chained fact journal |
+| `estate::load`, `estate::from_str`, `estate::path`, `EnvRef`, `Env`, `TariffSpec::to_tariff`, `estate::webhook_secret`, `estate::operator_tokens` | the one estate file and the variables it names |
+| `InvoiceSpecification`, `InvoiceSyntax`, `InvoiceDelivery`, `InvoiceContact`, `MandateSeed` | the estate's invoicing keys |
+| `vault::DataKey`, `vault::Digest`, `vault::Sealed`, `vault::Sealing` | data keys, keyed digests, sealed records and journals |
+| `Operators`, `serve::operator_only`, `serve::read_bounded`, `Server::serve_on` | operator read models, bounded bodies, a caller-bound listener |
+| `webhook::receive`, `webhook::Refusal` | a signed, fresh inter-daemon delivery, or why not |
+| `ui::page`, `ui::operator_page`, `ui::script`, `ui::hardened`, `Lang` | server-rendered pages |
+| `policy::Gate`, `policy::Policies` | Cedar policies (feature `policy`) |
+
+## Feature flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `serde` | on | serialisation of persisted/forwarded types; enables `journal`, `estate` and `vault` |
+| `policy` | off | Cedar policies over the authority model's entity types |
+
+## Standards and sources
+
+- [Standard Webhooks](https://www.standardwebhooks.com), [CloudEvents](https://cloudevents.io)
+- [C2SP signed note](https://c2sp.org/signed-note) and the [checkpoint](https://c2sp.org/tlog-checkpoint) shape, Ed25519
+- `[NIS2 Art. 21(2)]` — incident handling, the reason every fact names its actor
+- OCPI party and role model (`emob_core::Role`)
+- [Cedar](https://www.cedarpolicy.com) policy language
+
+## Part of emob
+
+emob is an open-source Rust toolkit for EV charging back offices; every daemon
+in `services/` is built on this crate. Background:
+[Architecture](https://hupe1980.github.io/emob/docs/architecture/) on the site;
+see also the [workspace README](../../README.md) and
+[THREAT_MODEL.md](../../THREAT_MODEL.md).
+
+## License
 
 MIT OR Apache-2.0

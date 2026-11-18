@@ -9,7 +9,7 @@
 //! to the same ASN.1, with the Annex F fields where Annex F says they go.
 //!
 //! What that is *not* is interoperability with a live ecosystem. Hubject's own
-//! open test PKI is in `specs/roaming/openplugncharge-master.zip` — a real V2G
+//! open test PKI is in `concepts/reference/roaming/openplugncharge-master.zip` — a real V2G
 //! Root, real OEM sub-CAs and real provisioning certificates — and
 //! `tests/a_contract_is_installed.rs` runs the provisioning chain against it
 //! where the working copy has that archive, saying by name when it does not.
@@ -170,3 +170,6 @@ pub const FOREIGN_CONTRACT: &str = concat!(
     "/ezStM7zt61WASqBp8ypKJqlViRSDwIhAKlh5wuuBr/uUATP03AXbKmKWNYt35hSPW1L",
     "Vs/MGi7J",
 );
+
+/// The ISO 15118-20 PKI: three ecosystems and an Ed448 one.
+pub mod iso20;

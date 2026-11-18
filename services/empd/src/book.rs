@@ -11,6 +11,7 @@
 //! losing them is invisible until a month is wrong.
 
 use emob_core::Money;
+use emob_service::Actor;
 use emob_service::journal::{Folded, Journal, JournalError, Kinded};
 
 use crate::{
@@ -32,6 +33,10 @@ pub enum Event {
     Issued {
         /// The keyed digest the token is known by.
         token: TokenRef,
+        /// The data key the reference was derived and the uid sealed under
+        /// (SR-047) — so a key can be rotated and a record under a destroyed
+        /// one is recognised as erased rather than as a forgery.
+        key: emob_service::vault::KeyId,
         /// What it carries.
         held: Box<Token>,
     },
@@ -171,8 +176,8 @@ impl<J: Journal> Book<J> {
         }
     }
 
-    fn commit(&mut self, event: &Event, about: &str) -> Result<(), BookError> {
-        match self.folded.note(event) {
+    fn commit(&mut self, by: &Actor, event: &Event, about: &str) -> Result<(), BookError> {
+        match self.folded.note(by, event) {
             Ok(_) => Ok(()),
             Err(source) => {
                 self.halted = Some(source.to_string());
@@ -184,16 +189,21 @@ impl<J: Journal> Book<J> {
         }
     }
 
-    /// Take a contract on.
+    /// Take a contract on, as `by`.
+    ///
+    /// Every fact names who caused it (SR-100): the estate at start, `csmsd`
+    /// for what its authorisation request or a delivery drove, an operator by
+    /// the name the gate authenticated — never a name read from a body.
     ///
     /// # Errors
     ///
     /// [`BookError::Journal`] where the fact could not be recorded.
-    pub fn with(&mut self, contract: Contract) -> Result<(), BookError> {
+    pub fn with(&mut self, by: &Actor, contract: Contract) -> Result<(), BookError> {
         self.guard()?;
         let about = contract.id.to_string();
         self.folded.state_mut().hold(contract.clone());
         self.commit(
+            by,
             &Event::Contracted {
                 contract: Box::new(contract),
             },
@@ -209,6 +219,7 @@ impl<J: Journal> Book<J> {
     /// [`BookError::Journal`] where the issue could not be recorded.
     pub fn issue_token(
         &mut self,
+        by: &Actor,
         contract: &ContractId,
         uid: impl Into<String>,
         token_type: TokenType,
@@ -228,8 +239,10 @@ impl<J: Journal> Book<J> {
                 why: "a token was issued and immediately not found".to_owned(),
             })?;
         self.commit(
+            by,
             &Event::Issued {
                 token: token.clone(),
+                key: self.folded.state().key_id().clone(),
                 held: Box::new(held),
             },
             contract.as_str(),
@@ -245,10 +258,11 @@ impl<J: Journal> Book<J> {
     /// [`BookError::Journal`] where the block could not be recorded — which is
     /// the one that matters most here, because a block that is forgotten is a
     /// lost card that authorises again after a restart.
-    pub fn block(&mut self, token: &TokenRef) -> Result<(), BookError> {
+    pub fn block(&mut self, by: &Actor, token: &TokenRef) -> Result<(), BookError> {
         self.guard()?;
         self.folded.state_mut().block(token)?;
         self.commit(
+            by,
             &Event::Blocked {
                 token: token.clone(),
             },
@@ -264,6 +278,7 @@ impl<J: Journal> Book<J> {
     /// contract's running total, and [`BookError::Journal`] otherwise.
     pub fn ran_up(
         &mut self,
+        by: &Actor,
         contract: &ContractId,
         session: &SessionId,
         amount: Money,
@@ -277,6 +292,7 @@ impl<J: Journal> Book<J> {
         // fold that skipped it would rebuild a contract owing the old figure.
         if !matches!(counted, Counted::Already) {
             self.commit(
+                by,
                 &Event::RanUp {
                     contract: contract.clone(),
                     session: session.clone(),
@@ -296,12 +312,14 @@ impl<J: Journal> Book<J> {
     /// ran up, and [`BookError::Journal`] otherwise.
     pub fn invoiced(
         &mut self,
+        by: &Actor,
         contract: &ContractId,
         sessions: &[SessionId],
     ) -> Result<Option<Money>, BookError> {
         self.guard()?;
         let total = self.folded.state_mut().invoiced(contract, sessions)?;
         self.commit(
+            by,
             &Event::Invoiced {
                 contract: contract.clone(),
                 sessions: sessions.to_vec(),
@@ -329,7 +347,7 @@ impl Empd {
     pub(crate) fn apply(&mut self, event: Event) {
         match event {
             Event::Contracted { contract } => self.hold(*contract),
-            Event::Issued { token, held } => {
+            Event::Issued { token, held, .. } => {
                 self.tokens.insert(token.as_str().to_owned(), *held);
             }
             Event::Blocked { token } => {

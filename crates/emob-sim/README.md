@@ -1,27 +1,27 @@
 # emob-sim
 
-A deterministic e-mobility fleet, driven through the whole chain: virtual
-charging stations that **sign genuine OCMF**, eight seeded faults, and a
-reconciliation that proves every kilowatt-hour either billed or was refused
-with a reason.
+A deterministic EV charging fleet simulator: virtual stations that sign genuine OCMF meter records, eight seeded faults, and a day-level reconciliation proving every kilowatt-hour was either billed or refused with a reason.
 
-Part of [emob](https://github.com/hupe1980/emob), the open-source e-mobility
-operating stack.
+[![crates.io](https://img.shields.io/crates/v/emob-sim.svg)](https://crates.io/crates/emob-sim) [![docs.rs](https://img.shields.io/docsrs/emob-sim)](https://docs.rs/emob-sim) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-sim.svg)](#license)
+
+A fleet test that asserts "no errors" passes by throwing sessions away. This
+crate asserts something a silent failure cannot satisfy: over a whole day,
+`Σ settled + Σ refused = Σ metered`, and every refusal carries a reason. The
+stations are virtual — no socket, no hardware — but their ECDSA signatures over
+OCMF (Open Charge Metering Format, in which a calibrated meter signs each
+reading) are real, and everything downstream runs the production code.
 
 ```console
 cargo add emob-sim
 ```
 
-📖 The reasoning behind this crate, with the regulation it cites, is in
-**[Architecture](https://hupe1980.github.io/emob/docs/architecture/)**.
-The signatures are on [docs.rs](https://docs.rs/emob-sim).
-
-## The demo that cannot lie
+## Example
 
 ```rust
 use emob_sim::{FaultPlan, Rate, ReferenceDay};
 
 let outcome = ReferenceDay::builder()
+    .seed(7)
     .stations(100)
     .sessions_per_station(4)
     .faults(FaultPlan::everything(Rate::one_in(9)))
@@ -29,126 +29,105 @@ let outcome = ReferenceDay::builder()
     .run();
 
 println!("{}", outcome.summary());
-// 400 sessions: 197 settled (8969.120 kWh), 203 refused (9555.738 kWh), metered 18524.858 kWh
+// "400 sessions: … settled (… kWh), … refused (… kWh), metered … kWh"
 
 assert!(outcome.reconciles());
 assert!(outcome.every_session_is_accounted_for());
 assert!(outcome.every_refusal_has_a_reason());
 ```
 
-The assertion is **not** "everything billed". It is:
+## What it guarantees
 
-> Every kilowatt-hour a meter moved either reached a settled record or was
-> refused with a reason. Nothing is unaccounted for.
+- **Nothing is unaccounted for.** `DayOutcome::reconciles` holds when every
+  kilowatt-hour a meter moved reached a settled record or a reasoned refusal.
+- **Signatures are genuine.** A real ECDSA key signs the real payload bytes,
+  verified through the same path as a record from a physical meter. Hand-written
+  fixtures only prove the parser accepts what a test author typed.
+- **Nothing downstream is stubbed.** `emob-ocpp` assembles each session from the
+  station's own OCPP transaction events, `emob-eichrecht` verifies the evidence,
+  `emob-session` splits on the settlement grid, `emob-tariff` prices,
+  `emob-cdr` builds the record and the ledger accepts it. Faults land on the
+  OCPP events as they would on a wire, so a dropped record is genuinely absent.
+- **One seed is one day.** No entropy source, no clock, no thread-local state;
+  randomness is a built-in `SplitMix64` stream, so a dependency update cannot
+  reorder it. Independent parts draw from labelled streams, so adding a draw in
+  one generator does not reshape every session.
+- **No I/O.** Nothing opens a socket, reads a file or asks the time; the day
+  starts at `ReferenceDayBuilder::day_start`. `just purity` enforces it.
 
-That is `Σ allocated + residual = total` over a day rather than a session, and
-it is the only assertion a fleet run can make that a silent failure cannot
-satisfy. A run asserting "no errors" passes by throwing sessions away.
+## How it works
 
-## What is virtual, and what is not
+### Realistic sessions
 
-The station is imaginary: no socket, no cabinet, no WebSocket. Its
-**signatures are genuine** — a real ECDSA key, over the real payload bytes,
-verified through the same code path a record off a real meter goes through.
+- **Every transaction opens `EVConnected`.** As on a real OCPP 2.0.1 station,
+  the transaction starts with `chargingState = EVConnected` and a
+  `Transaction.Begin` reading, and reports `Charging` 5 seconds to 3 minutes
+  later. That exercises both halves of `[REA 6-A §3.1]` on fast posts: a wait the
+  clock cannot resolve is dropped from the occupancy fee with a note; one it can
+  is billed.
+- **The register belongs to the station.** A meter counts up over its life and a
+  session is the difference of two readings `[OCMF Tab. 7]`, so each station
+  carries its register across sessions rather than resetting to zero.
+- **The charge curve tapers**, so quarter-hour energies are not uniform and the
+  split's interpolation is exercised on non-terminating ratios.
+- **Half the posts are 22 kW, half 150 kW**, offered the same tariff, so the
+  tariff-shape rule can refuse only the fast half.
 
-A simulator whose fixtures are hand-written strings proves that the parser
-accepts what the test author typed. One that signs proves that the chain
-accepts what a station produces.
+### The eight faults
 
-Everything downstream is the real thing too: `emob-ocpp` assembles the session
-from the station's own OCPP transaction events, `emob-eichrecht` verifies,
-`emob-session` splits on the settlement grid, `emob-tariff` prices, `emob-cdr`
-builds and the ledger accepts. Nothing is stubbed.
-
-The OCPP step matters more than it looks. A fleet that built its sessions
-directly from the meter series it had just generated would prove everything
-downstream of a CSMS and nothing about the CSMS itself — so the station emits
-events, the faults land on those events the way they would land on a wire, and a
-dropped record is genuinely absent from the stream. The reconciliation is
-unchanged to the last digit, which is the point: the seam is transparent to the
-arithmetic and now under the same assertion as everything else.
-
-## Every transaction opens `EVConnected`
-
-A real 2.0.1 station opens a transaction with `chargingState = EVConnected` and
-a `Transaction.Begin` reading, and reports `Charging` some seconds later with no
-reading at all. Every simulated session does the same, with a wait drawn from
-five seconds to three minutes, so the fleet exercises both halves of
-`[REA 6-A §3.1]` on every fast post: a wait the clock cannot resolve, which is
-dropped from the occupancy fee with a note, and one it can, which is billed —
-and which is the only thing that lets an unsynchronised clock refuse a session
-on its own. Before the fleet's sessions opened this way, no session ever billed
-a duration and that gate was exercised by nothing.
-
-## The register is the station's, not the session's
-
-A real meter counts up over its whole life, and a session is a *difference*
-between two of its readings `[OCMF Tab. 7]`. So the station carries its register
-across sessions, and the second session on a post starts where the first left
-it. A generator that resets to zero hides an off-by-one nobody would notice.
-
-The charge curve tapers, too — a battery at 80 % takes far less than one at
-20 % — because a session that delivers the same energy every quarter hour makes
-every interpolation exact and every ratio terminate, which is precisely the case
-the split's conservation proof does not need.
-
-## Faults are the point
-
-| Fault | The rule it exercises |
+| Fault | Rule it exercises |
 |---|---|
-| `SubstituteReading` | a meter that invented a value it could not measure `[OCMF Tab. 10]` |
-| `DroppedRecord` | a hole in the pagination that every remaining signature verifies across |
+| `SubstituteReading` | the meter reported a value it could not measure `[OCMF Tab. 10]` |
+| `DroppedRecord` | a gap in the pagination, with every remaining signature valid |
 | `TamperedValue` | a payload byte changed after signing |
-| `UnsynchronisedClock` | the energy bills and the duration does not `[OCMF Tab. 19]` |
+| `UnsynchronisedClock` | energy bills, duration does not `[OCMF Tab. 19]` |
 | `WrongDirectionRegister` | a `C2` export register billed as a draw `[OCMF Tab. 25]` |
-| `ExceptionDuringCharging` | `TX=X`: time and energy unusable from there on |
-| `UnregisteredStation` | a provisioning gap — the commonest unbillable session in the field |
+| `ExceptionDuringCharging` | `TX=X`: time and energy unusable from that point |
+| `UnregisteredStation` | a provisioning gap — the station's key is not in the registry |
 | `UnlawfulTariff` | a tariff the post may not offer at its power `[AFIR Art. 5(4)]` |
 
-Each names a rule this workspace enforces somewhere, and a rule nothing
-exercises is a rule that quietly stops holding. `FaultPlan::everything` is the
-setting a fleet run should use: a run that exercises only the rules somebody
-remembered to list is a run that drifts.
+`UnsynchronisedClock` is the one fault that leaves the **energy** billable,
+which is the distinction Eichrecht (German calibration law) rests on; the
+catalogue makes every fault declare which side it falls on (`Fault::blocks_energy`). Use
+`FaultPlan::everything` for fleet runs, so new rules are exercised without
+anyone remembering to list them.
 
-`UnsynchronisedClock` is the one that leaves the **energy** billable, which is
-the distinction the whole Eichrecht chain is built on — and the fleet asserts
-it, over the catalogue, so a new fault has to declare which side it is on.
+### Telemetry is not money
 
-`UnlawfulTariff` is the one that has nothing to do with the meter, and it is why
-a post carries a rated power. Seven metering faults never once ran the tariff
-shape gate: the energy was measured perfectly, every signature held, and the
-session was priced with whatever tariff the fleet handed it. The fault cannot be
-a property of the tariff either — a per-minute-only tariff is an ordinary product
-— so it is a property of the **pairing**: half the fleet is a 22 kW post and half
-a 150 kW charger, the same tariff is offered to both, and only the fast half is
-refused.
+`ocpp-kit`'s CSMS ledger answers operational questions — did every event
+arrive, was this a retry — and carries meter values as `f64`. No billed
+kilowatt-hour goes through it: the billed value comes from the signed OCMF
+register in exact decimal.
 
-## One seed is one day
+## API at a glance
 
-No entropy source, no clock, no thread-local state, and a `SplitMix64` stream
-rather than a crate whose next release might reorder its output. A fleet run
-that fails once a month for reasons nobody can recreate is worse than no fleet
-run at all.
+| Item | Purpose |
+|---|---|
+| `ReferenceDay`, `ReferenceDayBuilder` | configure (`seed`, `stations`, `sessions_per_station`, `day_start`, `faults`) and `run` a day |
+| `DayOutcome` | `reconciles`, `every_session_is_accounted_for`, `every_refusal_has_a_reason`, `every_record_conserves`, `faults_seen`, `summary` |
+| `Fault`, `FaultPlan`, `Rate` | which faults, how often |
+| `VirtualStation`, `SessionPlan`, `ChargedSession`, `Identification` | one simulated station and its sessions |
+| `Rng` | the deterministic `SplitMix64` stream |
 
-Independent parts of a run draw from **labelled** streams, so adding a draw to
-the station generator does not reshape every session — otherwise a regression
-looks like a change everywhere.
+## Feature flags
 
-## The seam this crate is *not*
+None.
 
-`ocpp-kit`'s CSMS ledger answers an operational question — did every event
-arrive, is the sequence complete, was this a retry — and takes its meter values
-as `f64`. That is right for telemetry and wrong for money, so nothing here
-routes a billed kilowatt-hour through it: **the billed value comes from the
-signed OCMF register**, in exact decimal, and the OCPP ledger's job is to say
-whether anything went missing on the way. The two are complementary and must not
-be confused.
+## Standards and sources
 
-## No I/O, no clock
+- OCMF: `[OCMF Tab. 7]`, `[OCMF Tab. 10]`, `[OCMF Tab. 19]`, `[OCMF Tab. 25]`
+- `[REA 6-A §3.1]` — duration billing and clock synchronisation
+- `[AFIR Art. 5(4)]` — tariff shapes at a given power
+- OCPP 2.0.1 transaction events
 
-Nothing here opens a socket, reads a file or asks the time; the day starts at an
-instant you pass in. `just purity` fails the build if that stops being true.
+## Part of emob
+
+emob is an open-source Rust toolkit for EV charging back offices; this crate
+drives the whole domain chain end to end. Background:
+[Architecture](https://hupe1980.github.io/emob/docs/architecture/) and
+[Eichrecht](https://hupe1980.github.io/emob/docs/eichrecht/) on the site; see
+also the [workspace README](../../README.md).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

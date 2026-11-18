@@ -20,7 +20,11 @@
 //! what came back.
 
 use emob_cdr::{Cdr, CdrKey};
+use std::sync::Arc;
+
+use emob_service::Actor;
 use emob_service::journal::{Folded, Journal, JournalError, Kinded};
+use emob_service::vault::{DataKey, Digest, KeyId};
 
 use crate::{Answer, Consignment, Delivery, DispatchError, Roamd, Verdict};
 
@@ -51,12 +55,13 @@ pub enum Event {
     ///
     /// `CREDENTIALS_TOKEN_A`, which reaches `versions` and `credentials` and
     /// nothing else. Journalled because a node that forgot it cannot complete a
-    /// handshake somebody has already been invited to.
+    /// handshake somebody has already been invited to — as a keyed digest,
+    /// because a journal copy must not be the invitation (SR-044).
     Offered {
         /// The platform it was handed to.
         peer_id: String,
-        /// The token.
-        token: String,
+        /// The token's digest.
+        token: Digest,
     },
     /// A platform completed the credentials handshake.
     Registered {
@@ -123,6 +128,23 @@ pub enum NodeError {
         /// What the journal said when it refused.
         why: String,
     },
+
+    /// The journal does not fold.
+    #[error(transparent)]
+    Fold(#[from] JournalError),
+
+    /// The journal holds tokens under another data key.
+    #[error(
+        "roamd's journal holds credentials under data key {found}, and ROAMD_DATA_KEY is {held}: \
+         with another key no partner's token would authenticate and no record could be pushed, \
+         so roamd does not start — restore the key the journal was written under"
+    )]
+    ForeignKey {
+        /// The key id the journal names.
+        found: KeyId,
+        /// The key id configured.
+        held: KeyId,
+    },
 }
 
 impl From<DispatchError> for NodeError {
@@ -135,6 +157,7 @@ impl From<DispatchError> for NodeError {
 pub struct Node<J: Journal> {
     folded: Folded<Roamd, Event, J>,
     halted: Option<String>,
+    key: Arc<DataKey>,
 }
 
 impl<J: Journal> core::fmt::Debug for Node<J> {
@@ -146,17 +169,34 @@ impl<J: Journal> core::fmt::Debug for Node<J> {
 }
 
 impl<J: Journal> Node<J> {
-    /// Rebuild the node from its journal, around a registry loaded fresh.
+    /// Rebuild the node from its journal, around a registry loaded fresh,
+    /// under the data key its tokens are digested and sealed with.
     ///
     /// # Errors
     ///
-    /// [`JournalError::Broken`] when the journal does not chain, and
-    /// [`JournalError::Encoding`] when it holds a fact this build cannot read.
-    pub fn open(empty: Roamd, journal: J) -> Result<Self, JournalError> {
+    /// [`NodeError::Fold`] when the journal does not chain or holds a fact this
+    /// build cannot read, and [`NodeError::ForeignKey`] when it was written
+    /// under another key.
+    pub fn open(empty: Roamd, journal: J, key: impl Into<Arc<DataKey>>) -> Result<Self, NodeError> {
+        let key = key.into();
+        let folded = Folded::open(empty, journal, Roamd::apply)?;
+        if let Some(found) = folded.state().peers().foreign_key(&key) {
+            return Err(NodeError::ForeignKey {
+                found,
+                held: key.id().clone(),
+            });
+        }
         Ok(Self {
-            folded: Folded::open(empty, journal, Roamd::apply)?,
+            folded,
             halted: None,
+            key,
         })
+    }
+
+    /// The data key tokens are digested and sealed under.
+    #[must_use]
+    pub fn key(&self) -> Arc<DataKey> {
+        Arc::clone(&self.key)
     }
 
     /// The folded node, for every question that does not change it.
@@ -184,8 +224,8 @@ impl<J: Journal> Node<J> {
         }
     }
 
-    fn commit(&mut self, event: &Event, key: &str) -> Result<(), NodeError> {
-        match self.folded.note(event) {
+    fn commit(&mut self, by: &Actor, event: &Event, key: &str) -> Result<(), NodeError> {
+        match self.folded.note(by, event) {
             Ok(_) => Ok(()),
             Err(source) => {
                 self.halted = Some(source.to_string());
@@ -206,6 +246,7 @@ impl<J: Journal> Node<J> {
     /// [`NodeError::Journal`] where the decision could not be recorded.
     pub fn consign(
         &mut self,
+        by: &Actor,
         cdr: &Cdr,
         token: &emob_roam::RoamingToken,
         context: Option<&emob_roam::ocpi::cdr::Context<'_>>,
@@ -240,6 +281,7 @@ impl<J: Journal> Node<J> {
             }
         };
         self.commit(
+            by,
             &Event::Consigned {
                 consignment: Box::new(consignment),
                 document,
@@ -257,6 +299,7 @@ impl<J: Journal> Node<J> {
     /// [`NodeError::Journal`] where the acceptance could not be recorded.
     pub fn accepted(
         &mut self,
+        by: &Actor,
         key: &CdrKey,
         at: time::OffsetDateTime,
         location: Option<String>,
@@ -266,6 +309,7 @@ impl<J: Journal> Node<J> {
             .state_mut()
             .accepted(key, at, location.clone())?;
         self.commit(
+            by,
             &Event::Delivered {
                 key: key.clone(),
                 delivery: Delivery::Accepted { at, location },
@@ -282,6 +326,7 @@ impl<J: Journal> Node<J> {
     /// accepted, and [`NodeError::Journal`] otherwise.
     pub fn refused(
         &mut self,
+        by: &Actor,
         key: &CdrKey,
         at: time::OffsetDateTime,
         reason: impl Into<String>,
@@ -290,6 +335,7 @@ impl<J: Journal> Node<J> {
         let reason = reason.into();
         self.folded.state_mut().refused(key, at, reason.clone())?;
         self.commit(
+            by,
             &Event::Delivered {
                 key: key.clone(),
                 delivery: Delivery::Refused { at, reason },
@@ -303,13 +349,18 @@ impl<J: Journal> Node<J> {
     /// # Errors
     ///
     /// [`NodeError::Journal`] where the offer could not be recorded.
-    pub fn offer(&mut self, peer_id: &str, token: &str) -> Result<(), NodeError> {
+    pub fn offer(&mut self, by: &Actor, peer_id: &str, token: &str) -> Result<(), NodeError> {
         self.guard()?;
-        self.folded.state_mut().peers_mut().offer(peer_id, token);
+        let digest = self.key.digest(crate::peering::INCOMING, token.as_bytes());
+        self.folded
+            .state_mut()
+            .peers_mut()
+            .offer(peer_id, digest.clone());
         self.commit(
+            by,
             &Event::Offered {
                 peer_id: peer_id.to_owned(),
-                token: token.to_owned(),
+                token: digest,
             },
             peer_id,
         )
@@ -324,6 +375,7 @@ impl<J: Journal> Node<J> {
     /// reproduce is one a partner will present to a `401`.
     pub fn register(
         &mut self,
+        by: &Actor,
         registration: crate::peering::Registration,
     ) -> Result<(), NodeError> {
         self.guard()?;
@@ -333,6 +385,7 @@ impl<J: Journal> Node<J> {
             .peers_mut()
             .register(registration.clone());
         self.commit(
+            by,
             &Event::Registered {
                 registration: Box::new(registration),
             },
@@ -345,10 +398,11 @@ impl<J: Journal> Node<J> {
     /// # Errors
     ///
     /// [`NodeError::Journal`] where the removal could not be recorded.
-    pub fn unregister(&mut self, peer_id: &str) -> Result<(), NodeError> {
+    pub fn unregister(&mut self, by: &Actor, peer_id: &str) -> Result<(), NodeError> {
         self.guard()?;
         self.folded.state_mut().peers_mut().unregister(peer_id);
         self.commit(
+            by,
             &Event::Unregistered {
                 peer_id: peer_id.to_owned(),
             },
@@ -376,13 +430,14 @@ impl<J: Journal> Node<J> {
     /// [`NodeError::Journal`] where the answer could not be recorded.
     pub fn answered(
         &mut self,
+        by: &Actor,
         key: &CdrKey,
         answer: &Answer,
         at: time::OffsetDateTime,
     ) -> Result<(), NodeError> {
         match answer {
-            Answer::Accepted { location } => self.accepted(key, at, location.clone()),
-            Answer::Refused { reason } => self.refused(key, at, reason.clone()),
+            Answer::Accepted { location } => self.accepted(by, key, at, location.clone()),
+            Answer::Refused { reason } => self.refused(by, key, at, reason.clone()),
             Answer::Unreached { .. } => Ok(()),
         }
     }
@@ -401,6 +456,7 @@ impl<J: Journal> Node<J> {
     /// nothing about this node changed.
     pub fn receive(
         &mut self,
+        by: &Actor,
         from: &emob_service::Principal,
         document: &ocpi_kit::v2_3_0::Cdr,
         evidence: Option<emob_cdr::EvidenceRef>,
@@ -419,6 +475,7 @@ impl<J: Journal> Node<J> {
                 .state_mut()
                 .hold_received(document.id.as_str().to_owned(), kept.clone());
             self.commit(
+                by,
                 &Event::Received {
                     cdr: Box::new(cdr),
                     document: Some(kept),
@@ -441,12 +498,15 @@ impl Roamd {
                 if let Some(document) = document {
                     self.outbox.insert(consignment.key.clone(), *document);
                 }
-                self.outbound.insert(consignment.key.clone(), *consignment);
+                let key = consignment.key.clone();
+                self.outbound.insert(key.clone(), *consignment);
+                self.reindex(&key);
             }
             Event::Delivered { key, delivery } => {
                 if let Some(consignment) = self.outbound.get_mut(&key) {
                     consignment.delivery = delivery;
                 }
+                self.reindex(&key);
             }
             Event::Offered { peer_id, token } => self.peers.offer(peer_id, token),
             Event::Registered { registration } => self.peers.register(*registration),

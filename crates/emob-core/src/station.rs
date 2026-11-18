@@ -1412,6 +1412,57 @@ pub struct ChargePointProfile {
     /// What `[38k §6(3)]` asks before its kilowatt-hours count towards the
     /// greenhouse-gas quota.
     pub quota: QuotaPosture,
+    /// Whether it feeds back, and under which `MiSpeL` Formelsatz the fed-back
+    /// energy is told apart from the drawn `[MiSpeL A1 3.2.5]`.
+    ///
+    /// Defaulted on read, because a profile journalled before 21.10.2026 said
+    /// nothing about it and meant "not bidirectional".
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub mispel: MispelPosture,
+}
+
+/// Which of Anlage 1's Formelsätze, with its Messkonzept, a bidirectional
+/// charging site is settled under (Bundesnetzagentur 618-25-02).
+///
+/// Only the two a charge point without a stationary store can be in: **A2**
+/// "Ladepunkt" with the grid meter Z1 and the meter Z2 behind the points
+/// `[MiSpeL A1 4.1.2]`, and its simplified alternative **A11** with Z1 alone,
+/// open only where no other generation sits behind the connection
+/// `[MiSpeL A1 10.3.1]`. The choice is binding and changes at the earliest for
+/// the next calendar year `[MiSpeL A1 3.2.3]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Formelsatz {
+    /// Basisfall A2 — Z1 and Z2, formulas (1)–(21).
+    A2,
+    /// Sonderfall A11 — Z1 only, formulas (16)A11–(21)A11.
+    A11,
+}
+
+impl core::fmt::Display for Formelsatz {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::A2 => "A2",
+            Self::A11 => "A11",
+        })
+    }
+}
+
+/// What `MiSpeL` asks of a point before its fed-back energy is relieved of
+/// levies — an entitlement forgone, not a duty breached.
+///
+/// A unidirectional point is ordinary consumption to the Festlegung
+/// `[MiSpeL A1 3.2.5]` and asks nothing, which is what the default says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MispelPosture {
+    /// Whether energy can be fed back from a vehicle through the point.
+    pub bidirectional: bool,
+    /// The Formelsatz its site is settled under, if one is approved.
+    pub formelsatz: Option<Formelsatz>,
+    /// Whether the grid and metering operators consented — what the rules
+    /// need until 30.09.2027 `[MiSpeL Tenor 9]`.
+    pub operator_consent: bool,
 }
 
 impl ChargePointProfile {
@@ -1750,6 +1801,7 @@ impl ChargePointProfile {
             registration: Registration::default(),
             metering: MeteringPosture::default(),
             quota: QuotaPosture::default(),
+            mispel: MispelPosture::default(),
         }
     }
 }

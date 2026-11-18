@@ -1,17 +1,34 @@
 +++
 title = "emob"
 template = "index.html"
-description = "Open-source EV charging operations for Europe — CPO and eMSP in one Rust workspace. Signed meter values, exact settlement, AFIR and Eichrecht as code."
+description = "Open-source EV charging software for Europe: CSMS and eMSP back office in Rust — OCPP 2.1, OCPI 2.3.0, Eichrecht-verified billing, AFIR compliance as code."
 +++
 
-Someone plugs in a car. Four minutes later a number exists that two companies
-will settle against, a tax authority may examine, and a driver may dispute two
-years from now. Between the plug and that number sit a meter under calibration
-law, a station protocol, a roaming hub, a tariff, and a dozen European duties
-with dates attached.
+## Why emob
 
-Most charging platforms treat that chain as plumbing. emob treats it as the
-product.
+Someone plugs in a car. Minutes later a number exists that two companies will
+settle against, a tax authority may examine, and a driver may dispute two years
+from now. Between the plug and that number sit a calibrated meter, a station
+protocol, a roaming hub, a tariff and a dozen European duties with dates
+attached. Most charging platforms treat that chain as plumbing. **emob treats it
+as the product.**
+
+<div class="features">
+<a class="feature" href="docs/eichrecht/"><h3>Eichrecht, verified end to end</h3><p>Every OCMF signed meter value is checked against a registered key, the session's records are checked for gaps, and a value that fails never reaches an invoice — with the reason attached.</p></a>
+<a class="feature" href="docs/pricing/"><h3>One price, everywhere</h3><p>The tariff that rates a session is the one shown on the station (OCPP 2.1), sent to roaming partners (OCPI) and published to the national access point (DATEX II). Display and bill cannot disagree.</p></a>
+<a class="feature" href="docs/settlement/"><h3>Money is never a float</h3><p>Exact decimals throughout, a quarter-hour split that conserves every watt-hour, and invoice lines that explain their own amounts — out to EN 16931 and SEPA.</p></a>
+<a class="feature" href="docs/compliance/"><h3>Compliance is a query</h3><p>AFIR, its delegated act on ISO 15118, the Ladesäulenverordnung, PAngV, NIS2 and the Cyber Resilience Act as dated, cited duties — assessed per charge point, provider and company.</p></a>
+<a class="feature" href="docs/roaming/"><h3>Roaming without silent loss</h3><p>OCPI 2.3.0 and 2.2.1 both ways, OICP 2.3 through Hubject. Every translation returns the record and an account of what the crossing cost.</p></a>
+<a class="feature" href="docs/architecture/"><h3>Replayable by design</h3><p>Domain crates read no clock and open no socket. A dispute about a two-year-old session is answered by replaying the check exactly as it ran.</p></a>
+</div>
+
+Also inside: [Plug & Charge for ISO 15118-2 and -20](@/docs/plug-and-charge.md) ·
+[§ 14a smart charging](@/docs/smart-charging.md) ·
+[MiSpeL for bidirectional charging](@/docs/bidirectional.md) ·
+[AFIR data and the Mobilithek feed](@/docs/locations.md) ·
+THG-Quote filing.
+
+## How a charging session becomes an invoice
 
 ```mermaid
 flowchart LR
@@ -21,196 +38,101 @@ flowchart LR
     EICH -->|"verified, or a reason"| CDR
     SES -->|"quarter-hour split"| CDR["CDR<br/>energy + price"]
     TAR["tariff"] --> CDR
-    CDR -->|"OCPI"| ROAM["roaming<br/>partner"]
-    CDR --> INV["invoice"]
+    CDR -->|"OCPI / OICP"| ROAM["roaming<br/>partner"]
+    CDR --> INV["e-invoice<br/>SEPA"]
     TAR -->|"OCPP 2.1"| CS
     TAR -->|"DATEX II"| NAP["national<br/>access point"]
-    RULES["obligation<br/>calendar"] -.->|"dated · cited"| CS
+    RULES["compliance<br/>calendar"] -.->|"dated · cited"| CS
     RULES -.-> TAR
 
     classDef hot fill:#b8410f22,stroke:#b8410f
     class EICH,CDR hot
 ```
 
-Every arrow is a place a kilowatt-hour can quietly become the wrong number. The
-pages below are mostly about the arrows.
+A charge point streams the session over OCPP; its meter signs each reading in
+OCMF. emob verifies the signatures, splits the energy into the quarter hours the
+market settles on, prices it with the tariff, and produces a charge detail
+record (CDR) — the document two companies settle against. From there it goes to
+roaming partners, to the invoice and to the books. Every arrow is a place a
+kilowatt-hour can quietly become the wrong number; each one has a test.
 
-## Evidence you can defend two years later
+## Four questions before a kilowatt-hour bills
 
-<div class="cards">
-<div class="card"><h3>A value that does not verify does not bill</h3><p>German law lets you invoice a measured value only if the customer can check it, long after the session. Here that is a property of the type system: the only route to a billable quantity returns nothing at all when anything is wrong — a bad signature, an unregistered key, a substitute reading, a deleted record.</p></div>
-<div class="card"><h3>Parsed without being destroyed</h3><p>An OCMF signature covers the payload bytes <em>as written</em>. A parser that deserialises and re-serialises to verify has already lost: key order, whitespace and number formatting each change the hash. The format is the <a href="https://crates.io/crates/ocmf"><code>ocmf</code></a> crate’s, written against all 256 records of the S.A.F.E. reference corpus with OpenSSL as an independent oracle — so “the signature holds” means what it says.</p></div>
-<div class="card"><h3>Signatures cannot see a deletion</h3><p>Drop the middle records of a charging session and every remaining signature still verifies. The specification assigns that check to a separate component — contiguous pagination, a begin marker, an end marker — and it is asked as its own question with its own answer, apart from “did this key sign these bytes”.</p></div>
-<div class="card"><h3>A chain proves four things</h3><p>Energy, duration, identity and direction are separate claims with separate fields. A session on an unsynchronised clock has a register an invoice may use and a duration it may not — so a per-kWh tariff bills it and a per-minute occupancy fee is refused by name. A record reporting that the certificate did not check out blocks both: the energy was measured, and there is nobody provably behind it.</p></div>
-<div class="card"><h3>Import and export never net, and the register says so</h3><p>OCMF reserves an OBIS range that states which way a register measured — <code>B*</code> drawn, <code>C*</code> fed back. Carrying that as an opaque string and taking the direction from somewhere else is how a V2G discharge gets billed as consumption with nothing downstream noticing. Here the code is read, and a record that claims the other direction is refused.</p></div>
-<div class="card"><h3>The customer can repeat the check</h3><p>German law does not require a measured value to be <em>correct</em>. It requires the affected party to be able to <strong>check</strong> it — so a platform that verifies internally and reports “verified” has satisfied nobody. The deliverable is a file the independent S.A.F.E. verifier reads: each record verbatim beside the key it was checked against, and emitted whether or not the session bills, because a dispute is exactly when it matters.</p></div>
-</div>
-
-## Arithmetic that adds up
-
-<div class="cards">
-<div class="card"><h3>Money is never a float</h3><p>Every quantity here either is money or becomes money. A build guard fails on an <code>f32</code> or <code>f64</code> anywhere — including a late <code>from_f64</code>, because a float converted at the boundary is still a float that was wrong at the source.</p></div>
-<div class="card"><h3>Scale is a claim about accuracy</h3><p>A register reporting <code>2935.600 kWh</code> is stating three decimals of resolution. Rewriting it as <code>2935.6</code> discards something the meter said about itself — which OCMF forbids in as many words. Nothing here strips a trailing zero, and even <code>Wh → kWh</code> moves the point rather than dividing.</p></div>
-<div class="card"><h3>The quarter-hour split conserves exactly</h3><p>A session from 10:01 to 10:22 must be settled against two quarter hours, and the boundary falls two thirds of the way through. Computing each slot independently leaves a sum that misses the total, and the usual fix shoves the remainder into the last slot — misattributing energy to whoever held it. Taking differences of cumulative boundaries makes the sum telescope instead: exact, always, whatever the ratio.</p></div>
-<div class="card"><h3>The split that conserves is the input that prices</h3><p>“The first 10 kWh at 0.39, the rest at 0.59” is a condition on how much has been delivered <em>so far</em>. Rated against the session total instead, a 30 kWh session reprices all thirty at 0.59 — including the ten the driver was quoted at 0.39. Rating walks the record’s own quarter hours, and cuts a period wherever a threshold falls inside it — the wall clock and the local midnight a weekday rate turns on included — so the answer never depends on how the session was sliced.</p></div>
-<div class="card"><h3>Every line explains its own amount</h3><p>One line per distinct price that applied, each reproducing its total from its own quantity and unit price, plus at most one visible adjustment for a minimum or a maximum. There is no term in a total that is not one of those two things, so “why is this €14.46” is answered by reading the record rather than by re-deriving it.</p></div>
-<div class="card"><h3>Tax is a breakdown, not a number</h3><p>Electricity and a service fee can sit in different VAT categories, and a European e-invoice wants the taxable amount per rate. One dimension charged at two prices can span two categories, so the breakdown is per rate and per dimension — reading one rate off the first line taxes the second tier at the first tier’s rate.</p></div>
-</div>
-
-## One price, three audiences
-
-A CPO states its ad-hoc price to three parties, and each is a duty with its own
-citation: the **driver at the point**, before they start; the **roaming partner**
-who will settle against it; and the **national access point**, free of charge.
-Almost every stack computes that number three times, in three systems, and
-reconciles none of them against the invoice.
-
-```mermaid
-flowchart LR
-    T["one Tariff<br/>the object that rates"]
-    T -->|"OCPP 2.1<br/>SetDefaultTariff"| A["the driver,<br/>at the point"]
-    T -->|"OCPI 2.3.0"| B["the roaming<br/>partner"]
-    T -->|"DATEX II"| C["the national<br/>access point"]
-    T --> D["the invoice"]
-
-    classDef one fill:#b8410f22,stroke:#b8410f
-    class T one
-```
-
-Here the three crossings read one object — the same one that rates the CDR — so
-there is nothing to drift from, and a test asserts the three read one decimal.
-Where a wire cannot state the price exactly the crossing **refuses** rather than
-rounding: OCPP 2.1 quotes time by the minute, and an ordinary €2.50-an-hour
-occupancy fee has no exact per-minute decimal, so it has no honest representation
-on the screen the regulation actually names.
-
-## A rulebook the code actually consults
-
-<div class="cards">
-<div class="card"><h3>Compliance is a query, and it looks forward</h3><p>“Are we AFIR-ready for 2027?” is normally a consulting engagement. Here it is a function call against a calendar of dated, cited duties — and because every duty carries the date it begins binding, one that has not started yet is judged <em>at its own commencement date</em> against the estate as it stands. A point that will fail on 1 January is a firmware programme now rather than an enforcement letter later. A build guard fails if a rule cites a document the source index cannot produce.</p></div>
-<div class="card"><h3>Applicability is not failure</h3><p>A private depot is not <em>failing</em> the ad-hoc payment duty; the duty does not bind it. A free charger owes no payment instrument and no dynamic data — the same words appear in two articles. A 2019 point is outside the 2027 ISO 15118-20 duty because the Annex binds points <em>installed or renovated from</em> that date. Merging exemptions with real breaches is how compliance dashboards come to be ignored.</p></div>
-<div class="card"><h3>A duty knows which of three subjects it binds</h3><p>Article 5(5) binds the mobility service provider, not the point. The NIS2 energy annex names charge point operators by role and asks nothing about a point at all — size, governance, whether an early warning can leave the building inside a day. An operator whose every point is faultless can be in breach as a provider, and in breach again as a company.</p></div>
-<div class="card"><h3>A directive is not a regulation</h3><p>NIS2 told Member States to apply its rules from October 2024; a directive binds nobody directly, and the German transposition came into force in December 2025. The Cyber Resilience Act beside it applies on its own dates in every Member State. Treating “the EU date” as one thing reports a breach in months when no authority could act.</p></div>
-</div>
-
-## Built to be replayed
-
-<div class="cards">
-<div class="card"><h3>Nothing reads a clock</h3><p>The domain crates take time and keys as arguments. A dispute about a session from two years ago is answered by replaying the check exactly as it ran — and a build guard fails if a domain crate ever reaches for the ambient world.</p></div>
-<div class="card"><h3>A hundred stations, and nothing unaccounted for</h3><p>A deterministic fleet runs four hundred sessions from one seed, with virtual stations that sign genuine OCMF and a catalogue of seeded faults. Every kilowatt-hour is either settled or refused with a reason, and the two columns add up to the metered total exactly — because the arithmetic is exact decimal all the way down.</p></div>
-<div class="card"><h3>A crossing has a cost, and it is written down</h3><p>Carrying a record onto somebody else’s model is not a re-encoding: something is rounded, collapsed, or has no field to live in. Every translation returns the value <em>and</em> the account of what it cost, by JSON pointer into the document the recipient will be reading. Disputes are settled with that account.</p></div>
-</div>
-
-## One session, end to end
-
-A charging session leaves behind a handful of OCMF records. Turning them into a
-number worth invoicing means answering four questions that are usually
-conflated, and answering them in order:
-
-```rust
-let records = raw.iter().map(|r| ocmf::Record::parse(r)).collect::<Result<Vec<_>, _>>()?;
-let evidence = Evidence::assemble(&records, &registry, session_start);
-
-match evidence.billable_energy() {
-    Some(energy) => println!("bill {energy}"),   // 29.500 kWh
-    None => for reason in evidence.reasons() {
-        eprintln!("blocked: {reason}");
-        // record 2: the signature does not match the payload
-        // pagination went 1 → 3 at record 1: a record was removed or reordered
-        // record 2 reports meter state S (SUBSTITUTE)
-    },
-}
-```
+German calibration law lets you invoice a measured value only if the customer
+can check it, long after the session `[MessEG §33]`. emob asks four separate
+questions, in order, and answers each on its own:
 
 | Question | Answered by |
 |---|---|
-| Did *this key* produce *these bytes*? | the ECDSA verification |
-| Is this key *this charge point's* key? | the out-of-band key registry |
-| Are any records missing from the session? | the chain validator |
-| May these readings be billed at all? | the meter state and error flags |
+| Did *this key* produce *these bytes*? | ECDSA verification over the bytes as written |
+| Is it *this charge point's* key? | an out-of-band key registry with validity windows |
+| Is any record missing from the session? | the chain validator: pagination and begin/end markers |
+| May these readings be billed at all? | the meter's state and error flags |
 
-The registry is the one most often skipped. A verifier that takes the public key
-from the record it is checking has verified nothing at all — so keys arrive from
-type approval documents or provisioning, never from a record, and they carry
-validity windows so that a meter exchanged in June does not make January's
-sessions unverifiable.
+The driver gets the evidence too: a transparency file the independent S.A.F.E.
+verifier reads, emitted whether or not the session bills — because a dispute is
+exactly when it matters. [Read the Eichrecht guide →](@/docs/eichrecht.md)
+
+## The European rulebook, with dates
+
+| Date | Rule | In emob |
+|---|---|---|
+| 14 Apr 2026 | AFIR Art. 20: static and dynamic data as DATEX II via the Mobilithek | ✅ feed generated · ⏳ push |
+| 11 Sep 2026 | Cyber Resilience Act: vulnerability reporting | ✅ assessed per company |
+| 21 Oct 2026 | BNetzA MiSpeL: levy relief for bidirectional charging points | ✅ month and year netted · two entitlements |
+| 1 Jan 2027 | ISO 15118-20 on new public points (Delegated Regulation 2025/656) | ✅ duty modelled · -2 and -20 contract chains validated under named roots |
+| 1 Jan 2027 | AFIR card payment at existing ≥ 50 kW TEN-T points | ✅ duty modelled |
+| 1 Jan 2027 | German B2B e-invoices issued for turnover above €800k | ✅ EN 16931 / XRechnung in UBL and CII · invoice page · signed handover |
+| 10 Oct 2028 | EU measuring-instruments rules cover charging equipment | 📐 tracked |
+
+[How compliance is modelled →](@/docs/compliance.md)
+
+## See it run: the operator page and the driver receipt
+
+`just demo` starts the whole estate on your machine in one command — every
+daemon, three simulated stations on OCPP 1.6, 2.0.1 and 2.1, an OCPI roaming
+partner and a seeded morning of sessions — and prints two links worth opening.
+
+<div class="shots">
+<figure>
+<picture><source media="(prefers-color-scheme: dark)" srcset="img/heute-dark.webp"><img src="img/heute-light.webp" width="1280" height="800" loading="lazy" alt="Heute, the operator page: a 77.8 % charging success rate, its causes, the weakest charge points, a refused session with the paragraph that refused it, and an invoice awaiting acceptance"></picture>
+<figcaption><strong>Heute</strong> — what needs a person today, headed by the charging success rate counted from the ledger that bills. <a href="docs/run-the-estate/">The operator page →</a></figcaption>
+</figure>
+<figure>
+<picture><source media="(prefers-color-scheme: dark)" srcset="img/receipt-dark.webp"><img src="img/receipt-light.webp" width="390" height="844" loading="lazy" alt="A driver receipt on a phone: measured, signed, verified — 26.984 kWh, 22 minutes, 13.22 euros, with the price line and the meter key"></picture>
+<figcaption><strong>The receipt</strong> — the verdict, the energy, the price and the meter key, checked on the driver's phone. <a href="docs/run-the-estate/#the-driver-receipt">The receipt →</a></figcaption>
+</figure>
+</div>
 
 ## Where it stands
 
-Fifteen domain crates are real, tested and green — `emob-core`,
-`emob-eichrecht`, `emob-session`, `emob-cdr`, `emob-tariff`, `emob-ocpp`,
-`emob-poi`, `emob-roam`, `emob-billing`, `emob-thg`, `emob-smart`,
-`emob-eebus`, `emob-pnc`, `emob-service` and `emob-sim` — with eight daemons on
-top of them and **1075 tests**. The domain crates do no I/O, read no clock and
-hold no binary floats.
+**✅ Release 0.3 — a journal you can trust, and ready for 2027.** Nine daemons
+start from one `estate.toml`. Stations connect to `csmsd` over OCPP with
+security profiles 1–3 and TLS; `empd` answers every authorisation, failing
+closed; sessions are journalled (sealed under a per-daemon data key), billed by
+`billd` into a monthly EN 16931 invoice and pushed to roaming partners by
+`roamd` over OCPI. The operator works from **Heute**, the driver checks a
+**receipt** in the browser, and releases are signed and attested. New in 0.3:
 
-What that buys, concretely:
+- every journal fact names its **actor**, logs are JSON with request ids, and
+  each journal **signs its head** for a **witness** (`emob witness`, and a
+  section on Heute); a daemon refuses to start from a journal shorter than its
+  signed head;
+- the **MiSpeL month** for bidirectional points, and two calendar entries;
+- **ISO 15118-20** contract chains under named roots;
+- the **invoice page** with its XRechnung / EN 16931 files and signed delivery
+  to the operator's ERP or Peppol provider;
+- an **accessibility check** on every page in CI, the receipt link on the
+  station's display (opt-in), and a Docker-only `just demo`.
 
-- a genuinely signed session runs from the meter to a taxable amount and back
-  out as a file the driver's own verifier reads — including a record this
-  workspace did not write, from a real German meter, checked against the key it
-  is published with;
-- the same session settles at the **same money** over self-roaming, OCPI 2.3.0
-  and OCPI 2.2.1, each crossing reporting what it cost, and the record a partner
-  receives is one this stack reads back into its own model — and it crosses
-  **Hubject** on OICP 2.3 with its energy, its evidence and its identity, where
-  the price does not cross at all and the crossing says so;
-- the tariff that priced it reaches the charge point's own screen over OCPP 2.1,
-  a partner over OCPI and the national access point over DATEX II, and a test
-  asserts the three read one decimal;
-- the sessions `[OCPI 2.3.0]` walks through in prose — its `step_size`
-  transitions, its price limits, its reservations — price to the totals its own
-  breakdown tables publish;
-- a month closes: the same records become an EN 16931 invoice whose subtotals
-  reproduce its own lines, a SEPA collection that draws the total to the cent
-  and postings that balance — with the rounding stated rather than absorbed, and
-  a cross-border settlement taxed where the reseller is established rather than
-  where the charge point stands;
-- the closing itself is a decision rather than a batch: the invoice number is
-  spent once, a period that has been closed is not closed again, a re-rated month
-  cancels before it re-bills, nothing reaches the books until the recipient's
-  platform has accepted the document — and a correction chain holds **one**
-  invoice in the books at a time, whichever end of it is posted first, which is
-  the property a generated sequence of calls checks after every one of them;
-- the year's greenhouse-gas quota is filed from the same records, by both the
-  routes the Verordnung gives — a public point's metered kilowatt-hours and a
-  depot's registered vehicles — and a point that fails one of the four conditions
-  between a kilowatt-hour and the quota is refused by name rather than missing
-  from the file;
-- a hundred-station fleet run reconciles exactly;
-- every one of those decisions survives the process that made it: the four
-  daemons that hold a ledger fold it from a hash-chained journal, so a restart
-  is a replay — and a journal somebody edited stops the daemon rather than being
-  folded into a past it cannot account for;
-- a partner **registers** with this node through the module OCPI makes mandatory
-  of every implementation, and from that moment a record leaves for it over a
-  real socket — with the seal `[OCPI 2.3.0]` puts on a sent CDR written **after**
-  the answer, and a partner's refusal told apart from a partner nobody reached,
-  because only one of them means the record is not coming back;
-- a § 14a setpoint arrives as a **real SPINE datagram**, binds the allocation as
-  an exact decimal, and leaves as an OCPP charging profile at the one purpose a
-  market optimiser cannot outrank — while the site holds the minimum draw the
-  Festlegung guarantees even after the control box goes silent;
-- a Plug & Charge contract authorises a session that settles, with the identifier
-  read **off the certificate** and the meter's own signed record stating the same
-  strength of assignment — neither side told the other's answer. A contract from
-  a second ecosystem validates impeccably in the pool that minted it and reaches
-  nothing in this one;
-- a roaming peer's credential reaches its own party's records and no others, and
-  the advisory plane beside the daemons **cannot move money** — its output type
-  is a leaf nothing consumes, and its principal cannot hold a capability that
-  writes.
+**✅ Underneath:** fifteen domain crates — Eichrecht verification, sessions and
+the quarter-hour split, CDRs, tariffs, OCPP, OCPI and OICP crossings, AFIR data,
+EN 16931 invoices and SEPA, THG-Quote, § 14a, Plug & Charge — each with no I/O,
+no clock and no binary floats.
 
-What is not built: the clients for four of the five outbound wires — the
-Mobilithek snapshot, the tariff push to a 2.1 estate, the SHIP session and the
-OICP broker — the OPCP pool client, the availability reporting service, and
-eMIP. Every page here marks ✅ built and 📐 designed, and the gap between the two
-is never blurred.
+**⏳ Next:** the OICP and national-access-point push clients, SEPA runs from
+`billd`, the SHIP/EEBUS session for § 14a, and MiSpeL on Heute once a
+grid-meter series reaches the estate.
 
-<div class="cta">
-
-[Get started](@/docs/getting-started.md)
-[Read the docs](@/docs/_index.md)
-[GitHub](https://github.com/hupe1980/emob)
-
-</div>
+Every page in these docs marks what is ✅ built, ⏳ next and 📐 designed, and
+never blurs the difference. [Run the estate →](@/docs/run-the-estate.md)

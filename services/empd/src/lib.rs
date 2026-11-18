@@ -56,8 +56,20 @@
 #![warn(missing_docs, clippy::pedantic)]
 
 pub mod book;
+pub mod daemon;
+pub mod http;
+pub mod seed;
 
 pub use book::{Book, BookError, Event};
+
+use std::sync::Arc;
+
+use emob_service::vault::{DataKey, KeyId, Sealed};
+
+/// The purpose a uid is sealed for.
+const UID: &str = "empd/uid";
+/// The purpose a token reference is derived for.
+const REFERENCE: &str = "empd/token-ref";
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -268,8 +280,10 @@ impl Contract {
 pub struct Token {
     /// The contract it bills against.
     pub contract: ContractId,
-    /// The uid OCPI requires, and a session deliberately does not hold.
-    pub uid: String,
+    /// The uid OCPI requires, and a session deliberately does not hold —
+    /// sealed under `EMPD_DATA_KEY`, so the journal never holds it in clear and
+    /// destroying the key erases it (SR-046).
+    pub uid: Sealed,
     /// What the driver holds up.
     pub token_type: TokenType,
     /// How an operator holding it in a list may treat it.
@@ -410,6 +424,16 @@ pub enum ProviderError {
         contract: String,
     },
 
+    /// A token whose uid was sealed under a data key this provider no longer
+    /// holds: erased, by destroying the key (SR-046).
+    #[error(
+        "token {token} was erased: its uid is sealed under a key this provider no longer holds"
+    )]
+    Erased {
+        /// Its reference.
+        token: String,
+    },
+
     /// A token was presented that this provider never issued.
     #[error("token {token} was not issued by this provider")]
     UnknownToken {
@@ -523,8 +547,8 @@ pub struct Empd {
     /// over. Every other ledger in this workspace is keyed by the thing it
     /// holds; this one was keyed by the contract (D309).
     unbilled: BTreeMap<String, BTreeMap<String, Money>>,
-    /// The key the token store is hashed under.
-    key: Vec<u8>,
+    /// The key token references are derived under and UIDs sealed under.
+    key: Arc<DataKey>,
     /// The operators whose meters this provider bills on and from whom it holds
     /// the `[MessEG §33(2)]` confirmation.
     ///
@@ -545,14 +569,14 @@ impl Empd {
     /// by anybody holding the crate is one where a UID can be confirmed by
     /// guessing, which is the privacy property [`TokenRef`] exists for.
     #[must_use]
-    pub fn new(me: PartyId, key: impl Into<Vec<u8>>) -> Self {
+    pub fn new(me: PartyId, key: DataKey) -> Self {
         Self {
             me,
             contracts: BTreeMap::new(),
             tokens: BTreeMap::new(),
             markups: BTreeMap::new(),
             unbilled: BTreeMap::new(),
-            key: key.into(),
+            key: Arc::new(key),
             confirmations: BTreeSet::new(),
         }
     }
@@ -633,7 +657,7 @@ impl Empd {
             reference.as_str().to_owned(),
             Token {
                 contract: contract.clone(),
-                uid,
+                uid: self.key.seal_str(UID, &uid),
                 token_type,
                 whitelist,
                 blocked: false,
@@ -686,9 +710,17 @@ impl Empd {
                 .ok_or_else(|| ProviderError::UnknownToken {
                     token: token.as_str().to_owned(),
                 })?;
+        // A uid sealed under a key this provider no longer holds was erased on
+        // purpose: the token exists in the history and cannot be presented.
+        let uid = self
+            .key
+            .open_str(UID, &stored.uid)
+            .map_err(|_| ProviderError::Erased {
+                token: token.as_str().to_owned(),
+            })?;
         Ok(RoamingToken::new(
             self.me.clone(),
-            stored.uid.clone(),
+            uid,
             stored.token_type,
             stored.contract.clone(),
         )?)
@@ -1050,14 +1082,26 @@ impl Empd {
         Allowed::Allowed
     }
 
-    /// The keyed digest a session may hold in place of a uid.
-    fn reference_for(&self, uid: &str) -> TokenRef {
-        use sha2::{Digest as _, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&self.key);
-        hasher.update(uid.as_bytes());
-        TokenRef::new(hex::encode(hasher.finalize()))
-            .unwrap_or_else(|_| unreachable!("a SHA-256 digest is 64 lowercase hex characters"))
+    /// Every token this provider issued, by the reference a session holds.
+    pub fn tokens(&self) -> impl Iterator<Item = (&str, &Token)> {
+        self.tokens
+            .iter()
+            .map(|(reference, token)| (reference.as_str(), token))
+    }
+
+    /// The keyed digest a session may hold in place of a uid — what a uid
+    /// presented at a station is looked up by: HMAC-SHA256 under the data
+    /// key's digest subkey (SR-047), whose id [`Self::key_id`] names.
+    #[must_use]
+    pub fn reference_for(&self, uid: &str) -> TokenRef {
+        TokenRef::new(self.key.digest(REFERENCE, uid.as_bytes()).hex())
+            .unwrap_or_else(|_| unreachable!("an HMAC-SHA256 is 64 lowercase hex characters"))
+    }
+
+    /// The id of the key references are derived and UIDs sealed under.
+    #[must_use]
+    pub fn key_id(&self) -> &KeyId {
+        self.key.id()
     }
 }
 

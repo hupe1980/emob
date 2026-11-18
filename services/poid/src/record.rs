@@ -13,6 +13,7 @@
 //! estate after every restart is one an access point rate-limits.
 
 use emob_poi::datex::{Published, TablePublication};
+use emob_service::Actor;
 use emob_service::journal::{Journal, JournalError, Kinded, Record};
 
 use crate::{Accepted, Poid};
@@ -127,11 +128,16 @@ impl<J: Journal> Ledger<J> {
     /// service ahead of its record, and this stops recording rather than
     /// letting the next restart forget a snapshot the access point holds.
     ///
+    /// `by` is who caused it: the publish loop's push came back accepted, so
+    /// it is [`Actor::Timer`] — the access point answered a call this daemon
+    /// made on its own cadence, not a request anybody sent in (SR-100).
+    ///
     /// # Errors
     ///
     /// Whatever the journal could not do.
     pub fn accepted(
         &mut self,
+        by: &Actor,
         service: &mut Poid<'_>,
         publication: &TablePublication,
         at: time::OffsetDateTime,
@@ -152,7 +158,7 @@ impl<J: Journal> Ledger<J> {
             doing: "written",
             source,
         })?;
-        match self.journal.append(event.kind(), &body) {
+        match self.journal.append(event.kind(), by, &body) {
             Ok(record) => Ok(record),
             Err(error) => {
                 self.halted = Some(error.to_string());

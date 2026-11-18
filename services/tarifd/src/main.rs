@@ -19,9 +19,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use emob_core::PartyId;
-use emob_service::{Identity, Readiness, Server, Shutdown, identity};
+use emob_service::{Identity, Readiness, Server, Shutdown, estate, identity};
 use tarifd::{Audience, Tarifd};
 
 /// What the daemon waits for before it takes traffic.
@@ -41,7 +41,7 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 #[tokio::main]
 async fn main() -> Result<()> {
     let me: Identity = identity!();
-    emob_service::telemetry::init(me, "info,tarifd=debug", false);
+    emob_service::telemetry::init(me, "info,tarifd=debug");
 
     let http: SocketAddr = emob_service::serve::bind_address("tarifd", "127.0.0.1:9581")?;
 
@@ -50,8 +50,14 @@ async fn main() -> Result<()> {
 
     // A real deployment loads these from the store `tarifd` writes to. The
     // service holds no tariff it was not given, and refuses to publish one.
-    let service = Arc::new(Mutex::new(Tarifd::new()));
-    let party = PartyId::new("DE", "ABC")?;
+    // The estate's tariffs: the same entries `csmsd` rates with, built by the
+    // same function, so the price published is the price billed.
+    let path = estate::path();
+    let estate: tarifd::http::Estate =
+        estate::load(&path).with_context(|| format!("reading the estate at {}", path.display()))?;
+    let operators = estate::operator_tokens(&estate.operators, &estate::process_env())?;
+    let service = Arc::new(Mutex::new(tarifd::http::published(&estate)?));
+    let party = estate.parties.operator.clone();
     readiness.up(TARIFFS);
 
     let schedule = Arc::clone(&service);
@@ -71,6 +77,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move { signal.on_signal().await });
 
     Server::new(me, readiness, shutdown)
+        .with(tarifd::http::router(Arc::clone(&service), operators))
         .draining_for(std::time::Duration::from_secs(3))
         .listen(http)
         .await?;

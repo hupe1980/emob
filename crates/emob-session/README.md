@@ -1,77 +1,82 @@
 # emob-session
 
-Charging sessions: how they were authorised, what the meter said, and how that
-divides across the quarter hours the market settles in.
+EV charging sessions for CSMS and billing developers: how a session was
+authorised, what the meter said, and how its energy divides exactly across the
+quarter hours the energy market settles in.
+
+[![crates.io](https://img.shields.io/crates/v/emob-session.svg)](https://crates.io/crates/emob-session) [![docs.rs](https://img.shields.io/docsrs/emob-session)](https://docs.rs/emob-session) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-session.svg)](#license)
+
+A session's energy has to be settled per quarter hour, and its idle time priced
+per minute. This crate splits a meter series so the slots sum to the session
+total to the last digit, records whether each slot was measured or
+interpolated, and keeps a timestamped state history that answers "how long was
+the vehicle connected and not charging?".
 
 ```console
 cargo add emob-session
 ```
 
-📖 The reasoning behind this crate, with the regulation it cites, is in
-**[Sessions and settlement](https://hupe1980.github.io/emob/docs/settlement/)**.
-The signatures are on [docs.rs](https://docs.rs/emob-session).
+## Example
 
+```rust
+use emob_session::{MeterReading, MeterSeries, ReadingContext, split};
+use emob_core::{Direction, Energy};
+use rust_decimal::Decimal;
+use std::str::FromStr;
+use time::macros::datetime;
 
-## The quarter-hour split conserves energy exactly
+let kwh = |s: &str| Energy::from_kwh(Decimal::from_str(s).unwrap()).unwrap();
 
-A session running 10:01 to 10:22 has to be settled against two quarter hours,
-and the boundary at 10:15 falls two thirds of the way through. Seven kilowatt
-hours times two thirds does not terminate.
+// 10:01 to 10:22 — the boundary at 10:15 falls two thirds of the way through,
+// and 7 kWh times two thirds does not terminate.
+let series = MeterSeries::new(Direction::Import, vec![
+    MeterReading::new(datetime!(2026-01-02 10:01 +1), kwh("0"), Direction::Import, ReadingContext::TransactionBegin),
+    MeterReading::new(datetime!(2026-01-02 10:22 +1), kwh("7"), Direction::Import, ReadingContext::TransactionEnd),
+])?;
 
-The naive approach computes each slot independently, discovers the sum is a few
-milliwatt-hours off the total, and shoves the difference into the last slot —
-silently misattributing energy to whoever held 10:15.
+let split = split::into_quarter_hours(&series)?;
+assert!(split.conserves());        // exactly 7 kWh, across two slots
+assert!(!split.fully_measured());  // …and it says it had to interpolate
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-Instead this computes the **cumulative** value at each boundary once and takes
-differences:
+## What it guarantees
+
+- **Conservation, exactly.** The slots of every split sum to the session total.
+  A unit test checks 144 sessions chosen for awkward ratios, and a property test
+  checks generated sessions with arbitrary cuts and idle intervals.
+- **Provenance on every slot.** Each slot says whether its energy was measured,
+  held flat, or interpolated.
+- **Import and export never net.** 18 kWh drawn and 5 kWh returned is 18 and 5,
+  never 13.
+- **No raw card UIDs.** `TokenRef` accepts only a 256-bit keyed digest.
+- **An ended session stays ended.** No transition, second end or late meter
+  series follows it.
+- **No I/O, no clock.** Every instant is an argument, so a two-year-old session
+  splits today exactly as it did then.
+
+## How the quarter-hour split works
+
+Splitting each slot independently leaves a sum a few milliwatt-hours off, and
+the usual fix pushes the difference into the last slot — misattributing energy
+to whoever's balance group held it. Instead the split computes the cumulative
+register value at each boundary once and takes differences:
 
 ```text
 slot[i] = cumulative(boundary[i+1]) − cumulative(boundary[i])
 ```
 
-The sum telescopes. Every interior boundary appears once positive and once
-negative and cancels exactly, whatever it was rounded to; what is left is
-`cumulative(end) − cumulative(start)`, the session total, to the last digit,
-always.
+Every interior boundary cancels, so the sum is `cumulative(end) −
+cumulative(start)`. Because that holds whatever a boundary was rounded to, an
+imprecise boundary would hide in a correct total; interpolation therefore goes
+through `emob_core::apportion`, which multiplies before dividing and rounds to
+twelve places (a nanowatt-hour).
 
-```rust
-let split = split::into_quarter_hours(&series)?;
-assert!(split.conserves());        // exactly, for every session
-```
+### A slot carries both its settlement period and its measured window
 
-A test runs 144 generated sessions — six start offsets × six durations × four
-totals, chosen to produce awkward ratios — and asserts it on every one.
-
-### …and conservation is also a hiding place
-
-Because the sum telescopes *whatever* each boundary was rounded to, an imprecise
-boundary is invisible in the total. It does not disappear — it lands entirely on
-the supplier who held that quarter hour, which is exactly the misattribution the
-telescoping was introduced to prevent. So the interpolation multiplies before it
-divides:
-
-```text
-delta × offset / gap     ✅ exact wherever the ratio terminates
-delta × (offset / gap)   ❌ precision spent on the ratio first
-```
-
-The same rule the rating engine follows, for the same reason — and the invariant
-this module is proudest of is exactly what would hide the difference.
-
-Both crates now do it through **one** function, `emob_core::apportion`, which
-also quotes the result to a fixed scale. `Decimal` carries ninety-six bits, and a
-boundary two thirds of the way through a gap spends all of them on its fraction:
-adding two of those needs more digits than there are, the interior boundaries
-stop cancelling, and `conserves()` fails by one unit in the last place — in the
-assertion that exists to prove there is none. Twelve places is a nanowatt-hour,
-and it is the difference between exactly and nearly.
-
-## A slot carries the window it measured, beside the one it settles in
-
-A session whose readings begin at 10:07 has its first slot reported under the
-quarter hour beginning **10:00** — that is the settlement period the energy
-belongs to `[A6 §IV.1]` — while its readings only cover **10:07 to 10:15**. Both
-statements are true and they are different instants, so `Slot` states both:
+A session whose readings begin at 10:07 settles its first slot in the quarter
+hour beginning 10:00 `[A6 §IV.1]`, while its readings cover only 10:07–10:15.
+`Slot` states both:
 
 ```rust
 assert_eq!(split.slots[0].quarter_hour.start(), at("10:00"));
@@ -79,118 +84,38 @@ assert_eq!(split.slots[0].from, at("10:07"));
 assert!(!split.slots[0].covers_the_whole_quarter_hour());
 ```
 
-A consumer that reconstructs one from the other has to guess, and guesses wrong
-whenever the session is wider than its meter series.
+### Cuts at state changes, not only at the grid
 
-## The grid is not the only thing that cuts a session
-
-A quarter hour is where the **energy** settles. It is not where the **price**
-changes: `[AFIR Art. 5(4)]` prices the time a vehicle is connected and *not*
-charging per minute, and a vehicle stops charging when it stops charging, not at
-`:15:00`. A slot running 10:15 to 10:30 with the charge finishing at 10:20 is ten
-minutes of occupancy and five of charging, which one `charging` flag cannot say.
-
-So `Session::split` cuts at the session's own state changes as well as at the
-grid, and each is another boundary in the same telescoping sum:
+The quarter hour is where energy settles, not where the price changes:
+`[AFIR Art. 5(4)]` lets a fast charger price connected-but-not-charging time
+per minute. `Session::split` also cuts at the session's own state changes, and
+holds the register flat across `Session::idle_intervals()` so energy is spread
+only over time spent charging:
 
 ```rust
 let split = session.split(Direction::Import)?;           // grid + state changes + idle
 let split = split::into_periods(&series, &cuts, &idle)?; // the primitive underneath
 ```
 
-Conservation is unaffected — interior boundaries cancel wherever they fall — and
-`market_series()` sums the slices of a quarter hour back together, so the market
-side still sees one entry per Messperiode.
+If the register moved across a gap with no charging time at all, the line is
+drawn anyway and `emob-cdr` reports the contradiction.
 
-### …and constant power means constant power *while charging*
+### Market series are labelled by period end
 
-A straight line between two readings is the honest guess across a gap the
-session says nothing about, and a wrong one across a gap it does. The ordinary
-OCPP 2.0.1 transaction opens `EVConnected` with a `Transaction.Begin` reading,
-starts charging thirty seconds later with no reading, and sends its next meter
-value at the quarter hour; its register did not move for those thirty seconds,
-and a line from the opening reading attributes energy to an interval the
-operator's own state machine calls suspended.
-
-So `Session::split` hands the interpolation `Session::idle_intervals()` — every
-stretch of the history in a state other than `Charging` — and the register is
-held flat across them, the gap's energy spread over the seconds that remain:
-
-```rust
-let split = split::into_periods(&series, &[charging_from], &[(begin, charging_from)])?;
-assert!(split.slots[0].energy.is_zero());   // nothing flowed before the charge began
-assert!(split.conserves());                  // and the total is untouched
-```
-
-Where a gap has no charging time at all and the register moved anyway, the line
-is drawn across the whole gap and the contradiction is left standing for
-`emob-cdr` to report — because it is now the meter's own.
-
-## The instant that names a period
-
-`[PTB-A 50.7 §3.1.7.2]`, in a footnote: "Der Zeitstempel, der zu einer
-Messperiode gehört, ist immer der Zeitpunkt des **Endes** einer Messperiode."
-
-A German meter, an MSCONS load profile and `mako-emob` all call 00:00–00:15 the
-**00:15** period. `QuarterHour` calls it 00:00, because a half-open interval
-named by its start is the only spelling in which `containing()` is a truncation.
-Both are consistent, and mixing them shifts every slot by fifteen minutes — an
-error that sums to zero across a session and is wrong for every balance group.
-
-So the conversion has a name and happens once, rather than in each adapter:
+German meters and MSCONS load profiles name 00:00–00:15 the **00:15** period
+`[PTB-A 50.7 §3.1.7.2]`; `QuarterHour` names it by its start. The conversion
+happens once:
 
 ```rust
 let series = split.market_series();   // each period labelled by its end
 ```
 
-## Every slot says where its number came from
+### Daylight-saving days have 92 or 100 periods
 
-```rust
-assert!(!split.fully_measured());
-for slot in split.interpolated() {
-    // this one was derived, not measured
-}
-```
-
-`Provenance::Measured` means a `Sample.Clock` reading landed on that boundary.
-`Provenance::Held` means the register was carried unchanged from a measured
-reading across an interval the session says nothing flowed in — exact, on the
-operator's own account, and a third answer because it rests on the state machine
-rather than on a second reading; `fully_measured()` accepts it, `interpolated()`
-does not list it. `Provenance::Interpolated` means it was derived by assuming
-constant power
-across a gap — which a tapering charge curve does not deliver: a car at 80 %
-state of charge draws far less at the end of a gap than at its start, so a
-straight line over-allocates to the later side. The error lands on whichever
-supplier held the boundary, so the assumption travels with the number instead of
-being forgotten.
-
-A `Sample.Periodic` reading that happens to fall on `:15:00` does **not** count
-as measured. The station chose that instant for its own reasons, and treating
-the coincidence as a clock-aligned measurement reports a settlement as
-authoritative on a day the phase drifted.
-
-And **a meter had one value at each instant**. Two readings of one register at
-one instant that disagree are a contradiction rather than an ordering question:
-a stable sort keeps the caller's order at equal keys, so left to the ordering the
-same pair reads as a register running backwards when the larger arrives first and
-passes in silence when the smaller does — and the arrival order of two messages
-is not evidence about a meter. `MeterError::ContradictoryReading` is asked before
-the monotonicity question; a duplicate that says the same thing still passes,
-because it contradicts nothing.
-
-## No daylight-saving branch
-
-A quarter hour here is an instant plus fifteen minutes of real time. Every civil
-UTC offset in the world is a whole number of quarter hours, so a UTC
-quarter-hour boundary is a local one everywhere — and the 92- and 100-slot days
-of a clock change are simply days with fewer or more instants in them. Nothing
-counts to 96.
-
-The market side *does* count, and 96 is what every exporter hard-codes. A
-balance-group submission is validated on how many Messperioden a day holds
-`[A6 §IV.1]`, so a series with 96 entries for 25 October is missing an hour of
-somebody's balance group:
+A quarter hour is an instant plus fifteen minutes; every civil UTC offset in use
+is a whole number of quarter hours, so no code counts to 96. The market does
+count, and a balance-group submission is validated on how many periods a day
+holds `[A6 §IV.1]`:
 
 ```rust
 let berlin = TimeZone::new("Europe/Berlin")?;
@@ -199,42 +124,44 @@ QuarterHour::periods_in_local_day(&berlin, date!(2026-03-29));  // Some(92)  spr
 QuarterHour::periods_in_local_day(&berlin, date!(2026-10-25));  // Some(100) autumn fold
 ```
 
-Measured between the two local midnights rather than read from a table of
-transition dates, so a zone that shifts by half an hour or at an hour other than
-02:00 needs no case. `None` says the day is not a whole number of periods at all
-— a civil offset that is not a multiple of fifteen minutes, which Liberia was the
-last of, in 1972.
+## Slot provenance: measured, held or interpolated
 
-## Authorisation paths are not interchangeable
+```rust
+assert!(!split.fully_measured());
+for slot in split.interpolated() {
+    // derived, not measured
+}
+```
 
-Six ways a session starts, and two things depend on which:
-
-| Path | Contract-free | Strongest honest identification |
+| `Provenance` | Meaning | `fully_measured()` |
 |---|---|---|
-| `AdHoc` | ✅ (the one AFIR requires) | trusted — no contract, so nothing for a certificate to certify |
+| `Measured` | A `Sample.Clock` reading landed on the boundary | ✅ |
+| `Held` | Register carried flat across an interval the session says nothing flowed in | ✅ |
+| `Interpolated` | Derived assuming constant power across a gap | ❌ |
+
+A tapering charge curve over-allocates to the later side of an interpolated
+gap, so the assumption travels with the number. A `Sample.Periodic` reading
+that happens to fall on `:15:00` does not count as measured.
+
+Two readings of one register at one instant that disagree are refused with
+`MeterError::ContradictoryReading`; an identical duplicate passes.
+
+## Authorisation paths and identification strength
+
+| `AuthPath` | Contract-free | Strongest plausible identification |
+|---|---|---|
+| `AdHoc` | ✅ (the one AFIR requires) | trusted — no contract to certify |
 | `PlugAndCharge` | | secure — `ISO15118_PNC` `[OCMF Tab. 15]` |
-| `LocalList` | | secure — a local list decides against an RFID card, and `RFID_PSK` `[OCMF Tab. 13]` is a secured one |
-| `Roaming`, `RemoteCommand` | | certified — `OCPP_CERTIFIED` `[OCMF Tab. 14]` certifies the mapping with a backend certificate |
+| `LocalList` | | secure — a secured RFID card, `RFID_PSK` `[OCMF Tab. 13]` |
+| `Roaming`, `RemoteCommand` | | certified — `OCPP_CERTIFIED` `[OCMF Tab. 14]` |
 | `AutoCharge` | | hearsay — a MAC address off the wire |
 
-
-**The ceiling is read off Tables 13–16, not off who decided.** `[OCMF Tab. 11]`
-grades *how the user was identified*; Tables 13–16 say which identifications each
-mechanism can carry, and the two axes are largely orthogonal. A ceiling set from
-the decision-maker refuses ordinary hardware — a local list decides against an
-RFID card, and a secured card is Table 11's own example of `SECURE`. What stays
-low is what cannot rise: an unauthenticated MAC address, and an ad-hoc session
-that presented no contract for anything to certify.
-
-`AutoCharge` recognises a vehicle by its MAC address. It is not a standard, not
-authenticated and trivially spoofable, and it is kept rigorously distinct from
-Plug & Charge — the two are constantly conflated in marketing and must never be
-conflated in evidence.
-
-`strongest_plausible_level()` is a **ceiling**, and it is what lets `emob-cdr`
-notice a session claiming Plug & Charge whose signed record reports a bare RFID
-UID. Under-reporting is a station being conservative; over-reporting is a
-contradiction.
+`strongest_plausible_level()` is a ceiling read off OCMF tables 13–16, graded on
+the scale of `[OCMF Tab. 11]`. It lets `emob-cdr` flag a session claiming Plug &
+Charge whose signed record reports a bare RFID UID: under-reporting is
+conservative, over-reporting is a contradiction. `AutoCharge` (vehicle MAC
+address, unauthenticated and spoofable) is kept distinct from ISO 15118 Plug &
+Charge.
 
 ## Tokens are never stored raw
 
@@ -244,67 +171,165 @@ TokenRef::new("NLTNM000122045U")  // Err: that is an eMAID
 TokenRef::new(&keyed_digest)      // Ok: 64 lowercase hex characters
 ```
 
-A card UID is a lifelong identifier of a physical object a person carries.
-Storing it on every session row builds a movement profile no part of a charging
-platform needs, so the type refuses anything that is not a 256-bit digest.
+A card UID is a lifelong identifier of something a person carries; storing it on
+every session row builds a movement profile.
 
-## Sessions are state machines, and the history is timestamped
+## Session state history
 
 ```rust
 session.transition_to(SessionState::SuspendedByVehicle, at(40))?;
 session.end(at(70), EndReason::Local)?;
 session.attach_series(more)?;   // Err: AlreadyEnded
-```
 
-Nothing follows the end — not a second end, not a resumption, not a late meter
-series, because a series arriving after the end is either a duplicate or a
-different session and guessing which is how energy gets double-billed. A
-transition dated before the one it follows is refused too: a history that is not
-ordered cannot be read as intervals.
-
-And it has to be readable as intervals, because "suspended" is not a status
-light. `[AFIR Art. 5(4)]` lets a fast charger charge an occupancy fee **per
-minute** for the time a vehicle is connected and not charging, so the question
-is *for how long*, and a state field without a timestamp cannot answer it.
-
-```rust
 assert_eq!(session.state_at(at(50)), Some(SessionState::SuspendedByVehicle));
 assert_eq!(session.activity_throughout(at(45), at(60)), Some(Activity::Parked));
 ```
 
-`emob-cdr` uses the same history the other way round: energy across a period
-the session says it was not charging in means the meter and the state machine
-disagree, and it refuses the record rather than picking one.
+Transitions dated before their predecessor are refused, so the history always
+reads as intervals. `activity_throughout` returns an `emob_core::Activity`:
 
-**And the question is asked once, as "what was it doing".**
-`activity_throughout` returns an `Activity` and may return `None`: `Pending` is
-authorised with nothing flowing and `Ended` is over, and both are "connected and
-not charging" — which is exactly what the fee prices. Every period a CDR carries
-is asked that one question, metered or not; asking `!suspended_throughout`
-instead reads "the record never said suspended" as "the vehicle was charging",
-and bills the minute a car sat `EVConnected` before its charge began as charging
-time.
+| `SessionState` | `Activity` | Priced as |
+|---|---|---|
+| `Charging` | `Charging` | charging time |
+| `SuspendedByVehicle` (OCPP `SuspendedEV`) | `Parked` | occupancy |
+| `SuspendedByOperator` (OCPP `SuspendedEVSE`, `[EnWG §14a]` dimming, faults) | `Withheld` | nothing |
 
-**There are two suspensions, because "no energy is flowing" has two causes and
-only one of them owes a fee.** `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`
-corrected its own definition of `PARKING_TIME` to the **vehicle's** demand, and
-said why: under the old reading drivers "would be exposed to penalizing loitering
-fees … when the EVSE is not offering energy to the vehicle while the vehicle is
-still requesting power". So `SuspendedByVehicle` — the battery is full — is
-`Activity::Parked` and prices as occupancy, while `SuspendedByOperator` — a
-charging profile at zero, a `[EnWG §14a]` dimming, a grid limit, a fault — is
-`Activity::Withheld` and prices as nothing. OCPP has distinguished them since
-2.0.1, as `SuspendedEV` against `SuspendedEVSE`.
+The split follows OCPI 2.3.0's definition of parking time as time the vehicle
+is not requesting power `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`. `Pending`
+and `Ended` are also connected-and-not-charging, so every period is asked "what
+was it doing", never "was it marked suspended".
 
-Import and export are separate registers counting separate quantities, and one
-session can hold both. They never net: 18 kWh drawn and 5 kWh returned is 18 and
-5, never 13.
+## The charging success rate
 
-## No I/O, no clock
+The industry reports *uptime*; a driver experiences *success* — did plugging
+in end in a charge? `success` counts it from the same facts that bill, so
+nobody can argue with the numerator: an attempt succeeds when its record
+**settles**, and a record settles once.
 
-Every instant is an argument, so a session from two years ago splits today
-exactly as it split then.
+```rust
+use emob_session::success::{Cause, Ending, Tally};
+
+let mut tally = Tally::default();
+tally.record("CP-1", Ending::Billed);
+tally.record("CP-2", Ending::Failed(Cause::Evidence));
+tally.estate.percent();   // Some(50.0) — exact, half-even to one place
+tally.worst(1);           // [("CP-2", …)]
+```
+
+| Item | Meaning |
+|---|---|
+| `success::Cause` | why an attempt failed, by owner: `Authorisation` (provider or card), `Evidence` (`[MessEG §33]` refused the energy), `StationFault`, `Cancelled` |
+| `success::cause_of_refusal` | the cause, from how the station ended the session and whether anything was measured |
+| `success::Ending` | `Billed`, or `Failed(Cause)` |
+| `success::Rate` | `attempted`, `billed`, failures by cause; `percent()` is `None` before the first attempt — a point nobody tried is not 100 % reliable |
+| `success::Tally` | the estate's rate and each point's; `record` is called once per fact in journal order, so a replay is the same tally; `worst(n)` names the weakest points |
+
+## The MiSpeL month: levy relief for bidirectional charging
+
+A bidirectional charge point draws energy from the grid and feeds some of it
+back. Under the Bundesnetzagentur's *MiSpeL* Festlegung (618-25-02, adopted
+01.10.2026) the part fed back out of a store — and a bidirectional point is one
+`[MiSpeL A1 3.2.5]` — relieves the same amount of the site's grid draw of levies.
+Net too much and the site keeps levies it owed; net too little and it pays
+twice. `mispel` does the arithmetic on quarter-hour values, and only the **levy**
+side: the market-premium side applies only to a premium-supported plant.
+
+| Option | Period | Function |
+|---|---|---|
+| *Abgrenzungsoption* (Anlage 1) | calendar month or *Rumpfmonat* | `mispel::month`: Basisfall A2 (grid meter Z1 and a meter Z2 behind the points, formulas (1)–(21)) or Sonderfall A11 (Z1 only) |
+| *Pauschaloption* (Anlage 2) | calendar year or *Rumpfjahr* | `mispel::pauschal_year`: Basisfall P2, factor 0,2 for a charge point |
+
+`mispel::governed` turns the Tenor into the one window a settlement may cover:
+
+- in effect from the publication on **21.10.2026** `[MiSpeL Tenor 8]`;
+- until **30.09.2027** only with the grid and metering operators' declared
+  consent `[MiSpeL Tenor 9]`;
+- the *Pauschaloption* only from the month after the European Commission's
+  state-aid approval — and not at all while there is none, because the
+  Festlegung makes it conditional on that approval;
+- a first assignment may start mid-month, and the rest of the month is a
+  *Rumpfmonat* that takes the calendar month's place `[MiSpeL A1 11]`; an
+  installation already assigned switches only on the first of a month.
+
+```rust
+use emob_session::mispel::{self, Choice, Conditions, Refusal};
+use time::macros::date;
+
+let conditions = Conditions {
+    assigned_from: date!(2026-10-01),
+    first_assignment: true,
+    operator_consent: true,
+    state_aid_approved_on: None,
+};
+
+// October 2026 is governed from 21.10. on: a Rumpfmonat.
+let october = mispel::governed(Choice::Abgrenzung, &conditions, date!(2026-10-01), date!(2026-10-31))?;
+assert_eq!((october.first, october.rumpf), (date!(2026-10-21), true));
+
+// The Pauschaloption is refused until the state-aid approval is known.
+assert_eq!(
+    mispel::governed(Choice::Pauschal, &conditions, date!(2026-01-01), date!(2026-12-31)),
+    Err(Refusal::NoStateAid),
+);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A month is **refused by name** (`mispel::Refusal`, each naming its rule) rather
+than netted wrongly when:
+
+- a point the declared metering concept does not cover fed back — a discharge
+  no approved Formelsatz sees cannot be netted;
+- a covered quarter hour was interpolated, not measured `[MiSpeL A1 3.2.1]`;
+- the grid meter series misses a quarter hour of the window or holds one twice
+  — a missing quarter hour of draw is levied draw that vanishes;
+- an installation already assigned switches mid-month;
+- consent is missing before 01.10.2027, or the *Pauschaloption* has no
+  state-aid approval;
+- the *Pauschaloption* is asked for without solar, or with more than 30 kWp.
+
+Draw and feed-in stay apart until the formula takes the minimum, every
+intermediate is kept with the Festlegung's own number (`mispel::Month`,
+`mispel::A2Figures`, `mispel::Year`, `mispel::Limits`), and the German legal
+calendar counts the 92- and 100-quarter days of a clock change. The tests
+reproduce Beispielrechnungen 1 and 2 of Anlage 1 and the two Rumpfjahre of
+Anlage 2 to the digit, and a property test over 500 seeded months checks that
+relieved and levied draw add up to the grid draw and that no figure exceeds the
+one it is bounded by.
+
+## API at a glance
+
+| Item | Purpose |
+|---|---|
+| `MeterReading`, `MeterSeries`, `ReadingContext` | A validated, cumulative register series |
+| `split::into_quarter_hours`, `split::into_periods` | The conserving split |
+| `SessionSplit`, `Slot`, `Provenance` | The result, with provenance |
+| `SessionSplit::market_series` | Periods labelled by their end, for the market |
+| `Session`, `SessionState`, `StateChange`, `EndReason` | The timestamped state machine |
+| `Session::split`, `idle_intervals`, `activity_throughout` | Questions a CDR asks |
+| `Authorization`, `AuthPath`, `TokenRef` | How the session started, without raw UIDs |
+| `success::Tally`, `success::Rate` | The charging success rate from the ledger that bills |
+| `mispel::month`, `mispel::pauschal_year`, `mispel::governed`, `mispel::Refusal` | The MiSpeL month and year, and why one is refused |
+
+## Feature flags
+
+| Feature | Default | Effect |
+|---|---|---|
+| `serde` | yes | `Serialize`/`Deserialize` for every public type |
+
+## Standards and sources
+
+BNetzA BK6-20-160 Anlage 6 (market communication and balancing), PTB-A 50.7, OCMF tables 11 and 13–16, OCPP 2.0.1
+transaction events, OCPI 2.3.0 charging periods, AFIR Art. 5(4), EnWG § 14a,
+and the Bundesnetzagentur's MiSpeL Festlegung 618-25-02 of 01.10.2026 (Tenor,
+Anlage 1 and Anlage 2).
+
+## Part of emob
+
+emob is an open-source e-mobility stack for charge point operators and
+e-mobility service providers. See
+[sessions and settlement](https://hupe1980.github.io/emob/docs/settlement/) on
+the documentation site and the [root README](https://github.com/hupe1980/emob).
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of Apache License 2.0 or MIT, at your option.

@@ -18,8 +18,9 @@ use std::net::SocketAddr;
 use anyhow::{Context as _, Result};
 use emob_poi::datex::Publisher;
 use emob_poi::site::Facility;
+use emob_service::head::{self, Signing, SigningKey};
 use emob_service::journal::Journal as _;
-use emob_service::{Identity, Readiness, Server, Shutdown, identity};
+use emob_service::{Identity, Readiness, Server, Shutdown, estate, identity};
 use poid::{Ledger, Poid};
 
 /// What the daemon waits for before it takes traffic.
@@ -35,7 +36,7 @@ const CADENCE: time::Duration = time::Duration::hours(1);
 #[tokio::main]
 async fn main() -> Result<()> {
     let me: Identity = identity!();
-    emob_service::telemetry::init(me, "info,poid=debug", false);
+    emob_service::telemetry::init(me, "info,poid=debug");
 
     let http: SocketAddr = emob_service::serve::bind_address("poid", "127.0.0.1:9582")?;
 
@@ -51,24 +52,43 @@ async fn main() -> Result<()> {
     // that forgot it answers *"no snapshot has ever been accepted"*, which is
     // safe (`status` refuses) and still wrong: it republishes the whole estate
     // after every restart, which is what an access point rate-limits.
-    let journal = emob_service::journal::for_daemon("poid")
+    //
+    // Its head is signed after every append, so a copy cut short — a restored
+    // backup, an edited file — refuses to start rather than republishing as if
+    // the access point held an older snapshot (SR-096).
+    let file = emob_service::journal::for_daemon("poid")
         .context("opening poid's journal — see EMOB_JOURNAL_DIR")?;
-    tracing::info!(path = %journal.path().display(), "folding the journal");
+    let journal_path = file.path().to_owned();
+    tracing::info!(path = %journal_path.display(), "folding the journal");
+    let journal = Signing::open(
+        file,
+        SigningKey::for_daemon("poid", &estate::process_env())?,
+        head::beside(&journal_path),
+    )
+    .context("opening poid's journal against its signed head")?;
+    let latest = journal.latest();
     let ledger = Ledger::open(journal).context("folding poid's journal")?;
     let held = ledger
         .last_accepted()
         .context("reading what the access point last took")?;
 
+    let path = estate::path();
+    let estate: poid::http::Estate =
+        estate::load(&path).with_context(|| format!("reading the estate at {}", path.display()))?;
+    let operators = estate::operator_tokens(&estate.operators, &estate::process_env())?;
+    let sites = poid::http::sites(&estate)?;
+    let view = poid::http::View::of(&sites, held.clone());
+
     let no_rates = |_: &emob_poi::site::ChargingPoint| None;
     let mut service = Poid::new(
         Publisher {
-            country: "DE".to_owned(),
+            country: estate.parties.operator.country_code().to_owned(),
             national_identifier: std::env::var("POID_NAP_IDENTIFIER")
                 .unwrap_or_else(|_| "DE-NAP-0000".to_owned()),
             language: "de".to_owned(),
         },
-        Facility::new("TABLE-1"),
-        Vec::new(),
+        Facility::new(format!("{}-TABLE", estate.parties.operator)),
+        sites,
         &no_rates,
     );
     if let Some(accepted) = &held {
@@ -76,7 +96,7 @@ async fn main() -> Result<()> {
         tracing::info!(
             published_at = %accepted.published_at,
             accepted_at = %accepted.at,
-            head = %ledger.journal().head().unwrap_or_default(),
+            head = ledger.journal().head().map(|head| head.position).unwrap_or_default(),
             "the access point holds this snapshot, and a status message may address its versions"
         );
     } else {
@@ -102,6 +122,9 @@ async fn main() -> Result<()> {
     tokio::spawn(async move { signal.on_signal().await });
 
     Server::new(me, readiness, shutdown)
+        .with(poid::http::router(view, operators.clone()).merge(
+            emob_service::serve::operator_only(head::router("poid", latest), operators),
+        ))
         .draining_for(std::time::Duration::from_secs(3))
         .listen(http)
         .await?;

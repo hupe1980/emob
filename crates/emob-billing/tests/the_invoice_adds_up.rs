@@ -19,6 +19,9 @@
 //!    it is [`Invoice::rounding_residual`] rather than a figure a reconciliation
 //!    has to discover.
 //! 4. **Every record billed is a record supplied**, once.
+//! 5. **A gross-priced month asks for what its receipts said**: BT-115 is the
+//!    sum of the records' `Cost::gross`, and any difference from BT-112 is the
+//!    stated rounding amount BT-114 (`BR-CO-16`).
 //!
 //! The evidence on each record is **stated** rather than assembled from a real
 //! chain: what these assert is the arithmetic of the document rather than the
@@ -466,6 +469,8 @@ fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
     let mut gave_energy_away = 0usize;
     let mut rounded_to_a_block = 0usize;
     let mut bound_spread = 0usize;
+    let mut stated_rounding = 0usize;
+    let mut anchored = 0usize;
     for case in 0..250 {
         let basis = if case % 2 == 0 {
             TaxIncluded::Yes
@@ -559,6 +564,49 @@ fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
             "case {case}: the records say {owed} is owed and the invoice bills {billed}"
         );
 
+        // 8. **A gross-priced month pays what its receipts said.** Each
+        //    session's receipt states `Cost::gross`, rounded once; the document
+        //    states BT-112 by the standard's own chain and the difference as
+        //    BT-114, so BT-115 is the receipts' sum to the cent — and a
+        //    net-priced document states no rounding amount at all.
+        let receipts: Decimal = records
+            .iter()
+            .map(|cdr| cdr.cost.as_ref().expect("a rated record").gross().amount())
+            .sum();
+        if basis == TaxIncluded::Yes {
+            assert_eq!(
+                invoice.payable_total().amount(),
+                receipts,
+                "case {case}: the receipts came to {receipts} and the invoice asks for {}",
+                invoice.payable_total()
+            );
+            assert_eq!(
+                invoice.payable_total().amount() - invoice.payable_rounding().amount(),
+                invoice.gross_total().amount(),
+                "case {case}: BR-CO-16"
+            );
+            assert!(
+                invoice.payable_rounding().amount().abs() <= bound,
+                "case {case}: a rounding amount of {} is not rounding",
+                invoice.payable_rounding()
+            );
+            // One rate and no bound: the taxable amount is the net inside the
+            //    receipts, so all BT-114 has left is the tax's own rounding.
+            if invoice.adjustments.is_empty() && invoice.tax.len() == 1 {
+                anchored += 1;
+                assert!(
+                    invoice.payable_rounding().amount().abs() <= dec(1, 2),
+                    "case {case}: {} on a one-rate document",
+                    invoice.payable_rounding()
+                );
+            }
+            if !invoice.payable_rounding().is_zero() {
+                stated_rounding += 1;
+            }
+        } else {
+            assert!(invoice.payable_rounding().is_zero(), "case {case}");
+        }
+
         if invoice
             .lines
             .iter()
@@ -632,6 +680,14 @@ fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
         }
     }
     assert!(built > 500, "only {built} records were built");
+    assert!(
+        anchored > 25,
+        "only {anchored} gross documents had one rate and no bound"
+    );
+    assert!(
+        stated_rounding > 10,
+        "only {stated_rounding} gross documents stated a rounding amount"
+    );
     // A generator that cannot reach a shape is a generator whose properties say
     // nothing about it, so the coverage is asserted rather than assumed.
     assert!(

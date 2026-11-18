@@ -71,24 +71,132 @@ pub fn registered_specialists() -> Vec<&'static str> {
     ]
 }
 
-/// Build the runtime with every specialist wired.
+/// The delegation chain a specialist's run acts under: the operator's party
+/// at the root, holding everything, and `agentd` one link down holding exactly
+/// the advisory principal's capabilities.
+///
+/// # Errors
+///
+/// `agentplane`'s refusal to build a chain that widens — which
+/// [`advisory`] already makes impossible, and which is not papered over here.
+pub fn chain(
+    agent: &emob_service::Principal,
+) -> Result<agentplane::core::Delegation, agentplane::core::DelegationError> {
+    use agentplane::core::{Delegation, Principal, Scope};
+    Delegation::root(Principal::new(
+        format!("operator:{}", agent.party),
+        Scope::root(),
+    ))
+    .delegate(Principal::new(
+        "agentd",
+        Scope::of(agent.capabilities.patterns()),
+    ))
+}
+
+/// Build the runtime with every specialist wired, **acting as** the advisory
+/// principal `agent` (SR-104).
 ///
 /// The store is the caller's: an embedded file for a single instance, or a
 /// database several instances share. What the daemon owns is which specialists
-/// exist, and that is [`registered_specialists`].
-#[must_use]
-pub fn runtime(store: Arc<dyn JournalStore>) -> Arc<Runtime> {
-    Runtime::builder(store)
+/// exist ([`registered_specialists`]) and whose authority they run on. Each
+/// specialist provides one read capability, and `agentplane` admits a run only
+/// when its capability is inside the chain — so a specialist that declared a
+/// write would be refused by the runtime at the call, not by review.
+///
+/// # Errors
+///
+/// As [`chain`].
+pub fn runtime(
+    store: Arc<dyn JournalStore>,
+    agent: &emob_service::Principal,
+) -> Result<Arc<Runtime>, agentplane::core::DelegationError> {
+    Ok(builder(store, agent)?.build())
+}
+
+fn builder(
+    store: Arc<dyn JournalStore>,
+    agent: &emob_service::Principal,
+) -> Result<agentplane::runtime::RuntimeBuilder, agentplane::core::DelegationError> {
+    Ok(Runtime::builder(store)
+        .acting_as(chain(agent)?)
         .skill(skills::compliance::ComplianceSweep)
         .skill(skills::evidence::EvidenceTriage)
-        .skill(skills::tariff::TariffReview)
-        .build()
+        .skill(skills::tariff::TariffReview))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emob_core::PartyId;
+    use emob_service::{Principal, Role};
     use serde_json::json;
+
+    fn agent() -> Principal {
+        advisory(&Principal::operator(
+            PartyId::new("DE", "ABC").unwrap(),
+            Role::Cpo,
+        ))
+        .expect("the operator holds every read capability")
+    }
+
+    fn plane(store: Arc<dyn JournalStore>) -> Arc<Runtime> {
+        runtime(store, &agent()).expect("the advisory chain builds")
+    }
+
+    /// A specialist that claims a write: what SR-104 must keep out.
+    #[derive(Debug)]
+    struct Issuer;
+
+    #[async_trait]
+    impl Skill for Issuer {
+        fn descriptor(&self) -> SkillDescriptor {
+            SkillDescriptor::new("issuer").provides(emob_service::caps::INVOICE_WRITE)
+        }
+
+        async fn invoke(
+            &self,
+            _cx: &mut StepCtx<'_>,
+            input: Tainted<serde_json::Value>,
+        ) -> Result<Outcome, SkillError> {
+            Ok(Outcome::done(input))
+        }
+    }
+
+    #[tokio::test]
+    async fn sr_104_a_capability_outside_the_advisory_principal_is_refused_at_the_call() {
+        let store: Arc<dyn JournalStore> =
+            Arc::new(RedbStore::open_in_memory().expect("an in-memory journal"));
+        let plane = builder(store, &agent())
+            .expect("the advisory chain builds")
+            .skill(Issuer)
+            .build();
+
+        let refused = plane
+            .start(
+                emob_service::caps::INVOICE_WRITE,
+                Tainted::trusted(json!({})),
+            )
+            .run()
+            .await;
+        match refused {
+            Err(error) => assert!(
+                error.to_string().contains("emob.invoice.write"),
+                "refused for another reason: {error}"
+            ),
+            Ok(outcome) => panic!("a write capability ran under the advisory chain: {outcome:?}"),
+        }
+
+        // …and the specialists that read still run under the same chain.
+        let read = plane
+            .start(
+                skills::evidence::CAPABILITY,
+                Tainted::trusted(json!({ "sessions": [] })),
+            )
+            .run()
+            .await
+            .expect("the run completed");
+        assert!(read.success().is_ok());
+    }
 
     #[tokio::test]
     async fn a_specialist_runs_and_the_run_replays_to_the_same_answer() {
@@ -97,7 +205,7 @@ mod tests {
         // "why did the queue say that" is answered rather than argued.
         let store: Arc<dyn JournalStore> =
             Arc::new(RedbStore::open_in_memory().expect("an in-memory journal"));
-        let runtime = runtime(Arc::clone(&store));
+        let runtime = plane(Arc::clone(&store));
 
         let input = json!({
             "sessions": [{
@@ -110,7 +218,8 @@ mod tests {
         });
 
         let outcome = runtime
-            .run(skills::evidence::NAME, Tainted::trusted(input))
+            .start(skills::evidence::CAPABILITY, Tainted::trusted(input))
+            .run()
             .await
             .expect("the run completed");
         let run_id = outcome.run_id;
@@ -134,13 +243,14 @@ mod tests {
         // queue that no domain crate produced.
         let store: Arc<dyn JournalStore> =
             Arc::new(RedbStore::open_in_memory().expect("an in-memory journal"));
-        let runtime = runtime(store);
+        let runtime = plane(store);
 
         let outcome = runtime
-            .run(
-                skills::evidence::NAME,
+            .start(
+                skills::evidence::CAPABILITY,
                 Tainted::trusted(json!({ "not": "a refusal list" })),
             )
+            .run()
             .await
             .expect("the run completed");
         assert!(outcome.success().is_err(), "the run did not fail");

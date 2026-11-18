@@ -1,199 +1,193 @@
 # csmsd
 
-**The CSMS a charging station connects to** — an OCPP 1.6J / 2.0.1 / 2.1
-endpoint whose transaction events reach the Eichrecht chain, with the seam rule
-enforced by the types it is allowed to see.
+The CSMS (charging station management system) daemon: an OCPP 1.6J / 2.0.1 / 2.1 WebSocket endpoint whose transaction events feed the Eichrecht billing chain.
 
-Part of [emob](https://github.com/hupe1980/emob). Not published: a service is
-deployed, not depended on.
+## Status
 
-```console
-CSMSD_BIND=0.0.0.0:9000 CSMSD_HTTP_BIND=0.0.0.0:9001 cargo run -p csmsd
-```
+| | |
+|---|---|
+| ✅ estate | stations (OCPP version, security profile, password hash), meter keys with their provenance, and tariffs come from `estate.toml`. An empty key registry keeps `/health/ready` at `503` naming `key-registry`, because every signed session would be refused |
+| ✅ journal | the CDR ledger, outcomes, in-flight transaction events, the OCPP 1.6 transaction counter, every authorisation answer and the outbox are a fold of `csmsd.ndjson` — a restart loses nothing. Record bodies are sealed under `CSMSD_DATA_KEY`, so the card UIDs they carry are not readable on disk. Every record names its actor (`station:<identity>` for what a station sent); the head is signed under `CSMSD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
+| ✅ authorisation | `Authorize` and every transaction start are asked of `empd` (`POST /v1/authorize`, service token). A timeout, an unreachable `empd` or a non-`200` answers `Invalid` with the reason journalled — fail closed; a refused start opens no transaction |
+| ✅ outbox | each settled session with a provider is delivered to `billd` and `roamd` as a Standard-Webhooks-signed `POST /v1/deliveries`, retried every `retry_secs`, recorded delivered only after a `2xx`; a final `4xx` is recorded as refused |
+| ✅ station edge | OCPP security profiles 1–3 with TLS, a connection cap, a per-connection message budget and an idle timeout (below) |
+| ✅ receipt | every settled or refused session has a driver receipt at `<public_url>/r/<token>` (below), optionally shown on the station's own display |
 
-Two listeners: the OCPP endpoint stations connect to, and the `emob-service`
-shell an orchestrator probes — `/health/live`, `/health/ready`, `/about`.
+`tests/a_station_connects.rs` runs a real `ocpp-kit` station against a real
+`ocpp-kit` CSMS over a TCP WebSocket with `csmsd` as the handler. The station
+sends the Open Charge Alliance's published `StopTransaction.req` from a DZG
+GSH01.1K2L meter: its `meterStop` is the lifetime register, 108814 Wh; the CDR
+bills **0.636 kWh**, the signed transaction difference.
 
-📖 The seam this daemon is deliberately thin around is described in
-**[The OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/)**.
+## What it owns
 
-## Two ledgers, side by side, doing different jobs
-
-A CSMS has to answer two questions about the same traffic, and conflating them
-is how a platform bills a number nothing signed.
+### Two ledgers, kept apart by type
 
 | Question | Answered by | Meter values |
 |---|---|---|
-| **Did the traffic arrive?** Every event accounted for, the sequence complete, a retry recognised as a retry | `ocpp-kit`'s `csms::ledger`, fed from its version-neutral `observe` view | the numeric register — exactly right for the question |
-| **What may be billed?** | `emob-ocpp` → `emob-eichrecht` → `emob-cdr` | the signed OCMF register, in exact decimal |
+| Did the traffic arrive? (every event, sequence complete, retries recognised) | `ocpp-kit`'s CSMS ledger, fed from its version-neutral `observe` view | numeric register (`f64`) — fine for telemetry |
+| What may be billed? | `emob-ocpp` → `emob-eichrecht` → `emob-cdr` | signed OCMF register, exact decimal |
 
-They run **beside** each other here, never one instead of the other, and the
-type system keeps them apart: nothing in the billing path can see an `f64`,
-because `emob_ocpp::TransactionEvent` has no field for one.
+Both run side by side. Nothing in the billing path can see an `f64`, because
+`emob_ocpp::TransactionEvent` has no field for one.
 
-## One funnel, three versions
+### One billing path for three OCPP versions
 
-`observe_v16`, `observe_v201` and `observe_v21` all produce the same `Observed`,
-and `emob-ocpp` reads the billable event out of it. So the billing path is **one
-function** for all three generations — `Csmsd::bill` — and the only thing the
-per-version handlers still do differently is the transaction id, because 1.6
-assigns it in the *response* and therefore makes it the CSMS's problem.
+`observe_v16`, `observe_v201` and `observe_v21` produce the same `Observed`, so
+billing is one function for all versions. The one protocol detail the daemon
+owns is the OCPP 1.6 transaction id, which the CSMS assigns in the
+`StartTransaction` response. Every rule that could be *wrong* — where 1.6 puts
+signed data, clock alignment, `chargingState`, retries — lives in `emob-ocpp`
+and is tested against the Open Charge Alliance's example messages.
 
-An observation also carries `warnings`, and one of them decides money: a station
-that sets `format: SignedData` and puts an unparseable document in the value
-looks, to anything reading only the billable events, exactly like a station
-sending no signed data at all. That transaction is refused **by name**, so the
-operator hears about it on the first session rather than at the end of a month
-of unbillable ones. The message is still answered — refusing the RPC would only
-make the station retry the same broken payload.
+A station that declares `format: SignedData` but sends an unparseable document
+would otherwise look like one sending no signed data; that transaction is
+refused by name on the first session. The RPC is still answered, so the station
+does not retry the same broken payload.
 
-The other warning kinds are about the numeric energy register, which is
-telemetry on this side of the seam and never billed here. They belong to the
-operational ledger's question, not this one.
+### Two bindings a station cannot supply itself
 
-## What is thin, and why that is the point
+- **Identity → charge point.** `Provisioning` maps the WebSocket identity to a
+  `ChargePoint` (EVSE id, rated power) once, at authentication, and the binding
+  travels with the connection. An unknown identity gets **404**, not 401, so an
+  operator can tell a typo from a bad password `[OCPP 2.0.1 Part 4 §3.1.1]`.
+- **Meter → public key.** The key that verifies OCMF comes from the
+  `KeyRegistry`, out of band `[OCMF §Relation of Serial Numbers]`, never from
+  the station's own `publicKey` claim `[OCA SMV §3.2.2]` or `MeterPublicKey`
+  configuration key `[OCA SMV §3.3.1]`.
 
-Everything in this crate is sockets, routing and bookkeeping. The parts that
-could be *wrong* — which field holds the signed data in 1.6, whether a reading
-is clock-aligned, what a `chargingState` means, whether a retry is a second
-reading — live in `emob-ocpp` and are tested there, against the Open Charge
-Alliance's own example messages.
+### Every transaction has an outcome
 
-A daemon is the worst place to keep a rule, because CI does not run it.
+| `Outcome` | Meaning |
+|---|---|
+| `Settled` | a CDR was produced |
+| `AlreadySettled` | the ledger already holds it — an OCPP retry, counted as success, not twice |
+| `Refused` | the chain's reasons, in order (including a *different* record under a settled key) |
+| `KeyMismatch` | the station signs with a key it was not provisioned with — likely a swapped meter; the chain refuses the session anyway |
+| `UnreadableClaimedKey` | the claimed key does not decode, so the comparison cannot run; the session still bills |
+| `AfterTheEnd` | the station sent data after its own `Ended` event |
 
-## The two bindings a station may not supply for itself
+The tariff is checked against the point's power **before** pricing, because
+`[AFIR Art. 5(4)]` constrains the pairing of tariff and charge point.
 
-```rust
-let fleet = Provisioning::new().with(
-    Identity::new("CP-1")?,
-    ChargePoint { evse_id: "DE*ABC*E00001".parse()?, rated_power_kw: dec("150") },
-);
+### The station edge: security profiles 1–3
 
-// …and the authenticator hands the point to the session that will use it.
-.authenticate(move |auth: Auth| {
-    let point = fleet.get(&auth.identity).cloned();
-    async move {
-        match point {
-            Some(point) => AuthOutcome::Accept(SessionContext::new(point)),
-            None => AuthOutcome::Unknown,
-        }
-    }
-})
-```
+Each `[[stations]]` entry names its `security_profile` `[OCPP 2.0.1 Part 2 §A00]`:
 
-**Identity → charge point.** The identity in a WebSocket URL is whatever the
-station was configured with. An unknown one is answered **404** rather than 401,
-so an operator can tell a typo from a bad password `[OCPP 2.0.1 Part 4 §3.1.1]`
-— and a station nobody provisioned never produces a session attributed to a
-point that does not exist.
+| Profile | The station proves who it is with | csmsd checks |
+|---|---|---|
+| 1 | HTTP Basic on a plain socket | the password against an Argon2id `password_hash`, verified off the async runtime |
+| 2 | HTTP Basic over TLS | the same; refused on a plain socket unless `[csms] tls_terminated_by_proxy = true` |
+| 3 | a TLS client certificate | the chain to `[csms] client_ca` and a CN equal to the identity; refused at start behind a proxy |
 
-The binding is made **once, at authentication**, and travels with the connection
-in `AuthOutcome::Accept(SessionContext::new(point))`. The handler reads it back
-with `Ctx::session::<ChargePoint>()` and keeps no provisioning map of its own:
-OCPP has no way to change which point a station is mid-session, so a per-event
-lookup would be a second source for a fact that cannot change.
+An unknown identity gets **404**, a wrong credential **401** (logged with the
+identity), a connection over `max_connections` **503**. A station that does not
+offer its provisioned OCPP version is refused. Each connection has a budget of
+`messages_per_minute` (excess answered with `SecurityError`, not processed) and
+an `idle_timeout_secs`; the counters are on the running daemon's edge. A second
+connection under a known identity supersedes the first — the credential check
+is what tells an impostor from a reconnect.
 
-**Component → public key.** OCMF requires the key to travel out of band. A
-station sends its own `publicKey` beside every signed value and offers a
-`MeterPublicKey` configuration key `[OCA SMV §3.3.1]`; neither is a binding, and
-a CSMS that trusted either would verify every record against whichever key made
-it verify. The `KeyRegistry` comes from a type approval.
-
-## Stopping without dropping a record
-
-A station holds a WebSocket for the length of a session, so killing this process
-mid-transaction does not lose a *request* — it loses the `StopTransaction` that
-carries the signed meter record, and that session becomes a kilowatt-hour nobody
-can bill and a driver who was charged nothing.
-
-So on `SIGTERM` the daemon stops reporting **ready** first, and only then drains.
-By the time the window starts, the orchestrator has already stopped routing
-stations here.
-
-The readiness surface names what it is waiting for rather than answering `200`
-and hoping: a `csmsd` whose key registry has not loaded refuses every session
-that arrives, and that looks like a fleet fault until the probe says otherwise.
+A non-loopback `CSMSD_BIND` without `[csms] tls_cert` (or a declared
+TLS-terminating proxy) refuses to start, naming `csms.tls_cert`. Print a
+station's `password_hash` with:
 
 ```console
-$ curl -s localhost:9001/health/ready
-key-registry: not started
-provisioning: not started
+printf '%s' "$PASSWORD" | cargo run -q -p csmsd -- hash-password 2.0.1
 ```
 
-## The one piece of protocol the daemon owns
+### The driver receipt
 
-OCPP 1.6 assigns a transaction id in the **response** to `StartTransaction`, not
-in the request — so the CSMS allocates it, and every later message carries it
-back. 2.x has the station allocate it instead. That asymmetry needs state, which
-is why it is here and not in `emob-ocpp`.
+Every session csmsd settles or refuses has a receipt at
+`<public_url>/r/<token>` (`[receipts] public_url` in the estate). It leads with
+the verdict — *Gemessen, signiert, geprüft*, or *Nicht abgerechnet* with the
+paragraph that refused it — then the energy, the price lines from the CDR, the
+meter key in groups of four to compare with the charge-point label, the
+S.A.F.E. transparency file, and **Selbst prüfen**: a WebAssembly build of
+`emob-verify` that checks every signed value on the phone, offline once loaded
+`[MessEG §33]`.
 
-## Nothing is dropped silently
+- The token is an HMAC under `receipt.key`, created beside the journal on first
+  start and kept out of it; only its SHA-256 is stored.
+- An unknown token gets the same `404` as any other path; no token is logged; no
+  contract id is shown; beyond 60 requests per second the answer is `429`.
+- The verifier is compiled in (`services/csmsd/assets/emob_verify.wasm`);
+  `just wasm` rebuilds it reproducibly and CI fails on a diff.
+- Each invoice line billd issues carries the receipt link. The receipt does not
+  link back: the invoice is the partner's whole month, every driver on it.
 
-Every transaction reaches an `Outcome`: `Settled` with the record it produced,
-`AlreadySettled` when the ledger already held it, or `Refused` with the reasons
-the chain gave, in the order it gave them. The same rule the fleet simulator
-asserts over a hundred stations — every kilowatt-hour either reaches a settled
-record or is refused with a reason somebody can act on — applies to a running
-daemon.
+### The receipt link on the station's display
 
-`AlreadySettled` is a **success**. OCPP guarantees delivery by retrying, so a
-record the ledger already holds is the ordinary shape of a flaky link; folding
-it into the refusals sends somebody to investigate a success and counts the
-energy twice. Only a `Conflict` — a *different* record under a settled key —
-needs a human.
+A station with `receipt_display_minutes` (1–15) in its `[[stations]]` entry is
+sent one `SetDisplayMessage` `[OCPP 2.0.1 Part 2 §O]` when a receipt is filed:
+`Beleg: <link>`, in German, shown in front until now plus those minutes. It is
+**off by default** because a screen is public — whoever stands there next can
+read the link — which is also why the window is bounded and the receipt it
+opens shows no name, card or contract.
 
-A station signing with a key it was not provisioned with gets its own outcome,
-separate from the refusal the chain will produce anyway. It has a **different
-fix**: a meter was swapped and nobody told the registry, and every session from
-that station is unbillable until somebody does. Catching it on the first signed
-value rather than after a week of them is the difference between an alert and an
-audit.
+The message is a courtesy, not a fact: one attempt with a 10-second timeout,
+after the receipt is journalled; never retried, never journalled, and logged
+with the station and the outcome only, never the link. OCPP 1.6 has no display
+message, so a 1.6 station with the option is named once at start-up and
+skipped; a value outside 1–15 refuses the start, naming the key.
 
-The tariff is checked against the point's own power before it prices anything:
-`[AFIR Art. 5(4)]` is a rule about the *pairing* of a tariff with a charge
-point, and a backend that rates first and checks later has already produced the
-number it may not charge.
+### Graceful shutdown
 
-## The test that proves it
-
-`tests/a_station_connects.rs` runs a real `ocpp-kit` `Station` against a real
-`ocpp-kit` `Csms` over a real TCP WebSocket — real handshake, real subprotocol
-negotiation, real RPC engine — with `csmsd` as the handler.
-
-The station sends the OCA's own published `StopTransaction.req` from a DZG
-GSH01.1K2L. Its `meterStop` says **108814** watt-hours, the meter's *lifetime*
-register. The CDR that comes out bills **0.636 kWh**, the signed transaction
-difference. Nothing between the socket and the ledger can see the first number.
-
-## The key a station claims, and being able to check it
-
-`[OCA SMV §3.2.2]` has a station send its own public key beside each signed
-value. The claim decides nothing — the key that verifies comes from the registry,
-out of band `[OCMF §Relation of Serial Numbers]` — but the two agreeing narrows a
-dispute to the numbers, and the two disagreeing names a meter swapped without the
-registry hearing about it.
-
-```rust
-Outcome::KeyMismatch { identity, claimed }        // a meter nobody told us about
-Outcome::UnreadableClaimedKey { identity, detail } // …and one we cannot even check
-```
-
-The second exists because the first silently stopped happening. A `publicKey`
-envelope that does not decode was answered with `continue`, so the comparison
-never ran and a swapped meter behind an unreadable key was never named. The
-session still bills — being unable to check a claim is not a reason to refuse the
-measurement — and the operator is told, because the fix is a provisioning one.
+On `SIGTERM` the shell stops reporting ready first, so the orchestrator routes
+no new station here, then drains for 15 seconds so an in-flight
+`StopTransaction` — the message carrying the signed meter record — can land.
+Killing the process instead loses nothing the journal holds: every accepted
+event is recorded before the station hears back.
 
 ## Configuration
 
-| Variable | Default | What |
+`main.rs` is configuration only; everything that runs is `csmsd::daemon::run`.
+
+| Variable | Default | Purpose |
 |---|---|---|
-| `CSMSD_HTTP_BIND` | `127.0.0.1:9001` | the readiness and health endpoint |
-| `CSMSD_BIND` | `127.0.0.1:9000` | the OCPP endpoint a station dials. Its **own** variable: the estate-wide address names the shell's socket, and one address applied to both would bind the second to the first's port |
-| `CSMSD_TIME_ZONE` | `Europe/Berlin` | the zone a tariff's `22:00` is read in — a fact about the **site**, not about this process. Judged in the wrong one, the same session costs a different amount (D175) |
-| `EMOB_JOURNAL_DIR` | `var` | where a daemon folds its ledger from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
-| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `CSMSD_HTTP_BIND` wins over. Every default is **loopback**, and loopback inside a container is reachable by nothing |
+| `EMOB_ESTATE` | `./estate.toml` | the estate: `[[stations]]`, `[[meter_keys]]`, `[[tariffs]]`, `[csms]`, `[receipts]`, `[services]`, `[[operators]]` |
+| `CSMSD_DATA_KEY` | **required** | 32 bytes, base64; seals the journal. Under another key csmsd refuses to start, naming the key id |
+| `CSMSD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head. A `.head` signed under another key refuses the start |
+| `EMOB_WEBHOOK_SECRET`, `EMOB_SERVICE_TOKEN`, `EMOB_OPERATOR_TOKEN` | **required** | the variables the estate names: delivery signatures, the token for `empd`, the read model's bearer |
+| `CSMSD_BIND` | `127.0.0.1:9000` | the OCPP WebSocket stations dial |
+| `CSMSD_HTTP_BIND` / `EMOB_HTTP_BIND` | `127.0.0.1:9001` | the shell: probes, read model, receipts |
+| `EMOB_JOURNAL_DIR` | `var` | where `csmsd.ndjson`, its `.head` and `receipt.key` live |
+| `EMOB_LOG_FORMAT` | JSON | `text` for a terminal. Each OCPP call's span carries `station:<identity>` |
+| `RUST_LOG` | `info,csmsd=debug` | log filter |
+
+## Running
+
+```console
+just demo                                   # the whole estate, csmsd included
+eval "$(just dev-keys)" && just dev-ca      # data keys and loopback TLS
+EMOB_ESTATE=deploy/estate.example.toml cargo run -p csmsd   # plus the *_env variables
+```
+
+In the example estate `CP-1` is a profile-2 station whose `AuthorizationKey` is
+`6d6f636b2d73746174696f6e2d736563726574` (hex of `mock-station-secret`); it dials
+`wss://127.0.0.1:9000/CP-1`.
+
+## Endpoints
+
+| Endpoint | Answers |
+|---|---|
+| OCPP WebSocket on `CSMSD_BIND` | OCPP 2.1, 2.0.1 and 1.6J |
+| `GET /v1/csmsd/today?limit=&refused=&silent=` | operator token: registry size, the charging success rate for **today** and the **last 7 days** in `[desk] time_zone` (each with causes and weakest points), refused sessions with typed, cited `findings` and their `receipt_path`, and silent stations — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page. Its size depends on `limit` and the number of stations, never on the history |
+| `GET /v1/csmsd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
+| `GET /r/{token}`, `GET /r/{token}/transparenz.xml` | the driver receipt and its transparency file |
+| `GET /r/verify.js`, `GET /r/verify.wasm` | the in-browser verifier |
+| `GET /health/live` | `200` while the process runs |
+| `GET /health/ready` | `200` once everything it waits for is loaded; `503` naming what is missing |
+| `GET /about` | name and version |
+
+## Built on
+
+`emob-ocpp`, `emob-eichrecht`, `emob-session`, `emob-tariff`, `emob-cdr`,
+`emob-service`, `emob-verify` (the receipt's verifier), and [`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.5 for
+transport and the operational ledger. See
+[The OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/) and the
+[workspace README](../../README.md).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

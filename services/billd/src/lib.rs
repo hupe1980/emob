@@ -56,15 +56,20 @@
 #![warn(missing_docs, clippy::pedantic)]
 
 pub mod books;
+pub mod daemon;
+pub mod deliver;
+pub mod invoice_page;
+pub mod receive;
 
 pub use books::{Books, BooksError, Event};
 
 use std::collections::BTreeMap;
 
 use doubleentry::{
-    Account, AccountId, AccountKind, AccountPath, Amount, Currency as LedgerCurrency, Description,
-    Entry, EntryId, IdempotencyKey, Journal, LedgerId, Recorded,
+    AccountKind, AccountPath, Amount, Currency as LedgerCurrency, Entry, Journal, LedgerId,
+    Recorded,
 };
+use emob_billing::Specification;
 use emob_billing::invoice::Invoice;
 use emob_billing::postings::{Postings, Role, Side};
 
@@ -130,6 +135,10 @@ pub struct Issued {
     pub replaces: Option<String>,
     /// Whether it has been booked.
     pub booked: bool,
+    /// The specification it was issued in, and is served and delivered in
+    /// (spec 010). A decision made once, at issue: a partner whose
+    /// configuration changes later does not change a document already issued.
+    pub specification: Specification,
 }
 
 /// Why a closing could not be made.
@@ -181,7 +190,7 @@ pub enum ClosingError {
         number: String,
         /// What the journal said.
         #[source]
-        source: doubleentry::JournalError,
+        source: Box<doubleentry::Error>,
     },
 
     /// A document was booked before the recipient had it.
@@ -301,7 +310,7 @@ pub enum ClosingError {
         number: String,
         /// What the ledger said.
         #[source]
-        source: doubleentry::EntryFieldError,
+        source: Box<doubleentry::Error>,
     },
 
     /// An amount on the document is not one the journal can hold.
@@ -311,7 +320,7 @@ pub enum ClosingError {
         number: String,
         /// What the ledger said.
         #[source]
-        source: doubleentry::MoneyError,
+        source: Box<doubleentry::Error>,
     },
 }
 
@@ -322,14 +331,14 @@ pub enum ClosingError {
 /// multiplication is exact and the rounding below is a formality. It is a
 /// refusal rather than a fallback because the fallback would be **zero**, and a
 /// posting of nothing is a statement the books would balance around.
-fn minor_units(amount: rust_decimal::Decimal, number: &str) -> Result<i64, ClosingError> {
+fn minor_units(amount: rust_decimal::Decimal, number: &str) -> Result<i128, ClosingError> {
     use rust_decimal::prelude::ToPrimitive as _;
     (amount * rust_decimal::Decimal::from(100))
         .round()
-        .to_i64()
+        .to_i128()
         .ok_or_else(|| ClosingError::Money {
             number: number.to_owned(),
-            source: doubleentry::MoneyError::Overflow,
+            source: Box::new(doubleentry::error::AmountError::Overflow.into()),
         })
 }
 
@@ -493,8 +502,61 @@ impl ChartOfAccounts {
     }
 }
 
+/// A record `csmsd` delivered, and whom it is owed by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Received {
+    /// The record.
+    pub cdr: emob_cdr::Cdr,
+    /// Who pays it.
+    pub partner: emob_core::PartyId,
+    /// The closing it belongs to.
+    pub period: String,
+    /// The driver's receipt link, when `csmsd` sent one (spec 003).
+    pub receipt: Option<String>,
+}
+
+/// The closing key of a partner's month: `<CC*PID>/<YYYY-MM>`.
+#[must_use]
+pub fn period_key(partner: &emob_core::PartyId, year: i32, month: time::Month) -> String {
+    format!("{partner}/{year:04}-{:02}", u8::from(month))
+}
+
+/// The closing a record belongs to: the month it **ended** in, in UTC.
+#[must_use]
+pub fn period_of(partner: &emob_core::PartyId, ended_at: time::OffsetDateTime) -> String {
+    let utc = ended_at.to_offset(time::UtcOffset::UTC);
+    period_key(partner, utc.year(), utc.month())
+}
+
+/// Everything one closing needs beside the records.
+#[derive(Debug, Clone)]
+pub struct Closing {
+    /// Who pays.
+    pub partner: emob_core::PartyId,
+    /// The month.
+    pub year: i32,
+    /// The month.
+    pub month: time::Month,
+    /// The invoice date.
+    pub issued_on: time::Date,
+    /// The operator.
+    pub seller: emob_billing::Counterparty,
+    /// The partner.
+    pub buyer: emob_billing::Counterparty,
+    /// The standard VAT rate where the energy was supplied.
+    pub vat_rate: rust_decimal::Decimal,
+    /// The specification the partner's documents are written in (BT-24).
+    pub specification: Specification,
+    /// How the partner pays (BG-16), when the estate says.
+    pub payment: Option<emob_billing::PaymentDetails>,
+    /// The partner's reference for our invoices (BT-10).
+    pub buyer_reference: Option<String>,
+}
+
 /// The service: a number series, the documents it has issued, and the books.
 pub struct Billd {
+    /// Records delivered, by key.
+    received: BTreeMap<String, Received>,
     numbering: Numbering,
     chart: ChartOfAccounts,
     /// Keyed by invoice number, which `[UStG §14(4) Nr. 4]` makes unique.
@@ -511,6 +573,7 @@ impl Billd {
     #[must_use]
     pub fn new(ledger: &str, numbering: Numbering) -> Self {
         Self {
+            received: BTreeMap::new(),
             numbering,
             chart: ChartOfAccounts::new(),
             issued: BTreeMap::new(),
@@ -521,6 +584,17 @@ impl Billd {
                     .unwrap_or_else(|_| unreachable!("a ledger name this crate accepted")),
             ),
         }
+    }
+
+    /// The records delivered, by key.
+    pub fn received(&self) -> impl Iterator<Item = &Received> {
+        self.received.values()
+    }
+
+    /// How many records were delivered — without walking them.
+    #[must_use]
+    pub fn received_count(&self) -> usize {
+        self.received.len()
     }
 
     /// Post to an operator's own chart of accounts rather than the default one.
@@ -543,8 +617,17 @@ impl Billd {
     }
 
     /// Every document, in the order the statute issues their numbers.
-    pub fn documents(&self) -> impl Iterator<Item = &Issued> {
+    #[must_use]
+    pub fn documents(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = &Issued> + ExactSizeIterator<Item = &Issued> {
         self.issued.values()
+    }
+
+    /// The *Stornorechnung* that cancels a document, where one does.
+    #[must_use]
+    pub fn cancelled_by(&self, number: &str) -> Option<&str> {
+        self.cancelled_by.get(number).map(String::as_str)
     }
 
     /// The document that closes a period **now**.
@@ -574,6 +657,20 @@ impl Billd {
         period: &str,
         invoice: impl FnOnce(String) -> Result<Invoice, emob_billing::BillingError>,
     ) -> Result<&Issued, ClosingError> {
+        self.issue_as(period, Specification::Core, invoice)
+    }
+
+    /// [`Self::issue`], in a stated EN 16931 specification (BT-24).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::issue`].
+    pub fn issue_as(
+        &mut self,
+        period: &str,
+        specification: Specification,
+        invoice: impl FnOnce(String) -> Result<Invoice, emob_billing::BillingError>,
+    ) -> Result<&Issued, ClosingError> {
         if let Some(number) = self.closed.get(period) {
             return Err(ClosingError::AlreadyClosed {
                 period: period.to_owned(),
@@ -594,6 +691,7 @@ impl Billd {
             cancels: None,
             replaces: None,
             booked: false,
+            specification,
         }))
     }
 
@@ -645,6 +743,7 @@ impl Billd {
             });
         }
 
+        let specification = original.specification;
         let credit_number = self.numbering.take();
         // The reason travels **on the document** as a BT-22 note, not in a log
         // here. A recipient's accounts-payable clerk holding a credit note that
@@ -661,6 +760,7 @@ impl Billd {
                 cancels: Some(number.to_owned()),
                 replaces: None,
                 booked: false,
+                specification,
             },
         );
         self.cancelled_by
@@ -679,6 +779,7 @@ impl Billd {
                 // nothing to ask about the original (D307).
                 replaces: Some(number.to_owned()),
                 booked: false,
+                specification,
             },
         );
 
@@ -765,7 +866,7 @@ impl Billd {
     /// themselves and the answer is to say so. A *process* that crashed between
     /// the journal's write and this flag's is a different case: the entry is
     /// keyed on the invoice number, so the replay finds the entry it already
-    /// wrote and returns it with [`Recorded::is_new`] false, rather than posting
+    /// wrote and returns it with [`Recorded::replayed`] set, rather than posting
     /// the month a second time.
     ///
     /// # Errors
@@ -826,7 +927,7 @@ impl Billd {
             .record(entry)
             .map_err(|source| ClosingError::Journal {
                 number: number.to_owned(),
-                source,
+                source: Box::new(source),
             })?;
         if let Some(document) = self.issued.get_mut(number) {
             document.booked = true;
@@ -873,12 +974,13 @@ impl Billd {
     ///
     /// # Errors
     ///
-    /// [`doubleentry::MoneyError`] where the journal cannot total its own
+    /// [`doubleentry::Error`] where the journal cannot total its own
     /// postings, which is a ledger that has stopped balancing.
     pub fn trial_balance(
         &self,
-    ) -> Result<doubleentry::TrialBalance<{ SCALE }>, doubleentry::MoneyError> {
-        self.journal.trial_balance(doubleentry::BalanceQuery::all())
+    ) -> Result<doubleentry::report::TrialBalance<{ SCALE }>, doubleentry::Error> {
+        self.journal
+            .trial_balance(&doubleentry::BalanceQuery::all())
     }
 
     /// What one account holds, in one currency.
@@ -891,28 +993,21 @@ impl Billd {
     ///
     /// # Errors
     ///
-    /// [`doubleentry::MoneyError`] where the journal cannot total its own
+    /// [`doubleentry::Error`] where the journal cannot total its own
     /// postings.
     pub fn balance_of(
         &self,
         path: &str,
         currency: &str,
-    ) -> Result<Option<doubleentry::Balance<{ SCALE }>>, doubleentry::MoneyError> {
+    ) -> Result<Option<doubleentry::Balance<{ SCALE }>>, doubleentry::Error> {
         let (Ok(path), Ok(currency)) = (path.parse::<AccountPath>(), LedgerCurrency::new(currency))
         else {
             return Ok(None);
         };
-        let Some(account) = self.journal.accounts().id_of(&path) else {
-            return Ok(None);
-        };
         Ok(self
             .trial_balance()?
-            .get(&doubleentry::BalanceKey {
-                account,
-                currency,
-                layer: doubleentry::Layer::Settled,
-            })
-            .copied())
+            .get(&path, currency)
+            .map(|row| row.balance))
     }
 
     /// One document's postings as a journal entry, with every account opened.
@@ -920,45 +1015,94 @@ impl Billd {
         &mut self,
         postings: &Postings,
         number: &str,
-    ) -> Result<Entry<doubleentry::Draft, { SCALE }>, ClosingError> {
+    ) -> Result<Entry<{ SCALE }>, ClosingError> {
         let currency = LedgerCurrency::new(postings.currency.as_str()).map_err(|source| {
             ClosingError::Money {
                 number: number.to_owned(),
-                source,
+                source: Box::new(source.into()),
             }
         })?;
+        let opened = self.calendar_through(postings.booked_on, number)?;
+        self.journal
+            .declare_currency(currency, SCALE, opened)
+            .map_err(|source| ClosingError::Journal {
+                number: number.to_owned(),
+                source: Box::new(source),
+            })?;
         // The **idempotency key** is the invoice number, which
-        // `[UStG §14(4) Nr. 4]` already makes unique. The entry's own id is not
-        // in the journal's canonical bytes, so a closing replayed after a crash
+        // `[UStG §14(4) Nr. 4]` already makes unique. The entry's id is derived
+        // from the ledger and the key, so a closing replayed after a crash
         // records once and returns what it recorded the first time.
-        let key = IdempotencyKey::new(number.as_bytes().to_vec()).map_err(|source| {
+        let key = doubleentry::IdempotencyKey::try_from(number).map_err(|source| {
             ClosingError::Field {
                 number: number.to_owned(),
-                source,
+                source: Box::new(source.into()),
             }
         })?;
-        let description = Description::new(format!("invoice {number}")).map_err(|source| {
-            ClosingError::Field {
-                number: number.to_owned(),
-                source,
-            }
-        })?;
-        let mut entry = Entry::<doubleentry::Draft, { SCALE }>::new(
-            EntryId::generate(),
-            key,
-            postings.booked_on,
-        )
-        .with_description(description);
+        // No memo: the key already names the document, and an unsalted memo is
+        // salted from the OS random source, which would make two replays of one
+        // journal two different ledgers.
+        let mut entry = Entry::<{ SCALE }>::new(key, postings.booked_on);
 
         for posting in &postings.postings {
-            let account = self.account_for(&posting.role, postings.booked_on, number)?;
-            let amount = Amount::<{ SCALE }>::from_minor(minor_units(posting.amount, number)?);
+            let account = self.account_for(&posting.role, opened, number)?;
+            let amount = Amount::<{ SCALE }>::from_minor(minor_units(posting.amount, number)?)
+                .map_err(|source| ClosingError::Money {
+                    number: number.to_owned(),
+                    source: Box::new(source.into()),
+                })?;
             entry = match posting.side {
                 Side::Debit => entry.debit(account, amount, currency),
                 Side::Credit => entry.credit(account, amount, currency),
             };
         }
         Ok(entry)
+    }
+
+    /// The month calendar, extended to cover `on`; returns the day it opens.
+    ///
+    /// The journal books only into a defined period, and periods are defined
+    /// back to back. billd closes months, so a period is a month: the first
+    /// booking opens the calendar at January of its year — a correction dated
+    /// earlier in the same year still has a period to land in — and every
+    /// later booking extends it forward to its own month. A booking dated
+    /// before the calendar opened is refused by the journal (`[300]`), which
+    /// is a document claiming a date before these books existed.
+    fn calendar_through(
+        &mut self,
+        on: time::Date,
+        number: &str,
+    ) -> Result<time::Date, ClosingError> {
+        let journal_error = |source| ClosingError::Journal {
+            number: number.to_owned(),
+            source: Box::new(source),
+        };
+        let periods = self.journal.periods().map_err(journal_error)?;
+        let (Some(first), Some(last)) = (periods.first(), periods.last()) else {
+            self.journal
+                .define_months(on.year(), 1..=u8::from(on.month()))
+                .map_err(journal_error)?;
+            return Ok(
+                time::Date::from_calendar_date(on.year(), time::Month::January, 1).unwrap_or(on),
+            );
+        };
+        let opened = first.start;
+        let mut next = last.end.next_day();
+        while let Some(start) = next.filter(|start| *start <= on) {
+            self.journal
+                .define_months(
+                    start.year(),
+                    u8::from(start.month())..=u8::from(start.month()),
+                )
+                .map_err(journal_error)?;
+            next = time::Date::from_calendar_date(start.year(), start.month(), 1)
+                .ok()
+                .and_then(|month| month.checked_add(time::Duration::days(31)))
+                .and_then(|later| {
+                    time::Date::from_calendar_date(later.year(), later.month(), 1).ok()
+                });
+        }
+        Ok(opened)
     }
 
     /// The account a role posts to, opened on first use.
@@ -968,23 +1112,22 @@ impl Billd {
     /// before — opens its account rather than failing the closing. The
     /// alternative is a month that will not book because a driver charged in a
     /// new country, which is a worse answer than an account with an obvious
-    /// name.
+    /// name. Opening is idempotent in the journal, so a role already open
+    /// writes nothing.
     fn account_for(
         &mut self,
         role: &Role,
         on: time::Date,
         number: &str,
-    ) -> Result<AccountId, ClosingError> {
+    ) -> Result<AccountPath, ClosingError> {
         let path = self.chart.path_for(role);
-        if let Some(existing) = self.journal.accounts().id_of(&path) {
-            return Ok(existing);
-        }
         self.journal
-            .register_account(Account::new(path, on).with_kind(ChartOfAccounts::kind_for(role)))
+            .open(path.to_string(), ChartOfAccounts::kind_for(role), on)
             .map_err(|source| ClosingError::Journal {
                 number: number.to_owned(),
-                source,
-            })
+                source: Box::new(source),
+            })?;
+        Ok(path)
     }
 
     /// Record one submission outcome.

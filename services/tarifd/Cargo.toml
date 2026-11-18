@@ -26,6 +26,8 @@ ocpi-kit     = { workspace = true }
 ocpp-kit     = { workspace = true }
 
 anyhow       = { workspace = true }
+axum         = { workspace = true }
+serde        = { workspace = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }
 tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }

@@ -15,16 +15,51 @@ emob-core      = { workspace = true }
 emob-eichrecht = { workspace = true }
 ocmf           = { workspace = true }
 emob-ocpp      = { workspace = true }
+emob-roam      = { workspace = true }
 emob-session   = { workspace = true }
 emob-service   = { workspace = true }
 emob-tariff    = { workspace = true }
-ocpp-kit       = { workspace = true, features = ["std", "tokio", "csms", "v1_6", "v2_0_1", "v2_1"] }
+# The check a driver runs, compiled in twice: natively to label the signed
+# values, and as the WebAssembly module the receipt serves (spec 003).
+emob-verify    = { path = "../../crates/emob-verify" }
+ocpp-kit       = { workspace = true, features = ["std", "tokio", "csms", "rustls", "v1_6", "v2_0_1", "v2_1"] }
+# Station passwords are Argon2id hashes in the estate (spec 005).
+argon2         = { workspace = true }
+# The salt for `csmsd hash-password`, from the RNG `rustls` already links.
+aws-lc-rs      = { workspace = true }
+# The server config is built here rather than by the kit, because the kit's
+# mutual-TLS constructor demands a certificate from *every* peer and a profile-2
+# station has none: `allow_unauthenticated` lets profiles 2 and 3 share one
+# listener. Already in the graph (the kit's `rustls` feature); `ring` is the
+# provider the kit uses, so no second provider is linked for this.
+rustls         = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 anyhow         = { workspace = true }
+# The receipt token: HMAC-SHA256 under a key from the OS CSPRNG (SR-060).
+base64         = { workspace = true }
+getrandom      = "0.4"
+hex            = { workspace = true }
+hmac           = { workspace = true }
+sha2           = { workspace = true }
+axum           = { workspace = true }
+# The client half of the deliveries and the authorise call. Already in the
+# graph through `ocpi-kit`'s `client` (roamd); `json` only, so it adds no crate.
+reqwest        = { version = "0.13", default-features = false, features = ["json"] }
 rust_decimal   = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+thiserror      = { workspace = true }
 time           = { workspace = true }
-tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 tracing        = { workspace = true }
 
 [dev-dependencies]
-ocpp-kit     = { workspace = true, features = ["std", "tokio", "csms", "station", "v1_6", "v2_0_1", "v2_1"] }
-tokio        = { version = "1.45", features = ["rt-multi-thread", "macros", "time", "net"] }
+tower-service      = "0.3"
+tracing-subscriber = { workspace = true }
+# The estate, started in-process: the three daemons a settled session reaches.
+billd          = { path = "../billd" }
+empd           = { path = "../empd" }
+roamd          = { path = "../roamd" }
+emob-sim       = { workspace = true }
+ocpp-kit       = { workspace = true, features = ["std", "tokio", "csms", "station", "testkit", "rustls", "v1_6", "v2_0_1", "v2_1"] }
+ocpi-kit       = { workspace = true, features = ["client", "server", "testkit"] }
+tokio          = { version = "1.45", features = ["rt-multi-thread", "macros", "time", "net", "io-util"] }

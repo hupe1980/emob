@@ -415,6 +415,31 @@ mod tests {
     }
 
     #[test]
+    fn a_tampered_value_is_a_signature_finding_citing_the_rule_that_refuses_it() {
+        let mut texts = session_texts();
+        texts[1] = texts[1].replace("2965.100", "9965.100");
+        let findings = assemble(&texts, &registry()).findings();
+        assert_eq!(findings[0].kind, crate::FindingKind::Signature);
+        assert_eq!(findings[0].kind.citation(), "[MessEG §33]");
+        assert_eq!(findings[0].takes, Disqualifies::Both);
+        assert!(findings[0].detail.contains("record 2"), "{findings:?}");
+        assert!(
+            assemble(&session_texts(), &registry())
+                .findings()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_missing_key_is_its_own_finding_because_it_has_its_own_fix() {
+        let findings = assemble(&session_texts(), &KeyRegistry::new()).findings();
+        assert!(
+            findings.iter().all(|f| f.kind == crate::FindingKind::NoKey),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn an_unregistered_station_cannot_bill() {
         let evidence = assemble(&session_texts(), &KeyRegistry::new());
         assert!(!evidence.is_billable());

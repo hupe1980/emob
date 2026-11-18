@@ -56,22 +56,35 @@
     reason = "`ServerError` in `serve` is the name the type has at every call site"
 )]
 
+pub mod actor;
 pub mod authority;
 pub mod config;
+#[cfg(feature = "serde")]
+pub mod estate;
 pub mod events;
+#[cfg(feature = "serde")]
+pub mod head;
 pub mod health;
 #[cfg(feature = "serde")]
 pub mod journal;
+#[cfg(feature = "serde")]
+pub mod page;
 #[cfg(feature = "policy")]
 pub mod policy;
 pub mod serve;
 pub mod shutdown;
 pub mod telemetry;
+pub mod ui;
+#[cfg(feature = "serde")]
+pub mod vault;
 pub mod webhook;
+#[cfg(feature = "serde")]
+pub mod witness;
 
 // `Role` is `emob-core`'s — see its documentation for why one concept has one
 // type here.
-pub use authority::{Capabilities, PartyScope, Principal, Token, caps};
+pub use actor::Actor;
+pub use authority::{Capabilities, Operators, PartyScope, Principal, Token, caps};
 pub use config::{ConfigError, Secret, load, load_from};
 pub use emob_core::Role;
 pub use health::{Identity, Probe, Readiness};
@@ -80,3 +93,16 @@ pub use journal::{Folded, Journal, JournalError, Kinded, Record};
 pub use serve::{Server, ServerError};
 pub use shutdown::Shutdown;
 pub use webhook::{Delivery, SecretError};
+
+/// Where a daemon reads "now" from.
+///
+/// For an instant that becomes part of what it decides or shows. `main` passes
+/// [`system_clock`]; a test or a simulated estate passes its own, so a run is
+/// reproducible for a given instant.
+pub type Clock = std::sync::Arc<dyn Fn() -> time::OffsetDateTime + Send + Sync>;
+
+/// The wall clock.
+#[must_use]
+pub fn system_clock() -> Clock {
+    std::sync::Arc::new(time::OffsetDateTime::now_utc)
+}

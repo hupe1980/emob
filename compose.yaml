@@ -4,7 +4,7 @@
 # no replica count here, because a service that folds a journal on a local
 # volume is a **single writer** by construction, and two of them behind one
 # volume would interleave two chains into one file. Scaling out is a design
-# question the roadmap names (R24); scaling up is `deploy.resources`.
+# question for later; scaling up is `deploy.resources`.
 #
 # Every daemon takes its journal on a named volume. A container without one is a
 # service whose ledger dies with it — the whole failure the journal exists to
@@ -21,16 +21,32 @@ name: emob
 # `httpGet`, a load balancer — is given them for. `ready` names what it is
 # waiting for; `live` only says the process is up.
 
+# The variables every daemon shares. A separate anchor, merged **inside** each
+# service's `environment:` with `<<: *env` — YAML's merge key is shallow, so a
+# service that wrote its own `environment:` under `<<: *daemon` replaced this map
+# whole and lost the journal directory and the bind address (found in 0.2).
+x-env: &env
+  EMOB_JOURNAL_DIR: /var/lib/emob
+  # The one a container cannot do without. Every daemon defaults to loopback —
+  # which is right on a laptop and reachable by nothing inside a container — so
+  # the estate-wide address is set here rather than in nine places. A daemon's
+  # own `<DAEMON>_HTTP_BIND` still wins over it.
+  EMOB_HTTP_BIND: 0.0.0.0:8080
+  RUST_LOG: ${RUST_LOG:-info}
+  # The estate: one file, mounted read-only, every daemon reading its sections.
+  EMOB_ESTATE: /etc/emob/estate.toml
+  # The secrets the estate names by variable. No defaults: a default secret is
+  # one every reader of this repository holds, and `:?` refuses to start the
+  # estate with a message rather than leave a container crash-looping.
+  EMOB_WEBHOOK_SECRET: ${EMOB_WEBHOOK_SECRET:?set EMOB_WEBHOOK_SECRET (whsec_<base64>) — the daemons sign what they hand each other}
+  EMOB_SERVICE_TOKEN: ${EMOB_SERVICE_TOKEN:?set EMOB_SERVICE_TOKEN — csmsd presents it to empd}
+  EMOB_OPERATOR_TOKEN: ${EMOB_OPERATOR_TOKEN:?set EMOB_OPERATOR_TOKEN — the read models answer nobody without one}
+  EMOB_PARTNER_DE_MSP_TOKEN_A: ${EMOB_PARTNER_DE_MSP_TOKEN_A:?set EMOB_PARTNER_DE_MSP_TOKEN_A — the Token A the demo partner registers with}
+
 x-daemon: &daemon
   restart: unless-stopped
   environment:
-    EMOB_JOURNAL_DIR: /var/lib/emob
-    # The one a container cannot do without. Every daemon defaults to
-    # loopback — which is right on a laptop and reachable by nothing inside a
-    # container — so the estate-wide address is set here rather than in eight
-    # places. A daemon's own `<DAEMON>_HTTP_BIND` still wins over it.
-    EMOB_HTTP_BIND: 0.0.0.0:8080
-    RUST_LOG: ${RUST_LOG:-info}
+    <<: *env
 
 services:
   csmsd:
@@ -38,64 +54,107 @@ services:
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-csmsd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: csmsd } }
     environment:
+      <<: *env
       # The second socket has its own variable: the estate-wide one names the
       # shell's address, and applying it to both would bind them to one port.
       CSMSD_BIND: 0.0.0.0:9000
+      # The key csmsd's journal is sealed under: its answers, CDRs and
+      # deliveries carry card UIDs (SR-048). `just dev-keys` prints one.
+      CSMSD_DATA_KEY: ${CSMSD_DATA_KEY:?set CSMSD_DATA_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
+      # The Ed25519 seed csmsd signs its journal head with after every append
+      # (spec 008); a journal shorter than its signed head does not start.
+      CSMSD_SIGNING_KEY: ${CSMSD_SIGNING_KEY:?set CSMSD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
     ports:
       - "8080:8080"   # the shell
-      - "9000:9000"   # the OCPP WebSocket a station dials
-    volumes: [csmsd:/var/lib/emob]
+      - "9000:9000"   # the OCPP WebSocket a station dials — wss://, profile 2
+    # The listener's certificate: a public bind without TLS refuses to start
+    # (SR-042). `just up` mints a throwaway one with `just dev-ca`.
+    volumes: [csmsd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro, ./target/dev-tls:/tls:ro]
 
   roamd:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-roamd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: roamd } }
+    environment:
+      <<: *env
+      # Partners' tokens are digested and sealed under it (SR-044).
+      ROAMD_DATA_KEY: ${ROAMD_DATA_KEY:?set ROAMD_DATA_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
+      # The Ed25519 seed roamd signs its journal head with after every append
+      # (spec 008); a journal shorter than its signed head does not start.
+      ROAMD_SIGNING_KEY: ${ROAMD_SIGNING_KEY:?set ROAMD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
     ports: ["8081:8080"]
-    volumes: [roamd:/var/lib/emob]
+    volumes: [roamd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   billd:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-billd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: billd } }
+    environment:
+      <<: *env
+      # The CDRs it receives carry card UIDs, its invoices the debtor's name and
+      # IBAN (SR-087); a journal under another key refuses to start.
+      BILLD_DATA_KEY: ${BILLD_DATA_KEY:?set BILLD_DATA_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
+      # The Ed25519 seed billd signs its journal head with after every append
+      # (spec 008); a journal shorter than its signed head does not start.
+      BILLD_SIGNING_KEY: ${BILLD_SIGNING_KEY:?set BILLD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
     ports: ["8082:8080"]
-    volumes: [billd:/var/lib/emob]
+    volumes: [billd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   empd:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-empd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: empd } }
     environment:
-      # The key the token store is hashed under, and the one value in this file
-      # with no default. A token reference is a keyed digest of an RFID uid
-      # precisely so that a store which leaks does not confirm a card by
-      # guessing — and a default key here would be one every reader of this
-      # repository holds. `:?` makes compose refuse to start the estate with a
-      # message, rather than leaving a container to crash-loop behind a probe
-      # nobody is watching.
-      EMPD_TOKEN_KEY: ${EMPD_TOKEN_KEY:?set EMPD_TOKEN_KEY — the token store is keyed, and a default key is a store whose digests anybody can recompute}
+      <<: *env
+      # The key token references are derived and UIDs sealed under (SR-046,
+      # SR-047). No default: a default key is one every reader of this
+      # repository holds — and destroying this one erases every UID empd ever
+      # journalled, which is the point.
+      EMPD_DATA_KEY: ${EMPD_DATA_KEY:?set EMPD_DATA_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
+      # The Ed25519 seed empd signs its journal head with after every append
+      # (spec 008); a journal shorter than its signed head does not start.
+      EMPD_SIGNING_KEY: ${EMPD_SIGNING_KEY:?set EMPD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
     ports: ["8083:8080"]
-    volumes: [empd:/var/lib/emob]
+    volumes: [empd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   poid:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-poid:${VERSION:-dev}
     build: { context: ., args: { DAEMON: poid } }
+    environment:
+      <<: *env
+      # The Ed25519 seed poid signs its journal head with after every append
+      # (spec 008); a journal shorter than its signed head does not start.
+      POID_SIGNING_KEY: ${POID_SIGNING_KEY:?set POID_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
     ports: ["8084:8080"]
-    volumes: [poid:/var/lib/emob]
+    volumes: [poid:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   tarifd:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-tarifd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: tarifd } }
     ports: ["8085:8080"]
-    volumes: [tarifd:/var/lib/emob]
+    volumes: [tarifd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   agentd:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-agentd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: agentd } }
     ports: ["8086:8080"]
-    volumes: [agentd:/var/lib/emob]
+    volumes: [agentd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
+
+  # The operator's page. It reads the others' read models and keeps one thing:
+  # the witness file — every journal head it read, so a journal cut short or
+  # restored from an older backup is an alarm on Heute (spec 008). On its own
+  # volume, which none of the daemons it watches can reach. Open
+  # http://localhost:8088/ with any user name and $EMOB_OPERATOR_TOKEN as the
+  # password.
+  deskd:
+    <<: *daemon
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-deskd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: deskd } }
+    ports: ["8088:8080"]
+    volumes: [deskd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   # The one that is not deployed with the others. `sited` runs **at a site**,
   # beside the connection point, because `[LPC-912]` puts a site into its
@@ -111,7 +170,7 @@ services:
     # deployment supplies, and this daemon does not open one yet (M12). A
     # mapping here would be a port with nothing behind it.
     ports: ["8087:8080"]
-    volumes: [sited:/var/lib/emob]
+    volumes: [sited:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
 volumes:
   csmsd: {}
@@ -122,3 +181,4 @@ volumes:
   tarifd: {}
   agentd: {}
   sited: {}
+  deskd: {}

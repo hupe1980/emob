@@ -4,11 +4,14 @@
 //!
 //! # Why the kit does not answer it, and why this does
 //!
-//! `iso15118::pnc::pki::validate` says so in as many words: it establishes that
-//! the leaf's key is certified by an unbroken chain to a trusted anchor, and
-//! *"that no certificate on the path has been **revoked**"* is what it does
-//! not. There is no OCSP client and no CRL fetcher in a `no_std` crate that
-//! opens no sockets, and there should not be.
+//! `iso15118::pnc::pki::validate` establishes that the leaf's key is certified
+//! by an unbroken chain to a trusted anchor, and that nothing on the path is
+//! revoked only *"as far as `evidence` shows"* — the OCSP responses and CRLs
+//! its caller already holds. It fetches none: there is no OCSP client and no
+//! CRL fetcher in a `no_std` crate that opens no sockets, and there should not
+//! be. For contract and OEM provisioning chains it requires no status shown
+//! good, so this crate passes `Evidence::none()` and keeps the answer here,
+//! in a [`RevocationList`].
 //!
 //! `[OPCP §Provisioning Certificate Pool]` makes it a control step all the
 //! same, and makes it the **third** of four:

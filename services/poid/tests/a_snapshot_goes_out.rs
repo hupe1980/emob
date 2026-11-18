@@ -390,6 +390,7 @@ fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
 // rollout publishes nothing correct in between. This is the fourth of the four
 // ledgers, and it is journalled last for exactly that reason.
 
+use emob_service::Actor;
 use emob_service::journal::{File, Journal as _};
 use poid::Ledger;
 
@@ -433,7 +434,7 @@ fn the_snapshot_the_access_point_holds_is_the_one_a_restart_reads_back() {
             .expect("a coherent inventory publishes");
         scratch
             .ledger()
-            .accepted(&mut poid, &snapshot, at(1))
+            .accepted(&Actor::Timer, &mut poid, &snapshot, at(1))
             .expect("the access point took it");
     }
 
@@ -479,7 +480,7 @@ fn a_journal_edited_in_the_middle_will_not_start_the_publisher() {
         for minute in 0..3 {
             let snapshot = poid.snapshot(at(minute)).expect("publishes");
             ledger
-                .accepted(&mut poid, &snapshot, at(minute + 1))
+                .accepted(&Actor::Timer, &mut poid, &snapshot, at(minute + 1))
                 .expect("taken");
         }
         assert_eq!(ledger.journal().records().expect("chained").len(), 3);

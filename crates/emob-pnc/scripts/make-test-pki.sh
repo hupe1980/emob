@@ -7,19 +7,25 @@
 # produced is checked against its own opinions.
 #
 # What it is *not* is a chain from a published V2G pool. Hubject's own is in
-# `specs/roaming/openplugncharge-master.zip` and the test that runs it says so;
+# `concepts/reference/roaming/openplugncharge-master.zip` and the test that runs it says so;
 # what is minted here is what CI can carry, and the accurate claim for it is
 # "the Annex F profiles are enforced against DER a third implementation wrote".
 #
 # The validity windows are absolute dates, so nothing here rots.
 #
-#   just pnc-fixtures
+#   just pnc-fixtures          (both files)
+#   scripts/make-test-pki.sh iso20   (only src/fixtures/iso20.rs)
 set -euo pipefail
+
+SET="${1:-all}"
+case "$SET" in all|iso2|iso20) ;; *) echo "usage: $0 [all|iso2|iso20]" >&2; exit 2 ;; esac
 
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 cd "$out"
+FROM="20200101000000Z"; TO_ROOT="20600101000000Z"; TO="20500101000000Z"
 
+if [ "$SET" != iso20 ]; then
 # ISO 15118 Annex F is secp256r1 for -2. Deterministic content everywhere except
 # the keys, which OpenSSL generates: the fixtures are checked in, so they are
 # minted once and reviewed as bytes.
@@ -109,7 +115,7 @@ emit() { # stem, constant name, what it is
 //! to the same ASN.1, with the Annex F fields where Annex F says they go.
 //!
 //! What that is *not* is interoperability with a live ecosystem. Hubject's own
-//! open test PKI is in `specs/roaming/openplugncharge-master.zip` — a real V2G
+//! open test PKI is in `concepts/reference/roaming/openplugncharge-master.zip` — a real V2G
 //! Root, real OEM sub-CAs and real provisioning certificates — and
 //! `tests/a_contract_is_installed.rs` runs the provisioning chain against it
 //! where the working copy has that archive, saying by name when it does not.
@@ -146,5 +152,79 @@ HEADER
   emit other-root OTHER_ROOT "**Another ecosystem's** V2G root. The whole of R10 is that this one is not [\`ROOT\`]."
   emit other-mo1 OTHER_MO_SUB_CA_1 "That ecosystem's Mobility Operator sub-CA."
   emit foreign FOREIGN_CONTRACT "A contract minted in the other ecosystem. Impeccable, and not this platform's."
+  printf '\n/// The ISO 15118-20 PKI: three ecosystems and an Ed448 one.\npub mod iso20;\n'
 } > "$OLDPWD/src/fixtures.rs"
 echo "🔑 crates/emob-pnc/src/fixtures.rs re-minted"
+fi
+
+
+# ── ISO 15118-20 ─────────────────────────────────────────────────────────────
+# Annex B: secp521r1 signed with SHA-512 [V2G20-2322], or Ed448; Annex B's
+# extensions only [V2G20-2323]; every certificate inside its issuer's validity
+# [V2G20-3000]. One root per European ecosystem (research R3 names them; none
+# publishes a -20 root, so these are emob's), and one Ed448 ecosystem whose only
+# purpose is to be refused by name (D304).
+if [ "$SET" != iso2 ]; then
+mkdir -p "$OLDPWD/src/fixtures"
+p5() { openssl ecparam -name secp521r1 -genkey -noout -out "$1.key" 2>/dev/null; }
+e4() { openssl genpkey -algorithm ED448 -out "$1.key" 2>/dev/null; }
+cnf20() { # file O CN DC|- basicConstraints keyUsage
+  {
+    printf '%s\n' "[req]" "distinguished_name = dn" "prompt = no" "[dn]" "O = $2" "CN = $3"
+    [ "$4" = - ] || printf 'DC = %s\n' "$4"
+    printf '%s\n' "[v3]" "basicConstraints = critical,$5" "keyUsage = critical,$6" "subjectKeyIdentifier = hash"
+  } > "$1"
+}
+root20() { # stem digest-flag O CN
+  openssl req -new -x509 -key "$1.key" -config "$1.cnf" -extensions v3 $2 \
+    -not_before "$FROM" -not_after "$TO_ROOT" -out "$1.crt" 2>/dev/null
+}
+issue20() { # stem issuer digest-flag
+  openssl req -new -key "$1.key" -config "$1.cnf" -out "$1.csr" 2>/dev/null
+  openssl x509 -req -in "$1.csr" -CA "$2.crt" -CAkey "$2.key" -CAcreateserial \
+    -extfile "$1.cnf" -extensions v3 $3 -not_before "$FROM" -not_after "$TO" -out "$1.crt" 2>/dev/null
+}
+for eco in hubject gireve charin; do
+  p5 "$eco-root"; cnf20 "$eco-root.cnf" "$eco test" "$eco V2G Root CA 20" V2G "CA:TRUE,pathlen:1" "keyCertSign,cRLSign"
+  root20 "$eco-root" -sha512
+  p5 "$eco-mo"; cnf20 "$eco-mo.cnf" "$eco test" "$eco MO Sub CA 20" - "CA:TRUE,pathlen:0" "keyCertSign,cRLSign"
+  issue20 "$eco-mo" "$eco-root" -sha512
+  p5 "$eco-contract"; cnf20 "$eco-contract.cnf" "$eco test" "DE8AACA2B3C4D5L" - "CA:FALSE" "digitalSignature,nonRepudiation"
+  issue20 "$eco-contract" "$eco-mo" -sha512
+done
+e4 ed-root; cnf20 ed-root.cnf "ed448 test" "Ed448 V2G Root CA" V2G "CA:TRUE,pathlen:1" "keyCertSign,cRLSign"; root20 ed-root ""
+e4 ed-mo; cnf20 ed-mo.cnf "ed448 test" "Ed448 MO Sub CA" - "CA:TRUE,pathlen:0" "keyCertSign,cRLSign"; issue20 ed-mo ed-root ""
+e4 ed-contract; cnf20 ed-contract.cnf "ed448 test" "DE8AACA2B3C4D5L" - "CA:FALSE" "digitalSignature,nonRepudiation"; issue20 ed-contract ed-mo ""
+
+emit20() { # stem, constant name, what it is
+  printf '\n/// %s\npub const %s: &str = concat!(\n' "$3" "$2"
+  openssl x509 -in "$1.crt" -outform DER 2>/dev/null | base64 | tr -d '\n' | fold -w 68 |
+    sed 's/.*/    "&",/'
+  printf ');\n'
+}
+{
+  cat <<'HEADER'
+//! An ISO 15118-20 test PKI, minted by OpenSSL by `scripts/make-test-pki.sh`.
+//!
+//! One root per European Plug & Charge ecosystem — Hubject, GIREVE with
+//! Thales, CharIN with Irdeto — on secp521r1 with `ecdsa-with-SHA512`, each
+//! with a Mobility Operator sub-CA and a contract (`CN=DE8AACA2B3C4D5L` in all
+//! three, so a test can show the **root**, not the identifier, deciding). None
+//! of the three publishes a -20 root (research R3), so these are this
+//! workspace's own and say so in their `O`.
+//!
+//! And one Ed448 ecosystem, whose only use is to be refused by name: this
+//! build has no Ed448 verifier on its `RustCrypto` generation (D304).
+HEADER
+  for eco in hubject gireve charin; do
+    up=$(echo "$eco" | tr '[:lower:]' '[:upper:]')
+    emit20 "$eco-root" "${up}_ROOT" "The \`$eco-test\` ecosystem's -20 V2G root (secp521r1)."
+    emit20 "$eco-mo" "${up}_MO_SUB_CA" "Its Mobility Operator sub-CA."
+    emit20 "$eco-contract" "${up}_CONTRACT" "A contract under it — \`CN=DE8AACA2B3C4D5L\`."
+  done
+  emit20 ed-root ED448_ROOT "An Ed448 -20 V2G root."
+  emit20 ed-mo ED448_MO_SUB_CA "Its Mobility Operator sub-CA (Ed448)."
+  emit20 ed-contract ED448_CONTRACT "A contract under it (Ed448), refused by name."
+} > "$OLDPWD/src/fixtures/iso20.rs"
+echo "🔑 crates/emob-pnc/src/fixtures/iso20.rs minted"
+fi

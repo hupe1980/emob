@@ -20,20 +20,33 @@ emob-service = { workspace = true }
 # carry it in its graph — which `cargo xtask check-graph` enforces (D181).
 doubleentry  = { workspace = true }
 
+emob-tariff  = { workspace = true }
+# The invoice page's token (spec 010): HMAC-SHA256 under a key from the OS
+# CSPRNG, the receipt's construction (SR-116).
+base64       = { workspace = true }
+getrandom    = "0.4"
+hmac         = { workspace = true }
+sha2         = { workspace = true }
+# The client half of the invoice delivery (SR-119). Already in the graph
+# through csmsd and roamd; `json` only.
+reqwest      = { version = "0.13", default-features = false, features = ["json"] }
 anyhow       = { workspace = true }
+axum         = { workspace = true }
+serde_json   = { workspace = true }
 serde        = { workspace = true }
 rust_decimal = { workspace = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }
-tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 tracing      = { workspace = true }
 
 [dev-dependencies]
+# The consumer side of the invoice files (spec 010): read back and validated.
+en16931        = { workspace = true }
+en16931-formats = { workspace = true }
 emob-eichrecht = { workspace = true }
 emob-session   = { workspace = true }
-emob-tariff    = { workspace = true }
 hex            = { workspace = true }
 ocmf           = { workspace = true }
 p256           = { workspace = true }
-sha2           = { workspace = true }
 time           = { workspace = true, features = ["macros"] }

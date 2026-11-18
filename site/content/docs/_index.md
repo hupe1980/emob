@@ -1,67 +1,68 @@
 +++
 title = "Documentation"
-description = "How emob works: the Eichrecht evidence chain, the OCPP seam, the quarter-hour split, tariffs that rate what they display, roaming, and the obligation calendar."
+description = "emob documentation: Eichrecht-verified EV charging billing, OCPP 2.1 and OCPI 2.3.0, AFIR price transparency, roaming, settlement and the compliance calendar."
 sort_by = "weight"
 template = "section.html"
 +++
 
 # Documentation
 
-Eleven pages, in the order they build on each other — the chain a kilowatt-hour
-travels, from the meter to the money, out to everyone owed a copy of it, and on
-to the invoice somebody pays. Two of them are about the wires either side of that
-chain: the contract a car presents before it starts, and the grid operator's
-ceiling the site draws under while it runs.
+emob is a Rust workspace for running EV charging as a business in Europe: it
+verifies signed meter values under German calibration law (*Eichrecht*), prices
+and settles charging sessions, exchanges records with roaming partners, and
+answers which regulatory duties a charge point, a provider or a company meets.
+These pages explain how each part works and why it is built that way.
+
+New here? Run `just demo` and read **[Run the estate](@/docs/run-the-estate.md)**,
+or start with **[Getting started](@/docs/getting-started.md)** for library
+code; then read in the order below. Unfamiliar terms (CPO, eMSP, CDR,
+OCMF, AFIR …) are defined in the [glossary](@/docs/glossary.md).
+
+## Reading order
+
+| # | Page | What it answers | Read it if you are… |
+|---|---|---|---|
+| 1 | [Getting started](@/docs/getting-started.md) | Install the crates; verify, price and settle one session | any developer evaluating emob |
+| 2 | [Run the estate](@/docs/run-the-estate.md) | `just demo`, the estate file, keys and TLS, signed journal heads and the witness, Heute, the driver receipt and the invoice page | running or evaluating the daemons |
+| 3 | [The Eichrecht chain](@/docs/eichrecht.md) | How a signed OCMF meter value becomes a billable quantity, and the file the driver checks it with | building billing, or auditing it |
+| 4 | [The OCPP seam](@/docs/ocpp.md) | How signed values are taken out of OCPP 1.6J / 2.0.1 / 2.1 traffic, and the price sent back to the station | integrating charge points |
+| 5 | [Sessions and settlement](@/docs/settlement.md) | Quarter-hour splitting, CDRs, invoices (EN 16931), SEPA and bookkeeping | working on settlement or finance |
+| 6 | [Tariffs and price transparency](@/docs/pricing.md) | Rating a session, and showing the same price before it starts under AFIR | designing tariffs |
+| 7 | [Locations and the national access point](@/docs/locations.md) | Publishing locations and prices as DATEX II to the national access point | responsible for data publication |
+| 8 | [Roaming](@/docs/roaming.md) | Sending and receiving CDRs, tariffs and locations over OCPI and OICP | connecting to partners or hubs |
+| 9 | [Plug & Charge](@/docs/plug-and-charge.md) | Checking ISO 15118 contract certificates and their ecosystem | operating Plug & Charge |
+| 10 | [§ 14a and the grid](@/docs/smart-charging.md) | Sharing a site's power under a grid operator's setpoint, over EEBUS | running depots or private sites |
+| 11 | [Bidirectional charging and MiSpeL](@/docs/bidirectional.md) | How much of a bidirectional site's grid draw is relieved of levies, per month or year | running bidirectional points |
+| 12 | [The obligation calendar](@/docs/compliance.md) | Which AFIR, LSV, MessEG, THG, MiSpeL, NIS2 and CRA entries bind, from when, and whether they are met | compliance and audit |
+| 13 | [Architecture](@/docs/architecture.md) | How the crates, daemons and protocol libraries fit together, and what is built today | evaluating the design |
 
 ```mermaid
 flowchart LR
-    M["meter<br/>signed OCMF"] --> E["Eichrecht<br/>chain"]
-    E --> O["the OCPP<br/>seam"]
-    O --> S["sessions &<br/>settlement"]
-    S --> T["tariffs &<br/>pricing"]
-    T --> L["locations &<br/>the access point"]
-    T --> R["roaming"]
-    T -->|"OCPP 2.1"| O
-    S --> INV["invoice ·<br/>SEPA · books"]
-    R --> INV
-    PNC["Plug & Charge<br/>contracts"] -->|"who"| S
-    G["§ 14a<br/>the grid"] -->|"how much"| O
-    C["compliance"] -.->|"binds every step"| E
-    C -.-> S
-    C -.-> T
-    C -.-> R
-    C -.-> G
-
-    classDef step fill:#b8410f22,stroke:#b8410f
-    classDef rule fill:#88888818,stroke:#888,stroke-dasharray:4 3
-    class E,O,S,T,L,R,INV,PNC,G step
-    class C rule
+    M["signed meter value<br/>(OCMF)"] --> E["Eichrecht<br/>verification"]
+    O["OCPP<br/>station traffic"] --> E
+    E --> S["session split<br/>+ CDR"]
+    T["tariff"] --> S
+    S --> R["roaming<br/>partners"]
+    S --> INV["invoice · SEPA<br/>· books"]
+    T --> L["national<br/>access point"]
+    C["obligation<br/>calendar"] -.->|"binds every step"| E & S & T & R
 ```
 
-Start with **[Getting started](@/docs/getting-started.md)** if you want running
-code, or with **[The Eichrecht chain](@/docs/eichrecht.md)** if you want to know
-why a signed meter value is harder than it looks.
+## Conventions on these pages
 
-Every page marks ✅ built and 📐 designed. The gap between the two is the most
-useful thing this documentation can tell you, so it is never blurred.
+- **Status markers.** ✅ built and tested · ⏳ next · 📐 designed, not yet
+  written. Each page says where a feature exists in a library but is not yet
+  called by a running daemon.
+- **Citations.** Every regulatory claim names its source in brackets, for
+  example `[AFIR Art. 5(4)]` (Regulation (EU) 2023/1804), `[MessEG §33]` (the
+  German Measurement and Calibration Act) or `[OCMF Tab. 7]` (a table of the
+  Open Charge Metering Format). A build check rejects citations to documents it
+  does not know.
+- **German legal terms stay German** where the law uses them — *Ladepunkt*,
+  *Eichrecht*, *Durchleitung* — because a translated term of art drifts in
+  meaning. Each is explained on first use.
+- **Code samples** are abridged from the crates' own tests. For exact
+  signatures, see the API documentation on [docs.rs](https://docs.rs/emob-core).
 
-## Conventions
-
-**Regulatory claims cite their source.** `[AFIR Art. 5(4)]` is Regulation (EU)
-2023/1804 Article 5(4); `[DA-656 Anh. 2.1.1]` is Delegated Regulation (EU)
-2025/656; `[LSV26 §4]` the Ladesäulenverordnung; `[MessEG §33]`, `[PTB-A 50.7]`
-and `[REA 6-A]` the German metrology instruments; `[NIS2 Art. 21(2)]` Directive
-(EU) 2022/2555 and `[CRA Art. 14]` Regulation (EU) 2024/2847; `[OCMF Tab. 7]` the
-Open Charge Metering Format's own tables. A build guard fails if the source tree
-cites a document the index cannot produce, so every claim on these pages can be
-followed to a paragraph.
-
-**German terms stay German where the regulation uses them** — Ladepunkt,
-Eichrecht, Bilanzkreis, Durchleitung — because translating a legal term of art is
-how its meaning drifts.
-
-**The code samples are drawn from the crates' own tests**, abridged for reading
-rather than invented for the page. The compiled versions are the doc-tests in the
-[API documentation](https://docs.rs/emob-core), which CI builds with warnings
-denied; a snippet here is an excerpt, so reach for `docs.rs` when you want the
-signature rather than the shape.
+Security assumptions and threats are described in the repository's
+[threat model](https://github.com/hupe1980/emob/blob/main/THREAT_MODEL.md).

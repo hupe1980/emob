@@ -1,0 +1,29 @@
+[package]
+name        = "emob-verify"
+publish     = false
+description = "The check a driver runs on a signed meter value: one OCMF record, one key, one verdict — natively for the emob CLI and as a C-ABI WebAssembly module for the receipt page"
+keywords    = ["ocmf", "eichrecht", "wasm", "verification", "ev-charging"]
+readme      = "README.md"
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lib]
+# `cdylib` is the module the receipt page loads; `rlib` is the same check for
+# the CLI and the tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Not `ocmf = { workspace = true }`: the workspace entry carries `xml` and
+# `session`, which the browser does not need and which would double the module.
+# `alloc` + `verify` + the four pure-Rust curves, nothing else.
+ocmf = { version = "0.1", default-features = false, features = ["alloc", "verify", "curves-pure"] }
+
+[dev-dependencies]
+emob-eichrecht = { workspace = true }
+serde_json     = { workspace = true }
+time           = { workspace = true }
+ocmf           = { workspace = true }

@@ -1,56 +1,49 @@
 # billd
 
-The service that closes a month: **when** an invoice is issued, **what number**
-it carries, **which one** it supersedes, and **which account** each posting lands
-in — and never what a document says.
+The billing daemon: decides when a month is closed, which invoice number it gets, which invoice supersedes which, and which ledger account each posting lands in — and puts every issued invoice on a page its recipient can read, and in the operator's ERP.
 
-```console
-cargo run -p billd
-```
+## Status
 
-## What it decides, and what it must not
+| | |
+|---|---|
+| ✅ library | `billd::Billd` and `billd::Books` implement numbering, closing once, cancellation and re-billing, submission state, and double-entry posting into [`doubleentry`](https://crates.io/crates/doubleentry) 0.9 — tested in `tests/a_month_is_closed_once.rs` |
+| ✅ journal | on start the daemon folds its hash-chained journal (`billd` under `EMOB_JOURNAL_DIR`) and resumes the number series from it before reporting ready. Record bodies — received CDRs carry a card UID, invoices an IBAN — are sealed under `BILLD_DATA_KEY`; every record names its actor; the head is signed under `BILLD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
+| ✅ deliveries | `POST /v1/deliveries` takes the CDRs `csmsd` settles: 1 MiB cap, Standard-Webhooks signature and 300 s freshness, id = CDR key, issuer must be an estate partner; journalled as `received`, then answered. A duplicate is answered `200 duplicate` |
+| ✅ month close | an hourly calendar closes each partner's previous month once: one EN 16931 invoice per partner and calendar month from the records received, seller from `[billing]`, buyer from the partner, in the partner's `specification` (EN 16931 or XRechnung). A document that specification rejects is refused at the close, while it is only a spent number. Each line carries the driver's receipt link |
+| ✅ invoice page | every issued invoice has a page at `/i/{token}` with its UBL and CII files |
+| ✅ delivery | with `[billing.delivery]`, each issued invoice is posted, signed, to the operator's ERP or Peppol provider until it answers; an accepted one is booked |
+| ⏳ not yet | SEPA collection runs; the library builds them |
 
-`emob-billing` turns rated records into a document. The rounding that happens
-once at the line, the VAT treatment derived from the parties, the EN 16931
-semantic invoice and the verdict on it, the pain.008 that draws it, and postings
-addressed by **role** — everything that could be *wrong about a document* is
-there and is tested there.
+What a document **says** — rounding, VAT, EN 16931, SEPA, role-addressed
+postings — is `emob-billing`'s and tested there. `billd` holds the four facts no
+single document can carry.
 
-Four things are not, and none of them is a property of any document.
+## What it owns
 
-## 1. What number it carries
+### 1. The invoice number
 
-`[UStG §14(4) Nr. 4]` requires *"eine fortlaufende Nummer mit einer oder mehreren
-Zahlenreihen, die zur Identifizierung der Rechnung vom Rechnungsaussteller
-**einmalig** vergeben wird"*. Unique, and issued by the person issuing the
-invoice — which is a fact about a **counter**, not about a month's records. Two
-closings that each produce `R-2026-0001` is the failure, and no crate can see it.
+`[UStG §14(4) Nr. 4]` requires a sequential number, in one or more series,
+assigned **once** (*einmalig*) by the issuer. That is a fact about a counter,
+not about a month's records, so it lives here.
 
 ```rust
 Numbering::series("R", 2026).resuming_after(6)   // the store said 0006
 ```
 
-**One or more series** is the part worth modelling: the statute explicitly
-permits a separate run per year, per branch or per document kind, so an operator
-running `R-2026-0001` beside `S-2026-0001` is doing what the paragraph allows
-rather than something clever.
+Several series (per year, branch or document kind) are explicitly allowed, so
+`R-2026-0001` beside `S-2026-0001` is lawful. A number is spent before the
+document is built and stays spent if the document is later rejected.
 
-And the number is spent **before** the document is built, and stays spent
-whatever happens next. A counter that rewound on a rejection would hand the
-corrected document a number the refused one already carried.
+### 2. Closing a period once
 
-## 2. When a period is closed, and that it closes once
+Re-closing a month against the same records is either the same invoice again or
+a correction. `Billd::issue` refuses a period it already closed
+(`ClosingError::AlreadyClosed`); `Billd::rebill` is the explicit correction.
 
-A month re-closed against the same records is not a second month. It is either
-the same invoice — in which case the second closing is the first one's number
-spent for nothing — or a **correction**, and which of those it is decides whether
-money moves twice. `Billd::issue` refuses; `Billd::rebill` is the second reading,
-stated rather than guessed.
+### 3. Which invoice supersedes which
 
-## 3. Which invoice supersedes which
-
-A re-rated month cancels the one it replaces, and the order is the same one
-`[OCPI 2.3.0 §mod_cdrs]` gives a CDR correction: the reversal first.
+A re-rated month is cancelled and re-billed, reversal first — the same order
+`[OCPI 2.3.0 §mod_cdrs]` uses for CDR corrections:
 
 ```rust
 let (credit, replacement) = billd.rebill(
@@ -61,144 +54,174 @@ let (credit, replacement) = billd.rebill(
 )?;
 ```
 
-Both are numbered from the same series and both are returned, because the
-cancellation is not a bookkeeping detail — it is a document the recipient has to
-receive before the replacement makes sense. `Invoice::cancellation` builds the
-*Stornorechnung* and `postings_for` reverses its books; neither knows whether the
-original was ever issued, which is why this is here.
+Both documents get numbers from the same series and both are returned, because
+the recipient needs the cancellation (*Stornorechnung*) before the replacement
+makes sense. The reason travels on the document as a BT-22 note.
 
-**The reason travels on the document**, as a BT-22 note, rather than into a log
-on this side. A recipient's accounts-payable clerk holding a credit note that
-does not say why has to telephone for it.
+### 4. Which account a role lands in
 
-## 4. Which account a role lands in
+`emob-billing` addresses postings by role; the chart of accounts is the
+operator's. Defaults are paths; override them with `ChartOfAccounts::mapping`
+(for example to SKR 03 or SKR 04 numbers).
 
-`emob-billing` addresses a posting by what it is *for* — a receivable, energy
-revenue, VAT payable in a named country at a named rate — and stops. That is not
-squeamishness: a chart of accounts is an operator's own, it differs between
-SKR 03 and SKR 04 before it differs between companies, and a domain crate that
-hard-coded `1400` would be wrong for every second deployment while looking
-authoritative.
-
-| Role | Default path | SKR 03 |
+| Role | Default path | SKR 03 example |
 |---|---|---|
 | `Receivable` | `assets:receivable` | `1400` |
 | `EnergyRevenue` | `income:energy` | `8400` |
 | `ServiceRevenue` | `income:service` | `8400` |
 | `VatPayable { rate, place_of_supply }` | `liabilities:vat:DE:19` | `1776` |
 
-The defaults are spelled as **paths** rather than numbers because a path says
-what an account is for in the same vocabulary the role does. A deployment that
-wants SKR 04 supplies its own with `ChartOfAccounts::mapping`.
-
-### A VAT liability has a creditor
-
-The rate is not the account. C-60/23 (*Digital Charging Solutions*) makes the
-network-access fee a **separate and independent** supply of services, so one
-document can owe tax in two places at once — the electricity where the point
-stands `[UStG §3g]`, the fee where the supplier sits `[UStG §3a(1)]`. A single
-`liabilities:vat` account nets a French return into a German one and is right for
-neither authority, so the place of supply is in the account path.
+The place of supply is part of the VAT account path, because one document can
+owe tax in two countries: electricity where the point stands `[UStG §3g]`, a
+subscription fee where the supplier sits `[UStG §3a(1)]` (CJEU C‑60/23).
 
 ```rust
-billd.balance_of("liabilities:vat:FR:20", "EUR")?;   // the French filing
-billd.balance_of("liabilities:vat:DE:19", "EUR")?;   // and the German one
+billd.balance_of("liabilities:vat:FR:20", "EUR")?;   // the French return
+billd.balance_of("liabilities:vat:DE:19", "EUR")?;   // the German one
 ```
 
-This is the only manifest in the workspace that declares [`doubleentry`]: it
-takes `uuid`/`v7`, and therefore a clock, so no crate promising replay may carry
-it in its graph — which `cargo xtask check-graph` enforces.
+The ledger uses monthly periods, opened at January of the first booking's year
+and extended forward as later months are booked; a booking dated before that is
+refused. Entries carry no memo — the invoice number is the key — so replaying
+the journal rebuilds the same ledger.
 
-## A document that was not accepted was not issued
+### Issued, accepted, then booked
 
-`[UStG §14(1)]` lets an electronic invoice be transmitted only in a structured
-format meeting the European norm, and a German public buyer's platform **answers**
-a submission rather than swallowing it.
+`[UStG §14(1)]` requires e-invoices in a structured European-norm format, and a
+public buyer's platform answers each submission. So posting is a separate,
+later step:
 
 ```rust
 billd.issue("2026-06", closing)?;                    // numbered, not booked
 billd.accepted("R-2026-0001", on, Some(reference))?; // the platform took it
-billd.book("R-2026-0001")?;                          // …and only now the books
+billd.book("R-2026-0001")?;                          // only now the books
 ```
 
-That ordering is the whole reason posting is a separate act. A platform that
-books on issue and submits afterwards has a trial balance that disagrees with
-what the recipient holds, and the disagreement is invisible until somebody
-reconciles.
+A cancellation whose original is not booked is refused, because booked alone
+it would credit a receivable nobody debited. Booking the same number twice is
+reported as a repeat; a replay after a crash finds the entry already written
+rather than posting it again.
 
-**And a reversal is only a reversal beside the entry it undoes.** `postings_for`
-reverses every side of a *Stornorechnung* — same accounts, same amounts, the
-other way — which is exactly right against the invoice it cancels and a
-fabrication on its own: booked alone it credits a receivable nobody debited and
-debits revenue nobody earned. The journal balances either way, because double
-entry balances whatever it is told, so nothing fails until somebody reconciles
-against the recipient. A cancellation whose original has not been booked is
-refused by name. Which document cancels which is this service's fact, and neither
-the crate that builds the cancellation nor the journal that seals the entry holds
-it.
+### State survives a restart
 
-Two second bookings are two different things, and get two answers. A caller that
-books the same number twice is repeating themselves, and is told so. A *process*
-that crashed between the journal's write and its own flag is not: the entry is
-keyed on the invoice number, so the replay finds what it already wrote rather
-than posting the month again.
+`billd::Books` is `Billd` folded from a hash-chained journal of facts
+(`issued`, `submitted`, `booked`). Facts, not commands, so a replay never
+re-decides a number.
 
-## No I/O in the library
-
-Nothing in the library opens a socket or reads a clock. The journal is in memory
-and persisting it is a deployment's job; every date is an argument, so two runs of
-one closing produce one set of postings and one set of bytes.
-
-The submission is the one leg CI cannot run: a *Rechnungseingangsplattform* is
-somebody else's endpoint behind a registration, exactly as `csmsd`'s WebSocket and
-the Mobilithek subscription are.
-
-## The fifth thing: that what was decided outlives the process
-
-Every rule above is about a **pair** — what was true before a call and what may
-be true after. All four were enforced, tested, and driven by a generated
-sequence of calls that checks the invariant after every one. And all four were
-held in one process, so a restart handed the next document the number the first
-one carries, which is exactly what `[UStG §14(4) Nr. 4]` forbids by name.
-
-`Books` is `Billd` folded from a hash-chained journal. Every decision is written
-down as a **fact** — `issued`, `submitted`, `booked` — and the service on the
-way up is the fold of those facts. Facts and not commands, because a command log
-re-decides at replay, and a platform whose invoice numbers move when a tariff is
-corrected is not one anybody can keep books with.
-
-```rust,ignore
+```rust
 let mut books = Books::open(
     "emob",
     Numbering::series("R", 2026),
     ChartOfAccounts::new(),
     emob_service::journal::for_daemon("billd")?,
 )?;
-
-// `R-2026-0001` before the restart is not `R-2026-0001` after it.
-let number = books.issue("2026-06", closing)?;
+let number = books.issue("2026-06", closing)?;   // continues the series
 ```
 
-The record is appended after the decision and before the caller is told: a
-process killed between the two loses both, which is the safe direction. A
-journal that **refuses** a write leaves the state ahead of the record, and the
-service halts — a platform that keeps issuing invoices it cannot account for is
-worse than one that stops and says so.
+A record is appended after the decision and before the caller is told. If the
+journal refuses a write the service halts (`Books::is_halted`). A journal edited
+in the middle fails to open; one cut at the end is refused against the head
+`billd` signed into `billd.ndjson.head`, and a witness (`deskd`, or
+`emob witness`) catches a restore from an older backup. After an intended reset,
+move the `.head` file aside.
 
-A journal edited in the middle breaks the chain and `Books::open` refuses to
-start. A journal with its **last** record cut off does not, and cannot: it is
-byte-for-byte a journal that was never written. `Journal::head`, recorded
-somewhere this process cannot reach, is the only witness to that.
+### The invoice page: `/i/{token}`
+
+From 01.01.2027 a German business invoice is the structured EN 16931 file
+`[UStG §14(1)]` names, and nobody reads XML. So every issued document has one
+page, built like a bill: what is owed, by when and how it is collected; who
+bills whom; every session with the receipt link that lets its driver check it;
+the VAT; the one rounding amount the document states; and the two files —
+`/i/{token}/ubl.xml` (OASIS UBL 2.1) and `/i/{token}/cii.xml` (UN/CEFACT CII),
+which are the invoice in law. German first, `?lang=en`, printable, no script.
+
+- **The page computes nothing that decides.** Every figure is the document's
+  own, and the files are byte for byte what the operator system receives.
+- **The token is a capability.** 128 bits of HMAC-SHA256 over the invoice
+  number under `invoice.key` (32 bytes, created beside the journal on first
+  start, mode 0600), so a link can be sent again. An unknown token is a bare
+  `404`; the routes take 60 requests a second, then `429`; every answer is
+  `no-store` and `noindex`. A debtor's IBAN is masked to its country and last
+  four.
+- **A receipt does not link back.** The invoice is a partner's whole month,
+  every driver of that partner on it; a link from one driver's receipt would
+  widen a one-session link to all of them.
+
+`[billing] public_url` is the origin the page is linked from (the demo prints
+it as `Invoice`).
+
+### Handing the invoice over: `[billing.delivery]`
+
+`billd` writes the e-invoice and does not transmit it — no SMTP, no Peppol access
+point. With `[billing.delivery]` set, every document still `Issued` is posted to
+the operator's ERP or Peppol provider as a Standard Webhooks delivery: the
+file in the configured `syntax` (`ubl` or `cii`), signed under the secret
+`secret_env` names, `webhook-id` = the invoice number (the receiver's idempotency
+key), and the page link in `emob-invoice-url` when `public_url` is set. The URL
+must be `https://`, or `http://` on loopback.
+
+| Answer | Recorded | Why |
+|---|---|---|
+| `2xx` | accepted, with the optional `reference`; then booked | the recipient's platform took it |
+| `401`, `408`, `429`, `5xx`, no answer | nothing — retried every `retry_secs` | a secret being rotated, a system starting, a system down |
+| any other `4xx` | rejected, with the body (up to 512 bytes) as the reason | the system read it and said no; the number stays spent |
 
 ## Configuration
 
-| Variable | Default | What |
+| Variable | Default | Purpose |
 |---|---|---|
-| `BILLD_HTTP_BIND` | `127.0.0.1:9584` | the readiness and health endpoint |
-| `BILLD_SERIES` | `R` | the number series' prefix |
-| `EMOB_JOURNAL_DIR` | `var` | where the journal is folded from and appended to. **Not** a temporary directory by default: a service that silently journalled to `/tmp` would come back from a reboot with an empty ledger and no error |
-| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `BILLD_HTTP_BIND` wins over. A container image sets it, because every default here is **loopback** and loopback inside a container is reachable by nothing |
+| `EMOB_ESTATE` | `./estate.toml` | `[billing]` (below), `[[partners]]` (buyer details, `specification`, `buyer_reference`, `mandate`), `[services]`, `[[operators]]` |
+| `BILLD_DATA_KEY` | **required** | 32 bytes, base64; seals the journal |
+| `BILLD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head |
+| the variable `[billing.delivery] secret_env` names | with `[billing.delivery]` | `whsec_<base64>`: signs the handover to the operator system |
+| `EMOB_WEBHOOK_SECRET`, `EMOB_OPERATOR_TOKEN` | **required** | the variables the estate names: delivery signatures, the read model's bearer |
+| `BILLD_HTTP_BIND` / `EMOB_HTTP_BIND` | `127.0.0.1:9584` | the shell |
+| `EMOB_JOURNAL_DIR` | `var` | journal directory — deliberately not a temp directory, so a reboot does not empty the ledger |
+| `EMOB_LOG_FORMAT` | JSON | `text` for a terminal |
+| `RUST_LOG` | `info,billd=debug` | log filter |
+
+The invoicing keys of the estate:
+
+| Key | Meaning |
+|---|---|
+| `[billing] iban` | the operator's account, paid into by transfer (BT-84) |
+| `[billing] creditor_id` | the SEPA creditor identifier, for a partner with a mandate (BT-90) |
+| `[billing] contact` | `{ name, phone, email }`, the seller's contact (BG-6), which XRechnung requires |
+| `[billing] public_url` | the origin invoice pages are linked at: `<public_url>/i/<token>` |
+| `[billing.delivery]` | `url`, `secret_env`, `syntax` (`ubl`, default, or `cii`) |
+| `[[partners]] specification` | `en16931` (default) or `xrechnung` (BT-24) |
+| `[[partners]] buyer_reference` | the partner's reference for our invoices — a Leitweg-ID for a public buyer (BT-10) |
+| `[[partners]] mandate` | `{ reference, iban }`: a SEPA direct-debit mandate; without one, the partner pays by transfer |
+| `electronic_address` | on `seller` and each partner's `billing`: the e-mail address an e-invoice is addressed to (BT-34 / BT-49), which XRechnung requires of both parties |
+
+## Running
+
+```console
+EMOB_ESTATE=deploy/estate.example.toml cargo run -p billd   # plus the *_env variables
+```
+
+Or `just demo`, or the whole estate in containers with `just up` (`billd`'s
+shell on `localhost:8082`, journal on a named volume).
+
+## Endpoints
+
+| Path | Answers |
+|---|---|
+| `POST /v1/deliveries` | a CDR from `csmsd`, signed and fresh |
+| `GET /i/{token}`, `/i/{token}/ubl.xml`, `/i/{token}/cii.xml` | unauthenticated, behind the token: the invoice page and its two files |
+| `GET /v1/billd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
+| `GET /v1/billd/today?limit=&invoices=` | operator token: counts of records received and refused deliveries, and the documents waiting on the recipient (`submission` issued or rejected with the reason) — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page |
+| `GET /health/live` | `200` while the process runs |
+| `GET /health/ready` | `200` once the number series is folded from the journal; `503` listing `numbering` until then |
+| `GET /about` | name and version |
+
+## Built on
+
+`emob-billing` (documents, VAT, postings by role, the EN 16931 files),
+`emob-service` (shell, journal, signed head, pages), [`doubleentry`](https://crates.io/crates/doubleentry) 0.9 (the
+ledger). See [Settlement and billing](https://hupe1980.github.io/emob/docs/settlement/)
+and the [workspace README](../../README.md).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

@@ -3,11 +3,18 @@ name: Release
 # `cargo publish` cannot be undone: a version number is spent the moment it is
 # accepted, and a wrong one is fixed only by burning the next. So the tag is the
 # trigger, and everything before the upload is a gate.
+#
+# What a tag produces: the fifteen crates on crates.io (trusted publishing — no
+# stored token), a GitHub release carrying every `.crate`, one CycloneDX SBOM of
+# the workspace and `SHA256SUMS`, all three under a build-provenance
+# attestation, and the nine daemon images plus the `emob` CLI image (what
+# `just demo` runs without Rust) on ghcr.io with BuildKit provenance.
 on:
   push:
     tags: ["v*"]
   # For rehearsing the whole gate against any commit. Defaults to a dry run, so
-  # the manual path cannot publish by accident.
+  # the manual path cannot publish by accident — and it never cuts a GitHub
+  # release or pushes an image, whatever the input says.
   workflow_dispatch:
     inputs:
       publish:
@@ -21,8 +28,8 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-permissions:
-  contents: read
+# Nothing by default; each job is granted exactly what it writes.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,14 +39,17 @@ jobs:
   verify:
     name: Verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: extractions/setup-just@v3
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-deny
 
@@ -70,126 +80,131 @@ jobs:
     needs: verify
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
-    # Scopes the token to this environment and is where a required reviewer
-    # goes, so an irreversible upload can be held behind an approval.
+    # Named so crates.io's trusted publishing can be scoped to it, and where a
+    # required reviewer goes, so an irreversible upload can be held behind an
+    # approval.
     environment:
       name: crates-io
       url: https://crates.io/crates/emob-core
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    # Trusted publishing: GitHub's OIDC identity is exchanged for a crates.io
+    # token that lives about thirty minutes and is revoked when the job ends.
+    # There is no long-lived `CARGO_REGISTRY_TOKEN` in the repository to leak.
+    # Each crate needs its trusted publisher configured once on crates.io
+    # (owner `hupe1980`, repository `emob`, workflow `release.yml`, environment
+    # `crates-io`); a crate without one fails at its own step, and the re-run
+    # after adding it skips everything already uploaded.
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      # One step per crate, in dependency order, because a publish is fifteen
-      # uploads and can stop in the middle: crates.io accepts the first few,
-      # something fails, and the version is now spent for those and free for the
-      # rest. `cargo publish --workspace` refuses that state outright, so each
-      # crate treats "already uploaded" as the upload having already happened.
-      # Every other failure still stops the run.
-      #
-      # `cargo publish` waits for each crate to reach the index before the next
-      # one resolves against it, so the order below is the dependency order —
-      # and it is the order `cargo publish --workspace --dry-run` prints, which
-      # is what `just release-check` runs.
-      #
-      # **The list is held to the workspace by a guard.** Six publishable crates
-      # were missing from it for four milestones — `emob-billing`, `emob-thg`,
-      # `emob-smart`, `emob-service` among them — and nothing said so, because a
-      # release that publishes nine of fifteen crates succeeds. `cargo xtask
-      # check-manifests` now reads this file (D317).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      - name: Hand the short-lived token to the publish steps
+        env:
+          TOKEN: ${{ steps.auth.outputs.token }}
+        run: echo "CARGO_REGISTRY_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: Publish emob-core
         run: |
           out=$(cargo publish -p emob-core --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-eichrecht
         run: |
           out=$(cargo publish -p emob-eichrecht --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-session
         run: |
           out=$(cargo publish -p emob-session --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-tariff
         run: |
           out=$(cargo publish -p emob-tariff --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-cdr
         run: |
           out=$(cargo publish -p emob-cdr --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-billing
         run: |
           out=$(cargo publish -p emob-billing --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-smart
         run: |
           out=$(cargo publish -p emob-smart --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-eebus
         run: |
           out=$(cargo publish -p emob-eebus --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-ocpp
         run: |
           out=$(cargo publish -p emob-ocpp --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-sim
         run: |
           out=$(cargo publish -p emob-sim --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-pnc
         run: |
           out=$(cargo publish -p emob-pnc --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-poi
         run: |
           out=$(cargo publish -p emob-poi --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-roam
         run: |
           out=$(cargo publish -p emob-roam --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-service
         run: |
           out=$(cargo publish -p emob-service --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
       - name: Publish emob-thg
         run: |
           out=$(cargo publish -p emob-thg --locked 2>&1) && rc=0 || rc=$?
           echo "$out"
-          if [ $rc -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit $rc; fi
+          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
 
+  # The GitHub release, and what a consumer checks a release against: every
+  # `.crate` as packaged here, the workspace SBOM, `SHA256SUMS` over both, and a
+  # build-provenance attestation over all of it in the public transparency log
+  # (`gh attestation verify emob-core-<version>.crate --repo hupe1980/emob`).
+  # cargo's tarballs are reproducible, so the `.crate` attested here is the one
+  # crates.io serves.
   github-release:
     name: GitHub release
     needs: publish
@@ -197,12 +212,68 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: cargo-cyclonedx
+
+      - name: Package, SBOM, checksums
+        run: |
+          set -euo pipefail
+          cargo package --workspace --locked --no-verify
+          just sbom
+          mkdir -p dist
+          # `cargo package` packs every member; only the `emob-*` crates are published.
+          cp target/package/emob-*.crate target/sbom/*.cdx.json dist/
+          (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.crate
+            dist/*.cdx.json
+
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" \
+          gh release create "${GITHUB_REF#refs/tags/}" dist/* \
             --title "${GITHUB_REF#refs/tags/}" \
             --generate-notes \
             --verify-tag
+
+  # The nine daemons and the `emob` CLI, from `docker-bake.hcl` — the list
+  # lives there and only there. Pushed only for a tag; BuildKit attaches its SLSA provenance to each
+  # image manifest. The base images are pinned by digest in the Dockerfile, so
+  # what this builds on cannot move between two runs of the same tag.
+  images:
+    name: Images
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Version from the tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          source: .
+          files: docker-bake.hcl
+          push: true
+          provenance: mode=max

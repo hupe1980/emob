@@ -12,6 +12,9 @@
 //! - [`split`] — the quarter-hour split, which **conserves energy exactly by
 //!   construction** and records for every slot whether it was measured or
 //!   interpolated.
+//! - [`mispel`] — the first arithmetic larger than one session: a bidirectional
+//!   site's month (and Pauschal year) under the Bundesnetzagentur's `MiSpeL` Festlegung,
+//!   netting the points' quarter hours against the grid meter's.
 //! - [`session`] — the session itself, as a state machine that refuses what the
 //!   protocol forbids and keeps **when** each state was entered, because
 //!   "suspended" is an interval a tariff prices rather than a status light.
@@ -58,8 +61,10 @@
 
 pub mod auth;
 pub mod meter;
+pub mod mispel;
 pub mod session;
 pub mod split;
+pub mod success;
 
 pub use auth::{AuthError, AuthPath, Authorization, Subject, TokenRef};
 pub use meter::{MeterError, MeterReading, MeterSeries, ReadingContext};

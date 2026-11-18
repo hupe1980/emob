@@ -19,13 +19,23 @@ var/
 # Contains mutation testing data
 **/mutants.out*/
 
-# Internal-only documents (not published) — the architecture notes and the backlog
-concepts/
+# Internal-only documents (not published) — the architecture notes and the backlog.
+#
+# The third-party corpus — regulations, laws, standards, protocol documents and
+# papers, copyrighted — lives at `concepts/reference/` and is covered by this line,
+# indexed with retrieval URLs in `concepts/REFERENCES.md` so the folder can be rebuilt.
+/concepts/
 
-# Third-party regulations, laws, standards, protocol documents and papers
-# (copyrighted; indexed with retrieval URLs in specs/README.md so the folder
-# can be rebuilt from scratch).
-specs/
+# This project's own feature specifications, and the Spec Kit machinery that
+# produces them: one `specs/NNN-slug/` per change (spec, plan, tasks, the
+# threatspec threat-model.yaml), `.specify/memory/constitution.md`, the threatspec
+# extension, and the `/speckit-*` skills. Same rule as `concepts/` — internal.
+#
+# Until 2026-11-18 `specs/` held the corpus now under `concepts/reference/`; a
+# stale copy is ignored by the same line. Matches hems, ocpp-kit, mako and agentplane.
+/specs/
+/.specify/
+/.claude/
 
 # Feedback for sibling crates (bug reports / feature requests; always internal — sent to their teams)
 *_FEEDBACK.md

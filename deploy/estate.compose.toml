@@ -1,0 +1,112 @@
+# The demonstration estate for `docker compose` — deploy/estate.example.toml
+# with the daemons reached by their service names instead of loopback. Keep the
+# two in step; `emob-service`'s estate tests parse both.
+#
+# Path: EMOB_ESTATE (default ./estate.toml). A daemon reads only the sections it
+# uses and refuses to start, naming the key, on one it cannot parse. Secrets are
+# never written here: every `*_env` field names an environment variable.
+#
+# No reach-back allowlist: a partner registering with this node has to be
+# reachable over https at a public address.
+
+[parties]
+operator = "DE*ABC"   # the CPO: stations, CDRs and invoices are issued under it
+provider = "DE*MSP"   # the e-mobility provider empd runs
+
+[[stations]]
+identity = "CP-1"
+ocpp = "1.6"
+# Security profile 2: HTTP Basic over TLS. The hash is of the demo station's
+# AuthorizationKey 6d6f636b2d73746174696f6e2d736563726574 (hex of
+# "mock-station-secret"); `csmsd hash-password 1.6` prints one for yours.
+security_profile = 2
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$q1iothavEHNDTeGVTzaU5A$FPoYufVFH6pj8V/ENPoPB3jm497gMXbSv9Y82oKyfYA"
+evse = "DE*ABC*E00001"
+rated_power_kw = "150"
+tariff = "ad-hoc"
+connector = "iec62196_t2_combo"
+location = { id = "LOC-1", name = "Depot Mitte", street = "Invalidenstrasse", house_number = "1", postal_code = "10115", city = "Berlin", country = "DE", latitude = "52.531800", longitude = "13.384900", time_zone = "Europe/Berlin" }
+
+# The public key of emob-sim's first virtual meter (Rng::stream(2026, "estate")),
+# out of band — never the key a station sends on its own socket.
+[[meter_keys]]
+meter = "SIM-METER-00001"
+curve = "secp256r1"
+key = "042d356388ae4082b9d5d77278f29947f9893b272cd58ba98151272cf5b3861f48dbfd493d2686037dcc7ecd64312b498ed13b44734010be5e6526480d6a906808"
+provenance = "emob-sim virtual meter 1 — demonstration only"
+
+[[tariffs]]
+id = "ad-hoc"
+currency = "EUR"
+time_zone = "Europe/Berlin"
+energy = "0.49"   # gross, per kWh: the price a driver is shown, VAT included [PAngV §3(1)]
+vat = "19"        # the rate inside it; the invoice strips it, and asks for what the receipts said
+
+[[partners]]
+party = "DE*MSP"
+token_a_env = "EMOB_PARTNER_DE_MSP_TOKEN_A"
+signed_data = true
+settles_within_days = 30
+billing = { name = "MSP Mobility GmbH", street = "Am Markt 2", post_code = "50667", city = "Köln", country = "DE", vat_id = "DE123456789" }
+
+[billing]
+series = "R"
+vat_rate = "19"
+seller = { name = "ABC Charging GmbH", street = "Invalidenstrasse 1", post_code = "10115", city = "Berlin", country = "DE", vat_id = "DE987654321" }
+
+[[contracts]]
+id = "DE-MSP-C00000001-W"
+from = "2026-01-01"
+tokens = [
+  { uid = "04A1B2C3D4E5F6", type = "RFID", whitelist = "ALLOWED" },
+  { uid = "04DEADBEEF0001", type = "RFID", whitelist = "ALLOWED", blocked = true },
+]
+
+[[operators]]
+name = "demo operator"
+token_env = "EMOB_OPERATOR_TOKEN"
+
+# How csmsd's OCPP listener is exposed. Throwaway loopback certificates —
+# `just up` mints them with `just dev-ca` and mounts target/dev-tls at /tls. A production estate names its own.
+[csms]
+tls_cert = "/tls/server.pem"
+tls_key = "/tls/server.key"
+client_ca = "/tls/ca.pem"
+max_connections = 1024
+messages_per_minute = 120
+idle_timeout_secs = 900
+
+# What the operator page (deskd) reads, with which of the operator tokens. billd
+# and roamd are read at their [services] addresses.
+[desk]
+csmsd = "http://csmsd:8080"
+token_env = "EMOB_OPERATOR_TOKEN"
+time_zone = "Europe/Berlin"   # the page's "today" and its clock
+
+[receipts]
+# Where a driver's phone reaches csmsd's shell: every receipt link
+# (`<public_url>/r/<token>`) starts here, on invoice lines too. The
+# token is minted under `receipt.key`, created beside the journal on first start.
+public_url = "http://localhost:8080"
+
+[services]
+billd = "http://billd:8080"
+roamd = "http://roamd:8080"
+empd = "http://empd:8080"
+webhook_secret_env = "EMOB_WEBHOOK_SECRET"   # whsec_<base64>
+service_token_env = "EMOB_SERVICE_TOKEN"
+authorize_timeout_ms = 2000
+retry_secs = 5
+
+[roaming]
+public_url = "http://roamd:8080/ocpi"
+reach_back_allow = []
+
+# What the witness trusts. deskd reads every journalled daemon's
+# signed head (GET /v1/<name>/head) every 30 s and alarms on Heute when one goes
+# backwards, forks or comes under another key. A daemon named here is checked
+# against this verifier key (what the head's Emob-Verifier-Key header says);
+# one not named is pinned the first time it is seen — trust on first use, and
+# Heute says which.
+[witness]
+keys = {}   # e.g. { csmsd = "emob/csmsd+1a2b3c4d+AXJ…" }

@@ -13,8 +13,8 @@
 //! * **which ecosystem** a contract belongs to, when there is more than one
 //!   (R10, [`pool`]);
 //! * whether anything on its path has been **withdrawn**, which
-//!   `iso15118::pnc::pki::validate` names as what it does not answer
-//!   ([`revocation`]);
+//!   `iso15118::pnc::pki::validate` answers only from evidence its caller
+//!   already holds, and for these profiles does not require ([`revocation`]);
 //! * which **vehicle** a contract was installed against, and which contracts go
 //!   when that vehicle does ([`contract`]);
 //! * and the two identifiers the relationship is keyed on —
@@ -89,7 +89,7 @@ pub mod verify;
 pub use contract::{Contract, ContractBook};
 pub use error::PncError;
 pub use id::{Pcid, PcidError};
-pub use pool::{Pool, PoolId, PoolRegistry, TrustAnchor};
+pub use pool::{Generation, Pool, PoolId, PoolRegistry, TrustAnchor};
 pub use revocation::{DEFAULT_FRESHNESS, RevocationList, Standing, Withdrawals};
 pub use verify::{
     Curves, VerifiedContract, VerifiedProvisioning, verify_contract, verify_provisioning,

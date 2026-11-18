@@ -29,7 +29,7 @@ use emob_core::Emaid;
 use iso15118::pnc::pki::{Profile, VerifyWith};
 use iso15118::pnc::{PncError as KitError, Suite};
 
-use crate::{Pcid, PncError, PoolId, PoolRegistry, RevocationList};
+use crate::{Generation, Pcid, PncError, PoolId, PoolRegistry, RevocationList};
 
 /// ECDSA verification for the two curves ISO 15118's Annex F admits, on this
 /// workspace's own `RustCrypto` generation.
@@ -41,6 +41,20 @@ use crate::{Pcid, PncError, PoolId, PoolRegistry, RevocationList};
 /// comment.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Curves;
+
+/// No digest is implemented, deliberately.
+///
+/// The kit hashes only to check revocation **evidence** — an OCSP response's
+/// `CertID`, a CRL's signature — and this crate hands it none: for contract
+/// and OEM provisioning chains no status has to be shown good, and the
+/// revocation answer is [`crate::RevocationList`]'s. Were evidence ever passed,
+/// `None` makes it unsupported and therefore never good, which is the safe
+/// failure rather than a silent pass.
+impl iso15118::pnc::pki::Hasher for Curves {
+    fn hash(&self, _alg: iso15118::pnc::pki::HashAlgorithm, _data: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+}
 
 impl VerifyWith for Curves {
     fn verify_with(
@@ -104,6 +118,8 @@ pub struct VerifiedContract {
     pub emaid: Emaid,
     /// Which ecosystem vouched for it.
     pub pool: PoolId,
+    /// Which generation's rules it was judged under.
+    pub generation: Generation,
     /// The last instant the leaf itself is valid, from its own `notAfter`.
     #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
     pub valid_until: time::OffsetDateTime,
@@ -153,6 +169,8 @@ pub struct VerifiedProvisioning {
     pub pcid: Pcid,
     /// Which ecosystem vouched for it.
     pub pool: PoolId,
+    /// Which generation's rules it was judged under.
+    pub generation: Generation,
     /// The last instant the leaf itself is valid.
     #[cfg_attr(feature = "serde", serde(with = "time::serde::rfc3339"))]
     pub valid_until: time::OffsetDateTime,
@@ -175,12 +193,13 @@ pub struct VerifiedProvisioning {
 /// caller is not expecting.
 ///
 /// ```no_run
-/// # use emob_pnc::{PoolId, PoolRegistry, RevocationList, verify_contract};
+/// # use emob_pnc::{Generation, PoolId, PoolRegistry, RevocationList, verify_contract};
 /// # use iso15118::pnc::pki::Profile;
 /// # let (registry, chain, revocations): (PoolRegistry, Vec<&[u8]>, RevocationList) = unimplemented!();
 /// let contract = verify_contract(
 ///     &registry,
 ///     &PoolId::new("hubject-ccp"),
+///     Generation::Iso20,
 ///     &chain,
 ///     &revocations,
 ///     time::OffsetDateTime::UNIX_EPOCH,
@@ -193,13 +212,20 @@ pub struct VerifiedProvisioning {
 pub fn verify_contract<'a>(
     pools: &'a PoolRegistry,
     pool: &PoolId,
+    generation: Generation,
     chain: &[&'a [u8]],
     revocations: &RevocationList,
     at: time::OffsetDateTime,
     expected_provider: Option<&str>,
 ) -> Result<VerifiedContract, PncError> {
-    let validated =
-        pools.validate_in(pool, chain, Profile::ContractCertificate, at, revocations)?;
+    let validated = pools.validate_in(
+        pool,
+        chain,
+        Profile::ContractCertificate,
+        generation,
+        at,
+        revocations,
+    )?;
 
     let common_name =
         validated
@@ -232,6 +258,7 @@ pub fn verify_contract<'a>(
     Ok(VerifiedContract {
         emaid,
         pool: pool.clone(),
+        generation,
         valid_until: instant(validated.leaf.not_after),
         anchor: validated
             .anchor
@@ -256,6 +283,7 @@ pub fn verify_contract<'a>(
 pub fn verify_provisioning<'a>(
     pools: &'a PoolRegistry,
     pool: &PoolId,
+    generation: Generation,
     chain: &[&'a [u8]],
     revocations: &RevocationList,
     at: time::OffsetDateTime,
@@ -264,6 +292,7 @@ pub fn verify_provisioning<'a>(
         pool,
         chain,
         Profile::OemProvisioningCertificate,
+        generation,
         at,
         revocations,
     )?;
@@ -283,6 +312,7 @@ pub fn verify_provisioning<'a>(
     Ok(VerifiedProvisioning {
         pcid,
         pool: pool.clone(),
+        generation,
         valid_until: instant(validated.leaf.not_after),
         anchor: validated
             .anchor
@@ -322,6 +352,7 @@ mod tests {
         let contract = VerifiedContract {
             emaid: Emaid::parse("DE-8AA-CA2B3C4D5-L").expect("a valid EMAID"),
             pool: PoolId::new("hubject-ccp"),
+            generation: Generation::Iso2,
             valid_until: time::macros::datetime!(2026-07-01 00:00 UTC),
             anchor: "V2G Root".to_owned(),
         };

@@ -1,614 +1,256 @@
 # emob-billing
 
-Rated charging records turned into money: invoice lines whose **rounding is
-stated rather than discovered**, the German VAT treatment of a roaming
-settlement as an executable rule, an EN 16931 e-invoice with the verdict on it
-before anything is sent, a SEPA collection that reads no clock, and double-entry
-postings that balance before a single account is named.
+Turns rated charging records into invoices, VAT decisions, EN 16931 e-invoices, SEPA direct debits and balanced bookkeeping postings — for charge point operators (CPOs) and e-mobility service providers (eMSPs) who bill in the EU.
+
+[![crates.io](https://img.shields.io/crates/v/emob-billing.svg)](https://crates.io/crates/emob-billing) [![docs.rs](https://img.shields.io/docsrs/emob-billing)](https://docs.rs/emob-billing) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-billing.svg)](#license)
+
+A CDR (charge detail record) is a claim about what happened; an invoice is a
+demand a tax authority reads, a partner pays against and an auditor asks for.
+This crate makes the four decisions between the two: where the amounts are
+rounded, who owes the VAT and where, whether the e-invoice passes the standard's
+own rules, and how the money is collected and booked. It reads no clock, prices
+nothing and names no accounts, so a billing run replayed two years later
+produces the same bytes.
 
 ```console
 cargo add emob-billing
 ```
 
-📖 The reasoning behind this crate, with the regulation it cites, is in
-**[Settlement and billing](https://hupe1980.github.io/emob/docs/settlement/)**.
-The signatures are on [docs.rs](https://docs.rs/emob-billing).
+## Example
 
-## A record is a claim; an invoice is a demand
-
-Everything upstream answers *what happened* — a meter signed a register, a chain
-held up, a split conserved, a tariff priced the periods the split produced.
-`emob-cdr` ends with a record that carries its own energy and its own price and
-can prove both.
-
-An invoice is the document a tax authority reads, a partner pays against and an
-auditor asks for. Four things have to happen between the two, and each is a
-decision rather than a mapping.
-
-| | |
-|---|---|
-| `invoice` | the exact, unrounded amounts become figures in a currency's minor unit — **once, at the line** — and the difference is stated |
-| `tax` | who owes the VAT, in which country, and **who is liable for it** — two questions, not one. For a roaming settlement the place of supply is not where the charge point stands `[UStG §3g]`, and the reverse charge follows only where the seller is not established there (Art. 195) |
-| `en16931` | the document, and the verdict on it: 223 syntax-independent rules plus the national usage specification, run before anything is sent |
-| `payment` · `postings` | the collection, and the books |
-
-## A record has two supplies
-
-A CDR carries **two** ratings: the charging session, and the reservation that ran
-before it `[OCPI 2.3.0 §mod_cdrs_cdr_object]`. Both reach the document through
-one function:
+A German CPO bills a French eMSP for a month of roaming sessions:
 
 ```rust
-invoice.lines[0].description;  // "… — reservation"    — it ran first
-invoice.lines[1].description;  // "… — energy"
-invoice.lines[0].id;           // "1.1"
-invoice.lines[1].id;           // "1.2"  — one sequence across both parts
-invoice.gross_total();         // == cdr.total_cost().unwrap()
-```
+use emob_billing::{Counterparty, InvoiceBuilder, TaxStatus, en16931, postings};
+use rust_decimal::Decimal;
+use std::str::FromStr;
+use time::macros::date;
 
-Three things the two parts do not share, and each is a field on the document:
+let ledger: emob_cdr::CdrLedger = load_the_month();   // your rated records
 
-- **The window.** A reservation's line states the reservation's own dates in
-  BT-134/BT-135, not the session's. A supply dated outside the period it happened
-  in is a document a tax office reads differently.
-- **The name of the dimension.** The same `TIME` is *charging time* in one part
-  and *reservation* in the other, and a document that calls both the first is one
-  the driver cannot check against what they were quoted.
-- **Nothing else.** The VAT stripping, the rounding, the line numbering and the
-  bound-as-allowance are one rule applied twice — two spellings of "turn a rating
-  into lines" is the drift this crate exists to prevent.
+let cpo = Counterparty::new(
+    "Stadtwerke Musterstadt GmbH",
+    "Musterstadt",
+    TaxStatus::business("DE", "DE123456789"),
+);
+// An eMSP buys sessions to resell them, so the place of supply moves to
+// France and the VAT is the recipient's [UStG §3g].
+let emsp = Counterparty::new("Mobilité SAS", "Lyon", TaxStatus::reseller("FR", "FR12345678901"));
 
-A reservation priced in a currency the session was not is refused with every
-other unsettleable shape: `emob_cdr::validate` blocks the record before this
-layer sees it.
-
-## What the document tells the payer
-
-**What is inside the measured value.** `[REA 6-A §3.2]` lets a DC station meter
-on the AC side of its rectifier and then obliges the operator to tell *"die von
-einem Messwert **oder einer Rechnung** Betroffenen"* that the losses are part of
-the number — the invoice, in as many words. So the figure goes in BT-127, on the
-line carrying the measured value, from the record's own signed evidence:
-
-```rust
-line.compensated_loss;   // Some(0.150 kWh) — from `EvidenceRef`, not from a flag
-// BT-127: "CDR DE*ABC*1 — 0.150 kWh of this measured value is compensated
-//          cable or rectification loss and is part of the stated value
-//          [REA 6-A §3.2]"
-```
-
-**What the rating had to report.** Putting every note on an invoice is as wrong
-as putting none. A note concerns the **payer** exactly when it says a quantity
-was billed differently from how it was measured — a block rounding that charges
-for kilowatt-hours nobody delivered, a dimension nothing priced, a line the
-clock could not resolve, minutes the operator withheld — which is what
-`[AFIR Art. 5(4)]` and `[PAngV]` entitle a driver to reconcile. Those cross as
-BG-1 notes coded `AAI`, so a receiving system routes them.
-`emob_tariff::RatingNote::concerns_the_payer` is the line. A fault in a document
-the payer did not write — a VAT rate with no split, two bounds that contradict —
-goes to the operator queue that reads the `Crossing`.
-
-The tariff version stays **off** the document: a line names its record and the
-record names the tariff by content, so a second identifier here would be a name
-the recipient cannot resolve without the record anyway.
-
-## A bound is not a line
-
-`[OCPI 2.3.0 §Tariff]`'s `min_price` and `max_price` move a session's total
-without changing what was delivered, and a maximum moves it **down**. Put on the
-document as a line, a cap is a negative amount and a negative BT-146 — and
-`BR-27` refuses that outright, so the whole invoice is invalid. EN 16931 has the
-group for it:
-
-```rust
-invoice.lines.len();                    // 1 — the energy that was delivered
-invoice.adjustments[0].kind;             // Allowance — BG-20
-invoice.adjustments[0].amount;           // 3.75, a positive magnitude
-invoice.line_total();                    // 12.15 — BT-106
-invoice.taxable_total();                 // 8.40  — BT-109 = 106 − 107 + 108
-invoice.gross_total();                   // 10.00 — the cap, exactly
-```
-
-The amount is derived from what the **document** states — the rounded lines less
-the rounded target — rather than from the exact difference: rounding the two
-independently landed a cent past the cap, and the cap is the one number the
-driver was promised. A bound with nothing to adjust *is* the line, because
-`BR-16` requires an invoice to have one and a charge has no document to be a
-charge on.
-
-And the target is built the way the lines are: **every amount stripped at its
-own rate**. An allowance carries one VAT rate — BT-95 and BT-96 — so the bound is
-converted on its own and added to the lines' own nets, rather than the record's
-whole total being put through one factor. On a €100.00 session made of energy at
-19 % beside a session fee at 7 %, the single-factor reading divided the 7 % half
-by 1.19 as well and billed **€98.80**.
-
-**And a bound is not always one allowance.** A cut deeper than the category it is
-attributed to states a negative BT-116 under a positive invoice — a document that
-reconciles, whose totals chain holds, and which **all 317 of EN 16931's own rules
-accept**, because none of them forbids it. BG-20 is repeatable, so the
-bound becomes one allowance per category it is drawn from,
-`emob_tariff::Rated::adjustment_parts` states the split, and the rating solved the
-price along the same walk — so the document and the total agree by construction
-rather than by a second reading here.
-
-The rounded total is still the document's own: `signed` is a difference of two
-figures the invoice already prints, which is what makes it reach the tariff's
-figure exactly, so it is **shared out** across the parts and the largest carries
-whatever the rounding leaves — the part with the most room under it.
-
-`BillingError::AdjustmentExceedsCategory` did not go away, it moved to the door:
-a `Rated` deserialised from a partner went through no rating and no clamp, so its
-adjustment can exceed everything the record charges, and that record is refused
-by name.
-
-The books move the revenue that bound belongs to, chosen from the largest line
-**of that record** — the same scope `emob_tariff::Adjustment::vat` uses for the
-rate. Asked of the whole document instead, a month of energy sessions plus one
-capped occupancy session books the cap against energy revenue for a session that
-delivered none.
-
-## The item price is the net one
-
-BT-146 is defined **exclusive of VAT**. A gross tariff's own figure put there
-states a price that does not produce the line — `29.500 × 0.49` is `14.455`
-where the line says `12.15`, off by the whole rate, which
-`PEPPOL-EN16931-R120` refuses at a hundred times its tolerance. Both the amount
-and the price are stripped at the same rate, and every line reproduces itself:
-
-```rust
-assert!(invoice.lines.iter().all(InvoiceLine::reconciles));   // and so does
-assert!(invoice.reconciles());                                 // the document
-```
-
-## A time line is stated in seconds, against a price per hour
-
-OCPI quotes time per hour, and 3600 has two factors of three: twenty-five
-minutes is `0.41666…` h, and a line whose quantity is rounded no longer
-reproduces its own amount. EN 16931 has the field for exactly this — BT-149,
-the item price base quantity — so a time line carries whole seconds at the
-tariff's own hourly price:
-
-```rust
-line.quantity;        // 1500        — BT-129, in SEC
-line.unit_price;      // 6.00        — BT-146, per hour
-line.base_quantity;   // 3600        — BT-149: "6.00 EUR per 3600 SEC"
-line.net;             // 2.50        — BT-131 = 1500 × 6.00 ÷ 3600, exactly
-```
-
-Energy and session lines carry a base quantity of one and are written without
-it. A renderer that ignores BT-149 shows a price per second 3600 times too
-high, and the crossing's account says so.
-
-## The rounding happens once, at the line, and says so
-
-`29.500 kWh × 0.49` is `14.45500`, and `emob-tariff` keeps every digit on
-purpose: rounding per line and then summing gives a different answer from
-summing and then rounding, and which is correct is a tax question rather than an
-arithmetic one. This is the layer that answers it.
-
-**Which basis.** EN 16931's line amount (BT-131) is always net, so a gross
-tariff's lines are converted first — at the rate its own component carries, or at
-the supply's where the component states none.
-
-**At which rate.** The **category** is a property of the document — a supply is a
-reverse charge or it is not — and the **rate** is a property of the *line*,
-because electricity and a service fee can sit in different categories. An invoice
-that taxed both at one rate would over-declare on one of them, and `BR-S-08` and
-`BR-S-09` are the standard's own rules that say so.
-
-```rust
-invoice.lines[0].vat_rate;   // 19 — the energy component's own
-invoice.lines[1].vat_rate;   //  7 — the service fee's
-invoice.tax.len();           //  2 — one taxable amount per rate
-```
-
-Under a category that does not levy tax the gross is still stripped at the rate
-the tariff quoted — a price with 19 % in it is not a price the recipient of a
-reverse charge owes 19 % on — and the rate the document *states* is zero, which
-`BR-AE-5` and its siblings require.
-
-**Where.** Per line, and nowhere else. The standard's totals are sums of the
-line amounts — `BT-106 = Σ BT-131`, and per category `BT-116 = Σ BT-131` — so
-rounding anywhere else produces a document whose own lines do not add up to its
-own subtotals.
-
-**And the difference is on the document.** `Invoice::rounding_residual()` is the
-gap between what the records came to exactly and what the invoice states; the
-tax follows from the rounded figure, so that residual is the whole of what the
-document approximates. The `Crossing` the builder returns names each record the
-document does not reproduce, by JSON Pointer into the invoice.
-
-```rust
-let crossing = InvoiceBuilder::new("R-2026-0001", issued, period, cpo, driver)
-    .supplied_from("DE", dec("19"))   // the country the points stand in, and its rate
-    .ledger(&ledger)      // `live`, never `iter` — see below
-    .due_on(due)
+let crossing = InvoiceBuilder::new(
+        "R-2026-0007",
+        date!(2026 - 07 - 01),                              // issue date
+        (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),     // billing period, BG-14
+        cpo,
+        emsp,
+    )
+    .supplied_from("DE", Decimal::from_str("19")?)          // where the points stand, and its rate
+    .ledger(&ledger)                                        // reads `CdrLedger::live`
+    .due_on(date!(2026 - 07 - 15))
     .build()?;
 
-assert_eq!(crossing.value.taxable_total().to_string(), "26.08 EUR");
-assert!(crossing.value.reconciles());
-// …and what that cost, per record.
-for reason in crossing.reasons() { println!("{reason}"); }
+let invoice = crossing.value;
+assert!(invoice.reconciles());
+
+// The document and the verdict on it, before anything is sent.
+let crossed = en16931::to_en16931(&invoice, en16931::Specification::Core)?;
+assert!(crossed.value.is_valid());
+
+// The books, balanced before a single account is named.
+assert!(postings::postings_for(&invoice).balances());
 ```
 
-## The tax rule every platform gets wrong
+`build` returns a `Crossing`: the invoice plus the account of what it
+approximated, naming each record the document does not reproduce exactly by JSON
+Pointer into the invoice.
 
-Recharging an EV is a **single composite supply of goods** — the electricity —
-not a bundle of services. The Court of Justice settled that in C‑282/22.
+## What it guarantees
 
-C‑60/23 (*Digital Charging Solutions*, 17.10.2024) settles the three-party shape
-every roaming session has: where the driver contracts with an e-mobility provider
-rather than with the operator of the point, the chain is a **commission
-structure** under Article 14(2)(c) — two successive supplies of goods, CPO to
-eMSP and eMSP to driver — and the Court held so despite the eMSP controlling
-neither when, where nor how much is drawn. That is what makes an eMSP a *taxable
-dealer*, and it is the premise everything below rests on.
+- **Rounding happens once, at the line, and is stated.** EN 16931's totals are
+  sums of line amounts (`BT-106 = Σ BT-131`), so rounding anywhere else produces
+  a document whose lines do not add up to its subtotals.
+  `Invoice::rounding_residual` states the gap between the exact records and the
+  printed figures.
+- **Every line and the document reconcile.** `InvoiceLine::reconciles` and
+  `Invoice::reconciles` hold for every invoice the builder returns.
+- **The e-invoice is judged before it is sent.** `en16931::to_en16931` returns the
+  semantic document and its report against 223 syntax-independent rules plus the
+  national usage specification. `en16931::write` refuses with
+  `BillingError::NotCollectable` rather than hand back a document its profile
+  rejects.
+- **VAT follows the parties, not the station.** `TaxTreatment::decide` applies
+  the place-of-supply and reverse-charge rules per invoice (see below).
+- **Only billable records are billed.** A record `emob_cdr::validate` blocks is
+  refused as `BillingError::NotSettleable`; a record offered together with the
+  correction that supersedes it as `BillingError::SupersededRecord`. This covers the two paths that bypass
+  `CdrBuilder`: a partner's document and anything a service deserialised.
+- **A German kilowatt-hour needs signed evidence behind it.** `[MessEG §33(3) Nr. 1]`
+  requires invoices based on measured values to let the recipient check them, and
+  §33(1) allows a measured value in commerce only where it is traceable to the
+  measurement. A per-kWh or per-minute line measured in Germany with no signed
+  record is refused (`BillingError::NotVerifiable`); a per-session fee needs
+  nothing. The test is where the meter is, not the place of supply.
+- **A V2G discharge is never billed to the driver.** A discharge is a supply in
+  the other direction — in Germany usually a self-billed *Gutschrift*
+  `[UStG §14]` — so it is refused by name (`BillingError::ExportNotBillable`).
+- **No clock.** Issue, due and collection dates and the pain.008 timestamp are
+  all arguments. `sepa` would otherwise default some of them from the system
+  clock, and a collection file that differs between two runs is one no bank can
+  reconcile. A test asserts identical inputs give identical XML.
 
-`[UStG §3g]`, Article 38 of the VAT Directive, then says that a supply of
-electricity **to a taxable dealer** is made where that dealer is established. An
-e-mobility provider buying sessions through roaming is exactly one: it does not
-consume the electricity, it resells it. So a German CPO settling with a French
-eMSP is not making a German supply at all — the place of supply is France, and
-German VAT does not arise.
+## How it works
 
-### Where the supply is taxed and who pays it are two questions
+### Invoice lines: net prices, two supplies, time in seconds
 
-Article 195 shifts the liability to the recipient — the reverse charge
-`[UStG §13b]` — only "if the supplies are carried out by a taxable person **not
-established within that Member State**". A CPO with a branch or a VAT
-registration in the buyer's country is making an ordinary **local** supply there,
-at that country's rate, and a reverse charge on it drops tax that was due. So
-establishment is stated rather than inferred from the two countries:
+- **Net item price.** BT-146 is exclusive of VAT. A gross tariff's lines are
+  converted at the rate of their own price component (or the supply's rate when
+  the component states none), so every line reproduces itself and
+  `PEPPOL-EN16931-R120` holds.
+- **One rate per line.** The VAT category belongs to the document's supply; the
+  rate belongs to the line, because energy (19 %) and a service fee (7 %) can
+  differ. `invoice.tax` holds one subtotal per rate, as `BR-S-08` and `BR-S-09`
+  require. Under a category that levies no tax the gross is still stripped at the
+  quoted rate, and the stated rate is zero (`BR-AE-5`).
+- **Reservation and session.** A CDR can carry two ratings, the session and the
+  reservation before it `[OCPI 2.3.0 §mod_cdrs_cdr_object]`. Both become lines
+  in one sequence (`1.1`, `1.2`), each with its own dates in BT-134/BT-135 and
+  its own dimension name.
+- **Time lines.** OCPI prices time per hour, and 25 minutes is `0.41666…` h. A
+  time line therefore states whole seconds (BT-129) against the hourly price, with
+  BT-149 base quantity 3600, so `1500 × 6.00 ÷ 3600 = 2.50` exactly.
+- **Notes that concern the payer.** `[REA 6-A §3.2]` lets a DC station meter on
+  the AC side and requires the operator to tell whoever receives a measured value
+  or an invoice that the losses are included. The compensated loss goes into
+  BT-127 from the record's signed evidence. Rating notes that
+  `emob_tariff::RatingNote::concerns_the_payer` selects — a quantity billed
+  differently from how it was measured, which `[AFIR Art. 5(4)]` and `[PAngV]`
+  let a driver reconcile — cross as BG-1 notes coded `AAI`.
+- **The driver's receipt.** A line whose session has a receipt page carries it
+  (`InvoiceLine::receipt`), appended to BT-127 as "Beleg: <link>", so the payer
+  can open the signed evidence behind each line.
 
-```rust
-let cpo = TaxStatus::business("DE", "DE123456789");
-TaxTreatment::decide(&cpo, &french_emsp, "DE", &rates)?;    // AE, place FR
+### Price caps and minimums are allowances, not lines
 
-let cpo = cpo.also_established_in(["FR"]);
-TaxTreatment::decide(&cpo, &french_emsp, "DE", &rates)?;    // S at 20 %, place FR
-```
+A tariff's `max_price` or `min_price` `[OCPI 2.3.0 §Tariff]` changes the total
+without changing what was delivered. As a line, a cap would be a negative BT-146,
+which `BR-27` refuses. So it becomes a document-level allowance or charge (BG-20
+/ BG-21), one per VAT category it draws from, split as
+`emob_tariff::Rated::adjustment_parts` states. The amount is derived from the
+document's rounded figures, so the gross total lands on the cap exactly. A
+deserialised `Rated` whose adjustment exceeds a category is refused as
+`BillingError::AdjustmentExceedsCategory`.
 
-The ad-hoc leg does not share it. A driver paying at the point is not a
-reseller, so `[UStG §3g]` never engages and the supply is taxed where the
-charge point stands, whatever passport the driver carries. **Two sessions at one
-post, a minute apart, can carry different VAT** — which is why the treatment is
-decided per invoice from the parties, and not per station from a configuration
-field.
+### VAT on a roaming settlement
 
-```rust
-// Both identifiers, or there is no category — EN 16931's BR-AE-2 and BR-AE-3
-// refuse the document anyway, and refusing it here names the missing one.
-let rates = VatRates::new().at("DE", dec("19"));
-let treatment = TaxTreatment::decide(&seller.tax, &buyer.tax, "DE", &rates)?;
-assert_eq!(treatment.category, VatCategory::ReverseCharge);
-assert_eq!(treatment.place_of_supply, "FR");
-// …and the second supply asks a different question of the same two parties.
-let fee = TaxTreatment::decide_service(&seller.tax, &buyer.tax, &rates)?;
-```
+Recharging an EV is a single supply of goods — electricity (CJEU C‑282/22).
+Under C‑60/23 (*Digital Charging Solutions*, 17.10.2024) the roaming chain is a
+commission structure: CPO → eMSP → driver, two supplies, with the eMSP a
+reseller. That decides three things:
 
-### The rate belongs to the place of supply, not to the charge point
+| Situation | Treatment | Why |
+|---|---|---|
+| CPO sells to an EU eMSP not established where the CPO is | reverse charge (`AE`), place of supply = eMSP's country | `[UStG §3g]` / Art. 38: electricity to a reseller is supplied where the reseller is established; Art. 195 / `[UStG §13b]` shifts the liability |
+| CPO also established in the eMSP's country (`TaxStatus::also_established_in`) | standard rate of that country | the reverse charge applies only to a seller **not** established there |
+| Ad-hoc driver at the point | standard rate where the point stands | a driver is not a reseller, so `[UStG §3g]` never engages |
+| eMSP outside the EU (e.g. Switzerland) | outside scope (`O`) | no member state's VAT arises; `O` states no rate (`BR-O-05`), forbids VAT ids (`BR-O-02`), so the seller's legal registration BT-30 becomes mandatory (`BR-CO-26`) |
 
-Which is why the rates are a small table rather than one number. `[UStG §3g]`
-moves the place of supply, and it moves it to a country that need not be the one
-the points stand in: a German operator running chargers in France and settling
-with a German eMSP is taxed in Germany, at 19 %, on kilowatt-hours drawn under a
-20 % regime — the seller is established there, so the supply is local and the
-rate is the place of supply's own.
+Rates come from a `VatRates` table keyed by country, because the place of
+supply need not be where the points stand. A standard-rated supply whose place
+of supply has no rate is refused (`BillingError::NoVatRate`) rather than taxed
+at zero or at the wrong rate.
 
 ```rust
 let rates = VatRates::new().at("FR", dec("20")).at("DE", dec("19"));
-
-// The roaming leg — taxed where the reseller is established.
-let settlement = TaxTreatment::decide(&cpo, &german_emsp, "FR", &rates)?;
-assert_eq!((settlement.place_of_supply.as_str(), settlement.rate), ("DE", dec("19")));
-
-// The ad-hoc leg at the same posts — taxed where they stand.
-let ad_hoc = TaxTreatment::decide(&cpo, &driver, "FR", &rates)?;
-assert_eq!((ad_hoc.place_of_supply.as_str(), ad_hoc.rate), ("FR", dec("20")));
+let settlement = TaxTreatment::decide(&cpo, &german_emsp, "FR", &rates)?;  // DE, 19 %
+let ad_hoc     = TaxTreatment::decide(&cpo, &driver,      "FR", &rates)?;  // FR, 20 %
 ```
 
-A standard-rated supply whose place of supply has no stated rate is **refused**,
-because the two silent alternatives — using the rate that happened to be
-supplied, or using zero — are an invoice that over-declares its VAT and one that
-under-declares it.
+**Subscriptions are a separate service.** C‑60/23 also holds that a periodic
+fee charged *"regardless of whether the user actually purchased electricity"* is
+a separate supply of services, taxed where the supplier sits for a private
+customer `[UStG §3a(1)]`. Add it with `InvoiceBuilder::subscription` and give
+the supplier's rate with `InvoiceBuilder::vat_rate_in`; the document then carries
+two tax subtotals.
 
-### And a reseller outside the Union is `O`, not `G` — which changes the document
+### Specification and syntax are explicit
 
-Article 38 moves the place of supply to where the reseller is established. For a
-Swiss eMSP that is outside the Union, so **no member state's VAT arises at all**:
-the transaction is outside the scope. `G` — free export item — describes goods
-that are within scope and zero-rated because they leave the customs territory,
-which electricity consumed in the Union is not.
+`Specification` sets BT-24 and the rule set in one argument, so a document can
+never claim XRechnung after being checked against the core only.
+`Specification::Core` is plain EN 16931, which `[UStG §14]` requires for B2B.
+`Specification::XRechnung` adds the German public-sector `BR-DE-*` rules (Leitweg-ID,
+seller contact, payment instructions) and would refuse lawful B2B invoices if
+used for everything. `Syntax` picks UBL or CII, the two syntaxes CEN/TS 16931-2
+makes mandatory; which one is a fact about the recipient.
 
-`O` is the only category in UNCL 5305 that **states no rate**, and that is not a
-detail. `BR-O-05` refuses a line carrying BT-152 at all, and a rate of zero is
-carrying it; `BR-O-02` allows no VAT identifier on either party; and once the
-seller's is gone, `BR-CO-26` still wants the buyer to be able to identify its
-supplier — so the legal registration BT-30 stops being optional on exactly that
-document.
+### Cancellations (*Stornorechnung*)
 
-```rust
-let cpo = Counterparty::new("Stadtwerke Musterstadt GmbH", "Musterstadt", seller_tax)
-    .registered_as("HRB 12345", None);   // BT-30, and on this invoice not optional
+`Invoice::cancellation` builds a credit note (BT-3 = 381) referencing the
+original in BG-3, with the same positive figures — EN 16931 carries the
+direction in the document type, and a negated line breaks `BR-27`. Then
+`postings::postings_for` reverses every side, and `payment::instruct` refuses
+the credit note (`PaymentError::NotAnInvoice`) so a driver is never debited
+twice.
 
-let invoice = /* … to a Swiss reseller … */;
-assert!(invoice.lines.iter().all(|line| line.vat_rate.is_none()));
-assert_eq!(to_en16931(&invoice, Specification::Core)?.value.invoice.seller.vat_identifier, None);
-```
+### Postings by role, not by account
 
-The category type is **`en16931`'s own**: all ten codes with four predicates
-generated from the CEN artefacts, of which `forbids_exemption_reason` and
-`states_rate` are the two that decide the paragraph above. What stays here is the
-part `en16931` cannot know — which category two *parties* produce.
+`postings::postings_for` produces movements addressed by `Role` — receivable,
+energy revenue, service revenue, VAT payable at a rate — balanced before an
+account is named. Under a reverse charge there is no VAT posting. Charts of
+accounts (SKR03, SKR04, IFRS) differ, and a journal needs a calendar and a
+database, so mapping roles onto accounts and posting into a ledger is a
+service's job — in emob, `billd`'s. A role a chart cannot place must be refused
+there, never dropped.
 
-### The fee that is not electricity
+### Logs never show a full IBAN
 
-C‑60/23 also holds that a **periodic subscription** an eMSP charges its driver —
-one that buys access rather than kilowatt-hours — is a *separate and independent
-supply of services*, under its own place-of-supply rule rather than Article 38 or
-39. The Court's reason is the fee itself: it is charged *"regardless of whether
-the user actually purchased electricity during the relevant period"*.
+`Debug` of `Mandate`, `Creditor` and `PaymentDetails` masks the IBAN as
+`DE…3000` and names as `…` (`payment::mask_iban`), so a log line or a panic
+message does not carry bank details. `Display` of an IBAN is untouched: the
+documents need it.
 
-Separate means it does not follow the electricity anywhere, so one document can
-be taxed in two places at once — `[UStG §3g]` leaves a private customer's
-electricity at the charge point, `[UStG §3a(1)]` puts a service to a private
-person where the **supplier** sits.
+## API at a glance
 
-```rust
-let invoice = InvoiceBuilder::new(number, issued_on, period, cpo, driver)
-    .supplied_from("FR", dec("20"))   // where the electricity was drawn
-    .vat_rate_in("DE", dec("19"))     // where the supplier sits
-    .subscription(Subscription::new("network access", dec("4.99"), from, to))
-    .ledger(&ledger)
-    .build()?;
-invoice.tax.len();                    // two subtotals, two places of supply
-```
-
-That is why the VAT category is a **line** field, which is where EN 16931 has it:
-BT-151 and BT-152 belong to the line and BG-23 repeats, one entry per category and
-rate. What is a property of the whole document is which categories may
-share it — `BR-O-11` … `BR-O-14` forbid the outside-scope category to sit beside
-any other, and `exclusive_category` records it.
-
-The **line** comes from `empd`, because a contract whose driver charged nothing
-all month contributes no records — and the fee owed precisely because nothing was
-charged is invisible to everything downstream of the ledger.
-
-And the books agree with the document: under a reverse charge there is **no VAT
-posting**, because the liability is the recipient's. A platform that posts 19 %
-and removes it from the invoice has a VAT return that reconciles against nothing
-it sent.
-
-## The verdict is the deliverable, not the XML
-
-An invoice that serialises and does not validate is an invoice that comes back.
-So `to_en16931` returns the semantic document *and* its report, and `write` will
-not hand back a document its profile rejects — `Validated<P>` is a type that
-cannot be constructed from an invalid invoice, which is the same discipline
-`Evidence::billable_energy` applies to a kilowatt-hour one layer down.
-
-```rust
-let crossed = en16931::to_en16931(&invoice, Specification::Core)?;
-assert!(crossed.value.is_valid());
-
-// The German public buyer's document, or the terms that are missing.
-match en16931::write(&invoice, Specification::XRechnung, Syntax::Ubl) {
-    Ok(xml) => submit(&xml.value),
-    Err(BillingError::NotCollectable { reason }) => eprintln!("{reason}"),
-    Err(other) => return Err(other.into()),
-}
-```
-
-## The specification and the syntax are two questions, and neither has a default
-
-`Specification` is BT-24 **and** the rule set the document is judged by, in one
-argument, because they are one decision: a document claiming `XRechnung` because
-somebody typed the string, having been checked against the bare core, is the
-commonest way an invoice passes local validation and is rejected on receipt.
-`write` proves the invoice against the profile and lets the writer stamp BT-24
-from the profile that proved it, so the two cannot disagree.
-
-And `[UStG §14]` asks for a document conforming to Directive 2014/55/EU — which
-is EN 16931 itself, `Specification::Core`. `XRechnung`'s `BR-DE-*` rules are a
-**public-sector** usage specification: they want a Leitweg-ID, a seller contact
-and payment instructions that an ordinary business customer neither has nor
-needs. Writing every invoice as `XRechnung` refuses lawful B2B documents for want
-of a routing identifier the recipient does not issue.
-
-`Syntax` is the other half: UBL and CII are the two CEN/TS 16931-2 makes
-mandatory, they carry the same semantic invoice, and which one an access point
-takes is a fact about the **recipient**. Every ZUGFeRD payload is a CII document,
-so the binding that writes one is the binding the hybrid PDF will want.
-
-`BR-CO-25` is asked at construction rather than at validation, for the same
-reason: an invoice with something owing has to say when, the answer is a
-commercial term the caller holds, and a finding that names a rule id sends them
-looking for it in the standard.
-
-## `live`, not `iter`
-
-A correction is a *new* CDR that supersedes the old one, so a ledger holding a
-session and its correction holds both. `InvoiceBuilder::ledger` reads
-`CdrLedger::live` — and a caller that assembles the list by hand gets the same
-check, because the fault is in the list rather than in where it came from.
-
-## A record its own validator blocks is not one this layer sends
-
-`emob_cdr::validate` already asks everything that makes a record unsettleable —
-overlapping periods that bill a minute twice, a line whose own numbers do not
-produce its own amount, a price computed for a quantity the record does not
-state, an authorisation stronger than the signature supports. `CdrBuilder`
-refuses to *issue* such a record; this crate sends the demand, so it asks the
-same question of every `Cdr` rather than accepting any that carries a `Cost`.
-
-```rust
-let err = InvoiceBuilder::new(…).record(&overlapping).build().unwrap_err();
-assert!(matches!(err, BillingError::NotSettleable { .. }));   // …with the reasons
-```
-
-The ordinary path is unaffected: a record built by this workspace passes its own
-validator by construction, over a thousand generated sessions. The two doors it
-covers are the ones that never go through the builder — a partner's document,
-which `emob_roam::ocpi::from_ocpi` assembles directly, and anything a service
-deserialised.
-
-## …and a German kilowatt-hour needs something behind it
-
-`validate` grades a **missing signature** as a warning on purpose, and says why:
-it is blocking for a German energy invoice and merely notable elsewhere, so the
-decision belongs to the layer that knows which regime applies. This is that
-layer.
-
-`[MessEG §33(3) Nr. 1]` names invoices in as many words — *„Rechnungen, soweit
-sie auf Messwerten beruhen"* have to be ones the recipient can simply follow in
-order to check the values stated — and §33(1) permits a measured value to be used
-in commercial dealings at all only where it is traceable to the measurement. A
-line priced per kilowatt-hour or per minute rests on one; with no signed record
-behind it there is nothing to check it against, because the transparency file is
-made of exactly that evidence. A per-session fee rests on no measurement and
-needs nothing.
-
-Judged on where the **measurement** happened rather than on the place of supply —
-a German operator settling with a French reseller has moved the place of supply
-`[UStG §3g]` and has not moved its meters — and judged for Germany only, because
-asserting one member state's metrology law over all of them would refuse lawful
-invoices elsewhere.
-
-## A discharge is not a line on the driver's invoice
-
-`Direction` is a field rather than a sign everywhere in this workspace, so a V2G
-discharge can never net against a draw. Every layer honours it — the OBIS
-register the meter signed, the CDR builder, `to_ocpi` (which refuses an export
-**by name**, because OCPI cannot express one), `emob-thg` (which skips it,
-because `[38k §6]` counts electricity *withdrawn*). Without the same refusal
-here, a 29.5 kWh discharge priced through the same tariff is a valid EN 16931
-invoice demanding €14.46 from the person who **supplied** the energy — balanced
-postings, collectible pain.008, nothing objecting anywhere.
-
-```rust
-let err = InvoiceBuilder::new(…).record(&discharge).build().unwrap_err();
-assert!(matches!(err, BillingError::ExportNotBillable { .. }));
-```
-
-A discharge is not a smaller sale or a negative one. It is a supply in the other
-direction: the driver supplies, the operator buys, which moves the party, the
-place of supply and the VAT liability at once — and in Germany it is ordinarily a
-self-billed *Gutschrift* `[UStG §14]`, a document with the parties reversed.
-Which arrangement applies is a fact about a contract, not about a CDR, so this is
-a refusal that names what the document would have to be rather than a guess.
-
-## A cancellation is a kind, not a minus sign
-
-An invoice that was wrong is not deleted and not edited. It is reversed by a
-second document — a German *Stornorechnung* — and `Invoice::cancellation` is what
-builds it:
-
-```rust
-let storno = invoice.cancellation("R-2026-0001-S", date!(2026 - 08 - 15))?;
-
-assert_eq!(storno.kind, DocumentKind::CreditNote);      // BT-3 = 381
-assert_eq!(storno.cancels.unwrap().number, "R-2026-0001");  // BG-3
-assert_eq!(storno.gross_total(), invoice.gross_total());    // the same money
-```
-
-**Nothing is negated.** EN 16931 carries the direction in the *document type*
-and states what is being credited as a positive figure. A reversed line would
-carry a negative BT-146, which `BR-27` refuses outright — so a "negated" credit
-note is not a document at all. It is the same argument that makes a tariff's cap
-a document level allowance rather than a line, one layer further out.
-
-The lines, the records and the totals are the invoice's own, which is what lets a
-ledger pair the two and see a **reversal** rather than a second sale. UBL spells
-the two documents with different root elements, in different namespaces, with
-different names for the type code and the line, so a `kind` that did not reach
-the writer would produce an `<Invoice>` claiming BT-3 = 381 — a document
-`BR-CL-01` refuses on the way in and no schema catches on the way out.
-
-Two things then behave differently, and both are the half a platform gets wrong
-silently:
-
-- **`postings_for` reverses every side.** Same accounts, same amounts, the other
-  way. Booking a Storno like the invoice it cancels doubles the revenue and the
-  VAT liability, and the books disagree with the two documents that were sent —
-  at year end, in a reconciliation nobody runs until then.
-- **`payment::instruct` refuses it by name.** A direct debit draws money *in* and
-  a credit note is money owed *back*. Every figure on it is positive, so no
-  arithmetic check would have objected, and the driver would have been debited
-  twice.
-
-What stays outside this crate is *which* document a re-rated month supersedes and
-*when* — that belongs to the service that issued the first one. What a
-cancellation **says**, and what it does to the books, does not.
-
-## It reads no clock
-
-Every date and instant is an argument: the issue date, the due date, the
-collection date, the pain.008 timestamp. A billing run replayed two years later
-produces the same bytes.
-
-That matters more here than anywhere else in the workspace. `sepa` defaults
-several of those fields off the system clock — `IsoDate::today()` for a
-collection date, *now* for the message timestamp — and a collection file that
-differs between two runs of one job is a file no bank reconciles and no auditor
-can check. A test asserts the same inputs produce identical XML.
-
-## It names no accounts, and it links no ledger
-
-`postings_for` produces movements addressed by **role** — receivable, energy
-revenue, service revenue, VAT payable at a rate — balanced before an account is
-named:
-
-```rust
-let books = postings::postings_for(&invoice);
-assert!(books.balances());
-```
-
-SKR03 and SKR04 disagree about the numbers, so the chart is a service's. So is
-the **journal**: posting into one needs accounts, a calendar, a policy and a
-database, and none of those can live in a crate that promises to read no clock
-and open no socket. `mako` declares `doubleentry` in exactly one manifest —
-`services/accountingd` — and in no crate; `billd` is where it belongs here.
-
-It is not only a layering argument. A bookkeeping engine brings the clock in
-through the door: `doubleentry` takes `uuid` with `v7`, and a v7 identifier is
-generated from `SystemTime::now()`. `just purity` greps this workspace's own
-source and cannot see into a dependency, so the promise that two runs of one
-billing job produce one file is kept by what the manifests *do not* declare as
-much as by what the code does not call.
-
-What crosses the seam is `Postings`: a currency, a booking date, and a balanced
-set of role-addressed movements. A role a chart cannot place is a refusal rather
-than a dropped posting — a dropped posting is an entry that does not balance and
-a trial balance that is quietly wrong.
-
-## And it prices nothing
-
-`emob-tariff` rates a session and `emob-cdr` carries the result. A second engine
-here that could produce a different number for the same session is precisely the
-drift this workspace exists to make unrepresentable — which is why `en16931`'s
-own `billing` adapter is deliberately not enabled.
-
-## The document is checked as a property, not as an example
-
-`tests/a_month_closes.rs` closes one month from a real signature, and every
-assertion in it was written after the failure that motivated it — so each is a
-shape somebody already thought of. `tests/the_invoice_adds_up.rs` states what
-those examples are instances of, over two hundred and fifty generated months
-whose tariffs mix VAT rates and carry the minimum and maximum that become a
-document level allowance or charge: the document reconciles at every level the
-standard states one, the standard's own 317 rules accept it, the rounding
-residual is bounded by a minor unit per line and stated rather than absorbed, and
-every record supplied is billed exactly once.
-
-## What it stands on
-
-| Crate | For |
+| Item | Purpose |
 |---|---|
-| `en16931` | the EN 16931 semantic model and its 317 rules, at the severities the authorities publish |
-| `en16931-formats` | UBL and CII — the two syntaxes CEN/TS 16931-2 makes mandatory — and the XRechnung flavour of each |
-| `sepa` | pain.008, with IBAN, BIC and Creditor-Identifier validation |
+| `InvoiceBuilder` | assemble an invoice from records or a `CdrLedger`, with parties, period, rates, subscriptions |
+| `Invoice` | the document: lines, adjustments, tax subtotals, totals, `reconciles`, `rounding_residual`, `cancellation` |
+| `Counterparty`, `TaxStatus` | seller/buyer identity and VAT status (`consumer`, `business`, `reseller`, `also_established_in`) |
+| `TaxTreatment::decide`, `TaxTreatment::decide_service` | VAT category, place of supply and rate for electricity / for a service fee |
+| `VatRates` | standard rates by country |
+| `en16931::to_en16931` | semantic EN 16931 document plus validation report |
+| `en16931::write` | UBL or CII XML, only if the profile accepts it |
+| `payment::instruct` | SEPA pain.008 direct debit for an invoice |
+| `postings::postings_for` | balanced, role-addressed postings |
+| `BillingError`, `PaymentError` | every refusal, by name |
 
-## Licence
+## Feature flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `serde` | on | `Serialize`/`Deserialize` on every public type |
+
+## Standards and sources
+
+- EN 16931 (semantic model and its 317 business rules), CEN/TS 16931-2 (UBL, CII), XRechnung
+- VAT Directive 2006/112/EC Art. 14, 38, 195; `[UStG §3g]`, `[UStG §3a(1)]`, `[UStG §13b]`, `[UStG §14]`; CJEU C‑282/22 and C‑60/23
+- `[MessEG §33(3) Nr. 1]`, `[REA 6-A §3.2]` — measured values on invoices
+- `[AFIR Art. 5(4)]`, `[PAngV]` — price transparency to the driver
+- `[OCPI 2.3.0 §Tariff]`, `[OCPI 2.3.0 §mod_cdrs_cdr_object]`
+- SEPA pain.008 via `sepa`; EN 16931 via `en16931` and `en16931-formats`
+
+The test `tests/the_invoice_adds_up.rs` checks, over 250 generated months with
+mixed VAT rates and price bounds, that every document reconciles at every level,
+passes the standard's 317 rules, bounds its rounding residual by one minor unit
+per line, and bills each record exactly once.
+
+## Part of emob
+
+emob is an open-source Rust toolkit for EV charging back offices. This crate
+sits after `emob-tariff` (rating) and `emob-cdr` (records) and before `billd`,
+the daemon that closes a month. The reasoning and regulation are on the site
+under [Settlement and billing](https://hupe1980.github.io/emob/docs/settlement/);
+see also the [workspace README](../../README.md).
+
+## License
 
 MIT OR Apache-2.0

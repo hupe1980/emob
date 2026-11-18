@@ -1,9 +1,9 @@
 # cargo-deny — licences and advisories.
 #
-# Run with `just deny` or `cargo deny check`. CI runs it on every change; a
-# scheduled job re-runs the advisory half against the unchanged main branch,
-# because an advisory filed on a Wednesday concerns a dependency that was clean
-# on merge day.
+# Run with `just deny` or `cargo deny check`. CI runs it on every push and pull
+# request, and the release re-runs it on the tagged commit. There is no
+# scheduled run: an advisory filed against an unchanged `main` surfaces on the
+# next change or the next release, whichever comes first.
 
 [graph]
 all-features = true
@@ -34,6 +34,15 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# The Mozilla root store as data, under the Community Data License Agreement
+# (permissive, no copyleft). Pulled by ocpp-kit's `rustls` feature, which csmsd
+# enables for security profiles 2 and 3 (spec 005); csmsd itself never trusts
+# these roots — stations are verified against the estate's own `client_ca`.
+# Scoped to the one crate rather than allowed workspace-wide.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 # A second major version of a numeric or serialisation crate is how two halves
 # of the workspace come to disagree about what a number is — and in this
@@ -41,6 +50,10 @@ confidence-threshold = 0.9
 # reason.
 multiple-versions = "warn"
 wildcards = "deny"
+# A path dependency of a crate that is never published (a daemon's in-process
+# end-to-end tests start the other daemons) is not a version anybody resolves.
+# A publishable crate still names a version beside its path.
+allow-wildcard-paths = true
 
 [[bans.deny]]
 # The workspace promise is exact decimal arithmetic end to end. A crate whose
@@ -50,6 +63,13 @@ name = "float-cmp"
 
 [advisories]
 yanked = "deny"
+# An ignored advisory is a decision, not a silence: each entry names the
+# exposure analysis, the upstream it waits on, and the date it is looked at
+# again. The reasoning in full is D334 in the decision log.
+ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 timing variability, via elliptic-curve 0.13 <- p256/k256/p384/p192 0.13, the RustCrypto generation the ocmf crate pins and this workspace matches so the simulator signs with the code ocmf verifies with (D304). Exposure: emob verifies over public keys and public signatures, where a timing channel has no secret to leak; only emob-sim and test fixtures sign, with throwaway keys. Upstream: ocmf moving to the 0.14 curve generation, requested in our ocmf feedback (2026-11-18). Review 2027-03-01." },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (no known vulnerability), via cedar-policy, agentd's policy engine (D300); emob's own time types are time and jiff. Exposure: none beyond an unmaintained parser of policy-file dates the operator writes. Upstream: cedar-policy moving off chrono. Review 2027-03-01." },
+]
 
 [sources]
 unknown-registry = "deny"

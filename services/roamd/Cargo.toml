@@ -12,6 +12,7 @@ rust-version.workspace = true
 [dependencies]
 emob-cdr     = { workspace = true }
 emob-core    = { workspace = true }
+emob-poi     = { workspace = true }
 emob-roam    = { workspace = true }
 # `policy` because this is the daemon the feature exists for: a partner is
 # onboarded while the node runs, and what an operator wants to say about one is
@@ -27,6 +28,10 @@ ocpi-kit     = { workspace = true, features = ["client", "server"] }
 oicp-kit     = { workspace = true }
 
 anyhow       = { workspace = true }
+# A credentials token nobody can guess. Already in the graph (through the
+# kit's TLS stack); the one call is `getrandom::fill`.
+getrandom    = "0.4"
+hex          = { workspace = true }
 axum         = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -36,7 +41,7 @@ serde_json   = { workspace = true }
 http         = "1"
 thiserror    = { workspace = true }
 time         = { workspace = true }
-tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 tracing      = { workspace = true }
 
 [dev-dependencies]

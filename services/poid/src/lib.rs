@@ -58,6 +58,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
+pub mod http;
 pub mod record;
 
 pub use record::{Event, Ledger};

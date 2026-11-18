@@ -1,87 +1,120 @@
 # emob-eebus
 
-**The § 14a wire**: a grid operator's setpoint lifted off a SPINE datagram as an
-exact decimal, and the five states `[LPC §2.3.2]` gives a controllable site.
+The § 14a EnWG wire for EV charging sites: a grid operator's EEBUS power limit read off a SPINE datagram as an exact decimal, and a watchdog that says which of the five LPC states a site is in.
+
+[![crates.io](https://img.shields.io/crates/v/emob-eebus.svg)](https://crates.io/crates/emob-eebus) [![docs.rs](https://img.shields.io/docsrs/emob-eebus)](https://docs.rs/emob-eebus) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-eebus.svg)](#license)
+
+In Germany a grid operator curtails controllable devices under `[EnWG §14a]`
+through an Energy Guard (control box) that speaks EEBUS — SHIP transport and
+SPINE data model — using the Limitation of Power Consumption (LPC) use case. The
+[`eebus`](https://crates.io/crates/eebus) crate (0.11) implements LPC on both
+sides, against all 203 of its published abstract test cases; this crate is the
+thin seam between it and `emob-smart`. It does two things the kit leaves to a
+caller: read the limit exactly, and track which state a silence has put the site
+in. It has no I/O and no clock.
 
 ```console
 cargo add emob-eebus
 ```
 
-## What is here, and what is `eebus`'s
-
-[`eebus`](https://crates.io/crates/eebus) implements *Limitation of Power
-Consumption* on both sides, against all 203 of its published abstract test
-cases. Nothing here re-implements any of it — the datagrams, the bindings, the
-subscriptions and the acknowledgement a write is owed are the kit's, and this
-crate drives its `Engine` rather than replacing it.
-
-What is here is the seam, and it is the two things the kit leaves to a caller.
-
-## The value, exactly
-
-SPINE carries power as a `ScaledNumber` — `{ number, scale }`, an integer
-mantissa and a power of ten, which *is* a decimal:
+## Example
 
 ```rust
-assert_eq!(watts_of(&ScaledNumber::new(42, 2)),  Some(Decimal::from(4200)));
-assert_eq!(watts_of(&ScaledNumber::new(414, 1)), Some(Decimal::from(4140)));
+use emob_eebus::{Watchdog, watts_of};
+use eebus::model::ScaledNumber;
+use rust_decimal::Decimal;
+use time::macros::datetime;
+
+// 42 × 10² watts, off the wire, exactly.
+assert_eq!(watts_of(&ScaledNumber::new(42, 2)), Some(Decimal::from(4200)));
+
+let mut watchdog = Watchdog::new(Decimal::from_str_exact("4.2")?, time::Duration::hours(2));
+watchdog.heard_from(datetime!(2026-06-01 18:00 +2));
+
+// Two hours of silence puts the site into its failsafe [LPC-912]…
+assert_eq!(
+    watchdog.limit_at(datetime!(2026-06-01 20:30 +2)).lpc_state(),
+    Some("failsafe state")
+);
+// …and two more release it [LPC-022].
+assert_eq!(
+    watchdog.limit_at(datetime!(2026-06-01 23:00 +2)).lpc_state(),
+    Some("unlimited/autonomous")
+);
 ```
 
-Sixty watts apart, and the difference matters: `[BK6-22-300 Ziff. 4.5]`'s
-Mindestleistung is 4.2 kW and three-phase at 6 A is 4.14 kW, so a platform that
-cannot tell them apart cannot say whether it honoured an Anspruch. One statute
-along, `[EEG §9]`'s 70 % of a 9.9 kW array is `6930.000000000001` in `f64` — and
-a feed-in payment is computed against it.
+## What it guarantees
 
-A value no decimal can hold is **refused**, not approximated. A `scale` is a
-signed 16-bit number the peer chooses, so an unrepresentable figure is one
-well-formed message away; a NACK is a fact the Energy Guard can act on, and a
-substituted value is a limit nobody asked for applied to a site that will obey
-it.
+- **The limit is exact.** SPINE carries power as a `ScaledNumber` — an integer
+  mantissa and a power of ten, which is a decimal. `watts_of` reads it without
+  floating point. The `[BK6-22-300 Ziff. 4.5]` minimum of 4.2 kW and a
+  three-phase 6 A draw of 4.14 kW are 60 W apart, and that gap decides whether
+  an operator's legal minimum was honoured.
+- **An unrepresentable value is refused, not approximated.** The `scale` is a
+  signed 16-bit number the peer picks, so `read_limit_write` returns
+  `EebusError::UnreadableLimit` rather than substitute a limit nobody asked for.
+  A negative limit, which `[LPC-001]` forbids, is `EebusError::NegativeLimit`.
+- **Silence has a state.** `Watchdog::limit_at` returns an `emob_smart::GridLimit`
+  for any instant, carrying when the Energy Guard was last heard from.
+- **No floats on the binding path.** `eebus`'s use-case actor exposes `f64`
+  (SPINE guides talk in watts); this crate drives the `eebus` SPINE `Engine`
+  directly and takes the value off the datagram, and the workspace's
+  `no-floats` guard keeps it that way.
 
-## Which state a silence has put the site in
+## How it works
 
-`[LPC §2.3.2]` gives a controllable system five states and **three of them allow
-full power**. A depot at full power because its grid operator says so, one whose
-control box died four hours ago, and one nobody ever commissioned are the same
-number and three different problems.
+`[LPC §2.3.2]` gives a controllable site five states, three of which allow full
+power for different reasons. `Watchdog` decides which holds at a given instant:
 
-`emob_smart::GridLimit` is those five, read as a rule before this crate existed.
-What `Watchdog` adds is the clock:
-
-| Silence | State | Ceiling |
+| Situation | LPC state | Ceiling |
 |---|---|---|
-| never spoken | `Uncontrolled` | the site's own connection |
-| speaking, curtailed | `limited` | the setpoint |
-| speaking, released | `unlimited/controlled` | the connection |
-| past the Failsafe Duration Minimum `[LPC-912]` | `failsafe state` | the failsafe value |
-| past `[LPC-022]`'s release | `unlimited/autonomous` | the connection |
+| never heard from | uncontrolled | the site's own connection |
+| heard from, curtailed (`limited_to`) | `limited` | the setpoint |
+| heard from, released (`released`) | `unlimited/controlled` | the connection |
+| silent past the failsafe period `[LPC-912]` | `failsafe state` | the failsafe value `[LPC-901/1]` |
+| still silent past the release `[LPC-022]` | `unlimited/autonomous` | the connection |
 
-The last row is the half every summary of § 14a drops. A site leaves its
-failsafe after between two and 24 hours and runs on its own connection — because
-a building throttled to 4.2 kW for a week because a control box died is not what
-§ 14a asks for, and a grid operator that believes it can still curtail such a
-site is wrong about something it needs to be right about.
+The failsafe period is written by the Energy Guard; until it arrives,
+`FAILSAFE_AFTER` uses the two-hour floor of `[LPC-021]`, the reading that keeps a
+site under control longer. `Watchdog::released_after` sets the release period.
+The release matters: a building held at 4.2 kW for a week because a control box
+died is not what § 14a asks for, and a grid operator must know that such a site
+can no longer be curtailed.
 
-## Why the value does not come through the use-case actor
+`eebus` is used **without** its `runtime` feature, so this crate pulls in no
+tokio, TLS or mDNS; `cargo xtask check-graph` enforces it. The sockets belong to
+`sited`.
 
-`csmsd` keeps the same line with `ocpp-kit`: that crate's CSMS ledger answers an
-*operational* question from a numeric register, and **no billed kilowatt-hour is
-ever routed through it**.
+## API at a glance
 
-Here the line falls in the same place. `eebus`'s use-case actor answers the
-communication question and its surface is `f64`, because SPINE's implementation
-guides talk in watts. The value that binds an allocation comes off the
-`ScaledNumber` on the datagram, exactly, and this workspace's `no-floats` guard
-is what keeps that from quietly stopping being true.
+| Item | Purpose |
+|---|---|
+| `watts_of` | `ScaledNumber` → exact `Decimal` watts, or `None` |
+| `read_limit_write`, `LimitWrite` | the limit an LPC write would set, read from the resolved SPINE payload |
+| `Watchdog` | `heard_from`, `limited_to`, `released`, `limit_at` — the LPC state at an instant |
+| `FAILSAFE_AFTER` | the `[LPC-021]` two-hour floor |
+| `EebusError` | `NotALimitWrite`, `UnreadableLimit`, `NegativeLimit` |
 
-## No I/O, no clock
+## Feature flags
 
-A datagram is a value and every instant is an argument. `eebus` is taken
-**without `runtime`**, so there is no tokio in this tree and
-`cargo xtask check-graph` is what holds it — the sockets, the TLS and the mDNS
-belong to `sited`.
+| Flag | Default | Effect |
+|---|---|---|
+| `serde` | on | `Serialize`/`Deserialize` on every public type |
 
-## Licence
+## Standards and sources
+
+- EEBUS Limitation of Power Consumption: `[LPC §2.3.2]`, `[LPC-001]`, `[LPC-021]`, `[LPC-022]`, `[LPC-901/1]`, `[LPC-912]`
+- `[EnWG §14a]`, `[BK6-22-300 Ziff. 4.5]`
+- SHIP and SPINE via [`eebus`](https://crates.io/crates/eebus)
+
+## Part of emob
+
+emob is an open-source Rust toolkit for EV charging back offices. This crate
+feeds `emob-smart`, which allocates power under the limit; `sited` is the site
+daemon that will hold the SHIP session. Background:
+[Smart charging](https://hupe1980.github.io/emob/docs/smart-charging/) on the
+site; see also the [workspace README](../../README.md).
+
+## License
 
 MIT OR Apache-2.0

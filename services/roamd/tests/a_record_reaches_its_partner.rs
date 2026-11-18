@@ -878,10 +878,17 @@ fn a_partner_onboarded_at_runtime_is_decided_by_a_policy_an_operator_wrote() {
 // A peer is an HTTP server. One runs here, on a real port, and answers the way
 // `[OCPI 2.3.0 §mod_cdrs]` says a receiver answers.
 
+use emob_service::Actor;
 use emob_service::journal::{Journal as _, Memory};
 use ocpi_kit::VersionNumber;
 use ocpi_kit::client::ClientConfig;
 use roamd::{Answer, Dispatcher, Node};
+
+/// The node's data key: the same bytes on every open, which is what a restart
+/// under one `ROAMD_DATA_KEY` is.
+fn data_key() -> emob_service::vault::DataKey {
+    emob_service::vault::DataKey::from_bytes(&[5; 32])
+}
 use std::sync::{Arc, Mutex as StdMutex};
 
 /// A receiver that records what it was given and answers as the specification
@@ -942,8 +949,8 @@ fn dispatcher() -> Dispatcher {
 fn registered_at(addr: std::net::SocketAddr) -> roamd::Registration {
     roamd::Registration {
         peer_id: "NL*TNM".to_owned(),
-        incoming: "TOKEN-C-THIS-NODE-ISSUED".to_owned(),
-        outgoing: "a-test-credentials-token".to_owned(),
+        incoming: data_key().digest(roamd::peering::INCOMING, b"TOKEN-C-THIS-NODE-ISSUED"),
+        outgoing: data_key().seal_str(roamd::peering::OUTGOING, "a-test-credentials-token"),
         versions_url: format!("http://{addr}/ocpi/versions"),
         version: "2.3.0".to_owned(),
         endpoints: vec![roamd::peering::Endpoint {
@@ -957,7 +964,7 @@ fn registered_at(addr: std::net::SocketAddr) -> roamd::Registration {
 
 /// The consigned record, its rendered document, and the node holding both.
 fn queued() -> (Node<Memory>, CdrKey, Outbound) {
-    let mut node = Node::open(node(), Memory::new()).expect("an empty journal folds");
+    let mut node = Node::open(node(), Memory::new(), data_key()).expect("an empty journal folds");
     let cdr = issued("cdr-77", None);
     let token = token();
     let context = Context {
@@ -968,7 +975,7 @@ fn queued() -> (Node<Memory>, CdrKey, Outbound) {
         last_updated: at(31),
     };
     let key = node
-        .consign(&cdr, &token, Some(&context))
+        .consign(&Actor::service("csmsd"), &cdr, &token, Some(&context))
         .expect("a routable record");
     let document = node
         .state()
@@ -998,7 +1005,9 @@ async fn a_record_reaches_a_partner_over_a_real_socket_and_is_sealed_after_the_a
             .is_accepted()
     );
 
-    let answer = dispatcher().deliver(&registered_at(addr), &document).await;
+    let answer = dispatcher()
+        .deliver(&registered_at(addr), &data_key(), &document)
+        .await;
     assert_eq!(
         answer,
         Answer::Accepted {
@@ -1008,7 +1017,8 @@ async fn a_record_reaches_a_partner_over_a_real_socket_and_is_sealed_after_the_a
          back what it sent"
     );
 
-    node.answered(&key, &answer, at(40)).expect("recorded");
+    node.answered(&Actor::Timer, &key, &answer, at(40))
+        .expect("recorded");
     assert!(
         node.state()
             .consignment(&key)
@@ -1049,7 +1059,9 @@ async fn a_receiver_that_refuses_is_a_verdict_and_is_recorded_as_one() {
     .await;
     let (mut node, key, document) = queued();
 
-    let answer = dispatcher().deliver(&registered_at(addr), &document).await;
+    let answer = dispatcher()
+        .deliver(&registered_at(addr), &data_key(), &document)
+        .await;
     let Answer::Refused { reason } = &answer else {
         panic!("a receiver that answered has seen the record: {answer:?}");
     };
@@ -1058,7 +1070,8 @@ async fn a_receiver_that_refuses_is_a_verdict_and_is_recorded_as_one() {
         "the reason a person has to read must survive the wire: {reason}"
     );
 
-    node.answered(&key, &answer, at(40)).expect("recorded");
+    node.answered(&Actor::Timer, &key, &answer, at(40))
+        .expect("recorded");
     let held = node.state().consignment(&key).expect("held");
     assert!(!held.delivery.is_accepted());
     assert!(
@@ -1077,10 +1090,10 @@ async fn nobody_answering_is_not_a_refusal_and_leaves_the_record_owed() {
     let mut silent = registered_at("127.0.0.1:1".parse().expect("an address"));
     silent.endpoints.clear();
 
-    let answer = dispatcher().deliver(&silent, &document).await;
+    let answer = dispatcher().deliver(&silent, &data_key(), &document).await;
     assert!(matches!(answer, Answer::Unreached { .. }), "{answer:?}");
 
-    node.answered(&key, &answer, at(40))
+    node.answered(&Actor::Timer, &key, &answer, at(40))
         .expect("an unreachable partner records nothing");
     assert!(
         node.state()
@@ -1143,16 +1156,23 @@ async fn peer_platform() -> std::net::SocketAddr {
     addr
 }
 
-/// This node, listening.
+/// This node, listening, with the loopback allowlist the tests' peer needs.
 async fn this_node() -> (std::net::SocketAddr, Arc<StdMutex<Node<Memory>>>) {
+    this_node_reaching(roamd::reach::ReachBack::allowing(["127.0.0.1"])).await
+}
+
+/// This node, listening, behind `reach`.
+async fn this_node_reaching(
+    reach: roamd::reach::ReachBack,
+) -> (std::net::SocketAddr, Arc<StdMutex<Node<Memory>>>) {
     let node = Arc::new(StdMutex::new(
-        Node::open(node(), Memory::new()).expect("an empty journal folds"),
+        Node::open(node(), Memory::new(), data_key()).expect("an empty journal folds"),
     ));
     // The bootstrap token, handed to the platform out of band — which is what
     // `[OCPI 2.3.0 §credentials]` says happens before any of this.
     node.lock()
         .expect("not poisoned")
-        .offer("NL*TNM", "TOKEN-A-HANDED-OVER-BY-EMAIL")
+        .offer(&Actor::Estate, "NL*TNM", "TOKEN-A-HANDED-OVER-BY-EMAIL")
         .expect("recorded");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1182,8 +1202,8 @@ async fn this_node() -> (std::net::SocketAddr, Arc<StdMutex<Node<Memory>>>) {
     // the same bytes, and a token reached through ambient randomness is the one
     // thing in it that cannot be replayed.
     let mint: roamd::inbound::MintToken = Arc::new(|peer: &str| format!("TOKEN-C-FOR-{peer}"));
-    let handshake =
-        Handshake::new(me, Arc::clone(&node), mint, KitConfig::for_testing()).expect("a client");
+    let handshake = Handshake::new(me, Arc::clone(&node), mint, KitConfig::for_testing(), reach)
+        .expect("a client");
     let app = router(
         base,
         "/ocpi",
@@ -1270,8 +1290,29 @@ async fn a_peer_discovers_this_node_registers_with_it_and_then_pushes_a_record()
         let held = node.lock().expect("not poisoned");
         let registered: Vec<_> = held.state().peers().registered().collect();
         assert_eq!(registered.len(), 1);
-        assert_eq!(registered[0].incoming, "TOKEN-C-FOR-NL*TNM");
-        assert_eq!(registered[0].outgoing, "TOKEN-B-FROM-THE-PEER");
+        // SR-044: held as a digest and a box, never as the tokens themselves.
+        let key = held.key();
+        assert!(key.matches(
+            &registered[0].incoming,
+            roamd::peering::INCOMING,
+            b"TOKEN-C-FOR-NL*TNM"
+        ));
+        assert_eq!(
+            key.open_str(roamd::peering::OUTGOING, &registered[0].outgoing)
+                .unwrap(),
+            "TOKEN-B-FROM-THE-PEER"
+        );
+        let on_disk = serde_json::to_string(&held.journal().records().unwrap()).unwrap();
+        for token in [
+            "TOKEN-A-HANDED-OVER-BY-EMAIL",
+            "TOKEN-B-FROM-THE-PEER",
+            "TOKEN-C-FOR-NL*TNM",
+        ] {
+            assert!(
+                !on_disk.contains(token),
+                "SR-044: {token} is in the journal"
+            );
+        }
         assert!(
             held.journal()
                 .records()
@@ -1338,10 +1379,10 @@ async fn a_registration_survives_a_restart_because_the_token_is_a_fact() {
     let replay = Memory::new();
     for record in &records {
         replay
-            .append(&record.kind, &record.body)
+            .append(&record.kind, &record.actor, &record.body)
             .expect("the same facts");
     }
-    let restarted = Node::open(node(), replay).expect("the journal folds");
+    let restarted = Node::open(node(), replay, data_key()).expect("the journal folds");
 
     let registered: Vec<_> = restarted.state().peers().registered().collect();
     assert_eq!(
@@ -1349,7 +1390,14 @@ async fn a_registration_survives_a_restart_because_the_token_is_a_fact() {
         1,
         "a node that forgot its registrations answers 401 to every partner it has onboarded"
     );
-    assert_eq!(registered[0].incoming, "TOKEN-C-FOR-NL*TNM");
+    assert!(
+        restarted.key().matches(
+            &registered[0].incoming,
+            roamd::peering::INCOMING,
+            b"TOKEN-C-FOR-NL*TNM"
+        ),
+        "SR-044: after a restart Token C still authenticates"
+    );
     assert!(
         restarted
             .state()
@@ -1438,7 +1486,7 @@ async fn a_partner_that_registers_is_reachable_from_that_moment() {
 
     // …and a record reaches it, with no peer configured anywhere.
     let (_, _, document) = queued();
-    let answer = dispatcher().deliver(&to, &document).await;
+    let answer = dispatcher().deliver(&to, &data_key(), &document).await;
     assert!(
         matches!(answer, Answer::Accepted { .. }),
         "registering is what makes a partner reachable: {answer:?}"
@@ -1730,4 +1778,125 @@ async fn advertised(
         .url
         .as_str()
         .to_owned()
+}
+
+/// SR-045 (baseline SR-010): a registrant who names an internal address gets a
+/// refusal, and the address gets no request.
+#[tokio::test]
+async fn sr_045_a_handshake_pointed_inward_is_refused_before_any_request() {
+    // A listener that counts connections: the "internal service".
+    let inside = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a free port");
+    let inside_addr = inside.local_addr().expect("bound");
+    let reached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&reached);
+    tokio::spawn(async move {
+        while inside.accept().await.is_ok() {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+
+    let (mine, node) = this_node_reaching(roamd::reach::ReachBack::strict()).await;
+    let client = OcpiClient::with_config(KitConfig::for_testing()).expect("a client");
+    let token_a = CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").expect("a token");
+
+    for url in [
+        "http://169.254.169.254/latest/meta-data".to_owned(),
+        format!("https://{inside_addr}/ocpi/versions"),
+        format!("http://{inside_addr}/ocpi/versions"),
+    ] {
+        let theirs = ocpi_kit::testkit::sample::credentials("TOKEN-B-FROM-THE-PEER", &url)
+            .expect("a credentials object");
+        let selected = ocpi_kit::client::Registration::new(
+            KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
+            token_a.clone(),
+        )
+        .discover(client.transport())
+        .await
+        .expect("versions")
+        .select_best(client.transport())
+        .await
+        .expect("details");
+        let refused = selected.register(client.transport(), &theirs).await;
+        assert!(refused.is_err(), "SR-045: {url} was registered");
+    }
+    assert_eq!(
+        reached.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "SR-045: no request reached the internal address"
+    );
+    assert_eq!(
+        node.lock()
+            .expect("not poisoned")
+            .state()
+            .peers()
+            .registered()
+            .count(),
+        0,
+        "and nothing was registered"
+    );
+}
+
+/// SC-001, SR-096: the cut the chain cannot see — the **last** record removed —
+/// is refused at start, because the head signed beside the journal still names
+/// the position it was cut from.
+#[test]
+fn sr_096_a_journal_cut_by_one_record_does_not_start() {
+    let dir = std::env::temp_dir().join(format!("emob-roamd-{}-sr096", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let journal = dir.join("roamd.ndjson");
+    let estate: roamd::daemon::Estate = emob_service::estate::from_str(
+        r#"
+        stations = []
+
+        [parties]
+        operator = "DE*ABC"
+        provider = "DE*EMP"
+
+        [services]
+        billd = "http://billd"
+        roamd = "http://roamd"
+        empd = "http://empd"
+        webhook_secret_env = "WEBHOOK_SECRET"
+        service_token_env = "SERVICE_TOKEN"
+
+        [roaming]
+        public_url = "http://roamd/ocpi"
+        "#,
+    )
+    .expect("an estate");
+    let data = emob_service::vault::DataKey::generate();
+    let signing = emob_service::head::SigningKey::generate();
+    let env: emob_service::estate::Env = Arc::new(move |name: &str| match name {
+        roamd::daemon::DATA_KEY => Some(data.clone()),
+        "ROAMD_SIGNING_KEY" => Some(signing.clone()),
+        _ => None,
+    });
+
+    {
+        let mut node = roamd::daemon::open(&estate, &journal, &env).expect("an empty journal");
+        node.offer(&Actor::Estate, "NL*TNM", "TOKEN-A-ONE")
+            .expect("recorded");
+        node.offer(&Actor::Estate, "BE*XYZ", "TOKEN-A-TWO")
+            .expect("recorded");
+        let partner = Actor::partner(&PartyId::new("NL", "TNM").expect("a party"));
+        node.unregister(&partner, "NL*TNM").expect("recorded");
+    }
+    // The node restarts over its own history.
+    drop(roamd::daemon::open(&estate, &journal, &env).expect("the journal it signed"));
+
+    let text = std::fs::read_to_string(&journal).expect("read");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "three facts");
+    std::fs::write(&journal, format!("{}\n", lines[..2].join("\n"))).expect("written");
+
+    let refused = roamd::daemon::open(&estate, &journal, &env)
+        .expect_err("SR-096: a journal one record short of its signed head does not start");
+    let said = format!("{refused:#}");
+    assert!(
+        said.contains("holds 2 records") && said.contains("signed a head at 3"),
+        "the refusal names both positions: {said}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

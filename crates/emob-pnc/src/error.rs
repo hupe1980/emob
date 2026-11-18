@@ -9,7 +9,7 @@
 
 use iso15118::pnc::pki::ChainError;
 
-use crate::{PoolId, Standing};
+use crate::{Generation, PoolId, Standing};
 
 /// Why a chain does not establish a contract, a vehicle, or anything else.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -62,6 +62,24 @@ pub enum PncError {
         from: time::OffsetDateTime,
         /// The one that is not after it.
         until: time::OffsetDateTime,
+    },
+
+    /// The leaf is on a curve this build, or this generation, does not take.
+    ///
+    /// Ed448 under either generation (no verifier on this workspace's
+    /// `RustCrypto` generation, D304), and anything but secp256r1 under -2
+    /// `[V2G2-007]`. Refused before any signature is checked, by name, so an
+    /// unverifiable signature is never read as a forged one — or as a good one.
+    #[error("the chain offered to pool {pool} under {generation} is on {curve}: {reason}")]
+    UnsupportedAlgorithm {
+        /// Which pool it was offered against.
+        pool: PoolId,
+        /// The rules the caller named.
+        generation: Generation,
+        /// The leaf's curve.
+        curve: String,
+        /// Why it is refused.
+        reason: &'static str,
     },
 
     /// The path validation refused it.

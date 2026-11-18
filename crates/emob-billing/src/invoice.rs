@@ -217,7 +217,9 @@ impl Counterparty {
 /// Mandatory in `XRechnung` (`BR-DE-1`) and optional in the CEN core, which is the
 /// ordinary shape of the German profile: the standard allows an invoice that
 /// does not say how to pay it and a German buyer does not.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` masks the IBAN and the account holder (SR-049).
+#[derive(Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum PaymentDetails {
     /// BG-17 — the buyer transfers to this account. UNCL 4461 code 58, SEPA
@@ -242,6 +244,32 @@ pub enum PaymentDetails {
         /// BT-91 — the account to be debited.
         debited_iban: String,
     },
+}
+
+impl core::fmt::Debug for PaymentDetails {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let iban = crate::payment::mask_iban;
+        match self {
+            Self::CreditTransfer {
+                iban: account,
+                holder,
+            } => f
+                .debug_struct("CreditTransfer")
+                .field("iban", &iban(account))
+                .field("holder", &holder.as_ref().map(|_| "…"))
+                .finish(),
+            Self::DirectDebit {
+                mandate_reference,
+                creditor_identifier,
+                debited_iban,
+            } => f
+                .debug_struct("DirectDebit")
+                .field("mandate_reference", mandate_reference)
+                .field("creditor_identifier", creditor_identifier)
+                .field("debited_iban", &iban(debited_iban))
+                .finish(),
+        }
+    }
 }
 
 impl PaymentDetails {
@@ -367,6 +395,13 @@ pub struct InvoiceLine {
     /// Only ever set on an energy line: the compensation is inside a register in
     /// kilowatt-hours, and a duration does not contain it.
     pub compensated_loss: Option<Energy>,
+    /// Where the driver checks the session this line bills — the receipt
+    /// `csmsd` serves, when the record arrived with one (spec 003).
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub receipt: Option<String>,
 }
 
 impl InvoiceLine {
@@ -750,6 +785,10 @@ pub struct Invoice {
     /// invoice rather than recomputed, because a residual whose two terms are
     /// not both on the document is a number nobody can check.
     pub exact_taxable: Decimal,
+    /// BT-114 — the rounding amount: what the drivers were shown, less what
+    /// this document's own totals chain comes to. See
+    /// [`Invoice::payable_total`] for why a gross-priced document carries one.
+    pub payable_rounding: Decimal,
 }
 
 impl Invoice {
@@ -817,6 +856,50 @@ impl Invoice {
         .round_to_minor_unit()
     }
 
+    /// BT-114 — the rounding amount, zero on a net-priced document.
+    #[must_use]
+    pub const fn payable_rounding(&self) -> Money {
+        Money::new(self.payable_rounding, self.currency)
+    }
+
+    /// The amount due for payment — BT-115: `BT-112 − BT-113 + BT-114`
+    /// (`BR-CO-16`), with nothing prepaid.
+    ///
+    /// # Why a gross-priced document is anchored on the receipts
+    ///
+    /// A tariff quoted gross is the price the driver was shown and agreed to
+    /// (`[PAngV §3(1)]` makes the gross figure, the *Gesamtpreis*, the one a
+    /// consumer is quoted), and every session's receipt states that record's
+    /// gross, rounded once. The document cannot simply restate the sum of those figures: EN 16931 makes
+    /// BT-109 the sum of rounded **net** line amounts (`BR-CO-10`, `BR-S-08`)
+    /// and computes the tax from it per category (`BR-CO-17`, `BR-S-09`), so
+    /// `BT-109 + BT-110` lands a few cents away from the receipts on any month
+    /// of more than a handful of sessions — 85.75 against receipts of 85.78
+    /// before 0.2 fixed this.
+    ///
+    /// So two things, in this order. The taxable amount is anchored on the
+    /// **gross the drivers were charged**: on a document of one rate and no
+    /// bound, line amounts move a minor unit each, where they were rounded
+    /// furthest, until BT-109 is `Σ receipts ÷ (1 + rate)` rounded once
+    /// (`[UStG §10(1)]`: the taxable amount is what the recipient pays, less
+    /// the tax in it). Whatever the per-category tax rounding still leaves —
+    /// a cent at most on such a document — is stated, not absorbed, as BT-114,
+    /// the standard's own field for the amount that brings the payable to the
+    /// figure agreed, and is reported on the [`Crossing`]. A driver who adds
+    /// up their receipts gets BT-115.
+    ///
+    /// A document of net-priced records, one under a category that levies no
+    /// tax (a reverse charge), or one with a line that is no record's (a
+    /// subscription) has no receipts to reproduce, and BT-114 is zero.
+    #[must_use]
+    pub fn payable_total(&self) -> Money {
+        Money::new(
+            self.gross_total().amount() + self.payable_rounding,
+            self.currency,
+        )
+        .round_to_minor_unit()
+    }
+
     /// What the lines came to exactly, before the document rounded them.
     #[must_use]
     pub const fn exact_taxable_total(&self) -> Money {
@@ -861,6 +944,7 @@ impl Invoice {
             && by_category == self.taxable_total().amount()
             && self.gross_total().amount()
                 == self.taxable_total().amount() + self.tax_total().amount()
+            && self.payable_total().amount() == self.gross_total().amount() + self.payable_rounding
     }
 
     /// The credit note that cancels this document — a German
@@ -959,6 +1043,7 @@ pub struct InvoiceBuilder<'a> {
     point_country: String,
     rates: VatRates,
     records: Vec<&'a Cdr>,
+    receipts: std::collections::BTreeMap<CdrKey, String>,
 }
 
 impl<'a> InvoiceBuilder<'a> {
@@ -988,6 +1073,7 @@ impl<'a> InvoiceBuilder<'a> {
             buyer,
             treatment: None,
             subscriptions: Vec::new(),
+            receipts: std::collections::BTreeMap::new(),
             point_country,
             rates: VatRates::new(),
             records: Vec::new(),
@@ -1122,6 +1208,18 @@ impl<'a> InvoiceBuilder<'a> {
         self
     }
 
+    /// The driver's receipt link for each record, carried on its lines
+    /// ([`InvoiceLine::receipt`], BT-127).
+    ///
+    /// The evidence `[MessEG §33]` asks for travels with the bill: a partner
+    /// holding the invoice can hand each driver the page their session's
+    /// signed values verify on.
+    #[must_use]
+    pub fn receipts(mut self, links: std::collections::BTreeMap<CdrKey, String>) -> Self {
+        self.receipts = links;
+        self
+    }
+
     /// Append the subscription lines, and the treatment that governs them.
     ///
     /// The **services** treatment beside the goods one, which C-60/23 keeps
@@ -1193,6 +1291,10 @@ impl<'a> InvoiceBuilder<'a> {
             &mut crossing,
         )?;
         let mut lines = lines;
+        for line in &mut lines {
+            line.receipt = self.receipts.get(&line.cdr).cloned();
+        }
+        let taxed = treatment.category.carries_tax();
         let treatments = self.append_subscriptions(&mut lines, treatment)?;
 
         if lines.is_empty() {
@@ -1207,6 +1309,15 @@ impl<'a> InvoiceBuilder<'a> {
         // names the two supplies rather than leaving `to_en16931` to report a
         // rule id (D269).
         let exclusive_category = refuse_mixed_exclusive(&treatments)?;
+
+        // A gross-priced month is taxed on what the receipts charged. See
+        // `Invoice::payable_total`.
+        let receipts = receipts_total(&self.records, taxed, &lines);
+        if let Some(receipts) = receipts
+            && adjustments.is_empty()
+        {
+            anchor_on_receipts(&mut lines, receipts, currency);
+        }
 
         let tax = breakdown(&lines, &adjustments, &treatments, currency);
         // What the records came to, exactly: the lines, less what the bounds
@@ -1235,11 +1346,19 @@ impl<'a> InvoiceBuilder<'a> {
             adjustments,
             tax,
             exact_taxable,
+            payable_rounding: Decimal::ZERO,
             payment_terms: self.payment_terms,
             buyer_reference: self.buyer_reference,
             notes,
             payment: self.payment,
         };
+
+        // BT-114: a document of gross-priced sessions pays what the receipts
+        // said. See `Invoice::payable_total`.
+        let mut invoice = invoice;
+        if let Some(receipts) = receipts {
+            invoice.payable_rounding = receipts - invoice.gross_total().amount();
+        }
 
         // `BR-CO-25`. Asked here, where the answer is a commercial term the
         // caller holds, rather than left for `en16931::validate` to report as a
@@ -1258,23 +1377,114 @@ impl<'a> InvoiceBuilder<'a> {
             "an invoice this crate builds adds up by construction"
         );
 
-        if !invoice.rounding_residual().is_zero() {
-            crossing.note(
-                "/totals/taxable",
-                format!(
-                    "the records came to {} exactly and this invoice states {}: a difference of \
-                     {}, from rounding each line to the minor unit of {currency}. The tax follows \
-                     from the rounded figure, so this is the whole of what the document \
-                     approximates, and the document is what settles",
-                    invoice.exact_taxable_total(),
-                    invoice.taxable_total(),
-                    invoice.rounding_residual()
-                ),
-            );
-        }
+        note_totals(&invoice, &mut crossing);
 
         Ok(crossing.map(|()| invoice))
     }
+}
+
+/// What the document's totals approximate, on the crossing: the line rounding
+/// against the records' exact figures, and the rounding amount (BT-114)
+/// against the receipts.
+fn note_totals(invoice: &Invoice, crossing: &mut Crossing<()>) {
+    if !invoice.rounding_residual().is_zero() {
+        crossing.note(
+            "/totals/taxable",
+            format!(
+                "the records came to {} exactly and this invoice states {}: a difference of \
+                 {}, from rounding each line to the minor unit of {}. The tax follows \
+                 from the rounded figure, so this is the whole of what the document \
+                 approximates, and the document is what settles",
+                invoice.exact_taxable_total(),
+                invoice.taxable_total(),
+                invoice.rounding_residual(),
+                invoice.currency
+            ),
+        );
+    }
+
+    if !invoice.payable_rounding.is_zero() {
+        crossing.note(
+            "/totals/rounding",
+            format!(
+                "the receipts for these sessions came to {} and this document's totals to {}: \
+                 the tax is computed once per category from the rounded net lines \
+                 (BR-CO-17), so the {} between them is stated as the rounding amount (BT-114) \
+                 and the amount due is what the receipts said",
+                invoice.payable_total(),
+                invoice.gross_total(),
+                invoice.payable_rounding()
+            ),
+        );
+    }
+}
+
+/// Move line amounts by a minor unit each, where they were rounded furthest,
+/// until BT-109 is the net inside the receipts: `receipts ÷ (1 + rate)`,
+/// rounded once (`[UStG §10(1)]`).
+///
+/// Only on a document whose lines share one rate — a receipt states one gross
+/// per session, not one per category, so a split across rates has no single
+/// figure to strip. Each line moves at most one minor unit off its own
+/// `BT-129 × BT-146 ÷ BT-149`, inside the two `PEPPOL-EN16931-R120` tolerates,
+/// and `exact_net` keeps the unrounded figure so the residual still says what
+/// moved. A gap wider than one unit per line is not rounding, and is left for
+/// BT-114 to state rather than spread.
+fn anchor_on_receipts(lines: &mut [InvoiceLine], receipts: Decimal, currency: Currency) {
+    let Some(rate) = lines.first().and_then(|line| line.vat_rate) else {
+        return;
+    };
+    if lines.iter().any(|line| line.vat_rate != Some(rate)) {
+        return;
+    }
+    let round = |amount: Decimal| Money::new(amount, currency).round_to_minor_unit().amount();
+    let unit = Decimal::new(1, currency.minor_unit_digits());
+    let target = round(receipts / (Decimal::ONE + rate / HUNDRED));
+    let stated: Decimal = lines.iter().map(|line| line.net).sum();
+    let steps = (target - stated) / unit;
+    let Some(count) = rust_decimal::prelude::ToPrimitive::to_usize(&steps.abs()) else {
+        return;
+    };
+    if count == 0 || count > lines.len() {
+        return;
+    }
+    let up = steps.is_sign_positive();
+    let mut order: Vec<usize> = (0..lines.len()).collect();
+    // Up: the lines rounded down furthest first; down: those rounded up.
+    order.sort_by_key(|&index| {
+        let gap = lines[index].exact_net - lines[index].net;
+        if up { -gap } else { gap }
+    });
+    for &index in order.iter().take(count) {
+        lines[index].net += if up { unit } else { -unit };
+    }
+}
+
+/// What the drivers' receipts for these records came to — each record's gross
+/// rounded once, as `Cost::gross` states it — where the document is one those
+/// receipts describe: every priced part quoted gross, a category that levies
+/// tax, and no line on the document that is not a record's. `None` otherwise,
+/// and BT-114 stays zero. See [`Invoice::payable_total`].
+fn receipts_total(records: &[&Cdr], taxed: bool, lines: &[InvoiceLine]) -> Option<Decimal> {
+    if !taxed
+        || lines
+            .iter()
+            .any(|line| !records.iter().any(|cdr| cdr.key == line.cdr))
+    {
+        return None;
+    }
+    let mut total = Decimal::ZERO;
+    for cdr in records {
+        let cost = cdr.cost.as_ref()?;
+        let gross_priced = core::iter::once(&cost.rated)
+            .chain(cost.reservation.as_ref())
+            .all(|rated| rated.tax_included == emob_tariff::TaxIncluded::Yes);
+        if !gross_priced {
+            return None;
+        }
+        total += cost.gross().amount();
+    }
+    Some(total)
 }
 
 /// The market whose metrology law this crate carries.
@@ -1820,6 +2030,8 @@ fn record_lines(
             compensated_loss: (line.dimension == Dimension::Energy)
                 .then(|| cdr.evidence.as_ref().and_then(|e| e.compensated_loss))
                 .flatten(),
+            // Set from the builder's receipts once every line is built.
+            receipt: None,
         });
     }
 
@@ -1926,6 +2138,7 @@ fn record_adjustments(
                 // no measured value, so there is none to disclose the contents
                 // of.
                 compensated_loss: None,
+                receipt: None,
             });
             return;
         }
@@ -2068,6 +2281,7 @@ fn subscription_line(
         // A fee that rests on no measured value has no measured value to
         // disclose the contents of `[REA 6-A §3.2]`.
         compensated_loss: None,
+        receipt: None,
     }
 }
 
@@ -2675,6 +2889,48 @@ mod tests {
             "{:?}",
             crossing.notes()
         );
+    }
+
+    #[test]
+    fn a_gross_priced_month_asks_for_what_its_receipts_said() {
+        // Seven sessions at 0.49 gross. Their receipts state 2.45 + 3.48 +
+        // 4.07 + 5.93 + 6.71 + 3.09 + 5.05 = 30.78; rounding each line's net
+        // and taxing the sum once (BR-CO-17) used to come to 30.76, two cents
+        // under what the driver had been shown.
+        let tariff = gross_tariff();
+        let records: Vec<Cdr> = [
+            "5.000", "7.100", "8.300", "12.100", "13.700", "6.300", "10.300",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(n, kwh)| record(&format!("c-{n}"), kwh, &tariff))
+        .collect();
+        let receipts: Decimal = records
+            .iter()
+            .map(|cdr| cdr.cost.as_ref().unwrap().gross().amount())
+            .sum();
+        assert_eq!(receipts, dec("30.78"));
+
+        let refs: Vec<&Cdr> = records.iter().collect();
+        let crossing = builder(&refs).build().unwrap();
+        let invoice = &crossing.value;
+        assert!(invoice.reconciles());
+        // The taxable amount is the net inside the receipts, 30.78 / 1.19 …
+        assert_eq!(invoice.taxable_total().to_string(), "25.87 EUR");
+        assert_eq!(invoice.tax_total().to_string(), "4.92 EUR");
+        assert_eq!(invoice.gross_total().to_string(), "30.79 EUR");
+        // … and the cent the tax's own rounding leaves is BT-114, stated.
+        assert_eq!(invoice.payable_rounding().to_string(), "-0.01 EUR");
+        assert_eq!(invoice.payable_total().amount(), receipts);
+        assert!(
+            crossing.reasons().any(|r| r.contains("BT-114")),
+            "{:?}",
+            crossing.notes()
+        );
+        // Each line moved at most a cent off its own price × quantity.
+        for line in &invoice.lines {
+            assert!((line.net - line.exact_net).abs() < dec("0.015"), "{line:?}");
+        }
     }
 
     #[test]

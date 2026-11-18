@@ -4,7 +4,7 @@
 //! # The rule is `emob-core`'s; the sweep is the agent's
 //!
 //! `emob_core::obligation::assess` judges **one** charge point against the
-//! **49 duties** on one date. It is the only implementation of those rules and
+//! **51 duties** on one date. It is the only implementation of those rules and
 //! this specialist does not have a second one — it calls it, once per point.
 //!
 //! What it adds is the two things a single assessment cannot say.
@@ -68,10 +68,14 @@ pub struct ComplianceSweep;
 /// The name this specialist is invoked under.
 pub const NAME: &str = "compliance-sweep";
 
+/// The one capability this specialist answers, and the one the runtime checks
+/// against the advisory principal before it runs (SR-104): it reads.
+pub const CAPABILITY: &str = emob_service::caps::LOCATION_READ;
+
 #[async_trait]
 impl Skill for ComplianceSweep {
     fn descriptor(&self) -> SkillDescriptor {
-        SkillDescriptor::new(NAME)
+        SkillDescriptor::new(NAME).provides(CAPABILITY)
     }
 
     async fn invoke(

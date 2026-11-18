@@ -44,7 +44,7 @@
 
 use std::collections::BTreeMap;
 
-use iso15118::pnc::pki::{Certificate, Profile, Validated};
+use iso15118::pnc::pki::{Certificate, Curve, Policy, Profile, Validated};
 
 use crate::verify::Curves;
 use crate::{PncError, RevocationList, Standing};
@@ -84,6 +84,45 @@ impl core::fmt::Display for PoolId {
 impl From<&str> for PoolId {
     fn from(name: &str) -> Self {
         Self::new(name)
+    }
+}
+
+/// Which ISO 15118 generation's rules a chain is judged under.
+///
+/// Named by the **caller**, per call, and never read off the certificate: it is
+/// the protocol the session negotiated — OCPP 2.x carries it beside the chain
+/// as `iso15118SchemaVersion` — and a validation that inferred it from the
+/// leaf would let whoever minted the leaf choose the weaker rules. Both
+/// generations are judged in one process, because `[DA-656 Anh. 2.1.2]` makes a
+/// Plug & Charge point support both from 01.01.2027.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum Generation {
+    /// ISO 15118-2: secp256r1 throughout `[V2G2-007]`.
+    Iso2,
+    /// ISO 15118-20 with Amd 1: secp521r1 with `ecdsa-with-SHA512` or Ed448
+    /// (`iso15118`'s `Rules::Iso20`), Annex B's extensions only, every certificate inside its
+    /// issuer's validity.
+    Iso20,
+}
+
+impl Generation {
+    /// The kit's policy for a profile under this generation.
+    const fn policy(self, profile: Profile) -> Policy {
+        match self {
+            Self::Iso2 => Policy::iso2(profile),
+            Self::Iso20 => Policy::iso20(profile),
+        }
+    }
+}
+
+impl core::fmt::Display for Generation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Iso2 => "ISO 15118-2",
+            Self::Iso20 => "ISO 15118-20",
+        })
     }
 }
 
@@ -264,7 +303,8 @@ impl PoolRegistry {
     /// to `[V2G2-925]` the moment there are two ecosystems.
     ///
     /// `chain` is the leaf followed by its intermediates, leaf first, as DER —
-    /// the order a `CertificateChainType` carries on the wire. `at` is the
+    /// the order a `CertificateChainType` carries on the wire. `generation` is
+    /// the protocol the session negotiated (see [`Generation`]). `at` is the
     /// instant to judge against; this crate reads no clock, and a replay two
     /// years later has to be able to ask the question as it was asked then.
     ///
@@ -284,7 +324,10 @@ impl PoolRegistry {
     /// [`PncError::UnknownPool`] for a pool nobody connected — never a fallback
     /// to another one's anchors. [`PncError::NoTrustedAnchor`] where the pool
     /// publishes roots and this side trusted none of them at `at`, which is a
-    /// configuration fault and not a bad certificate. [`PncError::Chain`] for
+    /// configuration fault and not a bad certificate.
+    /// [`PncError::UnsupportedAlgorithm`] for a leaf on a curve this build or
+    /// this generation does not take — Ed448 always, anything but secp256r1
+    /// under -2. [`PncError::Chain`] for
     /// everything the path validation refuses, and [`PncError::Revoked`] where
     /// the supplied status says so.
     pub fn validate_in<'a>(
@@ -292,6 +335,7 @@ impl PoolRegistry {
         pool: &PoolId,
         chain: &[&'a [u8]],
         profile: Profile,
+        generation: Generation,
         at: time::OffsetDateTime,
         revocations: &RevocationList,
     ) -> Result<Validated<'a>, PncError> {
@@ -300,9 +344,14 @@ impl PoolRegistry {
             connected: self.pools().map(|p| p.0).collect(),
         })?;
 
-        let anchors: Vec<&[u8]> = connected
+        // Public anchors: an OPCP pool roots the public V2G PKI. For the two
+        // profiles validated here — contract and OEM provisioning — the kit
+        // requires no status to be shown good ("fetching is the station's
+        // call", [V2G2-693]), so it is handed no evidence and the revocation
+        // answer below stays this crate's, over the whole path.
+        let anchors: Vec<iso15118::pnc::pki::TrustAnchor<'a>> = connected
             .anchors_at(at)
-            .map(|anchor| anchor.der.as_slice())
+            .map(|anchor| iso15118::pnc::pki::TrustAnchor::public(&anchor.der, &anchor.provenance))
             .collect();
         if anchors.is_empty() {
             return Err(PncError::NoTrustedAnchor {
@@ -312,12 +361,20 @@ impl PoolRegistry {
             });
         }
 
-        let validated =
-            iso15118::pnc::pki::validate(chain, &anchors, profile, at.unix_timestamp(), &Curves)
-                .map_err(|refusal| PncError::Chain {
-                    pool: pool.clone(),
-                    refusal,
-                })?;
+        refuse_algorithm(pool, chain, generation)?;
+
+        let validated = iso15118::pnc::pki::validate(
+            chain,
+            &iso15118::pnc::pki::TrustAnchors::new(&anchors),
+            generation.policy(profile),
+            &iso15118::pnc::pki::Evidence::none(),
+            at.unix_timestamp(),
+            &Curves,
+        )
+        .map_err(|refusal| PncError::Chain {
+            pool: pool.clone(),
+            refusal,
+        })?;
 
         // …and only now the question the path validation leaves to its caller.
         //
@@ -340,6 +397,51 @@ impl PoolRegistry {
             }
         }
         Ok(validated)
+    }
+}
+
+/// The curves this build verifies, judged on the leaf before the kit runs.
+///
+/// The kit refuses a -2 or mixed-curve chain under -20 rules itself
+/// (`AlgorithmNotAllowed`, `MixedCurves`). Two refusals are this side's:
+///
+/// - **Ed448**, under either generation. The kit admits it under -20
+///   (`iso15118`'s `Rules::Iso20`), and the only Rust verifier sits on the next `RustCrypto`
+///   generation, which D304 keeps out of this workspace. Unrefused, it would
+///   reach [`crate::Curves`] and come back as a bad signature — the right
+///   answer for the wrong reason, and a remedy nobody could act on.
+/// - **Anything but secp256r1 under -2** `[V2G2-007]`. -2 has no other curve,
+///   so a secp521r1 chain judged as -2 is a -20 chain escaping -20's rules —
+///   the size bound, the nesting, Annex B's extensions.
+///
+/// A leaf that does not parse is left to the kit, which names it.
+fn refuse_algorithm(
+    pool: &PoolId,
+    chain: &[&[u8]],
+    generation: Generation,
+) -> Result<(), PncError> {
+    let Some(curve) = chain
+        .first()
+        .and_then(|leaf| Certificate::parse(leaf).ok())
+        .map(|leaf| leaf.curve)
+    else {
+        return Ok(());
+    };
+    let refusal = match (curve, generation) {
+        (Curve::Ed448, _) => {
+            Some("this build verifies no Ed448 signature (D304): refused rather than skipped")
+        }
+        (Curve::P256, _) | (_, Generation::Iso20) => None,
+        (_, Generation::Iso2) => Some("ISO 15118-2 has secp256r1 only [V2G2-007]"),
+    };
+    match refusal {
+        None => Ok(()),
+        Some(reason) => Err(PncError::UnsupportedAlgorithm {
+            pool: pool.clone(),
+            generation,
+            curve: format!("{curve:?}"),
+            reason,
+        }),
     }
 }
 
@@ -417,6 +519,7 @@ mod tests {
                 &PoolId::new("some-other-ecosystem"),
                 &[&[0x30][..]],
                 Profile::ContractCertificate,
+                Generation::Iso2,
                 datetime!(2026-06-01 00:00 UTC),
                 &RevocationList::default(),
             )
@@ -446,6 +549,7 @@ mod tests {
                 &PoolId::new("hubject-ccp"),
                 &[&[0x30][..]],
                 Profile::ContractCertificate,
+                Generation::Iso2,
                 datetime!(2026-06-01 00:00 UTC),
                 &RevocationList::default(),
             )

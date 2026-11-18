@@ -1,192 +1,154 @@
 # empd
 
-The provider side of a contract: the token store two domain crates deliberately
-refuse to be, whether a contract authorises a session **now**, what the driver is
-quoted **before** it starts, and the fee that is owed **whether or not** they
-charged.
+The e-mobility service provider (eMSP) daemon: the keyed token store, real-time authorisation of a driver's contract, the AFIR price quote before a session, and the monthly fee owed whether or not the driver charged.
 
-```console
-EMPD_TOKEN_KEY=… cargo run -p empd
-```
+## Status
 
-## The service `emob-roam` asks for by name
+| | |
+|---|---|
+| ✅ library | `empd::Empd` and `empd::Book` implement the token store, `[OCPI 2.3.0 §mod_tokens]` authorisation, credit limits, the `[AFIR Art. 5(5)]` quote, and fees per contract — tested in `tests/a_contract_authorises_a_session.rs` |
+| ✅ journal | on start the daemon folds its hash-chained journal (`empd` under `EMOB_JOURNAL_DIR`) before reporting ready; card UIDs in it are sealed under `EMPD_DATA_KEY`, and it refuses to start without that key. Every record names its actor; the head is signed under `EMPD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
+| ✅ estate | contracts and tokens are seeded once from the estate's `[[contracts]]`; the provider party is the estate's `[parties] provider` |
+| ✅ authorisation | `POST /v1/authorize`, behind the service token `csmsd` holds, answers `Accepted` (with the token's keyed reference), `Blocked`, `Expired` or `Invalid` with a reason |
+| ⏳ not yet | an OCPI tokens endpoint for partners, and the fee hand-off to `billd` |
 
-> A `RoamingToken` is **presented to the crossing** by the party that holds the
-> mapping — the token store, which is a service with a key and a database and no
-> place in a domain crate.
+## What it owns
 
-`emob_session::Authorization` refuses to store an RFID UID: a UID is a lifelong
-identifier of a physical object a person carries, and a session row holding one
-builds a movement profile nothing in this platform needs. OCPI requires that
-same UID on every outgoing CDR. Those two facts do not compose inside a crate,
-and the resolution was never to weaken either.
+### The token store
+
+`emob_session::Authorization` refuses to store an RFID UID — a UID identifies,
+for life, a physical object a person carries. Yet OCPI requires the UID on every
+outgoing CDR. The store holds the mapping, keyed:
 
 ```rust
 let reference = provider.issue_token(&contract, "04A1B2C3D4E5F6", TokenType::Rfid, Whitelist::Allowed)?;
-reference.as_str();                 // 64 hex characters, and not the uid
-provider.present(&reference)?.uid;  // the uid, at the edge that has to send it
+reference.as_str();                 // 64 hex characters, not the UID
+provider.present(&reference)?.uid;  // the UID, only at the edge that must send it
 ```
 
-The digest is **keyed**, so a second provider holding the same card computes a
-different reference. And the contract identifier's check digit is verified here
-rather than at the crossing: `emob-roam` checks it *"because here is the last
-place anyone looks"*, and this is one place earlier — the difference between
-refusing a card at the counter and discovering three weeks later that a month of
-sessions was billed to somebody else's contract.
+The reference is an HMAC-SHA256 under a subkey of `EMPD_DATA_KEY`, so another
+provider holding the same card computes a different one; the UID itself is
+sealed under the same key. The key is never written to the journal — a backup
+must not make every digest reversible. Losing the key is crypto-erasure on
+purpose: a journal folded under a new key keeps its chain, and its tokens are
+`Erased` — they cannot be presented and do not resolve. The contract identifier's check
+digit is verified when the token is issued, before any session is billed to it.
 
-## 1. Whether a contract authorises this session, now
+### Real-time authorisation
 
-`[OCPI 2.3.0 §mod_tokens]` asks a real-time question and takes one of five
-answers. Four of them need something no document has.
+`[OCPI 2.3.0 §mod_tokens]` asks a CPO's question in real time and allows five
+answers; four need state no document holds.
 
-| Answer | What it needs | Why no crate can give it |
-|---|---|---|
-| `Blocked` | the token's standing | a lost card is a fact about a store |
-| `Expired` | a **clock** against the contract's window | a contract is a relationship over time |
-| `NoCredit` | a **ledger** of sessions nobody has invoiced | the sessions are precisely the ones with no document |
-| `NotAllowed` | the location | this point, not this driver |
-| `Allowed` | all of the above | — |
+| Answer | Needs |
+|---|---|
+| `Blocked` | the token's standing (a lost or stolen card) |
+| `Expired` | a clock against the contract window — inclusive at both ends |
+| `NoCredit` | the running total of sessions not yet invoiced |
+| `NotAllowed` | the location |
+| `Allowed` | all of the above |
 
-A contract that runs *until* the last of the month covers a session on that day.
-Inclusive at both ends, because that is what a driver reading their own contract
-expects.
+`invoiced` subtracts **what the invoice billed** rather than clearing the total,
+so a session authorised while a month is closing is not wiped. A closing that
+bills more than the total holds is refused by name.
 
-### …and the ledger it reads is written down, not cleared
+The whitelist rule cuts both ways: an operator asking about an `ALWAYS` token
+has a stale list, and a session started from a list for a `NEVER` token was
+never authorised (`Empd::started_from_list`). Both are refusals, because each
+is a session nobody will be paid for.
 
-`invoiced` takes **what the invoice billed** and subtracts it. Clearing the
-running total outright is true only at the instant the document was assembled: a
-session authorised while the closing runs is added to that total and then wiped —
-money nobody collects, and, because the credit limit is judged against exactly
-this figure, a driver handed back a limit they have not paid for. A closing that
-bills more than the ledger holds has counted a session twice or counted one this
-provider never saw, and is refused by name rather than driving the total below
-zero.
+### The quote before the session
 
-### The whitelist is a two-sided rule
-
-`ALWAYS` tells an operator to start from its own list and **never ask**; `NEVER`
-says always ask. Both directions are refusals here, and each of them is a session
-somebody is not going to be paid for:
-
-- an operator that asks about an `ALWAYS` token has a **stale list**, and the
-  sessions it is *not* asking about are being started from it — including for
-  tokens this provider has since blocked;
-- a session started from a list for a `NEVER` token was never authorised, and its
-  CDR arrives with nobody to bill.
-
-Neither shows up as an error anywhere else in the system.
-
-## 2. What the driver is quoted before they plug in
-
-`[AFIR Art. 5(5)]` binds the *provider* rather than the operator:
-
-> Mobility service providers shall make available to end users, prior to the
-> start of an intended recharging session, all price information specific to that
-> recharging session … clearly distinguishing all price components, including
-> applicable e-roaming costs and other fees or charges applied by the mobility
-> service provider.
-
-The operator's components are `emob_tariff::describe`'s, in the order
-`[AFIR Art. 5(4)]` prescribes, because a provider has no business restating
-somebody else's price in its own words. This service's own charges follow, each
-named — and the e-roaming cost is its own field, because the article names it
-separately from "other fees or charges".
+`[AFIR Art. 5(5)]` obliges the **provider** to show, before the session, all
+price components including e-roaming costs and its own fees. The operator's
+components come verbatim from `emob_tariff::describe`, in the order
+`[AFIR Art. 5(4)]` prescribes; the provider's own charges follow, each named,
+with e-roaming as its own component.
 
 ```rust
-quote.charged_by(ChargedBy::Operator);          // their price
-quote.charged_by(ChargedBy::ProviderERoaming);  // the cost the article names
+quote.charged_by(ChargedBy::Operator);          // the operator's price
+quote.charged_by(ChargedBy::ProviderERoaming);  // the e-roaming cost the article names
 quote.passes_the_operators_price_through(&tariff, at);
 ```
 
-**That last one is the article's substance.** The fold it forbids is not an
-unnamed component — it is a provider that adds five cents to the operator's price
-per kilowatt-hour and shows the driver one number. Every component is still
-"clearly distinguished", and two providers quoting one point give two different
-accounts of the same operator's price. So the test is not that the components are
-named; it is that the ones attributed to the **operator** are the ones the
-operator published.
+The last check is the article's point: a provider must not fold a surcharge
+into the operator's per-kWh price and show one number.
 
-### A price list with no country in it cannot surcharge the border
-
-The same paragraph ends: *"Mobility service providers shall not apply any extra
-charges for cross-border e-roaming."* Not "reasonable and transparent" — forbidden
-outright.
-
-So a `Markup` belongs to a **partner**, and there is no country anywhere in the
-type. Charging two partners differently is an ordinary commercial difference —
-their roaming costs differ — and the point's country never reaches the
-arithmetic.
-
-That is what lets this service **derive** what `emob_core::ProviderProfile` takes
-as four booleans somebody ticked:
+The same paragraph forbids extra charges for cross-border e-roaming. A `Markup`
+belongs to a partner and the type has no country, so no border surcharge can be
+expressed. That lets `Empd::provider_profile` **derive** the four facts
+`emob_core::ProviderProfile` needs, rather than taking ticked boxes:
 
 ```rust
 let assessment = assess_provider(&provider.provider_profile(), today);
 ```
 
-Three of the four are facts about this service's own data; the fourth is a fact
-about the type. A provider that has stated no price list at all discloses
-nothing, and the calendar says so rather than assuming the best.
+A provider with no price list discloses nothing, and the assessment says so.
 
-## 3. The fee that is owed whether or not anybody charged
+### The fee owed regardless of charging
 
-C-60/23 (*Digital Charging Solutions*) turns on a fixed fee charged *"regardless
-of whether the user actually purchased electricity during the relevant period"*,
-which is why the Court held network access to be a **separate and independent**
-supply of services.
-
-A month's invoice is assembled from records. A contract with no sessions produces
-none — so the one line that is owed anyway is invisible to everything downstream
-of the ledger.
+CJEU C‑60/23 treats a fee charged *"regardless of whether the user actually
+purchased electricity"* as a separate supply of services. A contract with no
+sessions produces no records, so the fee is derived from the **contracts in
+force**:
 
 ```rust
 provider.fees_for(date!(2026 - 06 - 01), date!(2026 - 06 - 30));
 ```
 
-Derived from the **contracts in force**, not from the records. Each is an
-`emob_billing::Subscription`, which is the line `billd` puts on the document and
-taxes under `[UStG §3a(1)]` rather than `[UStG §3g]`.
+Each is an `emob_billing::Subscription`, taxed under `[UStG §3a(1)]` rather than
+`[UStG §3g]`.
 
-## No I/O
+### State that survives a restart
 
-Nothing in the library opens a socket or reads a clock. Every date and instant is
-an argument, so two runs of one authorisation give one answer.
-
-## Three ledgers, and each fails in a different direction when it is forgotten
-
-A lost token store refuses every driver — loud, and fixed in an hour. A lost
-**block** admits a card its owner reported stolen. A lost **running total** reads
-zero, so every session is authorised past the credit limit that was the point of
-holding one, and nothing raises: a limit that is never reached looks exactly like
-a limit that is never exceeded.
-
-`Book` is `Empd` folded from a hash-chained journal — `contracted`, `issued`,
-`ran_up`, `invoiced`, `blocked` — with two rules the fold had to get right:
-
-- A session offered twice at the **same** figure records nothing, because a
-  journal growing by one line per partner retry makes a replay's cost
-  proportional to somebody else's flakiness. A session offered again at a
-  **different** figure is a re-rated record and does record, because it moves the
-  total, and a fold that skipped it would rebuild a contract owing a number
-  nothing in the system still believes.
-- The key the token store is hashed under is **not** in the journal. A file that
-  carried it would make every digest in itself reversible, for ever, by anybody
-  who restored a backup — which is the whole property `TokenRef` exists for. It
-  stays an argument to `Book::open`.
+Each forgotten fact fails differently: a lost token store refuses every driver;
+a lost block admits a stolen card; a lost running total authorises past every
+credit limit, silently. `Book` is `Empd` folded from a journal of `contracted`,
+`issued`, `ran_up`, `invoiced` and `blocked` facts. A session offered twice at
+the same figure records nothing (partner retries must not grow the journal); at
+a different figure it records, because a re-rated record moves the total.
 
 ## Configuration
 
-| Variable | Default | What |
+| Variable | Default | Purpose |
 |---|---|---|
-| `EMPD_HTTP_BIND` | `127.0.0.1:9585` | the readiness and health endpoint |
-| `EMPD_TOKEN_KEY` | *required* | the key the token store is hashed under |
-| `EMOB_JOURNAL_DIR` | `var` | where the journal is folded from and appended to. **Not** a temporary directory by default: a service that silently journalled to `/tmp` would come back from a reboot with an empty ledger and no error |
-| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `EMPD_HTTP_BIND` wins over. A container image sets it, because every default here is **loopback** and loopback inside a container is reachable by nothing |
+| `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[contracts]]`, `[services]`, `[[operators]]` |
+| `EMPD_DATA_KEY` | **required** | 32 bytes, base64: the token references' key and the seal on UIDs. A default would be a key anyone with this source could use |
+| `EMPD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head. A `.head` signed under another key refuses the start |
+| `EMOB_SERVICE_TOKEN`, `EMOB_OPERATOR_TOKEN` | **required** | the variables the estate names: the bearer `csmsd` authorises with, the read model's bearer |
+| `EMPD_HTTP_BIND` / `EMOB_HTTP_BIND` | `127.0.0.1:9585` | the shell |
+| `EMOB_JOURNAL_DIR` | `var` | journal directory — deliberately not a temp directory |
+| `EMOB_LOG_FORMAT` | JSON | `text` for a terminal |
+| `RUST_LOG` | `info,empd=debug` | log filter |
 
-`EMPD_TOKEN_KEY` has no default on purpose. A default is a store whose digests
-anybody holding this source can recompute, which is the property `TokenRef`
-exists for.
+## Running
+
+```console
+eval "$(just dev-keys)"
+EMOB_ESTATE=deploy/estate.example.toml cargo run -p empd   # plus the *_env variables
+```
+
+Or `just demo`, or `just up` for the whole estate (`empd`'s shell on
+`localhost:8083`).
+
+## Endpoints
+
+| Path | Answers |
+|---|---|
+| `POST /v1/authorize` | service token: a token's authorisation, fail-closed on anything unknown |
+| `GET /v1/empd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
+| `GET /v1/empd` | operator token: contracts and tokens **by reference, never by UID** |
+| `GET /health/live` | `200` while the process runs |
+| `GET /health/ready` | `200` once the contracts are folded from the journal; `503` listing `contracts` until then |
+| `GET /about` | name and version |
+
+## Built on
+
+`emob-roam` (`RoamingToken`), `emob-session`, `emob-tariff` (price
+descriptions), `emob-billing` (`Subscription`), `emob-core` (provider
+obligations), `emob-service` (shell, journal). See
+[Pricing](https://hupe1980.github.io/emob/docs/pricing/) and the
+[workspace README](../../README.md).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

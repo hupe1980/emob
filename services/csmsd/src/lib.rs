@@ -34,15 +34,14 @@
 //! carries it back. 2.x has the station allocate it instead. That asymmetry has
 //! to live somewhere with state, which is here.
 
-use std::collections::BTreeMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use emob_cdr::{Acceptance, CdrBuilder, CdrLedger, EvidenceRef};
+use emob_cdr::{Acceptance, Cdr, CdrBuilder, CdrLedger, EvidenceRef};
 use emob_core::{Direction, PartyId};
 use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_ocpp::{Transaction, TransactionEvent};
-use emob_session::Authorization;
-use emob_tariff::Tariff;
+use emob_service::Actor;
+use emob_service::journal::{Folded, Journal, JournalError};
 use ocpp_kit::csms::events::{Observed, WarningKind, observe_v16, observe_v21, observe_v201};
 use ocpp_kit::csms::ledger::{Ingested, Ledger};
 use ocpp_kit::engine::IncomingRequest;
@@ -50,13 +49,26 @@ use ocpp_kit::rpc::CallError;
 use ocpp_kit::transport::{BoxFuture, Ctx, Handler};
 use ocpp_kit::types::{DateTime, Identity};
 use ocpp_kit::{RawValue, Version, v1_6, v2_0_1, v2_1};
+use tracing::Instrument as _;
 
+pub mod authorize;
+pub mod daemon;
+pub mod display;
+pub mod edge;
+pub mod estate;
+pub mod journal;
+pub mod outbox;
 pub mod provisioning;
+pub mod read;
+pub mod receipt;
 
+pub use authorize::{Answer, Authorize, Status};
+pub use journal::{Delivery, DeliveryState, Event, Key, Open, Presented, State, Target};
 pub use provisioning::{ChargePoint, Provisioning};
 
 /// What became of one transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
     /// A CDR was built and the ledger accepted it.
     Settled {
@@ -94,6 +106,11 @@ pub enum Outcome {
         transaction: String,
         /// What the chain said, in the order it said it.
         reasons: Vec<String>,
+        /// The evidence chain's findings, typed and cited — empty when the
+        /// refusal came from somewhere other than the evidence (a tariff the
+        /// point may not offer, a transaction with no id, a ledger conflict).
+        /// What an operator page words as *"warum?"*.
+        findings: Vec<emob_eichrecht::Finding>,
     },
     /// The ledger already held this record, so nothing changed and nothing is
     /// billed twice.
@@ -163,99 +180,253 @@ pub enum Outcome {
     },
 }
 
-/// A transaction a station has opened and not yet closed, and what the link
-/// cost to carry it.
-#[derive(Debug)]
-struct Open {
-    transaction: Transaction,
-    /// Messages the operational ledger recognised as retries of ones it had
-    /// already taken.
-    ///
-    /// A different count from `Assembled::duplicates_dropped`, which is the
-    /// same signed *record* delivered by two different messages. This is the
-    /// same *message* delivered twice, and it is counted here because the event
-    /// that carries it never reaches the transaction any more — see
-    /// [`Csmsd::accept`]. Both are what a flaky link cost, and
-    /// [`Outcome::Settled`] reports their sum.
-    retried_messages: usize,
-    /// `seqNo`s the operational ledger says never arrived.
-    ///
-    /// A different fact from a retry, and the opposite one: a retry is a
-    /// message delivered twice, this is a message delivered **none**. Almost
-    /// always an offline period whose queue overflowed.
-    ///
-    /// What it does and does not threaten is the whole of why it is kept.
-    /// The **energy** is safe: it comes from the signed OCMF register, whose
-    /// own pagination refuses a chain with a record missing from it, so a gap
-    /// that swallowed a signed value is already a refusal. What is not safe is
-    /// the transaction's **shape** — a `SuspendedEV` nobody received is
-    /// occupancy `[AFIR Art. 5(4)]` prices per minute and this side never knew
-    /// about. So the gap is reported rather than billed on.
-    missing_messages: Vec<i32>,
+/// The body of one delivery, as `billd` and `roamd` read it
+/// (`specs/001-the-estate-runs/contracts/delivery.md`).
+#[derive(Debug, serde::Serialize)]
+pub struct CdrDelivery<'a> {
+    /// The event type, from the catalogue.
+    pub kind: &'static str,
+    /// The record, whole — the same value both receivers see.
+    pub cdr: &'a Cdr,
+    /// Whom it bills.
+    pub token: &'a Presented,
+    /// The signed OCMF records it rests on, as the station sent them.
+    pub signed: Vec<String>,
+    /// The station that ran it.
+    pub station: &'a str,
 }
 
-impl Open {
-    /// A transaction nobody has sent an event into yet.
-    fn new(id: &emob_core::SessionId, evse: &emob_core::EvseId) -> Self {
-        Self {
-            transaction: Transaction::new(id.clone(), evse.clone(), Authorization::ad_hoc()),
-            retried_messages: 0,
-            missing_messages: Vec::new(),
-        }
-    }
-}
+/// The heartbeat interval every `BootNotificationResponse` hands a station, in
+/// seconds — and the silence after which the operator page calls it silent.
+pub const HEARTBEAT_SECS: i32 = 300;
 
 /// The CSMS.
-pub struct Csmsd {
+pub struct Csmsd<J: Journal> {
     party: PartyId,
     registry: KeyRegistry,
-    tariff: Tariff,
-    /// Transactions the stations have opened and not yet closed.
-    inflight: Mutex<BTreeMap<(Identity, String), Open>>,
+    authority: Arc<dyn Authorize>,
     /// The operational view: arrival, sequence, retries. Meter values as `f64`,
     /// which is right for the question it answers and never leaves this field.
     operational: Mutex<Ledger>,
-    /// The billable view.
-    cdrs: Mutex<CdrLedger>,
-    outcomes: Mutex<Vec<Outcome>>,
-    /// The next transaction id to hand a 1.6 station.
-    next_1_6_transaction: Mutex<i32>,
+    /// Everything else, folded from the journal.
+    folded: Mutex<Folded<State, Event, J>>,
+    /// When each station was last heard from — about the link, like the
+    /// operational ledger, and not journalled: a heartbeat a minute is not a
+    /// fact anybody bills.
+    presence: Mutex<std::collections::BTreeMap<String, time::OffsetDateTime>>,
+    /// When this process started; nothing heard before it is known.
+    started: time::OffsetDateTime,
+    /// The key receipts are minted under (spec 003). `None` is a CSMS that
+    /// issues none — a test that does not look at them; the daemon always
+    /// sets one.
+    receipts: Option<receipt::Receipts>,
+    /// The stations that show their receipt link, and the CSMS that reaches
+    /// them (spec 011). Set once the CSMS is built, after this value is.
+    display: std::sync::OnceLock<(display::Display, ocpp_kit::transport::CsmsHandle)>,
+    /// Where `at` on the facts that end an attempt comes from (spec 007).
+    clock: emob_service::Clock,
 }
 
-impl Csmsd {
-    /// A CSMS for a provisioned fleet.
-    #[must_use]
-    pub fn new(party: PartyId, registry: KeyRegistry, tariff: Tariff) -> Self {
-        Self {
+impl<J: Journal> core::fmt::Debug for Csmsd<J> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Csmsd")
+            .field("party", &self.party)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<J: Journal> Csmsd<J> {
+    /// A CSMS whose state is what `journal` says it is.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError`] when the journal does not chain or holds a fact this
+    /// build cannot read — a CSMS that started anyway would be billing from a
+    /// ledger nobody can account for.
+    /// Each attempt is counted on its day in `zone` — the estate's `[desk]
+    /// time_zone`.
+    pub fn open(
+        party: PartyId,
+        registry: KeyRegistry,
+        authority: Arc<dyn Authorize>,
+        journal: J,
+        zone: emob_core::TimeZone,
+    ) -> Result<Self, JournalError> {
+        Ok(Self {
             party,
             registry,
-            tariff,
-            inflight: Mutex::new(BTreeMap::new()),
+            authority,
             operational: Mutex::new(Ledger::default()),
-            cdrs: Mutex::new(CdrLedger::new()),
-            outcomes: Mutex::new(Vec::new()),
-            next_1_6_transaction: Mutex::new(1),
+            folded: Mutex::new(Folded::open(State::new(zone), journal, journal::apply)?),
+            presence: Mutex::new(std::collections::BTreeMap::new()),
+            started: time::OffsetDateTime::now_utc(),
+            receipts: None,
+            display: std::sync::OnceLock::new(),
+            clock: emob_service::system_clock(),
+        })
+    }
+
+    /// Date the facts it decides by `clock` rather than the wall clock — a
+    /// simulated estate's, so its "today" is the page's.
+    #[must_use]
+    pub fn with_clock(mut self, clock: emob_service::Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Now, by this CSMS's clock.
+    #[must_use]
+    pub fn now(&self) -> time::OffsetDateTime {
+        (self.clock)()
+    }
+
+    /// Issue a receipt for every transaction that settles or is refused at
+    /// settlement, under `receipts` (spec 003).
+    #[must_use]
+    pub fn issuing_receipts(mut self, receipts: receipt::Receipts) -> Self {
+        self.receipts = Some(receipts);
+        self
+    }
+
+    /// Show each receipt link on the stations `display` names, through
+    /// `handle` (spec 011). A second call is ignored.
+    pub fn showing_receipts(
+        &self,
+        display: display::Display,
+        handle: ocpp_kit::transport::CsmsHandle,
+    ) {
+        let _ = self.display.set((display, handle));
+    }
+
+    /// The receipt link for a transaction — `/r/{token}` — when this CSMS
+    /// issues receipts. Minted again from the key, never read from the journal.
+    #[must_use]
+    pub fn receipt_path(&self, key: &Key) -> Option<String> {
+        self.receipts.as_ref().map(|receipts| receipts.path(key))
+    }
+
+    /// The absolute receipt link `billd` puts on the invoice line, for the
+    /// settled record `cdr`.
+    #[must_use]
+    pub fn receipt_url_for_record(&self, cdr: &str) -> Option<String> {
+        let receipts = self.receipts.as_ref()?;
+        // By key, never by a search over every receipt issued (FR-003).
+        let key = self.with_state(|state| state.receipt_for.get(cdr).cloned())?;
+        Some(receipts.url(&key))
+    }
+
+    /// The `Receipted` fact for a transaction, when this CSMS issues receipts.
+    fn receipted(
+        &self,
+        key: &Key,
+        point: &ChargePoint,
+        at: Option<time::OffsetDateTime>,
+        signed: Vec<String>,
+    ) -> Option<Event> {
+        self.receipts
+            .as_ref()
+            .map(|receipts| receipts.issue(key, point.evse_id.clone(), at, signed))
+    }
+
+    /// The receipt link of `key` on its own station's display, when it
+    /// shows one (SR-128, SR-129).
+    fn show_receipt(&self, key: &Key) {
+        let (Some((display, handle)), Some(receipts)) = (self.display.get(), &self.receipts) else {
+            return;
+        };
+        if display.shows(&key.0) {
+            display.send(handle, &key.0, &key.1, receipts.url(key));
         }
+    }
+
+    /// A station was heard from now.
+    fn heard(&self, identity: &Identity) {
+        lock(&self.presence).insert(identity.to_string(), time::OffsetDateTime::now_utc());
+    }
+
+    /// When `identity` was last heard from, since this process started.
+    #[must_use]
+    pub fn last_heard(&self, identity: &str) -> Option<time::OffsetDateTime> {
+        lock(&self.presence).get(identity).copied()
+    }
+
+    /// When this process started.
+    #[must_use]
+    pub const fn started(&self) -> time::OffsetDateTime {
+        self.started
+    }
+
+    /// The key registry verification runs against.
+    pub const fn registry(&self) -> &KeyRegistry {
+        &self.registry
     }
 
     /// The records that settled.
     #[must_use]
     pub fn settled(&self) -> usize {
-        lock(&self.cdrs).len()
+        lock(&self.folded).state().cdrs.len()
     }
 
     /// Everything that happened, in order.
     #[must_use]
     pub fn outcomes(&self) -> Vec<Outcome> {
-        lock(&self.outcomes).clone()
+        lock(&self.folded).state().outcomes.clone()
+    }
+
+    /// Read the folded state.
+    pub fn with_state<T>(&self, f: impl FnOnce(&State) -> T) -> T {
+        f(lock(&self.folded).state())
     }
 
     /// The CDR ledger, for a caller that wants the records themselves.
-    ///
-    /// Infallible: a poisoned mutex is recovered from rather than reported as an
-    /// absent ledger. See [`lock`](fn.lock.html).
     pub fn with_cdrs<T>(&self, f: impl FnOnce(&CdrLedger) -> T) -> T {
-        f(&lock(&self.cdrs))
+        f(&lock(&self.folded).state().cdrs)
+    }
+
+    /// The journal, for a caller that reads what was decided.
+    pub fn with_journal<T>(&self, f: impl FnOnce(&J) -> T) -> T {
+        f(lock(&self.folded).journal())
+    }
+
+    /// Append a fact and fold it.
+    ///
+    /// A journal that refuses is a decision not made: the station is answered
+    /// with an error, so it retries, rather than with an acceptance nothing
+    /// recorded. `by` is who caused it: the station whose authenticated
+    /// socket sent the message, the receiver whose answer ended a delivery, or
+    /// this daemon's own loop — never what a message says about itself.
+    pub(crate) fn record(&self, by: &Actor, event: Event) -> Result<(), CallError> {
+        lock(&self.folded)
+            .record(by, event)
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::error!(%error, "the journal refused a fact; the station will retry");
+                CallError::internal(format!("this CSMS could not record the message: {error}"))
+            })
+    }
+
+    /// Ask the provider about a token, and journal what it said.
+    async fn authorize(
+        &self,
+        by: &Actor,
+        identity: &Identity,
+        transaction: Option<String>,
+        uid: &str,
+    ) -> Result<Answer, CallError> {
+        let answer = self.authority.ask(uid).await;
+        if answer.status != Status::Accepted {
+            tracing::info!(station = %identity, status = ?answer.status, reason = %answer.reason, "a token was turned away");
+        }
+        self.record(
+            by,
+            Event::Authorized {
+                at: self.now(),
+                station: identity.to_string(),
+                transaction,
+                answer: answer.clone(),
+            },
+        )?;
+        Ok(answer)
     }
 
     /// Route one billable event into its transaction, settling it when the
@@ -266,161 +437,197 @@ impl Csmsd {
     /// `ingested` is what [`Ledger::ingest`] said about this message, and the
     /// only thing here that knows it has been seen before.
     /// `Ingested::Duplicate`'s own documentation states the rule — *"the station
-    /// retried; do not bill it twice"*.
+    /// retried; do not bill it twice"* — so a duplicate opens no transaction,
+    /// appends to none and closes none (D306). `AppliedWithGap` is bound and
+    /// its `missing` list travels with the transaction, because a verdict swept
+    /// into a catch-all is the one no attribute catches (D327).
     ///
-    /// Discarding it costs a session. A station retransmitting its
-    /// `StopTransaction` — the ordinary shape of a link that lost one answer —
-    /// finds no transaction under the key on the second delivery, because the
-    /// first settled and removed it; a fresh one opened from that single event
-    /// is refused for a window it does not have, and a settled session lands in
-    /// the operator's failure queue naming a metrology fault that never happened
-    /// (D306).
+    /// # The fact before the answer
     ///
-    /// So a duplicate reaches nothing: it opens no transaction, appends to none
-    /// and closes none. It is counted, because a link that retries constantly is
-    /// worth knowing about.
-    ///
-    /// # …and the verdict beside it, which the attribute cannot catch
-    ///
-    /// `Ingested` is `#[must_use]` since `ocpp-kit` 0.3, which closes the shape
-    /// above for good. It does not close `AppliedWithGap`: a verdict **bound**
-    /// and swept into a catch-all is a value nothing dropped, so no attribute
-    /// fires, and its `missing` list — *"the `seqNo`s that have never
-    /// arrived"* — goes with it (D327).
-    ///
-    /// The energy is safe either way; it was never this ledger's. What a gap
-    /// costs is the transaction's **shape**, and the occupancy read off it.
+    /// Every accepted event is journalled before the station hears back, so a
+    /// transaction open across a restart settles after it.
     fn accept(
         &self,
+        by: &Actor,
         ctx: &Ctx,
         transaction_id: &str,
         event: TransactionEvent,
         ingested: Option<Ingested>,
-    ) {
+    ) -> Result<(), CallError> {
         let identity = ctx.identity();
         // The charge point this station was provisioned as, hung on the session
         // by the authenticator. A connection that reached a handler without one
         // is a deployment that skipped the binding, and it must not produce a
         // session attributed to a point nobody named.
         let Some(point) = ctx.session::<ChargePoint>() else {
-            return;
+            return Ok(());
         };
         let closing = event.kind == emob_ocpp::EventKind::Ended;
 
         // A transaction the station did not name. The record it would settle is
-        // one nothing can be traced back to, and a substitute id would put
-        // every such transaction on this station under one key — so it is
-        // refused here, where the identity and the raw id are still in hand
-        // (D249).
-        let Ok(id) = transaction_id.parse::<emob_core::SessionId>() else {
-            lock(&self.outcomes).push(Outcome::Refused {
-                identity: identity.to_string(),
-                transaction: transaction_id.to_owned(),
-                reasons: vec![
-                    "the station sent a transaction event with no transaction id: a record \
-                     settled under a substitute id could not be traced back to the session \
-                     it billed"
-                        .to_owned(),
-                ],
-            });
-            return;
+        // one nothing can be traced back to (D249).
+        if transaction_id.parse::<emob_core::SessionId>().is_err() {
+            return self.record(
+                by,
+                Event::Noted {
+                    at: self.now(),
+                    closes: None,
+                    outcome: Outcome::Refused {
+                        identity: identity.to_string(),
+                        transaction: transaction_id.to_owned(),
+                        reasons: vec![
+                        "the station sent a transaction event with no transaction id: a record \
+                         settled under a substitute id could not be traced back to the session \
+                         it billed"
+                            .to_owned(),
+                    ],
+                        findings: Vec::new(),
+                    },
+                },
+            );
+        }
+
+        let key: Key = (identity.to_string(), transaction_id.to_owned());
+        // A start the provider refused opened no transaction, and nothing the
+        // station sends under its id afterwards is billed.
+        if lock(&self.folded).state().refused.contains(&key) {
+            return Ok(());
+        }
+
+        let missing = match ingested {
+            Some(Ingested::Duplicate) => {
+                if lock(&self.folded).state().inflight.contains_key(&key) {
+                    return self.record(
+                        by,
+                        Event::Retried {
+                            station: key.0,
+                            transaction: key.1,
+                        },
+                    );
+                }
+                return Ok(());
+            }
+            Some(Ingested::AfterEnd) => {
+                return self.record(
+                    by,
+                    Event::Noted {
+                        at: self.now(),
+                        closes: None,
+                        outcome: Outcome::AfterTheEnd {
+                            identity: identity.to_string(),
+                            transaction: transaction_id.to_owned(),
+                        },
+                    },
+                );
+            }
+            Some(Ingested::AppliedWithGap { missing }) => missing,
+            // `Applied`, no ledger event, or a verdict a later `ocpp-kit` adds
+            // (`#[non_exhaustive]`): a fresh delivery, with `CdrLedger`'s
+            // idempotence as the backstop against a double settlement.
+            _ => Vec::new(),
         };
 
-        let key = (identity.clone(), transaction_id.to_owned());
+        self.record(
+            by,
+            Event::Observed {
+                station: key.0.clone(),
+                transaction: key.1.clone(),
+                evse: point.evse_id.clone(),
+                event,
+                missing,
+            },
+        )?;
 
-        match ingested {
-            // Already taken. Counted where there is still a transaction to
-            // count it on; where there is not, the record has settled and the
-            // operational ledger is the one holding the retry.
-            Some(Ingested::Duplicate) => {
-                if let Some(open) = lock(&self.inflight).get_mut(&key) {
-                    open.retried_messages += 1;
+        if closing {
+            let open = lock(&self.folded).state().inflight.get(&key).cloned();
+            if let Some(open) = open {
+                let settled = self.settle(identity, transaction_id, point, &open);
+                let receipted = settled
+                    .iter()
+                    .any(|event| matches!(event, Event::Receipted { .. }));
+                for event in settled {
+                    self.record(by, event)?;
                 }
-                return;
+                // After the receipt and the verdict are journalled, and never
+                // waited for (SR-131).
+                if receipted {
+                    self.show_receipt(&key);
+                }
             }
-            // The station's own `Ended` has already been through here. A
-            // straggler after it is not a second transaction, and the signed
-            // value it carries is not on the record that settled.
-            Some(Ingested::AfterEnd) => {
-                lock(&self.outcomes).push(Outcome::AfterTheEnd {
-                    identity: identity.to_string(),
-                    transaction: transaction_id.to_owned(),
-                });
-                return;
-            }
-            // Recorded, and `seqNo`s before it never arrived. **Not** a
-            // refusal — the event in hand is real and the energy under it is
-            // signed — but the transaction's shape now has a hole, and
-            // `[ocpp_kit::csms::Ingested]` says in as many words that a
-            // consumer which discards this bills a transaction with one.
-            Some(Ingested::AppliedWithGap { missing }) => {
-                lock(&self.inflight)
-                    .entry(key.clone())
-                    .or_insert_with(|| Open::new(&id, &point.evse_id))
-                    .missing_messages
-                    .extend(missing);
-            }
-            // `Applied`, no ledger event at all — and a verdict a later
-            // `ocpp-kit` adds, because `Ingested` is `#[non_exhaustive]`. All
-            // of them are a fresh delivery here. The upstream documentation
-            // names the precondition for falling this way — *"treating it as a
-            // fresh delivery risks a double-settlement unless something
-            // further on deduplicates"* — and this side has one: `CdrLedger`
-            // is idempotent on the record's key. The other direction has no
-            // such backstop, because a signed kilowatt-hour dropped on an
-            // unrecognised verdict is unbilled energy nothing reports.
-            _ => {}
         }
-
-        let mut inflight = lock(&self.inflight);
-        let open = inflight
-            .entry(key.clone())
-            .or_insert_with(|| Open::new(&id, &point.evse_id));
-        open.transaction.events.push(event);
-
-        if closing && let Some(finished) = inflight.remove(&key) {
-            drop(inflight);
-            self.settle(identity, transaction_id, point, &finished);
-        }
+        Ok(())
     }
 
     /// The chain, exactly as `emob-sim` drives it: assemble, verify, price,
-    /// accept.
-    fn settle(&self, identity: &Identity, transaction_id: &str, point: &ChargePoint, open: &Open) {
+    /// accept — returned as the facts to record.
+    fn settle(
+        &self,
+        identity: &Identity,
+        transaction_id: &str,
+        point: &ChargePoint,
+        open: &Open,
+    ) -> Vec<Event> {
+        let key: Key = (identity.to_string(), transaction_id.to_owned());
         let transaction = &open.transaction;
-        let refuse = |reasons: Vec<String>| {
-            lock(&self.outcomes).push(Outcome::Refused {
+        let at = self.now();
+        let refuse = |reasons: Vec<String>, findings: Vec<emob_eichrecht::Finding>| Event::Noted {
+            at,
+            closes: Some(key.clone()),
+            outcome: Outcome::Refused {
                 identity: identity.to_string(),
                 transaction: transaction_id.to_owned(),
                 reasons,
-            });
+                findings,
+            },
         };
 
         // A tariff the point may not offer is refused before it prices
-        // anything. `[AFIR Art. 5(4)]` is a rule about the *pairing* of a
-        // tariff with a charge point, and a backend that rates first and checks
-        // later has already produced the number it may not charge.
-        let conformance = emob_tariff::check_afir(&self.tariff, point.rated_power_kw);
+        // anything `[AFIR Art. 5(4)]`.
+        let conformance = emob_tariff::check_afir(&point.tariff, point.rated_power_kw);
         if !conformance.is_lawful() {
-            return refuse(conformance.reasons().collect());
+            let receipt = self.receipted(&key, point, None, Vec::new());
+            return receipt
+                .into_iter()
+                .chain([refuse(conformance.reasons().collect(), Vec::new())])
+                .collect();
         }
 
         let assembled = match transaction.assemble(Direction::Import) {
             Ok(assembled) => assembled,
-            Err(error) => return refuse(vec![error.to_string()]),
+            Err(error) => {
+                let receipt = self.receipted(&key, point, None, Vec::new());
+                return receipt
+                    .into_iter()
+                    .chain([refuse(vec![error.to_string()], Vec::new())])
+                    .collect();
+            }
         };
 
-        // What the station *claims* it signs with, against what it was
-        // provisioned with. Neither decides anything — the verification below
-        // uses the registry — but a mismatch has its own fix and its own
-        // urgency.
-        self.check_claimed_keys(identity, transaction, &assembled);
+        // The receipt first: the verdict fact that follows completes it, and a
+        // settlement the station retries files the same receipt again.
+        let mut facts: Vec<Event> = self
+            .receipted(
+                &key,
+                point,
+                Some(assembled.session.started_at),
+                assembled
+                    .records
+                    .iter()
+                    .map(|record| record.as_str().to_owned())
+                    .collect(),
+            )
+            .into_iter()
+            .collect();
+        if let Some(finding) = self.check_claimed_keys(identity, transaction, &assembled) {
+            facts.push(Event::Noted {
+                at,
+                closes: None,
+                outcome: finding,
+            });
+        }
 
         // Against the **registry**, never against the key the station sent
-        // beside the record: a key arriving on the same socket proves only that
-        // whoever holds the socket owns a private key.
-        // The owned records outlive this borrowed view: a `Record` borrows the
-        // bytes its signature covers.
+        // beside the record.
         let borrowed: Vec<ocmf::Record<'_>> = assembled
             .records
             .iter()
@@ -429,57 +636,125 @@ impl Csmsd {
         let evidence = Evidence::assemble(&borrowed, &self.registry, assembled.session.started_at);
 
         // The record's identity is the station's and the transaction's, and it
-        // has to stay **unique**: `CdrLedger` is keyed by it, so two records
-        // sharing one id are one record, and the second is a restatement that
-        // leaves the first standing. A fallback id would make every record it
-        // caught collide with every other, which is the one failure a ledger
-        // cannot report (D249).
+        // has to stay **unique** (D249).
         let Ok(id) = format!("{identity}-{transaction_id}").parse() else {
-            return refuse(vec![
-                "neither the station identity nor the transaction id names anything, so this \
+            facts.push(refuse(
+                vec![
+                    "neither the station identity nor the transaction id names anything, so this \
                  record has no id that would be unique in the ledger"
-                    .to_owned(),
-            ]);
+                        .to_owned(),
+                ],
+                Vec::new(),
+            ));
+            return facts;
         };
         let cdr =
             CdrBuilder::from_session(&assembled.session, Direction::Import).and_then(|builder| {
                 builder
                     .key(self.party.clone(), id)
                     .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
-                    .rated_with(&self.tariff)
+                    .rated_with(&point.tariff)
                     .build()
             });
 
-        match cdr {
-            Ok(cdr) => {
-                let energy = cdr.total_energy.to_string();
-                let key = cdr.key.to_string();
-                // Both halves of what the link cost: records the transport
-                // delivered twice, and messages it delivered twice.
-                let retries = assembled.duplicates_dropped + open.retried_messages;
-                let gap = open.missing_messages.clone();
-                let stored = lock(&self.cdrs).accept(cdr);
-                {
-                    let mut outcomes = lock(&self.outcomes);
-                    outcomes.push(outcome_of(
-                        &stored,
-                        Accepted {
-                            key: &key,
-                            energy: &energy,
-                            retries,
-                            gap: &gap,
-                            identity: &identity.to_string(),
-                            transaction: transaction_id,
-                        },
-                    ));
-                }
-            }
+        let cdr = match cdr {
+            Ok(cdr) => cdr,
             Err(error) => {
                 let mut reasons = vec![error.to_string()];
                 reasons.extend(evidence.reasons());
-                refuse(reasons);
+                facts.push(refuse(reasons, evidence.findings()));
+                return facts;
             }
-        }
+        };
+
+        let energy = cdr.total_energy.to_string();
+        let record_key = cdr.key.to_string();
+        let retries = assembled.duplicates_dropped + open.retried_messages;
+        // What the ledger would answer — read here, decided by the fold, and
+        // the same answer both times because the ledger is a function of the
+        // facts before this one.
+        let acceptance = {
+            let folded = lock(&self.folded);
+            folded
+                .state()
+                .cdrs
+                .get(&cdr.key)
+                .map_or(Acceptance::Stored, |held| {
+                    let mut probe = CdrLedger::new();
+                    let _ = probe.accept(held.clone());
+                    probe.accept(cdr.clone())
+                })
+        };
+        let outcome = outcome_of(
+            &acceptance,
+            Accepted {
+                key: &record_key,
+                energy: &energy,
+                retries,
+                gap: &open.missing_messages,
+                identity: &identity.to_string(),
+                transaction: transaction_id,
+            },
+        );
+
+        // Owed to the invoice and to the partner — when somebody pays, and
+        // only the first time the record is stored.
+        let deliveries = match (&acceptance, self.token_for(&key)) {
+            (Acceptance::Stored, Some(token)) => {
+                let body = CdrDelivery {
+                    kind: emob_service::events::cdr::ISSUED,
+                    cdr: &cdr,
+                    token: &token,
+                    signed: assembled
+                        .records
+                        .iter()
+                        .map(|record| record.as_str().to_owned())
+                        .collect(),
+                    station: &key.0,
+                };
+                match serde_json::to_string(&body) {
+                    Ok(body) => Target::ALL
+                        .iter()
+                        .map(|to| Delivery {
+                            id: record_key.clone(),
+                            to: *to,
+                            body: body.clone(),
+                        })
+                        .collect(),
+                    Err(error) => {
+                        tracing::error!(%error, key = %record_key, "a delivery could not be encoded");
+                        Vec::new()
+                    }
+                }
+            }
+            (Acceptance::Stored, None) => {
+                tracing::warn!(
+                    key = %record_key,
+                    "settled with no provider named, so nobody is owed this record"
+                );
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+
+        facts.push(Event::Settled {
+            at,
+            station: key.0.clone(),
+            transaction: key.1.clone(),
+            cdr: Box::new(cdr),
+            outcome,
+            deliveries,
+        });
+        facts
+    }
+
+    /// The token a transaction started under.
+    fn token_for(&self, key: &Key) -> Option<Presented> {
+        lock(&self.folded)
+            .state()
+            .authorized
+            .get(key)
+            .and_then(|answer| answer.token.clone())
     }
 
     /// Compare every claimed key against the registry, and report a mismatch.
@@ -495,9 +770,9 @@ impl Csmsd {
         identity: &Identity,
         transaction: &Transaction,
         assembled: &emob_ocpp::Assembled,
-    ) {
+    ) -> Option<Outcome> {
         let Some(Ok(record)) = assembled.records.first().map(ocmf::RecordBuf::record) else {
-            return;
+            return None;
         };
         let registered = self
             .registry
@@ -513,11 +788,10 @@ impl Csmsd {
                     // fleet does and says nothing.
                     None => continue,
                     Some(Err(error)) => {
-                        lock(&self.outcomes).push(Outcome::UnreadableClaimedKey {
+                        return Some(Outcome::UnreadableClaimedKey {
                             identity: identity.to_string(),
                             detail: error.to_string(),
                         });
-                        return;
                     }
                 };
                 // Compared as **keys**, not as bytes. A station may send the
@@ -532,43 +806,43 @@ impl Csmsd {
                 ) {
                     Ok(claimed) => claimed,
                     Err(error) => {
-                        lock(&self.outcomes).push(Outcome::UnreadableClaimedKey {
+                        return Some(Outcome::UnreadableClaimedKey {
                             identity: identity.to_string(),
                             detail: error.to_string(),
                         });
-                        return;
                     }
                 };
                 if registered.as_ref() == Some(&claimed) {
                     continue;
                 }
-                lock(&self.outcomes).push(Outcome::KeyMismatch {
+                return Some(Outcome::KeyMismatch {
                     identity: identity.to_string(),
                     claimed: hex_of(claimed.sec1_bytes()),
                 });
-                return;
             }
         }
+        None
     }
 
     /// The billing half, for all three versions at once.
     ///
     /// One funnel: [`observe_v16`], [`observe_v201`] and [`observe_v21`] all
     /// produce the same [`Observed`], and `emob-ocpp` reads the billable event
-    /// out of it. Nothing here is version-specific except the transaction key,
-    /// which 1.6 makes the CSMS's problem.
+    /// out of it.
     ///
     /// A [`WarningKind::UnreadableSignedData`] is refused before anything else
     /// looks at the event: a station that declares `format: SignedData` and
     /// sends a document that does not parse is otherwise **indistinguishable
-    /// from one sending no signed data at all**, and the operator would find out
-    /// when a month of sessions turns out to be unbillable. The message is still
+    /// from one sending no signed data at all**. The message is still
     /// answered — refusing the RPC would only make the station retry.
-    ///
-    /// The other warning kinds are all about the numeric energy register, which
-    /// is telemetry on this side of the seam and never billed here. They reach
-    /// the operational ledger's question, not this one.
-    fn bill(&self, ctx: &Ctx, transaction: &str, observed: &Observed, ingested: Option<Ingested>) {
+    fn bill(
+        &self,
+        by: &Actor,
+        ctx: &Ctx,
+        transaction: &str,
+        observed: &Observed,
+        ingested: Option<Ingested>,
+    ) -> Result<(), CallError> {
         let identity = ctx.identity();
         let unreadable: Vec<String> = observed
             .warnings
@@ -577,21 +851,28 @@ impl Csmsd {
             .map(ToString::to_string)
             .collect();
         if !unreadable.is_empty() {
-            lock(&self.outcomes).push(Outcome::Refused {
-                identity: identity.to_string(),
-                transaction: transaction.to_owned(),
-                reasons: unreadable,
-            });
+            self.record(
+                by,
+                Event::Noted {
+                    at: self.now(),
+                    closes: None,
+                    outcome: Outcome::Refused {
+                        identity: identity.to_string(),
+                        transaction: transaction.to_owned(),
+                        reasons: unreadable,
+                        findings: Vec::new(),
+                    },
+                },
+            )?;
         }
 
         if let Some(event) = emob_ocpp::kit::event_from(&observed.event) {
-            self.accept(ctx, transaction, event, ingested);
+            self.accept(by, ctx, transaction, event, ingested)?;
         }
+        Ok(())
     }
 
-    /// The operational half: arrival, sequence, retries. Kept because it is a
-    /// different question, and reported because a link that retries constantly
-    /// is one an operator wants to know about.
+    /// The operational half: arrival, sequence, retries.
     fn record_operational(&self, identity: &Identity, observed: &Observed) -> Option<Ingested> {
         let event = ocpp_kit::csms::events::to_ledger_event(identity, observed)?;
         let mut ledger = lock(&self.operational);
@@ -602,15 +883,13 @@ impl Csmsd {
         })
     }
 
-    /// The next transaction id for a 1.6 station.
-    ///
-    /// 1.6 assigns it in the response, so the CSMS owns it. 2.x has the station
-    /// allocate one instead, which is why this is the only counter here.
-    fn allocate_1_6_transaction(&self) -> i32 {
-        let mut next = lock(&self.next_1_6_transaction);
-        let id = *next;
-        *next = next.saturating_add(1);
-        id
+    /// The next transaction id for a 1.6 station, journalled before it is
+    /// handed out — a counter a restart rewound would give the next station an
+    /// id an earlier transaction already carries.
+    fn allocate_1_6_transaction(&self, by: &Actor) -> Result<i32, CallError> {
+        let id = lock(&self.folded).state().next_1_6;
+        self.record(by, Event::Allocated { id })?;
+        Ok(id)
     }
 }
 
@@ -641,6 +920,7 @@ fn outcome_of(acceptance: &Acceptance, record: Accepted<'_>) -> Outcome {
         identity: record.identity.to_owned(),
         transaction: record.transaction.to_owned(),
         reasons: vec![reason],
+        findings: Vec::new(),
     };
     match acceptance {
         Acceptance::Stored => Outcome::Settled {
@@ -668,90 +948,199 @@ fn outcome_of(acceptance: &Acceptance, record: Accepted<'_>) -> Outcome {
 
 /// Lock a mutex, recovering from poisoning.
 ///
-/// Every mutex here guards a plain collection — the in-flight transactions, the
-/// two ledgers, the outcome list, the 1.6 counter. The poison flag says a thread
-/// died holding the lock and nothing about whether a `Vec<Outcome>` still makes
-/// sense, so bailing out on it would answer a panic elsewhere by dropping the
-/// record of what was billed, which is the worse failure of the two.
+/// The poison flag says a thread died holding the lock and nothing about
+/// whether the state still makes sense; the journal is what decides that.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-impl Handler for Csmsd {
+/// The handler behind an `Arc`, so the state outlives the server and a test
+/// can read it.
+pub struct Shared<J: Journal>(pub Arc<Csmsd<J>>);
+
+impl<J: Journal> Handler for Shared<J> {
     fn on_request(
         &self,
         ctx: Ctx,
         request: IncomingRequest,
     ) -> BoxFuture<'_, Result<Box<RawValue>, CallError>> {
-        Box::pin(async move {
-            match ctx.version() {
-                Version::V1_6 => self.on_v1_6(&ctx, &request),
-                Version::V2_0_1 => self.on_v2_0_1(&ctx, &request),
-                _ => self.on_v2_1(&ctx, &request),
+        // Who every fact this message causes is journalled under: the identity
+        // the edge authenticated the socket as, never a field of the message.
+        // One outside the actor alphabet is refused, not defaulted — the
+        // estate refuses such a station at start, so this is the backstop.
+        let by = Actor::station(&ctx.identity().to_string());
+        let span = match &by {
+            Ok(actor) => tracing::info_span!("station", actor = %actor),
+            Err(_) => tracing::info_span!("station"),
+        };
+        Box::pin(
+            async move {
+                let by = by.map_err(|error| CallError::security(error.to_string()))?;
+                self.0.heard(ctx.identity());
+                match ctx.version() {
+                    Version::V1_6 => self.0.on_v1_6(&by, &ctx, &request).await,
+                    Version::V2_0_1 => self.0.on_v2_0_1(&by, &ctx, &request).await,
+                    _ => self.0.on_v2_1(&by, &ctx, &request).await,
+                }
             }
-        })
+            .instrument(span),
+        )
     }
 }
 
-impl Csmsd {
-    fn on_v1_6(&self, ctx: &Ctx, request: &IncomingRequest) -> Result<Box<RawValue>, CallError> {
+impl<J: Journal> Csmsd<J> {
+    async fn on_v1_6(
+        &self,
+        by: &Actor,
+        ctx: &Ctx,
+        request: &IncomingRequest,
+    ) -> Result<Box<RawValue>, CallError> {
         let action = v1_6::Action::from_wire(&request.action)
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v1_6::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
+
+        // The provider is asked before anything is billed or allocated an
+        // answer: `Authorize`, and again at `StartTransaction`, which carries
+        // the idTag the transaction bills against.
+        match &typed {
+            v1_6::CsRequest::Authorize(authorize) => {
+                let answer = self
+                    .authorize(by, ctx.identity(), None, &authorize.id_tag)
+                    .await?;
+                return ctx.reply(&v1_6::AuthorizeResponse::new(v1_6::IdTagInfo::new(
+                    authorize::v1_6(answer.status),
+                )));
+            }
+            v1_6::CsRequest::StartTransaction(start) => {
+                // 1.6 assigns the id in the *response*, so the CSMS owns it.
+                let id = self.allocate_1_6_transaction(by)?;
+                let answer = self
+                    .authorize(by, ctx.identity(), Some(id.to_string()), &start.id_tag)
+                    .await?;
+                let observed = observe_v16(&typed);
+                let ingested = self.record_operational(ctx.identity(), &observed);
+                if answer.is_accepted() {
+                    self.bill(by, ctx, &id.to_string(), &observed, ingested)?;
+                }
+                return ctx.reply(&v1_6::StartTransactionResponse::new(
+                    v1_6::IdTagInfo::new(authorize::v1_6(answer.status)),
+                    id,
+                ));
+            }
+            _ => {}
+        }
+
         let observed = observe_v16(&typed);
         let ingested = self.record_operational(ctx.identity(), &observed);
-
-        // 1.6's transaction id lives in the response for `StartTransaction` and
-        // in the request for everything after it, so the funnel cannot supply
-        // it and this is the one place that knows it.
         let transaction_id = match &typed {
-            v1_6::CsRequest::StartTransaction(_) => Some(self.allocate_1_6_transaction()),
             v1_6::CsRequest::MeterValues(values) => values.transaction_id,
             v1_6::CsRequest::StopTransaction(stop) => Some(stop.transaction_id),
             _ => None,
         };
-
         if let Some(id) = transaction_id {
-            self.bill(ctx, &id.to_string(), &observed, ingested);
+            self.bill(by, ctx, &id.to_string(), &observed, ingested)?;
         }
-
-        answer_v1_6(ctx, &typed, transaction_id)
+        answer_v1_6(ctx, &typed)
     }
 
-    fn on_v2_0_1(&self, ctx: &Ctx, request: &IncomingRequest) -> Result<Box<RawValue>, CallError> {
+    async fn on_v2_0_1(
+        &self,
+        by: &Actor,
+        ctx: &Ctx,
+        request: &IncomingRequest,
+    ) -> Result<Box<RawValue>, CallError> {
         let action = v2_0_1::Action::from_wire(&request.action)
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_0_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
-        let observed = observe_v201(&typed);
-        let ingested = self.record_operational(ctx.identity(), &observed);
-
-        if let v2_0_1::CsRequest::TransactionEvent(event) = &typed {
-            self.bill(
-                ctx,
-                &event.transaction_info.transaction_id,
-                &observed,
-                ingested,
-            );
+        match &typed {
+            v2_0_1::CsRequest::Authorize(authorize) => {
+                let answer = self
+                    .authorize(by, ctx.identity(), None, &authorize.id_token.id_token)
+                    .await?;
+                ctx.reply(&v2_0_1::AuthorizeResponse::new(v2_0_1::IdTokenInfo::new(
+                    authorize::v2_0_1(answer.status),
+                )))
+            }
+            v2_0_1::CsRequest::TransactionEvent(event) => {
+                let transaction = event.transaction_info.transaction_id.clone();
+                let asked = match &event.id_token {
+                    Some(token) if !self.answered(ctx.identity(), &transaction) => Some(
+                        self.authorize(
+                            by,
+                            ctx.identity(),
+                            Some(transaction.clone()),
+                            &token.id_token,
+                        )
+                        .await?,
+                    ),
+                    _ => None,
+                };
+                let observed = observe_v201(&typed);
+                let ingested = self.record_operational(ctx.identity(), &observed);
+                self.bill(by, ctx, &transaction, &observed, ingested)?;
+                let mut response = v2_0_1::TransactionEventResponse::new();
+                if let Some(answer) = asked {
+                    response = response.with_id_token_info(v2_0_1::IdTokenInfo::new(
+                        authorize::v2_0_1(answer.status),
+                    ));
+                }
+                ctx.reply(&response)
+            }
+            other => answer_v2_0_1(ctx, other),
         }
-        answer_v2_0_1(ctx, &typed)
     }
 
-    fn on_v2_1(&self, ctx: &Ctx, request: &IncomingRequest) -> Result<Box<RawValue>, CallError> {
+    async fn on_v2_1(
+        &self,
+        by: &Actor,
+        ctx: &Ctx,
+        request: &IncomingRequest,
+    ) -> Result<Box<RawValue>, CallError> {
         let action = v2_1::Action::from_wire(&request.action)
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
-        let observed = observe_v21(&typed);
-        let ingested = self.record_operational(ctx.identity(), &observed);
-
-        if let v2_1::CsRequest::TransactionEvent(event) = &typed {
-            self.bill(
-                ctx,
-                &event.transaction_info.transaction_id,
-                &observed,
-                ingested,
-            );
+        match &typed {
+            v2_1::CsRequest::Authorize(authorize) => {
+                let answer = self
+                    .authorize(by, ctx.identity(), None, &authorize.id_token.id_token)
+                    .await?;
+                ctx.reply(&v2_1::AuthorizeResponse::new(v2_1::IdTokenInfo::new(
+                    authorize::v2_1(answer.status),
+                )))
+            }
+            v2_1::CsRequest::TransactionEvent(event) => {
+                let transaction = event.transaction_info.transaction_id.clone();
+                let asked = match &event.id_token {
+                    Some(token) if !self.answered(ctx.identity(), &transaction) => Some(
+                        self.authorize(
+                            by,
+                            ctx.identity(),
+                            Some(transaction.clone()),
+                            &token.id_token,
+                        )
+                        .await?,
+                    ),
+                    _ => None,
+                };
+                let observed = observe_v21(&typed);
+                let ingested = self.record_operational(ctx.identity(), &observed);
+                self.bill(by, ctx, &transaction, &observed, ingested)?;
+                let mut response = v2_1::TransactionEventResponse::new();
+                if let Some(answer) = asked {
+                    response = response
+                        .with_id_token_info(v2_1::IdTokenInfo::new(authorize::v2_1(answer.status)));
+                }
+                ctx.reply(&response)
+            }
+            other => answer_v2_1(ctx, other),
         }
-        answer_v2_1(ctx, &typed)
+    }
+
+    /// Whether the provider has already answered for this transaction.
+    fn answered(&self, identity: &Identity, transaction: &str) -> bool {
+        let key = (identity.to_string(), transaction.to_owned());
+        let folded = lock(&self.folded);
+        folded.state().authorized.contains_key(&key) || folded.state().refused.contains(&key)
     }
 }
 
@@ -760,18 +1149,13 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
-/// The 1.6 replies a station needs to make progress.
-fn answer_v1_6(
-    ctx: &Ctx,
-    request: &v1_6::CsRequest,
-    transaction_id: Option<i32>,
-) -> Result<Box<RawValue>, CallError> {
-    let accepted = v1_6::IdTagInfo::new(v1_6::AuthorizationStatus::Accepted);
+/// The 1.6 replies that need no decision.
+fn answer_v1_6(ctx: &Ctx, request: &v1_6::CsRequest) -> Result<Box<RawValue>, CallError> {
     match request {
         v1_6::CsRequest::BootNotification(_) => ctx.reply(&v1_6::BootNotificationResponse::new(
             v1_6::RegistrationStatus::Accepted,
             DateTime::UNIX_EPOCH,
-            300,
+            HEARTBEAT_SECS,
         )),
         v1_6::CsRequest::Heartbeat(_) => {
             ctx.reply(&v1_6::HeartbeatResponse::new(DateTime::UNIX_EPOCH))
@@ -779,24 +1163,19 @@ fn answer_v1_6(
         v1_6::CsRequest::StatusNotification(_) => {
             ctx.reply(&v1_6::StatusNotificationResponse::new())
         }
-        v1_6::CsRequest::Authorize(_) => ctx.reply(&v1_6::AuthorizeResponse::new(accepted)),
-        v1_6::CsRequest::StartTransaction(_) => ctx.reply(&v1_6::StartTransactionResponse::new(
-            accepted,
-            transaction_id.unwrap_or_default(),
-        )),
         v1_6::CsRequest::MeterValues(_) => ctx.reply(&v1_6::MeterValuesResponse::new()),
         v1_6::CsRequest::StopTransaction(_) => ctx.reply(&v1_6::StopTransactionResponse::new()),
         other => Err(CallError::not_supported(other.action().as_str())),
     }
 }
 
-/// The 2.0.1 replies.
+/// The 2.0.1 replies that need no decision.
 fn answer_v2_0_1(ctx: &Ctx, request: &v2_0_1::CsRequest) -> Result<Box<RawValue>, CallError> {
     match request {
         v2_0_1::CsRequest::BootNotification(_) => {
             ctx.reply(&v2_0_1::BootNotificationResponse::new(
                 DateTime::UNIX_EPOCH,
-                300,
+                HEARTBEAT_SECS,
                 v2_0_1::RegistrationStatus::Accepted,
             ))
         }
@@ -806,22 +1185,16 @@ fn answer_v2_0_1(ctx: &Ctx, request: &v2_0_1::CsRequest) -> Result<Box<RawValue>
         v2_0_1::CsRequest::StatusNotification(_) => {
             ctx.reply(&v2_0_1::StatusNotificationResponse::new())
         }
-        v2_0_1::CsRequest::Authorize(_) => ctx.reply(&v2_0_1::AuthorizeResponse::new(
-            v2_0_1::IdTokenInfo::new(v2_0_1::AuthorizationStatus::Accepted),
-        )),
-        v2_0_1::CsRequest::TransactionEvent(_) => {
-            ctx.reply(&v2_0_1::TransactionEventResponse::new())
-        }
         other => Err(CallError::not_supported(other.action().as_str())),
     }
 }
 
-/// The 2.1 replies.
+/// The 2.1 replies that need no decision.
 fn answer_v2_1(ctx: &Ctx, request: &v2_1::CsRequest) -> Result<Box<RawValue>, CallError> {
     match request {
         v2_1::CsRequest::BootNotification(_) => ctx.reply(&v2_1::BootNotificationResponse::new(
             DateTime::UNIX_EPOCH,
-            300,
+            HEARTBEAT_SECS,
             v2_1::RegistrationStatus::Accepted,
         )),
         v2_1::CsRequest::Heartbeat(_) => {
@@ -830,10 +1203,6 @@ fn answer_v2_1(ctx: &Ctx, request: &v2_1::CsRequest) -> Result<Box<RawValue>, Ca
         v2_1::CsRequest::StatusNotification(_) => {
             ctx.reply(&v2_1::StatusNotificationResponse::new())
         }
-        v2_1::CsRequest::Authorize(_) => ctx.reply(&v2_1::AuthorizeResponse::new(
-            v2_1::IdTokenInfo::new(v2_1::AuthorizationStatus::Accepted),
-        )),
-        v2_1::CsRequest::TransactionEvent(_) => ctx.reply(&v2_1::TransactionEventResponse::new()),
         other => Err(CallError::not_supported(other.action().as_str())),
     }
 }

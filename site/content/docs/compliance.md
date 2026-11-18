@@ -1,33 +1,36 @@
 +++
 title = "The obligation calendar"
-weight = 10
-description = "AFIR, DA-656, LSV 2026, PAngV, MessEG, THG and NIS2 as dated, cited, executable rules over three subjects — charge point, provider and undertaking."
+weight = 12
+description = "EV charging compliance as code: AFIR, ISO 15118-20, LSV, PAngV, MessEG, THG-Quote, MiSpeL, § 14a, NIS2, CRA — dated, cited duties per charge point and company."
 
 [extra]
 state = "built"
 nav = "Compliance"
 +++
 
-European charging regulation is a set of duties with dates attached. Most of
-them arrive between 2024 and 2028, several bind only some points, some bind the
-*provider* rather than the point, some bind the **undertaking** rather than
-either, and a few carve out explicit exemptions. "Are we ready?" is therefore a
-question with a date, a subject and an answer per duty — which is a query, not a
-document.
+The obligation calendar in `emob-core` answers "is this charge point, provider
+or company compliant on this date?" — duty by duty, each with its legal citation,
+the date it starts to bind, and a remedy. European charging regulation (AFIR, the
+EU Alternative Fuels Infrastructure Regulation, plus German and cybersecurity
+law) arrives in stages between 2024 and 2028, binds different subjects, and has
+explicit exemptions, so readiness is a query rather than a document.
 
 ```rust
+use emob_core::obligation::assess;
+use time::macros::date;
+
 let report = assess(&point, date!(2027-01-01));
 
-for finding in report.failing() {
+for finding in report.breaches() {
     println!("{}  {}", finding.obligation.citation, finding.obligation.remedy);
 }
 ```
 
-## Three subjects, because the law binds three
+## Three subjects: charge point, provider, company
 
 ```mermaid
 flowchart TB
-    CAL["the calendar<br/>40 dated, cited duties"]
+    CAL["the calendar<br/>51 dated, cited duties"]
     CAL -->|"assess"| P["charge point<br/>power · access · dates · payment"]
     CAL -->|"assess_provider"| M["mobility service provider<br/>disclosure · roaming surcharge"]
     CAL -->|"assess_undertaking"| U["the undertaking<br/>size · governance · incident reporting"]
@@ -36,14 +39,16 @@ flowchart TB
     class CAL one
 ```
 
-Every duty is answered by **exactly one** of the three, and a test asserts it —
-so no duty can be quietly unassessable, and adding a fourth subject cannot leave
-one behind. An operator whose every charge point is faultless can be in breach as
-a provider, and in breach again as a company.
+Some duties bind the **charge point**, some the **mobility service provider**
+(the company selling charging to drivers), and some the **undertaking** — the
+company as a whole. A test asserts every duty is answered by exactly one of the
+three, so no duty can silently go unassessed. A company whose every charge point
+is compliant can still be in breach as a provider, and again as an undertaking.
 
-## What is in it
+## Every duty in the calendar
 
-**49 duties** over three subjects.
+**51 duties** over three subjects. "Reads" says which facts decide whether the
+duty applies.
 
 | Duty | Source | From | Reads |
 |---|---|---|---|
@@ -55,10 +60,10 @@ a provider, and in breach again as a company.
 | At ≥ 50 kW the ad-hoc price is **based on a price per kWh** | `[AFIR Art. 5(4)]` | 13.04.2024 | deployed ≥ 13.04.2024 |
 | At ≥ 50 kW the €/kWh and any occupancy fee shown at the station | `[AFIR Art. 5(4)]` | 13.04.2024 | deployed ≥ 13.04.2024 |
 | Below 50 kW every component available, **in the prescribed order** | `[AFIR Art. 5(4)]` | 13.04.2024 | **no deployment-date limit** |
-| The **Arbeitspreis** at or beside the point, by one of three named media | `[PAngV §14(2)]` | **28.05.2022** | public ∧ paid ∧ an ad-hoc payment method is in use — **at any power** |
+| The **Arbeitspreis** (price per kWh) at or beside the point, by one of three named media | `[PAngV §14(2)]` | **28.05.2022** | public ∧ paid ∧ an ad-hoc payment method is in use — **at any power** |
 | …and, where a **web-based** system is used, through it before the session starts | `[PAngV §14(2)]` | 28.05.2022 | a second duty, not a fourth medium |
 | …and every further price completely, **in immediate vicinity** | `[PAngV §14(3)]` | 28.05.2022 | arises only where such a price is charged |
-| **The interface Annex II names** — AC ⇒ Type 2, DC ⇒ CCS Combo 2, *"at least"* | `[AFIR Art. 21(1)]` | 13.04.2024 | public — read off the inventory's own connector list; `[DA-656]` replaced points 1.1–1.4 and excepts two bands at 3.7 kW |
+| **The interface Annex II names** — AC ⇒ Type 2, DC ⇒ CCS Combo 2, *"at least"* | `[AFIR Art. 21(1)]` | 13.04.2024 | public — read off the connector list; `[DA-656]` replaced points 1.1–1.4 and excepts two bands at 3.7 kW |
 | Provider: disclose every component, e-roaming costs included | `[AFIR Art. 5(5)]` | 13.04.2024 | the provider profile |
 | Provider: **no** extra charge for cross-border e-roaming | `[AFIR Art. 5(5)]` | 13.04.2024 | the provider profile |
 | Every public point is a **digitally-connected** recharging point | `[AFIR Art. 5(7)]` | 14.10.2024 | public |
@@ -72,47 +77,50 @@ a provider, and in breach again as a company.
 | EN ISO 15118-1…-5 | `[DA-656 Anh. 2.1.1]` | 08.01.2026 | public ∧ **installed or renovated** ≥ 08.01.2026 |
 | EN ISO 15118-20, public | `[DA-656 Anh. 2.1.2]` | 01.01.2027 | public ∧ installed or renovated ≥ 01.01.2027 |
 | EN ISO 15118-20, **private Mode 3/4** | `[DA-656 Anh. 2.1.3]` | 01.01.2027 | private ∧ not Mode 2 ∧ installed or renovated ≥ 01.01.2027 |
-| Automatic authentication ⇒ **both** -2 and -20 | `[DA-656 Anh. 2.1.2]` | 01.01.2027 | AutoCharge counts, not only PnC |
+| Automatic authentication ⇒ **both** -2 and -20 | `[DA-656 Anh. 2.1.2]` | 01.01.2027 | AutoCharge counts, not only Plug & Charge |
 | Every point meets the **technical requirements** (§ 49(1) EnWG) | `[LSV26 §3]` | 01.01.2026 | public — the duty § 5(1)–(3) are exercised over |
 | …and the operator can **prove** it on request | `[LSV26 §4]` | 01.01.2026 | § 4(2) |
-| Commissioning notified **within two weeks** | `[LSV26 §4]` | 01.01.2026 | a date compared to a date — § 4(3) runs it from the day a point *became* public |
-| Decommissioning notified **unverzüglich** | `[LSV26 §4]` | 01.01.2026 | § 4(1) Nr. 2 |
+| Commissioning notified **within two weeks** | `[LSV26 §4]` | 01.01.2026 | § 4(3) runs it from the day a point *became* public |
+| Decommissioning notified **unverzüglich** (without undue delay) | `[LSV26 §4]` | 01.01.2026 | § 4(1) Nr. 2 |
 | An operator change notified by **both** operators | `[LSV26 §4]` | 01.01.2026 | § 4(1) S. 2 — one notice is not enough |
 | Conformity-assessed meter for energy billing | `[MessEG §33]` | 01.04.2019 | bills by energy |
 | …on a meter whose **verification period has not expired** | `[MessEG §37(1)]` | 01.04.2019 | bills by energy — eight years `[MessEV Anl. 7 Nr. 6.7]` from the placing on the market, ending with the calendar year `[MessEV §34(2)]` |
-| …and every intervention on it recorded, firmware pushes included | `[MessEG §31(2)]` | 01.04.2019 | bills by energy — the one retention figure the German metrology texts give |
-| A **provider** billing on somebody else's meter owes a confirmation from its operator | `[MessEG §33(2)]` | 01.04.2019 | the provider profile — derived from the operators it holds a markup for |
+| …and every intervention on it recorded, firmware pushes included | `[MessEG §31(2)]` | 01.04.2019 | bills by energy |
+| A **provider** billing on somebody else's meter owes a confirmation from its operator | `[MessEG §33(2)]` | 01.04.2019 | the provider profile |
 | Verifiable measured values | `[PTB-A 50.7]` | 01.04.2019 | bills by energy |
 | AC metering before the rectifier only in DC stations placed on the market before 2018 and **at most** 50 kW | `[REA 6-A]` | 16.03.2017 | the same number as AFIR's threshold, pointing the other way |
 | …and only where the rectification belongs to **one** session | `[REA 6-A]` | 16.03.2017 | a shared rectifier fails it |
-| …and the customer must be told the rectification loss is inside the value | `[REA 6-A]` | 16.03.2017 | a value nobody can interpret is one nobody can check |
+| …and the customer must be told the rectification loss is inside the value | `[REA 6-A]` | 16.03.2017 | see [the Eichrecht chain](@/docs/eichrecht.md#rectifier-losses-on-dc-stations-metered-on-the-ac-side) |
 | THG-Quote: publishable register entry, lawful metering, issued operator code | `[38k §6(3)]` | standing | public |
-| The undertaking gives the authority its details | `[NIS2 Art. 3(4)]` | 06.03.2026 | `UndertakingProfile` — an Annex I type of at least medium size; the German law gives the registration three months from the day it comes into scope |
+| The undertaking gives the authority its details | `[NIS2 Art. 3(4)]` | 06.03.2026 | an Annex I type of at least medium size; three months from coming into scope |
 | …and takes **all ten** risk-management measures | `[NIS2 Art. 21(2)]` | 06.12.2025 | a conjunction, not a score |
 | …and can warn the CSIRT **within 24 h** | `[NIS2 Art. 23(4)]` | 06.12.2025 | then 72 h, then a report within a month |
-| The **management body** approves and oversees the measures | `[NIS2 Art. 20(1)]` | 06.12.2025 | the same paragraph makes its members liable |
-| …and its members attend cybersecurity training | `[NIS2 Art. 20(2)]` | 06.12.2025 | required for the body, called for for all staff |
+| The **management body** approves and oversees the measures | `[NIS2 Art. 20(1)]` | 06.12.2025 | its members are liable |
+| …and its members attend cybersecurity training | `[NIS2 Art. 20(2)]` | 06.12.2025 | required for the body, encouraged for all staff |
 | A **manufacturer** reports an exploited vulnerability within 24 h | `[CRA Art. 14]` | 11.09.2026 | only where products with digital elements are placed on the market |
-| …and places only conformity-assessed products on the market | `[CRA Art. 13]` | 11.12.2027 | Annex I Part I ∧ the Part II vulnerability handling |
+| …and places only conformity-assessed products on the market | `[CRA Art. 13]` | 11.12.2027 | Annex I Part I ∧ Part II vulnerability handling |
+| A § 14a device is **always controllable** | `[BK6-22-300 Ziff. 4.6]` | 01.01.2024 | a non-public point over 4.2 kW, commissioned from that date |
+| The grid operator's reduction **outranks** market-driven load control | `[BK6-22-300 Ziff. 4.6]` | 01.01.2024 | a non-public point over 4.2 kW, commissioned from that date |
+| MiSpeL: fed-back energy is relieved of levies only under a Formelsatz with its metering concept | `[MiSpeL A1 3.2.5]` | 21.10.2026 | bidirectional; **an entitlement**, not a duty |
+| MiSpeL: until 30.09.2027 only with the grid and metering operators' consent | `[MiSpeL Tenor 9]` | 21.10.2026 | bidirectional; ends 30.09.2027; **an entitlement** |
 
-## Six properties that make it trustworthy
+## Six possible answers per duty
 
-### Every duty carries its citation
+A private depot is **not failing** the ad-hoc payment duty — the duty does not
+bind it. So each duty has one of six statuses:
 
-`cargo xtask check-citations` walks the source, finds every citation, and fails
-the build if one names a document `specs/README.md` does not index. A rule
-citing a Verordnung nobody can produce is indistinguishable from a rule somebody
-invented, and this is the difference made mechanical.
+| Status | Meaning |
+|---|---|
+| `Satisfied` | binds this subject, and it is met |
+| `Failing` | binds this subject, and it is not |
+| `NotApplicable` | does not bind this subject |
+| `NotYetInForce` | has not started binding yet — plan for it |
+| `NoLongerInForce` | bound once, since superseded |
+| `DifferentScope` | binds a different *kind* of subject |
 
-The `specs/` directory itself is gitignored — the documents are third-party and
-copyrighted — but the index that lists them, with a retrieval URL each, is
-tracked. The corpus rebuilds from a fresh clone.
-
-### Every duty carries its window
-
-`applies_from`, and `applies_until` for the duties that get superseded. Asking
-the calendar about a date is the *only* way to use it, so a duty cannot be
-applied a year before it exists:
+Every duty carries `applies_from` (and `applies_until` where superseded), and you
+can only use the calendar by asking about a date, so a duty is never applied
+before it exists:
 
 ```rust
 // DATEX II starts on 14.04.2026.
@@ -120,73 +128,57 @@ assert_eq!(status_on(date!(2026-04-13)), Status::NotYetInForce);
 assert_eq!(status_on(date!(2026-04-14)), Status::Failing);
 ```
 
-This is also what the Eichrecht reform now in flight will need: the revised MID
-gains an Annex Va for charging infrastructure, and when it lands it is a data
-change rather than a redesign.
+### Breaches versus a forgone entitlement
 
-### Applicability and satisfaction are different questions
-
-A private depot is **not failing** the ad-hoc payment duty. The duty does not
-bind it. So the calendar has six outcomes, not two:
-
-| Status | Meaning |
-|---|---|
-| `Satisfied` | binds this subject, and it is met |
-| `Failing` | binds this subject, and it is not |
-| `NotApplicable` | does not bind this subject |
-| `NotYetInForce` | has not started binding yet — work to plan |
-| `NoLongerInForce` | bound once, since superseded — nothing to do, ever |
-| `DifferentScope` | binds a different *kind* of subject |
-
-Merging the middle two produces reports that cry wolf, which is how compliance
-dashboards come to be ignored.
-
-Three exemptions in the AFIR text are easy to miss, and each is modelled as
-`NotApplicable` rather than as a pass:
-
-**A free charge point owes no payment instrument — and no dynamic data.** The
-payment régime "shall not apply to publicly accessible recharging points that do
-not require payment for the recharging service", and the *same words* appear
-again in `[AFIR Art. 20(2)]` for point (c), the dynamic data. That is why the
-static and dynamic data duties are two obligations rather than one: they have
-different exemptions. The ad-hoc *access* duty, meanwhile, is `Satisfied` for a
-free point rather than failing — a charger that costs nothing is contract-free
-by construction.
-
-**A QR code satisfies the duty only below 50 kW.** Art. 5(1) lists three
-acceptable instruments and restricts (c) — an internet-connected device such as
-one generating a QR code — to points below 50 kW. The same equipment is
-compliant on a 22 kW post and non-compliant on the 150 kW charger beside it.
-
-**The 2027 retrofit reaches safe and secure parking areas**, not only the TEN-T
-road network — and it explicitly covers points deployed *before* 13.04.2024,
-which is the whole purpose of the subparagraph.
-
-### Failing a duty and forgoing an entitlement are different answers
-
-**Forty-eight** of the forty-nine entries are duties: a regulator can fine an operator,
-order a retrofit, or forbid the operation of a point. One is not. The four
-conditions between a public kilowatt-hour and the German greenhouse-gas quota are
-worth money and break no law when unmet — the entry's own remedy ends *"…or forgo
-the quota"*. In one bucket, an estate that meets every legal duty in Europe and
-declines a subsidy reads as non-compliant. So each entry carries what failing it
-costs:
+Three of the fifty-one entries are not duties. The four conditions for the
+greenhouse-gas quota (THG-Quote) are worth money but break no law when unmet,
+and so are the two MiSpeL entries: a bidirectional point without a Formelsatz
+(`mispel-metering-concept`, from 21.10.2026) or, until 30.09.2027, without the
+grid and metering operators' consent (`mispel-operator-consent`) has broken
+nothing — it pays the levies on all of its grid draw. So each entry says what
+failing it costs, and the report separates them:
 
 ```rust
 report.verdict();      // Compliant — nothing unlawful
 report.breaches();     // what a regulator can act on
-report.forgone();      // money left on the table, which is not a breach
-report.failing();      // the union, for a caller that wants both
+report.forgone();      // money left on the table, not a breach
+report.failing();      // both, for a caller that wants the union
 ```
 
-### Every duty is assessable against something
+### Exemptions that are easy to miss
 
-`[AFIR Art. 5(5)]` binds the **mobility service provider**, not the point. A
-calendar that kept it in the table with an applicability test always returning
-`false` could only ever report "different scope" — which looks assessable and is
-not, and is worse than leaving it out.
+Each of these is modelled as `NotApplicable`, not as a pass:
 
-It is judged against a `ProviderProfile`:
+- **A free charge point owes no payment instrument and no dynamic data.** Both
+  `[AFIR Art. 5(1)]` and `[AFIR Art. 20(2)]` exempt points that do not require
+  payment, which is why static and dynamic data are separate duties. A free
+  point *satisfies* the ad-hoc access duty outright.
+- **A QR code satisfies the payment duty only below 50 kW.** Art. 5(1)(c)
+  restricts internet-connected payment to points below 50 kW.
+- **The 2027 retrofit also reaches safe and secure parking areas**, not only the
+  TEN-T road network, and explicitly covers points deployed before 13.04.2024.
+
+### Every duty is tested in both directions
+
+A property test checks the whole table: a subject that does everything asked
+fails nothing, and every entry fails for at least one subject in a panel (a bare
+point, a fast DC charger doing nothing, the same charger deployed before
+13.04.2024, a private wall box from 2027, a provider, a surcharging provider, and
+an undertaking in NIS2 scope doing nothing). This catches a check that reads the
+wrong field and is therefore always satisfied.
+
+### Citations are checked at build time
+
+`cargo xtask check-citations` finds every citation in code and docs and fails the
+build if one names a document the reference index does not list. The documents
+are third-party and not in the repository; the index records where to retrieve
+each.
+
+## Provider duties under AFIR Art. 5(5)
+
+`[AFIR Art. 5(5)]` binds the **mobility service provider**, not the point: it
+must disclose every price component, e-roaming costs included, and may not
+surcharge cross-border roaming. It is judged against a `ProviderProfile`:
 
 ```rust
 let mut provider = ProviderProfile::bare(PartyId::new("DE", "MSP")?);
@@ -199,24 +191,28 @@ assert_eq!(
     Some(Status::Failing),
 );
 
-provider.surcharges_cross_border_roaming = true;
-// And this one the article forbids outright, rather than merely capping.
+provider.surcharges_cross_border_roaming = true; // forbidden outright
 assert_eq!(assess_provider(&provider, today).verdict(), Verdict::Failing);
 ```
 
-An operator whose every charge point is faultless can still be in breach as a
-provider. In Germany one company usually wears both hats, and the provider half
-is the half nobody checks.
+`[AFIR Art. 5(6)]` tells authorities to monitor operators and providers for
+compliance with **paragraphs 3 and 5** specifically. Paragraph 5 is the provider
+duty above; paragraph 3 binds the operator — prices must be reasonable,
+comparable, transparent and non-discriminatory, and differentiation is allowed
+only if "proportionate and objectively justified". Both are in the calendar. The
+comparability and transparency limbs are enforced through the display duties of
+Art. 5(4) and the [tariff shape check](@/docs/pricing.md).
 
-### …and a third subject, because cybersecurity law binds the company
+`[AFIR Art. 5(11)]` binds neither: where a host (hotel, supermarket,
+municipality) owns the charger and a CPO operates it, the **owner** must supply
+hardware that lets the operator meet Art. 5(2), (7), (8) and (10). The remedy
+says the fix is a contract clause, not a technical change.
 
-`[NIS2 Anh. I]` names this industry in the Energy sector by its role, in as many
-words: *"Betreiber von Ladepunkten, die für die Verwaltung und den Betrieb eines
-Ladepunkts zuständig sind und Endnutzern einen Aufladedienst erbringen, auch im
-Namen und Auftrag eines Mobilitätsdienstleisters"*. Precisely the operator whose
-points the profile above describes — and **none of what it asks is a fact about
-a point**. Size, governance, whether an early warning can leave the building
-inside a day: those are facts about the undertaking.
+## NIS2 and the Cyber Resilience Act: duties of the company
+
+`[NIS2 Anh. I]` names charge point operators in the Energy sector. None of what
+it asks is a fact about a charge point — size, governance, incident reporting
+are facts about the undertaking:
 
 ```rust
 let mut operator = UndertakingProfile::bare(PartyId::new("DE", "CPO")?);
@@ -233,108 +229,43 @@ assert_eq!(
 );
 ```
 
-Seven duties: five from NIS2 — registration, the ten risk-management measures,
-the 24-hour early warning, the management body's approval, and its training —
-and two from the Cyber Resilience Act, which bind only an undertaking that
-places a product with digital elements on the market. The ten measures are a
-**conjunction**, because the article says the measures "shall include at least
-the following": nine of ten is not ninety per cent of a duty.
+Seven duties: five from NIS2 (registration, the ten risk-management measures,
+the 24-hour early warning, management approval, training) and two from the Cyber
+Resilience Act, which bind only a company that places products with digital
+elements on the market. The ten measures are a **conjunction** — the article says
+they "shall include at least" all ten.
 
-Two things in that regime are easy to get wrong and both are tested.
+Three details that are easy to get wrong, all tested:
 
-**The financial half of the size test is an `and`.** `[NIS2 Art. 2(1)]` reaches
-an entity that qualifies as medium-sized under Recommendation 2003/361/EC or
-exceeds those ceilings, and the Recommendation defines an SME as *fewer than 250
-staff **and** (turnover ≤ €50 M **and/or** balance sheet ≤ €43 M)*:
+- **The size test's financial half is an "and".** `[NIS2 Art. 2(1)]` uses the
+  EU SME definition: fewer than 250 staff **and** (turnover ≤ €50 M **or**
+  balance sheet ≤ €43 M). So an entity exceeds the ceilings if
+  `employees ≥ 250 ∨ (turnover > €50 M ∧ balance sheet > €43 M)`. Dropping the
+  balance-sheet condition misclassifies asset-light operators as essential.
+- **A directive binds from national transposition.** `[NIS2 Art. 41]` set
+  18.10.2024 for Member States, but Germany's implementing act took effect on
+  06.12.2025 with no general transition, so the calendar uses that date.
+- **A statutory window is part of the duty.** German law gives registration
+  three months from coming into scope, so that duty is dated 06.03.2026.
 
-```text
-exceeds the ceilings  ⇔  employees ≥ 250  ∨  (turnover > €50 M ∧ balance sheet > €43 M)
-```
+The CRA is a **Regulation**, so `[CRA Art. 71]`'s dates apply directly in every
+Member State: 11.09.2026 for vulnerability reporting, 11.12.2027 for the rest.
 
-Every secondary source checked writes "250 employees or €50 million turnover"
-and drops the balance-sheet conjunct, which puts an asset-light operator turning
-over €60 M on a €20 M balance sheet in the essential class it is not in.
+### This repository's own CRA practice
 
-**A directive binds from the day the Member State transposed it.** `[NIS2 Art.
-41]` obliged Member States to apply the rules from 18.10.2024. A directive binds
-nobody directly: Germany's NIS2UmsuCG came into force on 06.12.2025, with no
-general transitional period, and that is the day the calendar uses. Dating the
-duties from the Directive would report every German operator in breach for
-fourteen months in which no German authority could act.
+emob is software with digital elements too, so the repository carries the
+artefacts the CRA's vulnerability-handling duties ask of a manufacturer:
 
-**And a window the statute grants is part of the duty.** The German law gives the
-*registration* three months from the day an undertaking first comes into scope,
-so one already in scope when the law applied had until 06.03.2026. That duty is
-dated from the day its window closes; the four beside it, which carry no
-transitional provision, are dated from the day the law applies. A report that
-calls an operator non-compliant inside a period the statute gave it is making the
-same false statement as one that dates the duties from the Directive, three
-months instead of fourteen.
+| Duty | Here |
+|---|---|
+| A disclosure route | [`SECURITY.md`](https://github.com/hupe1980/emob/blob/main/SECURITY.md) (GitHub private vulnerability reporting) and `/.well-known/security.txt` on this site |
+| An SBOM per release | one CycloneDX file for the workspace (`just sbom`), attached to every GitHub release |
+| Provenance | a build-provenance attestation over every `.crate` and the SBOM; images carry BuildKit provenance |
+| Known advisories | decided in `deny.toml` with the exposure analysis and a review date, so `cargo deny` stays green |
 
-The Cyber Resilience Act beside it is a **Regulation**, so `[CRA Art. 71]`'s own
-dates are the dates in every Member State — 11.09.2026 for the reporting duty,
-11.12.2027 for the rest — with no transposition in between. Treating "the EU
-date" as one thing is how a compliance model gets both instruments wrong.
+## Which date AFIR means: deployed, built, installed or renovated
 
-A test asserts that **every duty in the calendar is answerable by exactly one of
-the three profiles**, so none can go quietly unassessable again — and so that
-adding a fourth subject cannot leave a duty behind.
-
-**And every duty is exercisable in both directions.** Answerable is not the same
-as answered: a `satisfied` closure that reads the wrong field, or the right one
-negated, judges every question about that duty confidently and wrongly, and a
-report is clean either way. So a property asks two things of the whole table at
-once — a subject that does everything the calendar asks **fails nothing**, and
-every entry is `Failing` for at least one subject in a panel: a bare point, a
-fast public DC charger doing none of what its class owes, that charger deployed
-before 13.04.2024, a private wall box installed from 2027, a provider, a provider
-that surcharges, and an undertaking in NIS2 scope doing nothing.
-
-The panel is the point. A duty phrased *do not do this* is correctly satisfied by
-a subject that has done nothing, and a duty binding a 300 kW charger does not
-bind an 11 kW wall box — so the witness a duty needs **is** a statement of what
-that duty is about.
-
-## The two paragraphs the Regulation itself names
-
-`[AFIR Art. 5(6)]` tells Member States what to watch: "Member States shall
-ensure that their authorities regularly monitor the recharging infrastructure
-market, and in particular, that they monitor the compliance of operators of
-recharging points and mobility service providers **with paragraphs 3 and 5**."
-
-Two paragraphs, two subjects. Paragraph 5 binds the provider — the disclosure
-duty and the cross-border-surcharge ban — and is judged against a
-`ProviderProfile`. Paragraph 3 binds the **operator**: prices must be
-reasonable, comparable, transparent and non-discriminatory, and "the level of
-prices may be differentiated, but only if the differentiation is proportionate
-and objectively justified".
-
-A calendar carrying one and not the other checks half of what the regulator was
-told to look at, which is how a dashboard comes to be green on the day an
-inspection is not. So the operator half is a duty with a real test — and
-differentiation is not itself the breach, **unjustified** differentiation is.
-The comparability and transparency limbs of the same paragraph are enforced
-where they are checkable: the display duties of Art. 5(4), and the
-[tariff shape check](@/docs/pricing.md).
-
-## And the paragraph that binds neither
-
-`[AFIR Art. 5(11)]`: "Where the operator of a recharging point is not the owner
-of that point, the owner shall make available to the operator … a recharging
-point with the technical characteristics which enable the operator to comply
-with the obligations set out in paragraphs 2, 7, 8 and 10."
-
-Host-owned hardware is the normal case — a hotel, a supermarket or a
-municipality buys the charger and a CPO operates it — and the operator is then
-held to the automatic-authentication, digital-connection, smart-recharging and
-fixed-cable duties on equipment it cannot change. The article puts that on the
-owner, which is only any use to an operator that wrote it into the contract. The
-remedy the calendar returns says exactly that, because the fix is not technical.
-
-## The dates the text actually gives
-
-Three wordings appear in Article 5 and they are not interchangeable. This is
-where most implementations go wrong:
+Article 5 uses three wordings, and they are not interchangeable:
 
 | Wording | Reads | Duties |
 |---|---|---|
@@ -342,7 +273,7 @@ where most implementations go wrong:
 | "built after … **or renovated after** …" | both, with **different dates** | 5(8) |
 | "installed **or renovated** from …" | `installed_or_renovated_on()` | `[DA-656 Anh. 2.1]` |
 
-A renovation is not a deployment. Reading it as one drags untouched 2019
+A renovation is not a deployment; reading it as one drags untouched 2019
 hardware into duties written for new equipment:
 
 ```rust
@@ -352,62 +283,89 @@ point.renovated_on = Some(date!(2026-03-01));
 // The card-reader duty binds points *deployed* from 13.04.2024. This one wasn't.
 assert_eq!(status(ObligationId::AfirPaymentInstrument), Status::NotApplicable);
 
-// The smart-recharging duty says "renovated after 14 October 2024" in as many
-// words, so it does bind.
+// Smart recharging says "renovated after 14 October 2024", so it binds.
 assert_eq!(status(ObligationId::AfirSmartRecharging), Status::Failing);
 ```
 
-Art. 5(4) adds a fourth subparagraph that limits **only its first two**
-subparagraphs to points deployed from 13.04.2024. The third — the ordered
-components below 50 kW — carries no such limit, so it reaches the whole
-installed base.
+Art. 5(4)'s date limit covers only its first two subparagraphs, so the ordered
+price components below 50 kW apply to the whole installed base.
 
-## The exemption that is a date, not a technology
+## ISO 15118 duties: the exemption is a date, not a technology
 
-`[DA-656]`'s recitals exempt existing low-level-communication points from the
-ISO 15118 duties, and the Annex expresses that as a date: 2.1.1 binds points
-"installed or renovated **from 8 January 2026**".
-
-Testing the *technology* as well — "not applicable if the point only does PWM" —
-would let a PWM-only point installed in 2026 escape the duty **because it fails
-it**. Exactly backwards, so the test is the date alone.
+`[DA-656]` (Delegated Regulation (EU) 2025/656) exempts existing points by date:
+2.1.1 binds points "installed or renovated **from 8 January 2026**". Testing the
+technology as well ("not applicable if the point only does PWM") would let a
+PWM-only point installed in 2026 escape the duty *because* it fails it.
 
 ```rust
-// A PWM-only point installed in June 2026: the non-compliant case.
+// A PWM-only point installed in June 2026: failing.
 assert_eq!(status(&fresh, ObligationId::Da656Iso15118Dash2), Status::Failing);
-
 // A 2019 point: out of scope, by date.
 assert_eq!(status(&legacy, ObligationId::Da656Iso15118Dash2), Status::NotApplicable);
 ```
 
-The date carries the exemption; the technology is what is being asked about.
+The 2027 generation is three duties: **2.1.2** for public points, **2.1.3(b)**
+for private **Mode 3/4** points (a domestic socket with an in-cable box is
+Mode 2), and 2.1.2's second sentence for **automatic authentication** — which
+includes AutoCharge, not only Plug & Charge.
 
-The 2027 generation is three duties rather than one, because the Annex has three
-provisions: **2.1.2** for public points, **2.1.3(b)** for private **Mode 3/4**
-points — a domestic socket with an in-cable box is Mode 2 and gets EN IEC
-61851-1 instead — and 2.1.2's second sentence for points offering **automatic
-authentication**, which is the trigger the Annex names rather than Plug & Charge
-specifically, so AutoCharge counts.
+### ISO 15118-20 on 01.01.2027: where it stands (18.11.2026)
 
-## The three duties the regulator actually audits
+- **The date stands.** No act amending Delegated Regulation (EU) 2025/656 is
+  published, so the three entries keep 01.01.2027.
+- **CharIN asks for 2028.** Its position paper of 03.08.2026 recommends moving
+  the -20 software requirement to 01.01.2028 — an industry position, not law.
+- **The Sustainable Transport Forum's Q&A** on ISO 15118 under the delegated
+  act is due for endorsement at its plenary on **25.11.2026**. The calendar
+  changes only from the published text.
 
-`[LSV26 §5]` names Art. 5(1), (2), **(7), (8) and (10)** as the paragraphs the
-Bundesnetzagentur may inspect, demand a retrofit for, and forbid the operation of
-a point over. The last three are the ones compliance models normally omit:
+On the platform side, `emob-pnc` validates ISO 15118-20 contract chains under
+their own roots — see [Plug & Charge](@/docs/plug-and-charge.md).
 
-- **5(7)** — every public point must be a *digitally-connected* recharging
-  point, from 14.10.2024. Without it neither the data nor the smart-charging
-  duties can be met at all.
-- **5(8)** — smart-recharging capable, with the two-date "or" above.
-- **5(10)** — every public **DC** point must have a fixed cable, from
-  14.04.2025.
+## E-invoices from 01.01.2027
 
-## A deadline is not a flag
+From 01.01.2027 a German business whose prior-year turnover exceeds €800,000
+must **issue** e-invoices to business customers: the structured EN 16931 file is
+the invoice `[UStG §14(1)]`. The Federal Ministry of Finance's letter of
+15.10.2026 (III C 5 - S 7287-a/00019/021/017) supplements its letters of 2024
+and 2025 and postpones nothing. It is a capability of the platform, not a
+charge-point duty, so it has no calendar entry: `billd` issues each partner's
+monthly invoice in EN 16931 or XRechnung, serves it on an invoice page with its
+UBL and CII files, and hands it to the operator's ERP or Peppol provider through
+a signed webhook — see [Run the estate](@/docs/run-the-estate.md#the-invoice-page).
 
-`[LSV26 §4]` does not ask whether a point is registered. It requires the
-operator to notify commissioning to the regulator **at the latest two weeks
-after** it happens — and § 5(3) lets the regulator forbid the operation of a
-point whose notice was never filed. A boolean cannot express a late filing:
+## MiSpeL: levy relief for bidirectional points
+
+The Bundesnetzagentur's MiSpeL ruling, in effect from 21.10.2026, relieves of
+levies the part of a site's grid draw that a bidirectional point fed back. The
+calendar carries its two preconditions as entitlements (above);
+`emob_session::mispel` does the arithmetic per calendar month (*Abgrenzungsoption*)
+or year (*Pauschaloption*). The Pauschaloption is refused until the European
+Commission approves it under state-aid law `[MiSpeL Tenor 9]`, because the
+ruling makes it applicable only from the month after that approval. See
+[Bidirectional charging and MiSpeL](@/docs/bidirectional.md).
+
+## The Ladesäulenverordnung (LSV 2026)
+
+The German charging-point ordinance lets the Bundesnetzagentur inspect, demand
+a retrofit for, and **forbid the operation of** a point `[LSV26 §5]`. It names
+AFIR Art. 5(1), (2), **(7), (8) and (10)**; the last three are often missed:
+
+- **5(7)** — every public point must be digitally connected, from 14.10.2024.
+- **5(8)** — smart-recharging capable, with the two-date rule above.
+- **5(10)** — every public **DC** point must have a fixed cable, from 14.04.2025.
+
+`[LSV26 §3]` adds the duty those powers are exercised over: every public point
+meets the technical requirements of § 49(1) EnWG. `[LSV26 §4]` is four duties:
+
+| Duty | Text | The trap |
+|---|---|---|
+| Commissioning notice | § 4(1) Nr. 1 — "spätestens zwei Wochen nach der Inbetriebnahme" | § 4(3) restarts the clock "wenn ein bestehender Ladepunkt öffentlich zugänglich wird" — a depot charger opened to the public owes its notice from **that** day |
+| Decommissioning notice | § 4(1) Nr. 2 — "unverzüglich" | a point still shown as live is one the operator still answers for |
+| Operator-change notice | § 4(1) Nr. 3 and S. 2 | **both** the outgoing and incoming operator must notify |
+| Evidence on request | § 4(2) | being compliant and being able to prove it are separate duties |
+
+A deadline is a date compared to a date, not a flag:
 
 ```rust
 point.commissioned_on = date!(2026-03-01);
@@ -419,195 +377,75 @@ point.registration = Registration::notified_on(date!(2026-03-10));
 assert_eq!(status(ObligationId::Lsv2026CommissioningNotice), Status::Satisfied);
 ```
 
-## The Ladesäulenverordnung is more than one notice
+*Unverzüglich* — "without culpable delay" `[BGB §121]` — has no number. The
+calendar uses the two weeks the same paragraph gives for commissioning, as a
+separate constant (`Registration::PROMPT_NOTIFICATION_DAYS`) so a deployment can
+see and change it; `Notice::delay_days` reports how late a filing was.
 
-`[LSV26 §5]` lets the Bundesnetzagentur inspect, demand a retrofit for and
-**forbid the operation of** a point over "eine technische Anforderung nach § 3".
-A calendar that carries the regulator's powers without the duty they are
-exercised over names the consequence and omits the cause, so § 3 is a duty now —
-every publicly accessible point must meet the applicable technical requirements,
-"insbesondere die Anforderungen an die technische Sicherheit von Energieanlagen
-nach § 49 Absatz 1 des Energiewirtschaftsgesetzes".
+`[LSV26 §6]` also has the regulator forward notifications monthly to the state
+calibration authorities, so filing a § 4 notice puts the point in front of the
+Eichrecht regulator. It binds the regulator, not the operator, so it is not a
+calendar entry.
 
-§ 4 is **four** duties rather than one, and three of them were missing:
+## THG-Quote: the greenhouse-gas quota
 
-| Duty | Text | The trap |
-|---|---|---|
-| Commissioning notice | § 4(1) Nr. 1 — "spätestens zwei Wochen nach der Inbetriebnahme" | § 4(3) applies the régime afresh "wenn ein bestehender Ladepunkt öffentlich zugänglich wird", so a depot charger that opens to the public owes its notice from **that** day. Reading the deadline off the commissioning date reports it as years late on its first day and never lets it become compliant |
-| Decommissioning notice | § 4(1) Nr. 2 — "unverzüglich" | A point the register still shows as live is one the operator is still answerable for |
-| Operator-change notice | § 4(1) Nr. 3 and S. 2 | "Anzeigen … durch den bisherigen **und** den neuen Betreiber" — **two** notices. An incoming operator that files its own and assumes the outgoing one did the same has a point § 5(3) may close, over a notice it never saw and did not owe |
-| Evidence on request | § 4(2) | Being compliant and being *able to prove* it are different duties, and the second is failed quietly: nothing goes wrong until the request arrives, and by then the documents either exist or they do not |
+`[38k §6(3)]` sets **four cumulative conditions** before a public charge point's
+kilowatt-hours earn the quota. `emob-thg`'s `QuotaPosture` holds them in the
+paragraph's order:
 
-### …and the notice is not only the regulator's business
+1. The regulator has **published** the point, or the operator **consented** to
+   publication — not merely that the § 4 notice was filed.
+2. The energy was measured in conformity with calibration law — `emob-thg`
+   refuses a record with no evidence, and one whose evidence failed.
+3. The operator holds an identification code **issued** by a registration
+   organisation `[AFIR Art. 20(1)]` — a well-formed `EvseId` is not proof.
+4. Further identifiers, only if announced in the Bundesanzeiger. None are today,
+   so `FurtherIdentifiers` has three states rather than a boolean.
 
-`[LSV26 §6]` obliges the Bundesnetzagentur to forward the § 4(1) notification
-data **monthly, electronically**, to the state authorities responsible for the
-Mess- und Eichgesetz — unless the receiving body has waived it. It is a duty on
-the regulator rather than on an operator, so it is not in the calendar; it is
-here because it changes what a § 4 notice *is*.
+`[38k §8(1)]` sets the filing deadlines: **28 February of the following year**
+for the § 6 route and **15 November of the obligation year** for § 7.
+`Route::deadline` carries both. One notification per point per year is allowed
+`[38k §8(1) S. 3]`, so adding a point twice is refused.
 
-Filing one puts the point in front of the Eichbehörde, by law and on a schedule.
-A stack that treats the Anzeige as a registry formality and the Eichrecht
-evidence chain as a separate concern has the two the wrong way round: the first
-is what tells the second's regulator the point exists.
-
-### `Unverzüglich` has no number, so the number is a documented choice
-
-Nr. 2 and Nr. 3 say *unverzüglich* — `[BGB §121]`'s *ohne schuldhaftes Zögern* —
-and give no figure. Inventing one would be a rule the text does not support;
-leaving the duty untestable would make it a rule nothing enforces.
-
-So the window is the one the legislator itself chose **in the same paragraph**
-for the one event it did quantify: two weeks. That is the reading with the best
-support inside the text, and it is a separate constant
-(`Registration::PROMPT_NOTIFICATION_DAYS`) precisely so a deployment can see the
-choice and argue with it. `Notice::delay_days` reports how late a filing was, so
-a stricter policy does not have to re-derive the arithmetic.
-
-## The quota's four conditions, and the one that is not the Anzeige
-
-`[38k §6(3)]` puts **four cumulative conditions** between a public
-kilowatt-hour and the greenhouse-gas quota it is worth a second time.
-`QuotaPosture` is four fields in the paragraph's own order.
-
-Nr. 1 asks whether the regulator has **published** the notified point, or the
-third party has **consented** to publication. It does not ask whether the
-Anzeige was made: `[LSV26 §4(1)]` requires the notice and says nothing about
-publication, so a point can be duly notified, on the register, and not
-publishable. Eligibility read off a notice date passes every point that has
-one — which, in a compliant estate, is every point.
-
-Nr. 2 wants the quantity determined in conformity with the measuring and
-calibration law, which is what `emob-eichrecht` decides per record — so
-`emob-thg` refuses a record with no evidence rather than summing it — and one whose evidence is *there and failed*, which is the worse of the two and the one a presence check lets through. Nr. 3
-wants an identification code **issued** to the operator by an ID registration
-organisation `[AFIR Art. 20(1)]`; a well-formed `EvseId` says the operator
-*uses* a code, not that a registered organisation issued it.
-
-Nr. 4's further identifying features exist only *"sofern die zuständige Stelle
-solche durch Bekanntgabe im Bundesanzeiger bestimmt hat"*, and today none are
-announced. `FurtherIdentifiers` has three states for that reason: `false` would
-block every claim in the country and `true` would keep passing on the day an
-announcement lands.
-
-### …and the deadline, which none of the four is
-
-`[38k §6(3)]` decides whether a kilowatt-hour *may* be claimed. `[38k §8(1)]`
-decides whether it *was*, and it gives the two routes two dates:
-
-> … 1. nach § 6 … bis zum Ablauf des **28. Februar des Folgejahres** oder
-> 2. nach § 7 … bis zum Ablauf des **15. November des jeweiligen
-> Verpflichtungsjahres**.
-
-The `[38k §7]` deadline falls **inside** the year it is about, six weeks before
-that year ends. There is no late filing and no partial credit — an eligible year
-that misses its date is worth exactly nothing — so `Route::deadline` carries both
-before the second claim type exists. `[38k §8(1) S. 3]` allows one notification
-per point per obligation year, which is why adding a point to one twice is a
-refusal rather than a silent replacement.
-
-## Both routes, and the paragraph that makes a bus worth a third more
-
-`[38k §6]` is the route a public charge point files: metered kilowatt-hours, the
-operator as claimant. `[38k §7]` is the other one — *„in anderen Fällen"* — and
-it is not the first with a flag on it:
+### The § 7 route for vehicle fleets
 
 | | `[38k §6]` | `[38k §7]` |
 |---|---|---|
-| the *Ladepunktbetreiber* | the operator of the point | the person the vehicle is registered to |
-| the quantity | a mess- und eichrechtskonform measured value | a published **Schätzwert**, once per vehicle |
-| the evidence | a signed meter record | a Zulassungsbescheinigung Teil I |
+| claimant | the operator of the point | the vehicle's registered keeper |
+| the quantity | a measured value under calibration law | a published estimate, once per vehicle |
+| the evidence | a signed meter record | a registration certificate (Zulassungsbescheinigung Teil I) |
 | the deadline | 28 February of the **following** year | 15 November **inside** the obligation year |
-| the counting factor | `[38k §5(3)]` — three steps | `[38k §7(6)]` — seven, and M3/N3 reach 4 |
+| the counting factor | `[38k §5(3)]` | `[38k §7(6)]` — M3/N3 reach 4 |
 
-No charge point holds a single fact in that right-hand column, which is why it is
-a second claim type.
+`[38k §7(6)]` gives buses and heavy goods vehicles (classes **M3 and N3**) a
+factor of **4 from 2027**, stepping down 3.5 (2035), 3 (2036), 2.5 (2037),
+2 (2038), 1.5 (2039), 1 (2040) — a third more than § 5(3)'s 3. That matters for
+depot operators, whose non-public posts are excluded from § 6 but whose own
+buses count under § 7. A vehicle counts once per year `[38k §7(4) S. 2]`, keyed
+by an identifier unique within the filer's records, never a licence plate.
 
-**The factor is why it is worth building.** `[38k §7(6)]` opens *"Abweichend von
-§ 5 Absatz 3 Satz 1"* and gives classes **M3 and N3** — buses and heavy goods
-vehicles — a factor of **4 from 2027**, stepping down 3.5 (2035), 3 (2036), 2.5
-(2037), 2 (2038), 1.5 (2039), 1 (2040). Against § 5(3)'s 3 that is a third more
-counted energy on the same kilowatt-hours, and it lands exactly where a depot
-operator is **both parties at once**: its posts are not publicly accessible so
-§ 6 refuses them, and its buses are registered to it so § 7 counts them.
-
-Three things fall out of the text rather than out of a summary of it. The
-deviation begins in 2027, so a bus counted in 2026 counts at § 5(3)'s factor and
-the notification **says so** rather than leaving an operator to discover it. A
-mixed fleet is counted at two factors in one notification, because the class is a
-fact about the vehicle. And a vehicle is counted once per obligation year
-`[38k §7(4) S. 2]`, which needs an identifier unique inside one filer's records
-and nothing more — never a registration plate, which is a lifelong identifier of
-a thing a person drives.
-
-## Planning
-
-```rust
-// What lands on the fleet between now and the end of 2027?
-for o in starting_between(date!(2026-09-01), date!(2027-12-31)) {
-    println!("{}  {}", o.applies_from, o.title);
-}
-```
-
-### …and which of them this estate will actually fail
-
-That is what the *calendar* holds. `agentd`'s compliance sweep asks it of an
-**estate**: every point against every duty, grouped by duty rather than by point
-— four hundred posts missing a CSMS connection is one firmware programme, not
-four hundred findings — and every duty that has not started binding judged *at
-its own commencement date* against the estate as it stands.
-
-```jsonc
-{ "on": "2026-09-01", "points": [ /* the inventory */ ], "horizon_days": 540 }
-```
-
-A point renovated in March 2027 that speaks only EN ISO 15118-2 is compliant
-today and in breach on new year's day, and that forecast is the only compliance
-advice arriving before the breach rather than after it. The horizon is the
-caller's; the date is an argument rather than a clock, so a run in March replays
-to the same answer in September.
-
-## The duty that is not about charging at all
+## § 14a EnWG: controllable charge points
 
 `[EnWG §14a]` lets a grid operator reduce the draw of *steuerbare
-Verbrauchseinrichtungen* to relieve a local overload, and
-`[BK6-22-300 Ziff. 2.4.1]` says which devices those are:
+Verbrauchseinrichtungen* (controllable devices), and `[BK6-22-300 Ziff. 2.4.1]`
+defines them to include a charge point over 4.2 kW in low voltage
 
-> ein Ladepunkt für Elektromobile, **der kein öffentlich zugänglicher Ladepunkt
-> im Sinne des § 2 Nr. 5 der Ladesäulenverordnung (LSV) ist**
+> **der kein öffentlich zugänglicher Ladepunkt im Sinne des § 2 Nr. 5 der
+> Ladesäulenverordnung (LSV) ist**
 
-— over 4.2 kW, in low voltage. The first condition is the one every summary
-drops, and it decides whether any of this applies: a **publicly accessible**
-point is not a steuerbare Verbrauchseinrichtung at all. The fast charger on the
-forecourt is outside § 14a; the depot behind the fence, the workplace car park
-and the fleet yard are inside it.
+— so a **publicly accessible** point is outside § 14a; depots, workplace car
+parks and fleet yards are inside it. Charge points count one by one, because
+`Ziff. 2.4.2`'s grouping applies only to heat pumps and space cooling.
 
-Which is the opposite of *"a charge park is a SteuVE at its grid connection
-point"*, the sentence these notes carried for six milestones. It is wrong twice
-over, because `Ziff. 2.4.2`'s grouping of several installations behind one
-connection into **one** device names only the heat-pump and space-cooling
-families — `2.4.1.b` and `2.4.1.c`. Charge points are not in that sentence, so a
-yard of nine wall boxes is nine devices and not one, which is what the
-Mindestleistung formula's `n` is (D301).
+The two duties in the table — always controllable, and the grid operator's
+reduction outranking market-driven load control `[BK6-22-300 Ziff. 4.6]` — read
+`grid.always_controllable` and `grid.grid_reduction_takes_priority`. The second
+is the one a load manager gets wrong: obeying a setpoint until a dynamic tariff
+says otherwise is controllable and still in breach. `emob-smart` meets it by
+construction.
 
-Two duties, both facts about how a point is equipped rather than how it is
-priced, both binding the *Betreiber* — which for a depot is the operator:
-
-| Duty | Source | Satisfied by |
-|---|---|---|
-| The device is equipped so that it is **always controllable** | `[BK6-22-300 Ziff. 4.6]` S. 1 | `grid.always_controllable` |
-| The grid operator's reduction **outranks** market-driven load control | `[BK6-22-300 Ziff. 4.6]` S. 3 | `grid.grid_reduction_takes_priority` |
-
-The second is a separate fact from the first and it is the one a load manager
-gets wrong: a site that obeys a setpoint until a dynamic tariff says otherwise is
-controllable and in breach. It is also the duty `emob-smart` discharges by
-construction — the ceiling is the only door an allocation exists through — and
-the profile records whether the site's own scheduler was built that way.
-
-**And a third fact the two duties do not cover: what the site draws when the
-grid operator stops speaking.** § 14a is carried over EEBUS's *Limitation of
-Power Consumption* use case, certifiable since July 2026, and `[LPC §2.3.2]`
-gives a controllable site five states rather than two:
+What the site may draw when the grid operator goes silent is set by EEBUS's
+*Limitation of Power Consumption* use case `[LPC §2.3.2]`:
 
 | State | The ceiling | Reported |
 |---|---|---|
@@ -617,30 +455,41 @@ gives a controllable site five states rather than two:
 | `unlimited/autonomous` `[LPC-906]` | the site's connection | **yes** |
 | no control box commissioned | the site's connection | — |
 
-Three of the five allow full power and they are three different facts, so
-`GridLimit` is those five rather than an option: a depot at 60 kW because its
-grid operator says it may and one at 60 kW because its control box died are the
-same number and different problems, and a grid operator that believes it can
-still curtail the second cannot. The Anspruch of `Ziff. 4.5` holds against a
-failsafe as against a setpoint — the Mindestleistung is a draw the grid can
-always carry, and giving it up under a communications fault is giving it up where
-nobody is watching (D302). The **timers** are the protocol engine's, beside the
-socket; `eebus` runs them against a virtual clock.
+`GridLimit` models all five, because full power by permission and full power
+after a failed control box are different situations. The guaranteed minimum
+power of `Ziff. 4.5` holds under failsafe too. Applicability lives in
+`emob-core`; the power arithmetic is in `emob-smart` — see
+[§ 14a and the grid](@/docs/smart-charging.md).
 
-The applicability is **derived** from the profile the calendar already judges
-rather than ticked beside it, and it lives in `emob-core` for that reason: a
-predicate and a load manager that can disagree about whether the statute binds a
-point are a duty judged one way and enforced another. The arithmetic — the
-Mindestleistung, the simultaneity factor, the allocation — is
-`emob-smart`, because a compliance answer is a boolean
-and a load manager is a kilowatt.
+## Planning ahead and sweeping an estate
 
-## What is not here 📐
+```rust
+// What lands on the fleet between now and the end of 2027?
+for o in starting_between(date!(2026-09-01), date!(2027-12-31)) {
+    println!("{}  {}  {}", o.applies_from, o.citation, o.title);
+}
+```
 
-The Cyber Resilience Act's *artefacts* — the SBOM, the declared support period,
-the update channel — are a build pipeline rather than a calendar entry; the
-calendar carries the duty that requires them. The AFIR TEN-T flag is an input:
-resolving which points sit "along" the network from corridor data is an
-operations question, not a domain one. And the NIS2 supervision regimes
-(`[NIS2 Art. 32]` against `[NIS2 Art. 33]`) differ by class rather than by
-duty, so the class is reported and the duties are judged the same for both.
+`agentd`'s compliance specialist runs this over a whole estate: every point
+against every duty, grouped by duty (four hundred posts without a CSMS
+connection is one firmware programme, not four hundred findings), and every
+upcoming duty judged at its own start date against the estate as it stands. A
+point due for renovation in March 2027 that speaks only ISO 15118-2 is compliant
+today and is flagged now as a breach from the day it is renovated. The date is an argument, so a run
+replays to the same answer. The specialist runs in the `agentd` daemon under
+the read-only advisory principal; ⏳ the event feed that triggers it is not
+wired yet.
+
+## Not yet covered 📐
+
+- A stated support period and update channel for operators: the calendar
+  carries the duty that requires them.
+- Whether a point lies on the TEN-T network is an input, not derived from
+  corridor data.
+- NIS2 supervision regimes (`[NIS2 Art. 32]` versus `[NIS2 Art. 33]`) differ by
+  class, so the class is reported and the duties are judged the same.
+
+Related: [The Eichrecht chain](@/docs/eichrecht.md) ·
+[Tariffs and price transparency](@/docs/pricing.md) ·
+[§ 14a and the grid](@/docs/smart-charging.md) ·
+[Bidirectional charging and MiSpeL](@/docs/bidirectional.md)

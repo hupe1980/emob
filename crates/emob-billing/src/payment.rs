@@ -31,7 +31,10 @@ use crate::invoice::Invoice;
 
 /// The creditor's side of a mandate — everything a collection needs that is not
 /// on the invoice.
-#[derive(Debug, Clone)]
+///
+/// `Debug` masks the IBAN (SR-049): a value that reaches a log line or an
+/// error message is the one nobody minimised.
+#[derive(Clone)]
 pub struct Creditor {
     /// The name the debtor will see on their statement.
     pub name: String,
@@ -44,7 +47,9 @@ pub struct Creditor {
 }
 
 /// The debtor's side: the mandate the customer signed.
-#[derive(Debug, Clone)]
+///
+/// `Debug` masks the IBAN and the debtor's name (SR-049).
+#[derive(Clone)]
 pub struct Mandate {
     /// The mandate reference — AT-01.
     pub reference: String,
@@ -54,6 +59,41 @@ pub struct Mandate {
     pub debtor_name: String,
     /// The account to draw from.
     pub debtor_iban: Iban,
+}
+
+/// An IBAN as a log line may show it: the country and the last four, e.g.
+/// `DE…3000` — enough to tell two accounts apart, not enough to draw on one.
+#[must_use]
+pub fn mask_iban(iban: &str) -> String {
+    let compact: Vec<char> = iban.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.len() < 8 {
+        return "…".to_owned();
+    }
+    let country: String = compact[..2].iter().collect();
+    let last: String = compact[compact.len() - 4..].iter().collect();
+    format!("{country}…{last}")
+}
+
+impl core::fmt::Debug for Creditor {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Creditor")
+            .field("name", &self.name)
+            .field("iban", &mask_iban(self.iban.as_ref()))
+            .field("bic", &self.bic)
+            .field("creditor_id", &self.creditor_id)
+            .finish()
+    }
+}
+
+impl core::fmt::Debug for Mandate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Mandate")
+            .field("reference", &self.reference)
+            .field("signed_on", &self.signed_on)
+            .field("debtor_name", &"…")
+            .field("debtor_iban", &mask_iban(self.debtor_iban.as_ref()))
+            .finish()
+    }
 }
 
 /// A collection built from one invoice.
@@ -93,7 +133,9 @@ pub fn instruct(
         });
     }
 
-    let total = invoice.gross_total().amount();
+    // BT-115, the amount due — not BT-112, which a stated rounding amount
+    // (BT-114) can differ from.
+    let total = invoice.payable_total().amount();
     let amount_minor = minor_units(total, invoice.currency.minor_unit_digits())?;
     if amount_minor <= 0 {
         return Err(PaymentError::NothingToCollect { amount: total });
@@ -238,6 +280,45 @@ mod tests {
         assert!(
             matches!(err, PaymentError::NotAWholeMinorUnit { .. }),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn sr_049_neither_the_iban_nor_the_debtor_name_reaches_debug() {
+        let iban = "DE89370400440532013000";
+        let mandate = Mandate {
+            reference: "MANDATE-1".to_owned(),
+            signed_on: sepa::IsoDate::from_str("2026-01-01").unwrap(),
+            debtor_name: "Erika Mustermann".to_owned(),
+            debtor_iban: sepa::validate_iban(iban).unwrap(),
+        };
+        let creditor = Creditor {
+            name: "ABC Charging GmbH".to_owned(),
+            iban: sepa::validate_iban(iban).unwrap(),
+            bic: None,
+            creditor_id: sepa::validate_creditor_id("DE98ZZZ09999999999").unwrap(),
+        };
+        let details = [
+            crate::invoice::PaymentDetails::CreditTransfer {
+                iban: iban.to_owned(),
+                holder: Some("Erika Mustermann".to_owned()),
+            },
+            crate::invoice::PaymentDetails::DirectDebit {
+                mandate_reference: "MANDATE-1".to_owned(),
+                creditor_identifier: "DE98ZZZ09999999999".to_owned(),
+                debited_iban: iban.to_owned(),
+            },
+        ];
+        let printed = format!("{mandate:?} {creditor:?} {details:?}");
+        assert!(!printed.contains(iban), "{printed}");
+        assert!(!printed.contains("Erika"), "{printed}");
+        assert!(
+            printed.contains("DE…3000"),
+            "masked, still tellable apart: {printed}"
+        );
+        assert!(
+            printed.contains("MANDATE-1"),
+            "the reference is not personal: {printed}"
         );
     }
 }

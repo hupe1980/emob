@@ -17,10 +17,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use csmsd::{ChargePoint, Csmsd, Outcome, Provisioning};
+use csmsd::{
+    Answer, Authorize, ChargePoint, Csmsd, Outcome, Presented, Provisioning, Shared, Status,
+};
 use emob_core::{Currency, PartyId};
 use emob_eichrecht::registry::{ComponentRef, KeyRegistry, RegisteredKey};
 use emob_ocpp::fixtures::{OCA_1_6_SAMPLED_VALUE, OCA_KEY_HEX};
+use emob_service::Actor;
+use emob_service::head::{self, Signing, SigningKey};
+use emob_service::journal::{File, Journal, Memory};
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
 use ocmf::PublicKey;
 use ocpp_kit::transport::{
@@ -47,17 +52,47 @@ impl ocpp_kit::transport::Handler for QuietStation {
     }
 }
 
-/// The handler behind an `Arc`, so a test can read the outcomes afterwards.
-struct Shared(Arc<Csmsd>);
+/// `empd`, as these tests need it: every card is a contract of `DE*MSP`.
+struct Provider;
 
-impl ocpp_kit::transport::Handler for Shared {
-    fn on_request(
-        &self,
-        ctx: ocpp_kit::transport::Ctx,
-        request: ocpp_kit::engine::IncomingRequest,
-    ) -> ocpp_kit::transport::BoxFuture<'_, Result<Box<RawValue>, ocpp_kit::rpc::CallError>> {
-        self.0.on_request(ctx, request)
+impl Authorize for Provider {
+    fn ask<'a>(
+        &'a self,
+        uid: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Answer> + Send + 'a>> {
+        Box::pin(async move {
+            Answer {
+                status: Status::Accepted,
+                reason: "a contract in force".to_owned(),
+                token: Some(Presented {
+                    issuer: PartyId::new("DE", "MSP").unwrap(),
+                    uid: uid.to_owned(),
+                    token_type: emob_roam::TokenType::Rfid,
+                    contract_id: "DE-MSP-C00000001-W".parse().unwrap(),
+                }),
+                reference: Some("a".repeat(64)),
+            }
+        })
     }
+}
+
+/// A CSMS over an in-memory journal.
+fn csmsd(registry: KeyRegistry, journal: Memory) -> Arc<Csmsd<Memory>> {
+    csmsd_over(registry, journal)
+}
+
+/// A CSMS over any journal.
+fn csmsd_over<J: Journal>(registry: KeyRegistry, journal: J) -> Arc<Csmsd<J>> {
+    Arc::new(
+        Csmsd::open(
+            PartyId::new("DE", "ABC").unwrap(),
+            registry,
+            Arc::new(Provider),
+            journal,
+            emob_core::TimeZone::utc(),
+        )
+        .expect("the journal folds"),
+    )
 }
 
 fn provisioning() -> Provisioning {
@@ -66,6 +101,8 @@ fn provisioning() -> Provisioning {
         ChargePoint {
             evse_id: "DE*ABC*E00001".parse().unwrap(),
             rated_power_kw: Decimal::from(150),
+            tariff: tariff(),
+            ocpp: Version::V1_6,
         },
     )
 }
@@ -128,7 +165,7 @@ fn stop_transaction(transaction_id: i32) -> v1_6::StopTransactionRequest {
 }
 
 /// A CSMS on an ephemeral port, and the task serving it.
-async fn serve(csmsd: Arc<Csmsd>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+async fn serve<J: Journal>(csmsd: Arc<Csmsd<J>>) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let fleet = provisioning();
     let csms = Csms::builder()
         .bind("127.0.0.1:0".parse().unwrap())
@@ -210,11 +247,7 @@ async fn run_one_session(handle: &Handle) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_station_connects_and_its_signed_kilowatt_hours_reach_a_cdr() {
-    let csmsd = Arc::new(Csmsd::new(
-        PartyId::new("DE", "ABC").unwrap(),
-        registry(),
-        tariff(),
-    ));
+    let csmsd = csmsd(registry(), Memory::new());
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     run_one_session(&connect(&addr, "CP-1")).await;
     server.abort();
@@ -266,6 +299,25 @@ async fn a_station_connects_and_its_signed_kilowatt_hours_reach_a_cdr() {
     });
     assert_eq!(priced.0.as_deref(), Some("0.31 EUR"));
     assert!(priced.1, "a genuine session settles");
+
+    // SR-101: every fact the session caused is journalled under the identity
+    // the socket authenticated as — not under anything the messages said.
+    let actors: Vec<Actor> = csmsd.with_journal(|journal| {
+        journal
+            .records()
+            .expect("the chain holds")
+            .into_iter()
+            .map(|record| record.actor)
+            .collect()
+    });
+    assert!(!actors.is_empty());
+    assert!(
+        actors
+            .iter()
+            .all(|actor| *actor == Actor::station("CP-1").unwrap()),
+        "{actors:?}"
+    );
+    assert_eq!(actors[0].to_string(), "station:CP-1");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -284,11 +336,7 @@ async fn a_station_signing_with_an_unprovisioned_key_is_named_before_the_audit()
         ),
         "a stale provisioning record",
     );
-    let csmsd = Arc::new(Csmsd::new(
-        PartyId::new("DE", "ABC").unwrap(),
-        stale,
-        tariff(),
-    ));
+    let csmsd = csmsd(stale, Memory::new());
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     run_one_session(&connect(&addr, "CP-1")).await;
     server.abort();
@@ -321,11 +369,7 @@ async fn a_station_whose_claimed_key_does_not_decode_is_named_rather_than_skippe
         .expect("the OCA fixture carries a claimed key");
     let corrupt = format!("{prefix}\"publicKey\":\"////not-a-key////\"}}");
 
-    let csmsd = Arc::new(Csmsd::new(
-        PartyId::new("DE", "ABC").unwrap(),
-        registry(),
-        tariff(),
-    ));
+    let csmsd = csmsd(registry(), Memory::new());
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("the CSMS answers a boot");
@@ -380,11 +424,7 @@ async fn a_station_nobody_provisioned_is_answered_unknown_rather_than_admitted()
     // can tell a typo from a bad password — and a station nobody provisioned has
     // no EVSE id, so its sessions would be attributed to a point that does not
     // exist.
-    let csmsd = Arc::new(Csmsd::new(
-        PartyId::new("DE", "ABC").unwrap(),
-        registry(),
-        tariff(),
-    ));
+    let csmsd = csmsd(registry(), Memory::new());
     let (addr, server) = serve(csmsd).await;
     let handle = connect(&addr, "CP-NOBODY");
 
@@ -409,11 +449,7 @@ async fn a_station_claiming_signed_data_and_sending_none_is_named_not_ignored() 
     //
     // `ocpp-kit` reports it as a `WarningKind::UnreadableSignedData` on the
     // observation, and `csmsd` turns that into a refusal with a reason.
-    let csmsd = Arc::new(Csmsd::new(
-        PartyId::new("DE", "ABC").unwrap(),
-        registry(),
-        tariff(),
-    ));
+    let csmsd = csmsd(registry(), Memory::new());
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     let handle = connect(&addr, "CP-1");
 
@@ -476,11 +512,7 @@ async fn a_retransmitted_stop_does_not_settle_a_second_time_or_refuse_the_first(
     // The operational ledger knew: `Ingested::Duplicate` says in as many words
     // "the station retried; do not bill it twice". `csmsd` was discarding the
     // answer.
-    let csmsd = Arc::new(Csmsd::new(
-        PartyId::new("DE", "ABC").unwrap(),
-        registry(),
-        tariff(),
-    ));
+    let csmsd = csmsd(registry(), Memory::new());
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("the CSMS answers a boot");
@@ -528,11 +560,7 @@ async fn a_signed_value_arriving_after_the_stop_is_named_rather_than_billed_as_a
     // not open a second transaction, and it must not be silent either: the
     // signed value it carries is energy that is **not** on the record that
     // settled, and the fix for that is at the station.
-    let csmsd = Arc::new(Csmsd::new(
-        PartyId::new("DE", "ABC").unwrap(),
-        registry(),
-        tariff(),
-    ));
+    let csmsd = csmsd(registry(), Memory::new());
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("the CSMS answers a boot");
@@ -586,4 +614,131 @@ async fn a_signed_value_arriving_after_the_stop_is_named_rather_than_billed_as_a
         "a straggler after the end is named: {outcomes:?}"
     );
     assert_eq!(csmsd.settled(), 1, "and it opens no second record");
+}
+
+/// What a restart is: the facts, folded into a process that never saw them.
+fn replay(from: &Csmsd<Memory>) -> Memory {
+    let replay = Memory::new();
+    from.with_journal(|journal| {
+        for record in journal.records().expect("the chain holds") {
+            replay
+                .append(&record.kind, &record.actor, &record.body)
+                .expect("the same facts");
+        }
+    });
+    replay
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_keeps_the_ledger_the_outcomes_and_the_1_6_counter() {
+    // Before the journal these were `Mutex`es: a restart emptied the CDR
+    // ledger, and the next 1.6 station got transaction id 1 again.
+    let first = csmsd(registry(), Memory::new());
+    let (addr, server) = serve(Arc::clone(&first)).await;
+    run_one_session(&connect(&addr, "CP-1")).await;
+    server.abort();
+    assert_eq!(first.settled(), 1);
+
+    let restarted = csmsd(registry(), replay(&first));
+    assert_eq!(restarted.settled(), 1, "the record survives");
+    assert_eq!(
+        restarted.outcomes(),
+        first.outcomes(),
+        "and so does what it meant"
+    );
+    assert_eq!(
+        restarted.with_state(|state| state.next_1_6),
+        2,
+        "the counter continues rather than handing out an id already spent"
+    );
+    assert_eq!(
+        restarted.with_state(|state| state.pending().count()),
+        2,
+        "the deliveries the record owes to billd and roamd are still owed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transaction_open_across_a_restart_settles_after_it() {
+    let first = csmsd(registry(), Memory::new());
+    let (addr, server) = serve(Arc::clone(&first)).await;
+    let handle = connect(&addr, "CP-1");
+    handle.call(boot()).await.expect("a boot");
+    handle.wait_ready().await;
+    let started = handle
+        .call(v1_6::StartTransactionRequest::new(
+            1,
+            "HRWWBX8".to_owned(),
+            0,
+            DateTime::parse("2023-05-19T13:52:39Z").unwrap(),
+        ))
+        .await
+        .expect("a start");
+    handle.shutdown(Duration::from_secs(1)).await;
+    server.abort();
+
+    // The process dies with the transaction open; the station reconnects to
+    // the one that replaced it and closes it there.
+    let restarted = csmsd(registry(), replay(&first));
+    let (addr, server) = serve(Arc::clone(&restarted)).await;
+    let handle = connect(&addr, "CP-1");
+    handle.call(boot()).await.expect("a boot");
+    handle.wait_ready().await;
+    handle
+        .call(stop_transaction(started.transaction_id))
+        .await
+        .expect("a stop");
+    handle.shutdown(Duration::from_secs(1)).await;
+    server.abort();
+
+    assert_eq!(restarted.settled(), 1, "{:?}", restarted.outcomes());
+}
+
+/// SC-001, SR-096: a journal cut at its end is a history shorter than one this
+/// daemon vouched for, and the chain alone cannot see it — the signed head can.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr_096_a_journal_cut_by_one_record_does_not_start() {
+    const SEED: [u8; 32] = [7; 32];
+    let dir = std::env::temp_dir().join(format!(
+        "emob-096-{}-{}",
+        std::process::id(),
+        time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+    ));
+    let path = dir.join("csmsd.ndjson");
+    let open = || {
+        Signing::open(
+            File::open(&path).expect("a journal file"),
+            SigningKey::from_seed(&SEED, "csmsd"),
+            head::beside(&path),
+        )
+    };
+
+    let first = csmsd_over(registry(), open().expect("a fresh journal opens"));
+    let (addr, server) = serve(Arc::clone(&first)).await;
+    run_one_session(&connect(&addr, "CP-1")).await;
+    server.abort();
+    assert_eq!(first.settled(), 1);
+    let held = first.with_journal(|journal| journal.records().expect("the chain holds").len());
+    drop(first);
+    assert!(open().is_ok(), "the journal as written opens");
+
+    // The last line removed: what is left still chains.
+    let text = std::fs::read_to_string(&path).expect("the journal");
+    let cut = text
+        .trim_end_matches('\n')
+        .rfind('\n')
+        .map_or(0, |at| at + 1);
+    std::fs::write(&path, &text[..cut]).expect("the journal, cut");
+
+    let refused = open().expect_err("a journal one record short of its head does not open");
+    let message = refused.to_string();
+    assert!(
+        message.contains(&format!("holds {} records", held - 1)),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("signed a head at {held}")),
+        "{message}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

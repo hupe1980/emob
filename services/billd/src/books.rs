@@ -28,6 +28,7 @@
 //! account for is worse than one that stops and says so.
 
 use emob_billing::invoice::Invoice;
+use emob_service::Actor;
 use emob_service::journal::{Folded, Journal, JournalError, Kinded};
 
 use crate::{Billd, ChartOfAccounts, ClosingError, Issued, Numbering, Recorded, Submission};
@@ -55,6 +56,10 @@ pub enum Event {
         cancels: Option<String>,
         /// What it replaces, for the second half of a re-billing.
         replaces: Option<String>,
+        /// The specification it was issued in (spec 010); a journal written
+        /// before 0.3 holds none and reads as the EN 16931 core.
+        #[serde(default = "core")]
+        specification: emob_billing::Specification,
     },
     /// The recipient's platform answered.
     Submitted {
@@ -68,6 +73,18 @@ pub enum Event {
         /// Which document.
         number: String,
     },
+    /// A rated record arrived from `csmsd`, owed by `partner` for `period`.
+    Received {
+        /// The record, whole: the invoice line is built from this value.
+        cdr: Box<emob_cdr::Cdr>,
+        /// Who pays it — the issuer of the contract it was charged under.
+        partner: emob_core::PartyId,
+        /// The closing it belongs to, `<CC*PID>/<YYYY-MM>`.
+        period: String,
+        /// The driver's receipt link, which the invoice line carries (spec 003).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<String>,
+    },
 }
 
 impl Kinded for Event {
@@ -76,8 +93,13 @@ impl Kinded for Event {
             Self::Issued { .. } => "issued",
             Self::Submitted { .. } => "submitted",
             Self::Booked { .. } => "booked",
+            Self::Received { .. } => "received",
         }
     }
+}
+
+const fn core() -> emob_billing::Specification {
+    emob_billing::Specification::Core
 }
 
 /// What went wrong that was not about a document.
@@ -124,6 +146,11 @@ impl From<ClosingError> for BooksError {
 }
 
 /// [`Billd`], folded from a journal and extended by appending to it.
+///
+/// Every method that writes a fact takes `by` first: the record names who
+/// caused it, so a document in the books answers "on whose word" as well as
+/// "what" — and the caller says so, because only the caller knows whether a
+/// month closed by the calendar or by an operator's hand.
 pub struct Books<J: Journal> {
     folded: Folded<Billd, Event, J>,
     halted: Option<String>,
@@ -192,9 +219,10 @@ impl<J: Journal> Books<J> {
         }
     }
 
-    /// Record a fact, halting the service if the journal will not take it.
-    fn commit(&mut self, event: &Event, number: &str) -> Result<(), BooksError> {
-        match self.folded.note(event) {
+    /// Record a fact as `by`'s, halting the service if the journal will not
+    /// take it.
+    fn commit(&mut self, by: &Actor, event: &Event, number: &str) -> Result<(), BooksError> {
+        match self.folded.note(by, event) {
             Ok(_) => Ok(()),
             Err(source) => {
                 self.halted = Some(source.to_string());
@@ -215,11 +243,30 @@ impl<J: Journal> Books<J> {
     /// which the service is halted.
     pub fn issue(
         &mut self,
+        by: &Actor,
         period: &str,
         invoice: impl FnOnce(String) -> Result<Invoice, emob_billing::BillingError>,
     ) -> Result<String, BooksError> {
+        self.issue_as(by, period, emob_billing::Specification::Core, invoice)
+    }
+
+    /// [`Self::issue`], in a stated EN 16931 specification.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::issue`].
+    pub fn issue_as(
+        &mut self,
+        by: &Actor,
+        period: &str,
+        specification: emob_billing::Specification,
+        invoice: impl FnOnce(String) -> Result<Invoice, emob_billing::BillingError>,
+    ) -> Result<String, BooksError> {
         self.guard()?;
-        let issued = self.folded.state_mut().issue(period, invoice)?;
+        let issued = self
+            .folded
+            .state_mut()
+            .issue_as(period, specification, invoice)?;
         let number = issued.invoice.number.clone();
         let event = Event::Issued {
             period: Some(period.to_owned()),
@@ -227,8 +274,9 @@ impl<J: Journal> Books<J> {
             invoice: Box::new(issued.invoice.clone()),
             cancels: None,
             replaces: None,
+            specification,
         };
-        self.commit(&event, &number)?;
+        self.commit(by, &event, &number)?;
         Ok(number)
     }
 
@@ -245,6 +293,7 @@ impl<J: Journal> Books<J> {
     /// cancelled, or is itself a credit note; [`BooksError::Journal`] otherwise.
     pub fn rebill(
         &mut self,
+        by: &Actor,
         number: &str,
         cancelled_on: time::Date,
         reason: impl Into<String>,
@@ -259,30 +308,38 @@ impl<J: Journal> Books<J> {
         let (credit_doc, replacement_doc) = {
             let state = self.folded.state();
             (
-                state.issued(&credit).map(|d| d.invoice.clone()),
-                state.issued(&replaced).map(|d| d.invoice.clone()),
+                state
+                    .issued(&credit)
+                    .map(|d| (d.invoice.clone(), d.specification)),
+                state
+                    .issued(&replaced)
+                    .map(|d| (d.invoice.clone(), d.specification)),
             )
         };
-        if let Some(invoice) = credit_doc {
+        if let Some((invoice, specification)) = credit_doc {
             self.commit(
+                by,
                 &Event::Issued {
                     period: None,
                     number: credit.clone(),
                     invoice: Box::new(invoice),
                     cancels: Some(number.to_owned()),
                     replaces: None,
+                    specification,
                 },
                 &credit,
             )?;
         }
-        if let Some(invoice) = replacement_doc {
+        if let Some((invoice, specification)) = replacement_doc {
             self.commit(
+                by,
                 &Event::Issued {
                     period,
                     number: replaced.clone(),
                     invoice: Box::new(invoice),
                     cancels: None,
                     replaces: Some(number.to_owned()),
+                    specification,
                 },
                 &replaced,
             )?;
@@ -297,6 +354,7 @@ impl<J: Journal> Books<J> {
     /// [`BooksError::Closing`] for a number never issued.
     pub fn accepted(
         &mut self,
+        by: &Actor,
         number: &str,
         at: time::Date,
         reference: Option<String>,
@@ -306,6 +364,7 @@ impl<J: Journal> Books<J> {
             .state_mut()
             .accepted(number, at, reference.clone())?;
         self.commit(
+            by,
             &Event::Submitted {
                 number: number.to_owned(),
                 submission: Submission::Accepted { at, reference },
@@ -321,6 +380,7 @@ impl<J: Journal> Books<J> {
     /// [`BooksError::Closing`] for a number never issued or already booked.
     pub fn rejected(
         &mut self,
+        by: &Actor,
         number: &str,
         at: time::Date,
         reason: impl Into<String>,
@@ -331,6 +391,7 @@ impl<J: Journal> Books<J> {
             .state_mut()
             .rejected(number, at, reason.clone())?;
         self.commit(
+            by,
             &Event::Submitted {
                 number: number.to_owned(),
                 submission: Submission::Rejected { at, reason },
@@ -345,16 +406,136 @@ impl<J: Journal> Books<J> {
     ///
     /// [`BooksError::Closing`] for every reason [`Billd::book`] gives, and
     /// [`BooksError::Journal`] where the fact could not be recorded.
-    pub fn book(&mut self, number: &str) -> Result<Recorded, BooksError> {
+    pub fn book(&mut self, by: &Actor, number: &str) -> Result<Recorded, BooksError> {
         self.guard()?;
         let recorded = self.folded.state_mut().book(number)?;
         self.commit(
+            by,
             &Event::Booked {
                 number: number.to_owned(),
             },
             number,
         )?;
         Ok(recorded)
+    }
+}
+
+impl<J: Journal> Books<J> {
+    /// Take a record `csmsd` delivered, once.
+    ///
+    /// Returns `false` for a record already held — the delivery id is the
+    /// record's key, so a retry changes nothing and is answered as a
+    /// duplicate (SR-030).
+    ///
+    /// # Errors
+    ///
+    /// [`BooksError::Journal`] where the receipt could not be recorded, after
+    /// which the service is halted.
+    pub fn receive(
+        &mut self,
+        by: &Actor,
+        cdr: emob_cdr::Cdr,
+        partner: emob_core::PartyId,
+        receipt: Option<String>,
+    ) -> Result<bool, BooksError> {
+        self.guard()?;
+        let key = cdr.key.to_string();
+        if self.state().received.contains_key(&key) {
+            return Ok(false);
+        }
+        let period = crate::period_of(&partner, cdr.ended_at);
+        self.folded.state_mut().received.insert(
+            key.clone(),
+            crate::Received {
+                cdr: cdr.clone(),
+                partner: partner.clone(),
+                period: period.clone(),
+                receipt: receipt.clone(),
+            },
+        );
+        self.commit(
+            by,
+            &Event::Received {
+                cdr: Box::new(cdr),
+                partner,
+                period,
+                receipt,
+            },
+            &key,
+        )?;
+        Ok(true)
+    }
+
+    /// Close one partner's month from the records received for it.
+    ///
+    /// `None` when nothing was received for the period — a month with no
+    /// sessions is not an invoice of zero.
+    ///
+    /// # Errors
+    ///
+    /// [`BooksError::Closing`] for a period already closed or a document
+    /// `emob-billing` refuses, [`BooksError::Journal`] otherwise.
+    pub fn close(
+        &mut self,
+        by: &Actor,
+        closing: &crate::Closing,
+    ) -> Result<Option<String>, BooksError> {
+        let period = crate::period_key(&closing.partner, closing.year, closing.month);
+        let mut ledger = emob_cdr::CdrLedger::new();
+        let mut receipts = std::collections::BTreeMap::new();
+        for received in self
+            .state()
+            .received
+            .values()
+            .filter(|r| r.period == period)
+        {
+            let _ = ledger.accept(received.cdr.clone());
+            if let Some(receipt) = &received.receipt {
+                receipts.insert(received.cdr.key.clone(), receipt.clone());
+            }
+        }
+        if ledger.is_empty() {
+            return Ok(None);
+        }
+        let first =
+            time::Date::from_calendar_date(closing.year, closing.month, 1).map_err(|error| {
+                BooksError::Halted {
+                    why: error.to_string(),
+                }
+            })?;
+        let last = first
+            .replace_day(closing.month.length(closing.year))
+            .map_err(|error| BooksError::Halted {
+                why: error.to_string(),
+            })?;
+        let specification = closing.specification;
+        let number = self.issue_as(by, &period, specification, |number| {
+            let mut builder = emob_billing::InvoiceBuilder::new(
+                number,
+                closing.issued_on,
+                (first, last),
+                closing.seller.clone(),
+                closing.buyer.clone(),
+            )
+            .supplied_from(closing.seller.country.clone(), closing.vat_rate)
+            .ledger(&ledger)
+            .receipts(receipts)
+            .due_on(closing.issued_on + time::Duration::days(14));
+            if let Some(payment) = &closing.payment {
+                builder = builder.paid_by(payment.clone());
+            }
+            if let Some(reference) = &closing.buyer_reference {
+                builder = builder.buyer_reference(reference.clone());
+            }
+            let invoice = builder.build()?.value;
+            // SR-122: a document its recipient's specification rejects is
+            // refused here, while it is only a spent number — not served on a
+            // page and posted to an access point that hands it back. The
+            // profile's own proof, the one the files are written through.
+            emob_billing::en16931::write(&invoice, specification, emob_billing::Syntax::Ubl)?;
+            Ok(invoice)
+        })?;
+        Ok(Some(number))
     }
 }
 
@@ -375,6 +556,7 @@ impl Billd {
                 invoice,
                 cancels,
                 replaces,
+                specification,
             } => {
                 self.numbering.resume_past(&number);
                 if let Some(period) = period {
@@ -391,6 +573,7 @@ impl Billd {
                         cancels,
                         replaces,
                         booked: false,
+                        specification,
                     },
                 );
             }
@@ -405,6 +588,22 @@ impl Billd {
             // returns what it recorded.
             Event::Booked { number } => {
                 let _ = self.book(&number);
+            }
+            Event::Received {
+                cdr,
+                partner,
+                period,
+                receipt,
+            } => {
+                self.received.insert(
+                    cdr.key.to_string(),
+                    crate::Received {
+                        cdr: *cdr,
+                        partner,
+                        period,
+                        receipt,
+                    },
+                );
             }
         }
     }

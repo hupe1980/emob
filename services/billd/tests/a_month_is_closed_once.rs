@@ -324,31 +324,30 @@ fn an_accepted_month_reaches_the_books_and_they_balance() {
         .unwrap();
 
     let recorded = billd.book("R-2026-0001").unwrap();
-    assert!(recorded.is_new);
+    assert!(!recorded.replayed);
     assert!(billd.issued("R-2026-0001").unwrap().booked);
 
     // 63.333 kWh at 0.49 gross: 12.15 + 8.44 + 5.49 = 26.08 taxable, 4.96 VAT,
     // 31.04 receivable. The books state the same figures the document does.
     let trial = billd.trial_balance().unwrap();
-    let totals = trial
-        .totals(doubleentry::Currency::EUR, doubleentry::Layer::Settled)
-        .unwrap();
-    assert!(totals.is_balanced(), "{totals:?}");
+    assert!(trial.is_balanced(), "{trial:?}");
 
     let vat = billd
         .balance_of("liabilities:vat:DE:19", "EUR")
         .unwrap()
         .expect("the German VAT account was opened by the posting");
-    let (direction, amount) = vat.net().unwrap();
-    assert_eq!(direction, doubleentry::Direction::Credit);
+    let net = vat.net();
+    let amount = net.abs();
+    assert!(net.is_negative(), "a credit balance");
     assert_eq!(amount.to_string(), "4.96");
 
     let receivable = billd
         .balance_of("assets:receivable", "EUR")
         .unwrap()
         .expect("the receivable was opened by the posting");
-    let (direction, amount) = receivable.net().unwrap();
-    assert_eq!(direction, doubleentry::Direction::Debit);
+    let net = receivable.net();
+    let amount = net.abs();
+    assert!(net.is_positive(), "a debit balance");
     assert_eq!(amount.to_string(), "31.04");
 
     // An operator that books twice is repeating themselves, and is told so.
@@ -370,9 +369,9 @@ fn an_accepted_month_reaches_the_books_and_they_balance() {
     let first = replayed.book("R-2026-0001").unwrap();
     let entry = replayed
         .journal()
-        .get(first.id)
-        .expect("the entry the journal sealed");
-    assert_eq!(entry.postings().len(), 3);
+        .entry(first.id)
+        .expect("the entry the journal recorded");
+    assert_eq!(entry.parts().postings.len(), 3);
 }
 
 #[test]
@@ -439,24 +438,18 @@ fn a_re_rated_month_cancels_before_it_re_bills_and_the_books_net_to_the_replacem
         billd.book(number).unwrap();
     }
 
-    // 63.333 kWh at 0.39 gross: 9.67 + 6.72 + 4.37 = 20.76 taxable, 3.94 VAT,
-    // 24.70 receivable — and the receivable holds the replacement *alone*,
-    // because the reversal took the original back out.
+    // 63.333 kWh at 0.39 gross: receipts of 11.51 + 8.00 + 5.20 = 24.71,
+    // which is the amount due (BT-115) — 24.71 receivable, the replacement
+    // *alone*, because the reversal took the original back out.
     let receivable = billd
         .balance_of("assets:receivable", "EUR")
         .unwrap()
         .unwrap();
-    let (direction, amount) = receivable.net().unwrap();
-    assert_eq!(direction, doubleentry::Direction::Debit);
-    assert_eq!(amount.to_string(), "24.70");
-    assert!(
-        billd
-            .trial_balance()
-            .unwrap()
-            .totals(doubleentry::Currency::EUR, doubleentry::Layer::Settled)
-            .unwrap()
-            .is_balanced()
-    );
+    let net = receivable.net();
+    let amount = net.abs();
+    assert!(net.is_positive(), "a debit balance");
+    assert_eq!(amount.to_string(), "24.71");
+    assert!(billd.trial_balance().unwrap().is_balanced());
 }
 
 #[test]
@@ -534,12 +527,12 @@ fn a_vat_liability_has_a_creditor_so_two_countries_are_two_accounts() {
         .balance_of("liabilities:vat:FR:20", "EUR")
         .unwrap()
         .expect("the electricity is owed to the French authority");
-    assert_eq!(french.net().unwrap().1.to_string(), "5.17");
+    assert_eq!(french.net().abs().to_string(), "5.17");
     let german = billd
         .balance_of("liabilities:vat:DE:19", "EUR")
         .unwrap()
         .expect("the network access is owed to the German one");
-    assert_eq!(german.net().unwrap().1.to_string(), "0.95");
+    assert_eq!(german.net().abs().to_string(), "0.95");
 }
 
 #[test]
@@ -571,7 +564,7 @@ fn an_operators_own_chart_of_accounts_is_the_one_that_is_posted_to() {
     billd.book("R-2026-0007").unwrap();
 
     let vat = billd.balance_of("1776", "EUR").unwrap().unwrap();
-    assert_eq!(vat.net().unwrap().1.to_string(), "4.96");
+    assert_eq!(vat.net().abs().to_string(), "4.96");
     assert!(
         billd
             .balance_of("liabilities:vat:DE:19", "EUR")
@@ -652,7 +645,7 @@ fn a_cancellation_cannot_reach_the_books_before_the_invoice_it_reverses() {
         .balance_of("assets:receivable", "EUR")
         .expect("a readable journal")
         .expect("both halves are posted");
-    assert_eq!(receivable.debits, receivable.credits);
+    assert_eq!(receivable.debit(), receivable.credit());
 }
 
 #[test]
@@ -700,14 +693,14 @@ fn a_replacement_cannot_reach_the_books_while_the_invoice_it_replaces_still_stan
         .unwrap();
     billd.book(&credit).unwrap();
     billd.book(&replacement).unwrap();
-    let (direction, amount) = billd
+    let net = billd
         .balance_of("assets:receivable", "EUR")
         .unwrap()
         .unwrap()
-        .net()
-        .unwrap();
-    assert_eq!(direction, doubleentry::Direction::Debit);
-    assert_eq!(amount.to_string(), "24.70");
+        .net();
+    let amount = net.abs();
+    assert!(net.is_positive(), "a debit balance");
+    assert_eq!(amount.to_string(), "24.71");
 }
 
 #[test]
@@ -772,18 +765,7 @@ fn receivable(billd: &Billd) -> i128 {
     let Some(balance) = billd.balance_of("assets:receivable", "EUR").unwrap() else {
         return 0;
     };
-    let Ok((direction, amount)) = balance.net() else {
-        return 0;
-    };
-    let cents: i128 = amount
-        .to_string()
-        .replace('.', "")
-        .parse()
-        .expect("a whole number of cents");
-    match direction {
-        doubleentry::Direction::Debit => cents,
-        doubleentry::Direction::Credit => -cents,
-    }
+    balance.net().to_minor()
 }
 
 /// Stated once rather than at every call site, because the point is that they
@@ -792,11 +774,8 @@ fn books_hold(billd: &Billd) -> Result<(), String> {
     // 1. The journal balances. Weak on its own — double entry balances whatever
     //    it is told — and it is the floor everything else stands on.
     let trial = billd.trial_balance().map_err(|e| e.to_string())?;
-    let totals = trial
-        .totals(doubleentry::Currency::EUR, doubleentry::Layer::Settled)
-        .map_err(|e| e.to_string())?;
-    if !totals.is_balanced() {
-        return Err(format!("the journal does not balance: {totals:?}"));
+    if !trial.is_balanced() {
+        return Err(format!("the journal does not balance: {trial:?}"));
     }
 
     // 2. Nothing is in the books that the recipient did not accept. `book`
@@ -819,7 +798,7 @@ fn books_hold(billd: &Billd) -> Result<(), String> {
         if document.invoice.kind.is_credit_note() {
             continue;
         }
-        let gross = (document.invoice.gross_total().amount() * dec("100"))
+        let gross = (document.invoice.payable_total().amount() * dec("100"))
             .round()
             .to_string();
         lawful.push(gross.parse().expect("a whole number of cents"));
@@ -892,13 +871,13 @@ fn the_books_hold_under_any_order_of_calls() {
                     .documents()
                     .map(|d| {
                         format!(
-                            "{} kind={:?} booked={} cancels={:?} replaces={:?} gross={}",
+                            "{} kind={:?} booked={} cancels={:?} replaces={:?} payable={}",
                             d.invoice.number,
                             d.invoice.kind,
                             d.booked,
                             d.cancels,
                             d.replaces,
-                            d.invoice.gross_total()
+                            d.invoice.payable_total()
                         )
                     })
                     .collect();
@@ -923,7 +902,14 @@ fn the_books_hold_under_any_order_of_calls() {
 // the process between them, and ask the questions again.
 
 use billd::Books;
+use emob_service::Actor;
 use emob_service::journal::{File, Journal};
+
+/// Who the decisions below are recorded as: an operator's hand, which is what
+/// a closing, a correction or a platform's answer typed in by somebody is.
+fn ops() -> Actor {
+    Actor::operator("ops").expect("an operator name")
+}
 
 /// A journal file of this test's own, removed when it is done.
 struct Scratch(std::path::PathBuf);
@@ -962,7 +948,7 @@ fn a_number_spent_before_a_restart_is_not_spent_again() {
     let first = {
         let mut books = scratch.books();
         books
-            .issue("2026-06", closing(&june, driver()))
+            .issue(&ops(), "2026-06", closing(&june, driver()))
             .expect("June closes")
     };
     assert_eq!(first, "R-2026-0001");
@@ -972,7 +958,7 @@ fn a_number_spent_before_a_restart_is_not_spent_again() {
 
     // The period is still closed, by the document that closed it.
     let refused = books
-        .issue("2026-06", closing(&june, driver()))
+        .issue(&ops(), "2026-06", closing(&june, driver()))
         .expect_err("June was closed before the restart");
     assert!(
         matches!(
@@ -987,7 +973,7 @@ fn a_number_spent_before_a_restart_is_not_spent_again() {
     // thing the statute names.
     let july = month("0.49");
     let next = books
-        .issue("2026-07", closing(&july, driver()))
+        .issue(&ops(), "2026-07", closing(&july, driver()))
         .expect("July closes");
     assert_eq!(
         next, "R-2026-0002",
@@ -1004,10 +990,11 @@ fn a_correction_survives_a_restart_with_the_reversal_still_first() {
     let (original, credit, replacement) = {
         let mut books = scratch.books();
         let original = books
-            .issue("2026-06", closing(&june, driver()))
+            .issue(&ops(), "2026-06", closing(&june, driver()))
             .expect("June closes");
         let (credit, replacement) = books
             .rebill(
+                &ops(),
                 &original,
                 date!(2026 - 07 - 10),
                 "re-rated at the contracted price",
@@ -1049,12 +1036,17 @@ fn the_books_come_back_balanced_and_a_month_is_not_posted_twice() {
     let number = {
         let mut books = scratch.books();
         let number = books
-            .issue("2026-06", closing(&june, driver()))
+            .issue(&ops(), "2026-06", closing(&june, driver()))
             .expect("June closes");
         books
-            .accepted(&number, date!(2026 - 07 - 02), Some("BE-1".to_owned()))
+            .accepted(
+                &ops(),
+                &number,
+                date!(2026 - 07 - 02),
+                Some("BE-1".to_owned()),
+            )
             .expect("the recipient took it");
-        books.book(&number).expect("it reaches the books");
+        books.book(&ops(), &number).expect("it reaches the books");
         number
     };
 
@@ -1072,8 +1064,9 @@ fn the_books_come_back_balanced_and_a_month_is_not_posted_twice() {
         .balance_of("assets:receivable", "EUR")
         .expect("the books total")
         .expect("the receivable was opened by the posting");
-    let (direction, amount) = receivable.net().expect("a net");
-    assert_eq!(direction, doubleentry::Direction::Debit);
+    let net = receivable.net();
+    let amount = net.abs();
+    assert!(net.is_positive(), "a debit balance");
     assert_eq!(
         amount.to_string(),
         "31.04",
@@ -1092,7 +1085,7 @@ fn a_journal_somebody_edited_is_refused_rather_than_folded() {
     {
         let mut books = scratch.books();
         books
-            .issue("2026-06", closing(&june, driver()))
+            .issue(&ops(), "2026-06", closing(&june, driver()))
             .expect("June closes");
     }
 
@@ -1119,12 +1112,12 @@ fn the_journal_names_what_kind_of_fact_each_record_is() {
     let june = month("0.49");
     let mut books = scratch.books();
     let number = books
-        .issue("2026-06", closing(&june, driver()))
+        .issue(&ops(), "2026-06", closing(&june, driver()))
         .expect("June closes");
     books
-        .accepted(&number, date!(2026 - 07 - 02), None)
+        .accepted(&ops(), &number, date!(2026 - 07 - 02), None)
         .expect("taken");
-    books.book(&number).expect("booked");
+    books.book(&ops(), &number).expect("booked");
 
     let kinds: Vec<String> = books
         .journal()
@@ -1134,4 +1127,652 @@ fn the_journal_names_what_kind_of_fact_each_record_is() {
         .map(|r| r.kind)
         .collect();
     assert_eq!(kinds, ["issued", "submitted", "booked"]);
+}
+
+/// 0.2: the calendar closes each partner's month from the records `csmsd`
+/// delivered — once, and a closed month is left alone.
+mod the_calendar {
+    use std::sync::Mutex;
+
+    use billd::Books;
+    use billd::daemon::{Estate, close_what_is_due};
+    use emob_service::Actor;
+    use emob_service::journal::Memory;
+    use time::macros::date;
+
+    fn estate() -> Estate {
+        emob_service::estate::from_str(include_str!("../../../deploy/estate.example.toml"))
+            .expect("the demo estate")
+    }
+
+    #[test]
+    fn a_partners_month_closes_once_from_what_was_delivered() {
+        let estate = estate();
+        let partner = estate.partners[0].party.clone();
+        let books = Mutex::new(
+            Books::open(
+                "emob",
+                billd::Numbering::series("R", 2026),
+                billd::ChartOfAccounts::new(),
+                Memory::new(),
+            )
+            .unwrap(),
+        );
+        // June's three sessions, delivered as `csmsd` would deliver them.
+        for cdr in super::month("0.49").iter() {
+            assert!(
+                books
+                    .lock()
+                    .unwrap()
+                    .receive(&Actor::service("csmsd"), cdr.clone(), partner.clone(), None)
+                    .unwrap()
+            );
+        }
+
+        // Still June: nothing is due.
+        close_what_is_due(&books, &estate, date!(2026 - 06 - 30));
+        assert_eq!(books.lock().unwrap().state().documents().count(), 0);
+
+        // July: June closes, with every record on it.
+        close_what_is_due(&books, &estate, date!(2026 - 07 - 01));
+        let held = books.lock().unwrap();
+        let documents: Vec<_> = held.state().documents().collect();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].invoice.records().len(), 3);
+        assert_eq!(
+            held.state().period_closed_by(&documents[0].invoice.number),
+            Some(format!("{partner}/2026-06"))
+        );
+        drop(held);
+
+        // The next tick in July finds the month closed and leaves it.
+        close_what_is_due(&books, &estate, date!(2026 - 07 - 02));
+        assert_eq!(books.lock().unwrap().state().documents().count(), 1);
+    }
+}
+
+/// SR-087: billd's journal is sealed under `BILLD_DATA_KEY`. A received CDR
+/// carries what identifies the driver's card, an invoice the debtor's name and
+/// IBAN; none of it is on disk in the clear, and a journal written under
+/// another key is refused rather than folded.
+mod sealed {
+    use std::sync::Arc;
+
+    use billd::Books;
+    use emob_billing::invoice::PaymentDetails;
+    use emob_service::Actor;
+    use emob_service::journal::File;
+    use emob_service::vault::{DataKey, Sealing};
+
+    use super::{ChartOfAccounts, Numbering, Scratch, cpo, date, dec, driver, month, ops};
+
+    const UID: &str = "04A1B2C3D4E5F6";
+    const IBAN: &str = "DE89370400440532013000";
+    const RECEIPT: &str = "http://127.0.0.1:9001/r/receipt-token-of-the-driver";
+
+    fn books(scratch: &Scratch, key: &Arc<DataKey>) -> Result<Books<Sealing<File>>, String> {
+        Books::open(
+            "emob",
+            Numbering::series("R", 2026),
+            ChartOfAccounts::new(),
+            Sealing::new(
+                File::open(&scratch.0).expect("the journal opens"),
+                Arc::clone(key),
+                "billd/journal",
+            ),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn sr_087_billds_journal_holds_no_uid_no_debtor_name_and_no_iban() {
+        let scratch = Scratch::new("sealed");
+        let key = Arc::new(DataKey::from_bytes(&[4; 32]));
+        let partner = emob_core::PartyId::new("DE", "MSP").unwrap();
+        let june = month("0.49");
+        {
+            let mut held = books(&scratch, &key).expect("an empty journal folds");
+            for cdr in june.iter() {
+                let mut cdr = cdr.clone();
+                cdr.authorization_reference = Some(UID.to_owned());
+                assert!(
+                    held.receive(
+                        &Actor::service("csmsd"),
+                        cdr,
+                        partner.clone(),
+                        Some(RECEIPT.to_owned())
+                    )
+                    .unwrap()
+                );
+            }
+            held.issue(&ops(), "2026-06", |number| {
+                Ok(emob_billing::InvoiceBuilder::new(
+                    number,
+                    date!(2026 - 07 - 01),
+                    (date!(2026 - 06 - 01), date!(2026 - 06 - 30)),
+                    cpo(),
+                    driver(),
+                )
+                .supplied_from("DE", dec("19"))
+                .ledger(&june)
+                .due_on(date!(2026 - 07 - 15))
+                .paid_by(PaymentDetails::DirectDebit {
+                    mandate_reference: "MANDATE-1".to_owned(),
+                    creditor_identifier: "DE98ZZZ09999999999".to_owned(),
+                    debited_iban: IBAN.to_owned(),
+                })
+                .build()?
+                .value)
+            })
+            .expect("June closes");
+        }
+
+        let text = std::fs::read_to_string(&scratch.0).expect("the journal is on disk");
+        for secret in [UID, IBAN, "Erika Mustermann", "Nebenweg 7", RECEIPT] {
+            assert!(!text.contains(secret), "billd.ndjson holds {secret}");
+        }
+        // The kinds stay readable: the file says what happened, not to whom.
+        assert!(text.contains(r#""received""#) && text.contains(r#""issued""#));
+
+        // Under its own key the books come back whole.
+        let back = books(&scratch, &key).expect("the journal folds under its key");
+        assert_eq!(back.state().received().count(), 3);
+        assert_eq!(back.state().documents().count(), 1);
+
+        // Under another key they do not come back at all.
+        let foreign = Arc::new(DataKey::from_bytes(&[5; 32]));
+        let refused = books(&scratch, &foreign).expect_err("a foreign key reads nothing");
+        assert!(refused.contains("data key"), "{refused}");
+    }
+
+    /// The daemon itself: no `BILLD_DATA_KEY`, no billd — naming the variable.
+    #[tokio::test]
+    async fn sr_087_billd_refuses_to_start_without_its_data_key() {
+        let scratch = Scratch::new("no-key");
+        let estate: billd::daemon::Estate =
+            emob_service::estate::from_str(include_str!("../../../deploy/estate.example.toml"))
+                .expect("the demo estate");
+        let env: emob_service::estate::Env = Arc::new(|name| match name {
+            "EMOB_WEBHOOK_SECRET" => Some("whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQ=".to_owned()),
+            "EMOB_OPERATOR_TOKEN" => Some("operator".to_owned()),
+            _ => None,
+        });
+        let refused = billd::daemon::run(billd::daemon::Options {
+            http: "127.0.0.1:0".parse().unwrap(),
+            journal: scratch.0.clone(),
+            estate,
+            env,
+            shutdown: emob_service::Shutdown::new(),
+            identity: emob_service::Identity::new("billd", "test"),
+        })
+        .await
+        .err()
+        .expect("billd does not start without a data key");
+        assert!(
+            format!("{refused:#}").contains(billd::daemon::DATA_KEY),
+            "{refused:#}"
+        );
+    }
+}
+
+/// Spec 008: billd's journal signs where it ends, so the one edit the chain
+/// cannot see — records cut off the end — stops the daemon (SR-096), and the
+/// signed head is an operator's read like every other (SR-103).
+mod signed {
+    use std::io::{Read as _, Write as _};
+    use std::sync::Arc;
+
+    use billd::Books;
+    use emob_service::head::{self, Signing, SigningKey};
+    use emob_service::journal::File;
+    use emob_service::vault::{DataKey, Sealing};
+
+    use super::{ChartOfAccounts, Numbering, Scratch, closing, date, driver, month, ops};
+
+    const SEED: [u8; 32] = [7; 32];
+
+    fn books(scratch: &Scratch) -> Result<Books<billd::daemon::Journal>, String> {
+        let sealed = Sealing::new(
+            File::open(&scratch.0).expect("the journal opens"),
+            Arc::new(DataKey::from_bytes(&[4; 32])),
+            "billd/journal",
+        );
+        let journal = Signing::open(
+            sealed,
+            SigningKey::from_seed(&SEED, "billd"),
+            head::beside(&scratch.0),
+        )
+        .map_err(|error| error.to_string())?;
+        Books::open(
+            "emob",
+            Numbering::series("R", 2026),
+            ChartOfAccounts::new(),
+            journal,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn sr_096_a_journal_cut_by_one_record_does_not_start() {
+        let scratch = Scratch::new("cut");
+        let june = month("0.49");
+        {
+            let mut books = books(&scratch).expect("an empty journal opens");
+            let number = books
+                .issue(&ops(), "2026-06", closing(&june, driver()))
+                .expect("June closes");
+            books
+                .accepted(&ops(), &number, date!(2026 - 07 - 02), None)
+                .expect("taken");
+            books.book(&ops(), &number).expect("booked");
+        }
+        drop(books(&scratch).expect("a whole journal opens again"));
+
+        // The last record goes; every record left still chains.
+        let text = std::fs::read_to_string(&scratch.0).expect("read");
+        let kept: Vec<&str> = text.lines().collect();
+        assert_eq!(kept.len(), 3);
+        std::fs::write(&scratch.0, format!("{}\n", kept[..2].join("\n"))).expect("cut");
+
+        let refused = books(&scratch).expect_err("a cut journal is not the history billd signed");
+        assert!(
+            refused.contains("holds 2 records") && refused.contains("signed a head at 3"),
+            "{refused}"
+        );
+    }
+
+    fn get(addr: std::net::SocketAddr, path: &str, token: Option<&str>) -> String {
+        let mut stream = std::net::TcpStream::connect(addr).expect("connects");
+        let auth = token.map_or_else(String::new, |t| format!("authorization: Bearer {t}\r\n"));
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nhost: billd\r\n{auth}connection: close\r\n\r\n"
+        )
+        .expect("sent");
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).expect("answered");
+        answer
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sr_103_the_signed_head_is_an_operators_read() {
+        let scratch = Scratch::new("head");
+        let estate: billd::daemon::Estate =
+            emob_service::estate::from_str(include_str!("../../../deploy/estate.example.toml"))
+                .expect("the demo estate");
+        let data = DataKey::generate();
+        let signing = SigningKey::generate();
+        let env: emob_service::estate::Env = Arc::new(move |name| match name {
+            "EMOB_WEBHOOK_SECRET" => Some("whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQ=".to_owned()),
+            "EMOB_OPERATOR_TOKEN" => Some("operator-token-of-the-test".to_owned()),
+            billd::daemon::DATA_KEY => Some(data.clone()),
+            "BILLD_SIGNING_KEY" => Some(signing.clone()),
+            _ => None,
+        });
+        let running = billd::daemon::run(billd::daemon::Options {
+            http: "127.0.0.1:0".parse().unwrap(),
+            journal: scratch.0.clone(),
+            estate,
+            env,
+            shutdown: emob_service::Shutdown::new(),
+            identity: emob_service::Identity::new("billd", "test"),
+        })
+        .await
+        .expect("billd starts with its keys");
+        let addr = running.http;
+
+        let (anonymous, operator) = tokio::task::spawn_blocking(move || {
+            (
+                get(addr, "/v1/billd/head", None),
+                get(addr, "/v1/billd/head", Some("operator-token-of-the-test")),
+            )
+        })
+        .await
+        .expect("asked");
+        running.kill();
+
+        assert!(anonymous.starts_with("HTTP/1.1 401"), "{anonymous}");
+        assert!(operator.starts_with("HTTP/1.1 200"), "{operator}");
+        assert!(operator.contains("emob/billd\n0\n"), "{operator}");
+    }
+}
+
+/// Spec 010: the invoice reaches its recipient — the page, its files and the
+/// signed handover to the operator system (SR-116..SR-122).
+mod an_invoice_reaches_its_recipient {
+    use std::sync::{Arc, Mutex};
+
+    use billd::Books;
+    use billd::daemon::{Estate, close_what_is_due};
+    use billd::deliver::Dispatcher;
+    use billd::invoice_page::{self, Invoices};
+    use emob_billing::Syntax;
+    use emob_service::Actor;
+    use emob_service::estate::{InvoiceContact, InvoiceSpecification, InvoiceSyntax, MandateSeed};
+    use emob_service::journal::Memory;
+    use emob_service::webhook;
+    use time::macros::date;
+
+    const DEBTOR_IBAN: &str = "DE02120300000000202051";
+    const SECRET: &str = "whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQ=";
+
+    /// The example estate, with its partner on XRechnung and a mandate.
+    fn estate(xrechnung_complete: bool) -> Estate {
+        let mut estate: Estate =
+            emob_service::estate::from_str(include_str!("../../../deploy/estate.example.toml"))
+                .expect("the example estate");
+        estate.billing.seller.electronic_address = Some("rechnung@abc.example".to_owned());
+        estate.billing.contact = Some(InvoiceContact {
+            name: "Rechnungswesen".to_owned(),
+            phone: "+49 30 1234567".to_owned(),
+            email: "rechnung@abc.example".to_owned(),
+        });
+        estate.billing.creditor_id = Some("DE98ZZZ09999999999".to_owned());
+        let partner = &mut estate.partners[0];
+        partner.specification = InvoiceSpecification::Xrechnung;
+        partner.billing.electronic_address = Some("ap@msp.example".to_owned());
+        partner.mandate = Some(MandateSeed {
+            reference: "MSP-2026-01".to_owned(),
+            iban: DEBTOR_IBAN.to_owned(),
+        });
+        if xrechnung_complete {
+            partner.buyer_reference = Some("MSP-AP-4711".to_owned());
+        }
+        estate
+    }
+
+    /// June delivered with receipt links, and closed on 1 July.
+    fn closed(estate: &Estate) -> Arc<Mutex<Books<Memory>>> {
+        let books = Arc::new(Mutex::new(
+            Books::open(
+                "emob",
+                billd::Numbering::series("R", 2026),
+                billd::ChartOfAccounts::new(),
+                Memory::new(),
+            )
+            .unwrap(),
+        ));
+        let partner = estate.partners[0].party.clone();
+        for (n, cdr) in super::month("0.49").iter().enumerate() {
+            books
+                .lock()
+                .unwrap()
+                .receive(
+                    &Actor::service("csmsd"),
+                    cdr.clone(),
+                    partner.clone(),
+                    Some(format!("https://csms.example/r/receipt-{n}")),
+                )
+                .unwrap();
+        }
+        close_what_is_due(&books, estate, date!(2026 - 07 - 01));
+        books
+    }
+
+    async fn serve(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn valid(xml: &str) -> bool {
+        let read = en16931_formats::read(xml.as_bytes()).expect("a document en16931 reads");
+        en16931::validate(&read.invoice).is_valid()
+    }
+
+    #[test]
+    fn sr_122_a_month_its_partners_specification_rejects_is_not_issued() {
+        // XRechnung needs a buyer reference (BR-DE-15); without one the
+        // closing is refused while the document is only a spent number.
+        let incomplete = estate(false);
+        let books = closed(&incomplete);
+        assert_eq!(books.lock().unwrap().state().documents().count(), 0);
+        let closing = billd::daemon::closing(
+            &incomplete,
+            &incomplete.partners[0],
+            2026,
+            time::Month::June,
+            date!(2026 - 07 - 01),
+        );
+        let refused = books
+            .lock()
+            .unwrap()
+            .close(&Actor::Timer, &closing)
+            .expect_err("XRechnung without BT-10");
+        assert!(refused.to_string().contains("BR-DE-15"), "{refused}");
+        let books = closed(&estate(true));
+        let state = books.lock().unwrap();
+        let issued = state.state().documents().next().expect("June is closed");
+        assert_eq!(issued.specification, emob_billing::Specification::XRechnung);
+    }
+
+    #[tokio::test]
+    async fn sr_116_sr_117_the_page_shows_the_bill_and_nothing_more() {
+        let estate = estate(true);
+        let books = closed(&estate);
+        let invoices = Arc::new(Invoices::ephemeral(None).unwrap());
+        let number = books
+            .lock()
+            .unwrap()
+            .state()
+            .documents()
+            .next()
+            .unwrap()
+            .invoice
+            .number
+            .clone();
+        let base = serve(invoice_page::router(
+            Arc::clone(&books),
+            Arc::clone(&invoices),
+        ))
+        .await;
+        let client = reqwest::Client::new();
+        let path = invoices.path(&number);
+
+        let page = client.get(format!("{base}{path}")).send().await.unwrap();
+        assert_eq!(page.status(), 200);
+        let headers = page.headers().clone();
+        assert_eq!(headers["x-robots-tag"], "noindex, nofollow");
+        assert_eq!(headers["cache-control"], "no-store");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        let html = page.text().await.unwrap();
+        assert!(html.len() < 30_000, "{} bytes", html.len());
+        assert!(
+            html.contains(&number) && html.contains("fällig am"),
+            "German first"
+        );
+        assert!(html.contains("SEPA-Lastschrift") && html.contains("DE…2051"));
+        assert!(!html.contains(DEBTOR_IBAN), "the debtor IBAN is masked");
+        for n in 0..3 {
+            assert!(html.contains(&format!("https://csms.example/r/receipt-{n}")));
+        }
+        assert!(html.contains("XRechnung 3.0 · UBL") && !html.contains("<script"));
+        let english = client
+            .get(format!("{base}{path}?lang=en"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(english.contains("due on"));
+
+        // Both files are XRechnung that en16931 reads back and validates.
+        for (file, syntax) in [("ubl.xml", Syntax::Ubl), ("cii.xml", Syntax::Cii)] {
+            let answer = client
+                .get(format!("{base}{path}/{file}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(answer.status(), 200);
+            assert!(
+                answer.headers()["content-disposition"]
+                    .to_str()
+                    .unwrap()
+                    .contains("xrechnung")
+            );
+            let xml = answer.text().await.unwrap();
+            assert!(valid(&xml), "{file}");
+            let state = books.lock().unwrap();
+            let issued = state.state().issued(&number).unwrap();
+            assert_eq!(xml, invoice_page::file(issued, syntax).unwrap());
+        }
+
+        // An unknown or malformed token is the router's own empty 404.
+        let unrouted = client.get(format!("{base}/nowhere")).send().await.unwrap();
+        for wrong in [
+            "/i/AAAAAAAAAAAAAAAAAAAAAA",
+            "/i/short",
+            "/i/AAAAAAAAAAAAAAAAAAAAAA/ubl.xml",
+        ] {
+            let answer = client.get(format!("{base}{wrong}")).send().await.unwrap();
+            assert_eq!(answer.status(), 404, "{wrong}");
+            assert_eq!(answer.headers().len(), unrouted.headers().len(), "{wrong}");
+            assert!(answer.text().await.unwrap().is_empty(), "{wrong}");
+        }
+    }
+
+    #[tokio::test]
+    async fn sr_118_a_flood_is_answered_429() {
+        let books = closed(&estate(true));
+        let invoices = Arc::new(Invoices::ephemeral(None).unwrap());
+        let base = serve(invoice_page::router_limited(books, invoices, 2)).await;
+        let client = reqwest::Client::new();
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            let answer = client
+                .get(format!("{base}/i/AAAAAAAAAAAAAAAAAAAAAA"))
+                .send()
+                .await
+                .unwrap();
+            statuses.push(answer.status().as_u16());
+        }
+        assert_eq!(statuses.last(), Some(&429), "{statuses:?}");
+    }
+
+    /// A receiver answering from a script, keeping what it was sent.
+    #[derive(Clone, Default)]
+    struct Receiver {
+        answers: Arc<Mutex<Vec<(u16, String)>>>,
+        seen: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    async fn receiver(answers: Vec<(u16, &str)>) -> (String, Receiver) {
+        let held = Receiver {
+            answers: Arc::new(Mutex::new(
+                answers
+                    .into_iter()
+                    .rev()
+                    .map(|(s, b)| (s, b.to_owned()))
+                    .collect(),
+            )),
+            ..Receiver::default()
+        };
+        let state = held.clone();
+        let router = axum::Router::new().route(
+            "/in",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let state = state.clone();
+                    async move {
+                        let secret = webhook::Secret::standard(SECRET).unwrap();
+                        let id = webhook::receive(
+                            &headers,
+                            &body,
+                            &[secret],
+                            time::OffsetDateTime::now_utc(),
+                            time::Duration::minutes(5),
+                        )
+                        .expect("signed with the estate's secret");
+                        state
+                            .seen
+                            .lock()
+                            .unwrap()
+                            .push((id, String::from_utf8(body.to_vec()).unwrap()));
+                        let (status, text) = state
+                            .answers
+                            .lock()
+                            .unwrap()
+                            .pop()
+                            .unwrap_or((200, String::new()));
+                        (axum::http::StatusCode::from_u16(status).unwrap(), text)
+                    }
+                },
+            ),
+        );
+        (format!("{}/in", serve(router).await), held)
+    }
+
+    fn dispatcher(url: &str) -> Dispatcher {
+        Dispatcher::new(
+            url,
+            webhook::Secret::standard(SECRET).unwrap(),
+            InvoiceSyntax::Ubl,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn sr_119_sr_120_a_retry_then_an_acceptance_books_the_invoice_once() {
+        let books = closed(&estate(true));
+        let invoices = Invoices::ephemeral(None).unwrap();
+        let (url, held) = receiver(vec![
+            (503, "starting"),
+            (200, r#"{"reference":"PEPPOL-1"}"#),
+        ])
+        .await;
+        let dispatcher = dispatcher(&url);
+
+        assert_eq!(
+            dispatcher.drain(&books, &invoices).await,
+            0,
+            "a 503 records nothing"
+        );
+        assert_eq!(dispatcher.drain(&books, &invoices).await, 1);
+        assert_eq!(
+            dispatcher.drain(&books, &invoices).await,
+            0,
+            "nothing is pending"
+        );
+        let seen = held.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "the third drain sent nothing");
+
+        let state = books.lock().unwrap();
+        let issued = state.state().documents().next().unwrap();
+        assert_eq!(seen[1].0, issued.invoice.number, "webhook-id is the number");
+        assert_eq!(seen[1].1, invoice_page::file(issued, Syntax::Ubl).unwrap());
+        assert!(matches!(
+            &issued.submission,
+            billd::Submission::Accepted { reference: Some(r), .. } if r == "PEPPOL-1"
+        ));
+        assert!(issued.booked, "accepted, then booked");
+    }
+
+    #[tokio::test]
+    async fn sr_120_a_final_refusal_is_recorded_and_not_booked() {
+        let books = closed(&estate(true));
+        let invoices = Invoices::ephemeral(None).unwrap();
+        let (url, _held) = receiver(vec![(422, "BR-DE-15 missing")]).await;
+        assert_eq!(dispatcher(&url).drain(&books, &invoices).await, 1);
+        let state = books.lock().unwrap();
+        let issued = state.state().documents().next().unwrap();
+        assert!(matches!(
+            &issued.submission,
+            billd::Submission::Rejected { reason, .. } if reason.contains("BR-DE-15")
+        ));
+        assert!(!issued.booked);
+    }
+
+    #[test]
+    fn sr_121_a_remote_plain_http_target_is_refused() {
+        let refused = Dispatcher::new(
+            "http://erp.example/in",
+            webhook::Secret::standard(SECRET).unwrap(),
+            InvoiceSyntax::Ubl,
+            std::time::Duration::from_secs(5),
+        );
+        assert!(refused.is_err());
+    }
 }

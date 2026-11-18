@@ -39,8 +39,8 @@
 //! onto its own chart. SKR03 and SKR04 disagree about the numbers, and posting
 //! into a journal needs a journal: accounts, a calendar, a policy, a database.
 //! None of those can live in a crate that reads no clock — and a bookkeeping
-//! engine would bring one in through the door, since a v7 identifier is
-//! generated from `SystemTime::now()`. See [`postings`].
+//! engine would bring ambient state in through the door, since `doubleentry`
+//! salts its memos from the OS random source. See [`postings`].
 //!
 //! # A month, end to end
 //!

@@ -25,7 +25,7 @@
 //! # The four properties that make this trustworthy
 //!
 //! **Every duty carries its citation.** `cargo xtask check-citations` fails the
-//! build if a citation names a document `specs/README.md` does not index — so a
+//! build if a citation names a document `concepts/REFERENCES.md` does not index — so a
 //! rule can always be followed to a file, a section and a retrieval URL. A rule
 //! citing a Verordnung nobody can produce is indistinguishable from one
 //! somebody invented.
@@ -171,6 +171,12 @@ pub enum ObligationId {
     PangvAdditionalPricesAdjacent,
     /// THG-Quote requires a register entry and third-party access.
     ThgEligibility,
+    /// Fed-back energy is relieved of levies only under a Formelsatz with its
+    /// Messkonzept.
+    MispelMeteringConcept,
+    /// …and, until 30.09.2027, only with the grid and metering operators'
+    /// consent.
+    MispelOperatorConsent,
     /// A steuerbare Verbrauchseinrichtung has to be equipped so that it is
     /// always controllable.
     EnwgSteuVeControllable,
@@ -238,6 +244,8 @@ impl ObligationId {
             Self::PangvArbeitspreisBeforeStart => "pangv-arbeitspreis-before-start",
             Self::PangvAdditionalPricesAdjacent => "pangv-additional-prices-adjacent",
             Self::ThgEligibility => "thg-eligibility",
+            Self::MispelMeteringConcept => "mispel-metering-concept",
+            Self::MispelOperatorConsent => "mispel-operator-consent",
             Self::EnwgSteuVeControllable => "enwg-steuve-controllable",
             Self::EnwgSteuVeGridPriority => "enwg-steuve-grid-priority",
             Self::Nis2Registration => "nis2-registration",
@@ -360,7 +368,10 @@ pub struct Obligation {
     pub consequence: Consequence,
     /// A one-line statement of the duty.
     pub title: &'static str,
-    /// The citation, in the form `specs/README.md` indexes.
+    /// The same statement in German, in the regulation's own terms — what a
+    /// German operator page shows.
+    pub title_de: &'static str,
+    /// The citation, in the form `concepts/REFERENCES.md` indexes.
     pub citation: &'static str,
     /// The first day the duty binds.
     pub applies_from: Date,
@@ -618,6 +629,15 @@ const CRA_REPORTING_APPLIES: Date = date!(2026 - 09 - 11);
 /// `[CRA Art. 71(2)]` — "Diese Verordnung gilt ab dem 11. Dezember 2027."
 const CRA_APPLIES: Date = date!(2027 - 12 - 11);
 
+/// `[MiSpeL Tenor 8]` — the Festlegung of 01.10.2026 takes effect with its
+/// Bekanntgabe, which `[EnWG §73]` Abs. 1a places two weeks after the
+/// Amtsblatt 19/2026 of 07.10.2026.
+const MISPEL_IN_EFFECT: Date = date!(2026 - 10 - 21);
+
+/// `[MiSpeL Tenor 9]` a) — "bis zum 30.09.2027 nur anwendbar, wenn … im
+/// Einverständnis mit dem jeweiligen Netzbetreiber und Messstellenbetreiber".
+const MISPEL_CONSENT_UNTIL: Date = date!(2027 - 09 - 30);
+
 /// The calendar itself.
 ///
 /// A `const` table so the whole rule set is visible in one screen and reviewed
@@ -629,6 +649,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirAdHocAccess,
         consequence: Consequence::Breach,
         title: "Ad-hoc charging must be possible without a contract",
+        title_de: "Ad-hoc-Laden ohne Vertrag ermöglichen",
         citation: "[AFIR Art. 5(1)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -646,6 +667,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirPaymentInstrument,
         consequence: Consequence::Breach,
         title: "A point deployed from 13.04.2024 needs a payment instrument widely used in the Union",
+        title_de: "Ladepunkt ab 13.04.2024: in der Union verbreitetes Zahlungsinstrument",
         citation: "[AFIR Art. 5(1)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -666,6 +688,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirPaymentInstrumentRetrofit,
         consequence: Consequence::Breach,
         title: "Points of at least 50 kW on TEN-T or a safe and secure parking area must be retrofitted",
+        title_de: "Ladepunkte ab 50 kW an TEN-V oder sicheren Parkflächen nachrüsten",
         citation: "[AFIR Art. 5(1)]",
         applies_from: date!(2027 - 01 - 01),
         applies_until: None,
@@ -700,6 +723,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirAutomaticAuthenticationOptOut,
         consequence: Consequence::Breach,
         title: "Where automatic authentication is offered, the right not to use it must be shown",
+        title_de: "Auf das Recht hinweisen, automatische Authentifizierung abzulehnen",
         citation: "[AFIR Art. 5(2)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -721,6 +745,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirNonDiscriminatoryPricing,
         consequence: Consequence::Breach,
         title: "Prices must not discriminate between end users and providers, or between providers",
+        title_de: "Keine Preisdiskriminierung von Endnutzern und Mobilitätsdienstleistern",
         citation: "[AFIR Art. 5(3)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -752,6 +777,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirEnergyBasedAdHocPrice,
         consequence: Consequence::Breach,
         title: "At 50 kW and above the ad-hoc price must be based on a price per kWh",
+        title_de: "Ab 50 kW den Ad-hoc-Preis auf Basis des Preises pro kWh bilden",
         citation: "[AFIR Art. 5(4)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -775,6 +801,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirPriceShownAtStation,
         consequence: Consequence::Breach,
         title: "At 50 kW and above the price per kWh and any occupancy fee must be shown at the station",
+        title_de: "Ab 50 kW Preis pro kWh und Belegungsgebühr an der Ladestation anzeigen",
         citation: "[AFIR Art. 5(4)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -793,6 +820,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirPriceComponentsInOrder,
         consequence: Consequence::Breach,
         title: "Below 50 kW every price component must be available, in the prescribed order",
+        title_de: "Unter 50 kW alle Preisbestandteile in vorgegebener Reihenfolge nennen",
         citation: "[AFIR Art. 5(4)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -811,6 +839,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirMspPriceDisclosure,
         consequence: Consequence::Breach,
         title: "A provider must disclose every price component before the session, e-roaming costs included",
+        title_de: "Alle Preisbestandteile samt Roamingkosten vor dem Laden offenlegen",
         citation: "[AFIR Art. 5(5)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -828,6 +857,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirMspNoCrossBorderSurcharge,
         consequence: Consequence::Breach,
         title: "A provider may not apply any extra charge for cross-border e-roaming",
+        title_de: "Keine Zusatzentgelte für grenzüberschreitendes E-Roaming erheben",
         citation: "[AFIR Art. 5(5)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -843,6 +873,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EichrechtValueUserConfirmation,
         consequence: Consequence::Breach,
         title: "A provider billing on somebody else's meter owes a confirmation from its operator",
+        title_de: "Messwertverwender holt Bestätigung des Messgeräteverwenders ein",
         citation: "[MessEG §33(2)]",
         applies_from: EICHRECHT_ENFORCED,
         applies_until: None,
@@ -870,6 +901,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirDigitallyConnected,
         consequence: Consequence::Breach,
         title: "Every publicly accessible point must be a digitally-connected recharging point",
+        title_de: "Jeder öffentlich zugängliche Ladepunkt muss digital vernetzt sein",
         citation: "[AFIR Art. 5(7)]",
         applies_from: AFIR_DIGITAL_CONNECTION,
         applies_until: None,
@@ -883,6 +915,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirSmartRecharging,
         consequence: Consequence::Breach,
         title: "Points built after 13.04.2024 or renovated after 14.10.2024 must be capable of smart recharging",
+        title_de: "Neue (ab 13.04.2024) und renovierte Ladepunkte: intelligentes Laden",
         citation: "[AFIR Art. 5(8)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -905,6 +938,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirFixedCableOnDc,
         consequence: Consequence::Breach,
         title: "Every publicly accessible DC point must have a fixed recharging cable installed",
+        title_de: "Öffentlich zugängliche DC-Ladepunkte mit fest angebrachtem Ladekabel",
         citation: "[AFIR Art. 5(10)]",
         applies_from: AFIR_DATA_AND_CABLES,
         applies_until: None,
@@ -918,6 +952,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirOwnerEnablesCompliance,
         consequence: Consequence::Breach,
         title: "A third-party owner must supply a point whose characteristics let the operator comply with 5(2), (7), (8) and (10)",
+        title_de: "Eigentümer liefert Ladepunkt, mit dem der Betreiber Art. 5 erfüllt",
         citation: "[AFIR Art. 5(11)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -953,6 +988,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirAnnexIiConnector,
         consequence: Consequence::Breach,
         title: "A point must carry the interface Annex II names for its current, power and vehicle class",
+        title_de: "Schnittstelle nach Anhang II für Stromart, Leistung und Fahrzeugklasse",
         citation: "[AFIR Art. 21(1)]",
         applies_from: AFIR_APPLIES,
         applies_until: None,
@@ -975,6 +1011,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirStaticData,
         consequence: Consequence::Breach,
         title: "Static data must be available free of charge",
+        title_de: "Statische Daten kostenlos bereitstellen",
         citation: "[AFIR Art. 20(2)]",
         applies_from: AFIR_DATA_AND_CABLES,
         applies_until: None,
@@ -988,6 +1025,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirDynamicData,
         consequence: Consequence::Breach,
         title: "Dynamic data — status, availability, ad-hoc price, renewable share — must be available free of charge",
+        title_de: "Dynamische Daten wie Status und Ad-hoc-Preis kostenlos bereitstellen",
         citation: "[AFIR Art. 20(2)]",
         applies_from: AFIR_DATA_AND_CABLES,
         applies_until: None,
@@ -1005,6 +1043,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirDataApi,
         consequence: Consequence::Breach,
         title: "An API giving free and unrestricted access to the data must be registered with the national access point",
+        title_de: "Datenschnittstelle beim nationalen Zugangspunkt registrieren",
         citation: "[AFIR Art. 20(3)]",
         applies_from: AFIR_DATA_AND_CABLES,
         applies_until: None,
@@ -1018,6 +1057,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::AfirDatex2,
         consequence: Consequence::Breach,
         title: "The national-access-point feed must use the DATEX II Recharging profile",
+        title_de: "Daten am nationalen Zugangspunkt im DATEX-II-Profil Recharging liefern",
         citation: "[DATEX-II-Profil]",
         applies_from: DATEX2_MANDATORY,
         applies_until: None,
@@ -1032,6 +1072,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Da656Iso15118Dash2,
         consequence: Consequence::Breach,
         title: "Public points installed or renovated from 08.01.2026 must implement EN ISO 15118-1…-5",
+        title_de: "Öffentliche Ladepunkte ab 08.01.2026: EN ISO 15118-1 bis -5 umsetzen",
         citation: "[DA-656 Anh. 2.1.1]",
         applies_from: DA656_APPLIES,
         applies_until: None,
@@ -1050,6 +1091,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Da656Iso15118Dash20Public,
         consequence: Consequence::Breach,
         title: "Public points installed or renovated from 01.01.2027 must implement EN ISO 15118-20",
+        title_de: "Öffentliche Ladepunkte ab 01.01.2027: EN ISO 15118-20 umsetzen",
         citation: "[DA-656 Anh. 2.1.2]",
         applies_from: DA656_ISO20,
         applies_until: None,
@@ -1063,6 +1105,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Da656Iso15118Dash20Private,
         consequence: Consequence::Breach,
         title: "Private Mode 3/4 points installed or renovated from 01.01.2027 must implement EN ISO 15118-20",
+        title_de: "Private Ladepunkte (Mode 3/4) ab 01.01.2027: EN ISO 15118-20 umsetzen",
         citation: "[DA-656 Anh. 2.1.3]",
         applies_from: DA656_ISO20,
         applies_until: None,
@@ -1083,6 +1126,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Da656AutomaticAuthenticationBothGenerations,
         consequence: Consequence::Breach,
         title: "A point offering automatic authentication must support both EN ISO 15118-2 and -20",
+        title_de: "Automatische Authentifizierung: EN ISO 15118-2 und -20 unterstützen",
         citation: "[DA-656 Anh. 2.1.2]",
         applies_from: DA656_ISO20,
         applies_until: None,
@@ -1112,6 +1156,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Lsv2026TechnicalRequirements,
         consequence: Consequence::Breach,
         title: "Every publicly accessible point must meet the applicable technical requirements",
+        title_de: "Technische Anforderungen an öffentliche Ladepunkte einhalten",
         citation: "[LSV26 §3]",
         applies_from: LSV26_IN_FORCE,
         applies_until: None,
@@ -1127,6 +1172,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Lsv2026TechnicalEvidence,
         consequence: Consequence::Breach,
         title: "The operator must be able to prove compliance with § 3 on the regulator's request",
+        title_de: "Einhaltung von § 3 auf Verlangen der Bundesnetzagentur nachweisen",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
         applies_until: None,
@@ -1143,6 +1189,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Lsv2026CommissioningNotice,
         consequence: Consequence::Breach,
         title: "Commissioning must be notified to the regulator at the latest two weeks afterwards",
+        title_de: "Inbetriebnahme binnen zwei Wochen bei der Bundesnetzagentur anzeigen",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
         applies_until: None,
@@ -1166,6 +1213,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Lsv2026DecommissioningNotice,
         consequence: Consequence::Breach,
         title: "Decommissioning must be notified to the regulator without undue delay",
+        title_de: "Außerbetriebnahme unverzüglich der Bundesnetzagentur anzeigen",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
         applies_until: None,
@@ -1186,6 +1234,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Lsv2026OperatorChangeNotice,
         consequence: Consequence::Breach,
         title: "A change of operator must be notified by both the outgoing and the incoming operator",
+        title_de: "Betreiberwechsel durch bisherigen und neuen Betreiber anzeigen",
         citation: "[LSV26 §4]",
         applies_from: LSV26_IN_FORCE,
         applies_until: None,
@@ -1208,6 +1257,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EichrechtConformityAssessedMeter,
         consequence: Consequence::Breach,
         title: "Billing by energy requires a conformity-assessed meter",
+        title_de: "Abrechnung nach Energie nur mit konformitätsbewertetem Messgerät",
         citation: "[MessEG §33]",
         applies_from: EICHRECHT_ENFORCED,
         applies_until: None,
@@ -1221,6 +1271,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EichrechtVerifiableValues,
         consequence: Consequence::Breach,
         title: "The customer must be able to verify the billed measured value",
+        title_de: "Messwerte für den Kunden nachprüfbar halten",
         citation: "[PTB-A 50.7]",
         applies_from: EICHRECHT_ENFORCED,
         applies_until: None,
@@ -1241,6 +1292,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EichrechtVerificationPeriod,
         consequence: Consequence::Breach,
         title: "The meter's verification period must not have expired",
+        title_de: "Eichfrist des Messgeräts darf nicht abgelaufen sein",
         citation: "[MessEG §37(1)]",
         applies_from: EICHRECHT_ENFORCED,
         applies_until: None,
@@ -1265,6 +1317,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EichrechtInterventionRecords,
         consequence: Consequence::Breach,
         title: "Records of every intervention on the meter — firmware included — must be kept",
+        title_de: "Eingriffe am Messgerät, auch Firmware-Updates, dokumentieren",
         citation: "[MessEG §31(2)]",
         applies_from: EICHRECHT_ENFORCED,
         applies_until: None,
@@ -1291,6 +1344,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::ReaAcMeteringOnLegacyDcOnly,
         consequence: Consequence::Breach,
         title: "AC metering before the rectifier is only permitted in DC stations placed on the market before 2018 and rated at most 50 kW",
+        title_de: "AC-Messung vor Gleichrichter nur bei DC-Altgeräten vor 2018, bis 50 kW",
         citation: "[REA 6-A]",
         applies_from: REA_6A_PUBLISHED,
         applies_until: None,
@@ -1313,6 +1367,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::ReaRectificationAttributable,
         consequence: Consequence::Breach,
         title: "AC metering requires the rectification to belong to exactly one charging session",
+        title_de: "AC-Messung nur bei Gleichrichtung für genau einen Ladevorgang",
         citation: "[REA 6-A]",
         applies_from: REA_6A_PUBLISHED,
         applies_until: None,
@@ -1339,6 +1394,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::ReaRectificationLossDisclosed,
         consequence: Consequence::Breach,
         title: "The customer must be told at the point that rectification losses are part of the measured value",
+        title_de: "Am Ladepunkt auf Gleichrichterverluste im Messwert hinweisen",
         citation: "[REA 6-A]",
         applies_from: REA_6A_PUBLISHED,
         applies_until: None,
@@ -1368,6 +1424,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EnwgSteuVeControllable,
         consequence: Consequence::Breach,
         title: "A non-public point over 4.2 kW in low voltage must always be controllable",
+        title_de: "Nicht öffentlicher Ladepunkt über 4,2 kW in Niederspannung steuerbar",
         citation: "[BK6-22-300 Ziff. 4.6]",
         applies_from: STEUVE_APPLIES,
         applies_until: None,
@@ -1385,6 +1442,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::EnwgSteuVeGridPriority,
         consequence: Consequence::Breach,
         title: "The grid operator's reduction must outrank market-driven load control",
+        title_de: "Netzorientierte Steuerung hat Vorrang vor marktorientierter Steuerung",
         citation: "[BK6-22-300 Ziff. 4.6]",
         applies_from: STEUVE_APPLIES,
         applies_until: None,
@@ -1424,6 +1482,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::PangvArbeitspreisAtThePoint,
         consequence: Consequence::Breach,
         title: "The Arbeitspreis must be indicated at or beside every public point taking an ad-hoc payment",
+        title_de: "Arbeitspreis am öffentlichen Ladepunkt mit Ad-hoc-Zahlung angeben",
         citation: "[PAngV §14(2)]",
         applies_from: PANGV_IN_FORCE,
         applies_until: None,
@@ -1448,6 +1507,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::PangvArbeitspreisBeforeStart,
         consequence: Consequence::Breach,
         title: "A web-based ad-hoc system must state the Arbeitspreis before the session starts",
+        title_de: "Webbasiertes Ad-hoc-System: Arbeitspreis vor Ladebeginn angeben",
         citation: "[PAngV §14(2)]",
         applies_from: PANGV_IN_FORCE,
         applies_until: None,
@@ -1472,6 +1532,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::PangvAdditionalPricesAdjacent,
         consequence: Consequence::Breach,
         title: "Any further prices must be stated completely, in immediate vicinity of the Arbeitspreis",
+        title_de: "Weitere Preise vollständig in unmittelbarer Nähe zum Arbeitspreis",
         citation: "[PAngV §14(3)]",
         applies_from: PANGV_IN_FORCE,
         applies_until: None,
@@ -1505,6 +1566,7 @@ pub const CALENDAR: &[Obligation] = &[
         // last clause.
         consequence: Consequence::ForgoneEntitlement,
         title: "THG-Quote requires a publishable register entry, lawful metering and an issued operator code",
+        title_de: "THG-Quote: Registereintrag, rechtskonforme Messung, Betreiber-ID",
         citation: "[38k §6(3)]",
         applies_from: date!(2022 - 01 - 01),
         applies_until: None,
@@ -1519,6 +1581,42 @@ pub const CALENDAR: &[Obligation] = &[
             },
         },
         remedy: "publish the register entry or consent to its publication, sign the conformity declaration the authority provides, and obtain an operator identification code — or forgo the quota",
+    },
+    // ── MiSpeL: what a bidirectional point's fed-back energy is worth ──────
+    //
+    // Two entitlements, not duties. A point that feeds back without either
+    // has broken nothing; it pays the levies on all of its grid draw, which is
+    // the arithmetic `emob_session::mispel` refuses to do on its behalf.
+    Obligation {
+        id: ObligationId::MispelMeteringConcept,
+        consequence: Consequence::ForgoneEntitlement,
+        title: "Fed-back energy is relieved of levies only under a MiSpeL Formelsatz with its metering concept",
+        title_de: "MiSpeL: Umlagesaldierung nur mit Formelsatz und Messkonzept",
+        citation: "[MiSpeL A1 3.2.5]",
+        applies_from: MISPEL_IN_EFFECT,
+        applies_until: None,
+        rule: Rule::ChargePoint {
+            // A unidirectional point is ordinary consumption and "kann …
+            // unberücksichtigt bleiben"; only a point that can feed back needs
+            // "ein dafür geeignetes Messkonzept".
+            applicable: |p| p.mispel.bidirectional,
+            satisfied: |p, _| p.mispel.formelsatz.is_some(),
+        },
+        remedy: "settle the site under Anlage 1 A2 (a meter behind the bidirectional points as well as the grid meter) or A11 (the grid meter alone, no other generation) — or forgo the levy relief on the fed-back energy",
+    },
+    Obligation {
+        id: ObligationId::MispelOperatorConsent,
+        consequence: Consequence::ForgoneEntitlement,
+        title: "Until 30.09.2027 MiSpeL applies only with the grid and metering operators' consent",
+        title_de: "MiSpeL bis 30.09.2027 nur im Einverständnis von NB und MSB",
+        citation: "[MiSpeL Tenor 9]",
+        applies_from: MISPEL_IN_EFFECT,
+        applies_until: Some(MISPEL_CONSENT_UNTIL),
+        rule: Rule::ChargePoint {
+            applicable: |p| p.mispel.bidirectional,
+            satisfied: |p, _| p.mispel.operator_consent,
+        },
+        remedy: "obtain the consent of the grid operator and the Messstellenbetreiber in writing before claiming — or forgo the relief until 01.10.2027, when the condition lapses",
     },
     // ── NIS2: the duties that name this industry by its role ───────────────
     //
@@ -1535,6 +1633,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Nis2Registration,
         consequence: Consequence::Breach,
         title: "An undertaking in scope must give the competent authority its details",
+        title_de: "Als betroffene Einrichtung der zuständigen Behörde Angaben übermitteln",
         citation: "[NIS2 Art. 3(4)]",
         // The duty attaches when the law applies and the breach begins three
         // months later, because the German transposition says so in as many
@@ -1551,6 +1650,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Nis2RiskManagement,
         consequence: Consequence::Breach,
         title: "…and take all ten cybersecurity risk-management measures",
+        title_de: "…und alle zehn Risikomanagementmaßnahmen der Cybersicherheit ergreifen",
         citation: "[NIS2 Art. 21(2)]",
         applies_from: NIS2_DE_IN_FORCE,
         applies_until: None,
@@ -1566,6 +1666,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Nis2IncidentEarlyWarning,
         consequence: Consequence::Breach,
         title: "…and be able to warn the CSIRT within twenty-four hours of a significant incident",
+        title_de: "…und dem CSIRT binnen 24 Stunden eine Frühwarnung übermitteln können",
         citation: "[NIS2 Art. 23(4)]",
         applies_from: NIS2_DE_IN_FORCE,
         applies_until: None,
@@ -1579,6 +1680,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Nis2ManagementApproval,
         consequence: Consequence::Breach,
         title: "The management body must approve the measures and oversee their implementation",
+        title_de: "Leitungsorgan billigt die Maßnahmen und überwacht ihre Umsetzung",
         citation: "[NIS2 Art. 20(1)]",
         applies_from: NIS2_DE_IN_FORCE,
         applies_until: None,
@@ -1592,6 +1694,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::Nis2ManagementTraining,
         consequence: Consequence::Breach,
         title: "…and its members must attend cybersecurity training",
+        title_de: "…und seine Mitglieder nehmen an Cybersicherheitsschulungen teil",
         citation: "[NIS2 Art. 20(2)]",
         applies_from: NIS2_DE_IN_FORCE,
         applies_until: None,
@@ -1614,6 +1717,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::CraVulnerabilityReporting,
         consequence: Consequence::Breach,
         title: "A manufacturer must report an actively exploited vulnerability within twenty-four hours",
+        title_de: "Hersteller meldet aktiv ausgenutzte Schwachstellen binnen 24 Stunden",
         citation: "[CRA Art. 14]",
         applies_from: CRA_REPORTING_APPLIES,
         applies_until: None,
@@ -1627,6 +1731,7 @@ pub const CALENDAR: &[Obligation] = &[
         id: ObligationId::CraEssentialRequirements,
         consequence: Consequence::Breach,
         title: "…and place only conformity-assessed products with digital elements on the market",
+        title_de: "…und bringt nur konformitätsbewertete Produkte in Verkehr",
         citation: "[CRA Art. 13]",
         applies_from: CRA_APPLIES,
         applies_until: None,
@@ -1893,6 +1998,12 @@ mod tests {
             operator_code_assigned: true,
             further_identifiers: FurtherIdentifiers::NoneAnnounced,
         };
+        // Bidirectional, so the MiSpeL entries are judged rather than skipped.
+        point.mispel = crate::station::MispelPosture {
+            bidirectional: true,
+            formelsatz: Some(crate::station::Formelsatz::A2),
+            operator_consent: true,
+        };
         point
     }
 
@@ -2004,6 +2115,10 @@ mod tests {
     /// Judged on a date after the last `applies_from`, so the answer is about
     /// the rule rather than about the calendar.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one panel, one statement about the whole calendar; split, it would be two halves of one claim"
+    )]
     fn every_duty_can_be_failed_and_every_duty_can_be_met() {
         let on = after_everything();
 
@@ -2113,24 +2228,35 @@ mod tests {
         let mut surcharging = ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap());
         surcharging.surcharges_cross_border_roaming = true;
 
-        let panel = [
-            assess(&ChargePointProfile::bare(evse(), date!(2027 - 06 - 01)), on),
-            assess(&fast, on),
-            assess(&legacy, on),
-            assess(&private, on),
-            assess(&silent, on),
-            assess(&aged, on),
-            assess_provider(
-                &ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap()),
-                on,
-            ),
-            assess_provider(&surcharging, on),
-            assess_undertaking(&undertaking_doing_nothing(), on),
-        ];
-        let breachable: std::collections::BTreeSet<ObligationId> = panel
-            .iter()
-            .flat_map(Assessment::failing)
-            .map(|finding| finding.obligation.id)
+        // …and a point that feeds back with neither Formelsatz nor consent,
+        // judged also on the last day of every entry that ends.
+        let mut feeding_back = ChargePointProfile::bare(evse(), date!(2027 - 06 - 01));
+        feeding_back.mispel.bidirectional = true;
+        let days = core::iter::once(on).chain(CALENDAR.iter().filter_map(|o| o.applies_until));
+        let breachable: std::collections::BTreeSet<ObligationId> = days
+            .flat_map(|on| {
+                [
+                    assess(&ChargePointProfile::bare(evse(), date!(2027 - 06 - 01)), on),
+                    assess(&fast, on),
+                    assess(&legacy, on),
+                    assess(&private, on),
+                    assess(&silent, on),
+                    assess(&aged, on),
+                    assess(&feeding_back, on),
+                    assess_provider(
+                        &ProviderProfile::bare(PartyId::new("DE", "MSP").unwrap()),
+                        on,
+                    ),
+                    assess_provider(&surcharging, on),
+                    assess_undertaking(&undertaking_doing_nothing(), on),
+                ]
+            })
+            .flat_map(|assessment| {
+                assessment
+                    .failing()
+                    .map(|finding| finding.obligation.id)
+                    .collect::<Vec<_>>()
+            })
             .collect();
 
         let missing: Vec<ObligationId> = CALENDAR
@@ -2156,7 +2282,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_rule_in_the_calendar_is_not_a_duty() {
+    fn exactly_three_rules_in_the_calendar_are_not_duties() {
         // A distinction is worth having only when something acts on it, and
         // `verdict` acts on this one. Stated as a test so that adding a second
         // entitlement — a future subsidy, a grant precondition — is a decision
@@ -2166,7 +2292,16 @@ mod tests {
             .filter(|o| !o.consequence.is_breach())
             .map(|o| o.id)
             .collect();
-        assert_eq!(entitlements, vec![ObligationId::ThgEligibility]);
+        // The MiSpeL pair joined it on purpose: a point that feeds back
+        // without them pays the levies on its whole draw and breaks nothing.
+        assert_eq!(
+            entitlements,
+            vec![
+                ObligationId::ThgEligibility,
+                ObligationId::MispelMeteringConcept,
+                ObligationId::MispelOperatorConsent,
+            ]
+        );
 
         // …and every remedy for an entitlement says what forgoing it costs,
         // because "or forgo the quota" is the half that makes it optional.
@@ -2208,6 +2343,7 @@ mod tests {
             consequence: Consequence::Breach,
             id: ObligationId::AfirDatex2,
             title: "a duty with both ends",
+            title_de: "eine Pflicht mit zwei Enden",
             citation: "[AFIR Art. 20(2)(c)]",
             applies_from: date!(2026 - 01 - 01),
             applies_until: Some(date!(2026 - 12 - 31)),
@@ -3654,6 +3790,31 @@ mod tests {
     }
 
     #[test]
+    fn every_duty_has_a_german_title() {
+        // The German operator page reads `title_de`; an empty one, or one that
+        // is the English line copied over, would put English back on it.
+        assert_eq!(CALENDAR.len(), 51);
+        for o in CALENDAR {
+            assert!(
+                !o.title_de.trim().is_empty(),
+                "{}: needs a German title",
+                o.id
+            );
+            assert_ne!(
+                o.title_de, o.title,
+                "{}: the German title is a translation",
+                o.id
+            );
+            let chars = o.title_de.chars().count();
+            assert!(
+                chars <= 70,
+                "{}: German title is {chars} chars, at most 70",
+                o.id
+            );
+        }
+    }
+
+    #[test]
     fn in_force_grows_monotonically_over_the_calendar() {
         let early = in_force_on(date!(2024 - 01 - 01)).count();
         let mid = in_force_on(date!(2026 - 06 - 01)).count();
@@ -3661,10 +3822,12 @@ mod tests {
         assert!(early < mid && mid < late, "{early} {mid} {late}");
         // The last date in the calendar is `[CRA Art. 71(2)]`'s 11.12.2027, so
         // "everything" is a day in 2028 rather than mid-2027.
+        // …except the one entry whose window has closed by then: MiSpeL's
+        // consent condition lapses after 30.09.2027 `[MiSpeL Tenor 9]`.
         assert_eq!(
             in_force_on(date!(2028 - 01 - 01)).count(),
-            CALENDAR.len(),
-            "everything is in force once the Cyber Resilience Act applies"
+            CALENDAR.len() - 1,
+            "everything but the lapsed MiSpeL consent is in force once the Cyber Resilience Act applies"
         );
     }
 

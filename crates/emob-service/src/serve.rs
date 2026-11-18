@@ -136,7 +136,10 @@ impl Server {
             .route("/health/ready", get(ready))
             .route("/about", get(about))
             .with_state(infra);
-        self.routes.clone().merge(shell)
+        self.routes
+            .clone()
+            .merge(shell)
+            .layer(axum::middleware::from_fn(traced))
     }
 
     /// Bind and serve until the shutdown signal, then drain.
@@ -146,10 +149,23 @@ impl Server {
     /// [`ServerError`] when the address cannot be bound or the server stops
     /// with one.
     pub async fn listen(self, addr: SocketAddr) -> Result<(), ServerError> {
-        let router = self.router();
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|source| ServerError::Bind { addr, source })?;
+        self.serve_on(listener).await
+    }
+
+    /// Serve on a listener the caller bound — what a daemon started in-process
+    /// on port `0` uses, so it can say which port it got.
+    ///
+    /// # Errors
+    ///
+    /// [`ServerError::Serve`] when the server stops with one.
+    pub async fn serve_on(self, listener: tokio::net::TcpListener) -> Result<(), ServerError> {
+        let router = self.router();
+        let addr = listener
+            .local_addr()
+            .map_err(|source| ServerError::Serve { source })?;
 
         tracing::info!(
             daemon = self.identity.name,
@@ -181,6 +197,79 @@ impl Server {
             .await
             .map_err(|source| ServerError::Serve { source })
     }
+}
+
+/// The header a request id travels in, both ways.
+pub const REQUEST_ID: &str = "x-request-id";
+
+/// An inbound request id, when it is one a log line can carry as it is: 1 to
+/// 64 of `[A-Za-z0-9._-]`. Anything else — a newline, a quote, a kilobyte — is
+/// replaced by a fresh id rather than written into somebody's incident
+/// timeline (SR-102).
+fn request_id(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get(REQUEST_ID)
+        .and_then(|value| value.to_str().ok())
+        .filter(|id| {
+            (1..=64).contains(&id.len())
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        })
+        .map_or_else(
+            || {
+                let mut bytes = [0_u8; 16];
+                aws_lc_rs::rand::fill(&mut bytes)
+                    .unwrap_or_else(|_| unreachable!("the system RNG does not fail"));
+                hex::encode(bytes)
+            },
+            str::to_owned,
+        )
+}
+
+/// One span per request: its id, its method, the **route** it matched and —
+/// once a gate admitted somebody — the actor. Never the raw path: for
+/// `/r/{token}` that is a capability, and a query string can hold anything.
+async fn traced(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use tracing::Instrument as _;
+    let id = request_id(request.headers());
+    let route = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("(unrouted)", axum::extract::MatchedPath::as_str)
+        .to_owned();
+    let probe = route.starts_with("/health/");
+    let span = tracing::info_span!(
+        "request",
+        id = %id,
+        method = %request.method(),
+        route = %route,
+        actor = tracing::field::Empty,
+    );
+    let mut response = next.run(request).instrument(span.clone()).await;
+    let status = response.status().as_u16();
+    span.in_scope(|| {
+        if probe {
+            tracing::debug!(status, "answered");
+        } else {
+            tracing::info!(status, "answered");
+        }
+    });
+    if let Ok(value) = axum::http::HeaderValue::from_str(&id) {
+        response.headers_mut().insert(REQUEST_ID, value);
+    }
+    response
+}
+
+/// Say who a request is acting as: the [`crate::Actor`] a gate authenticated,
+/// as a request extension a handler takes with `Extension<Actor>`, and on the
+/// request's log span.
+pub fn acting(request: &mut axum::extract::Request, actor: crate::Actor) {
+    tracing::Span::current().record("actor", tracing::field::display(&actor));
+    request.extensions_mut().insert(actor);
 }
 
 /// Why a daemon could not serve.
@@ -246,6 +335,60 @@ async fn about(State(infra): State<Infra>) -> String {
     format!("{} {}", infra.identity.name, infra.identity.version)
 }
 
+/// Read a request's headers and body, refusing one over `limit` bytes with `413`.
+///
+/// On its declared `content-length` before a byte of it is read, and otherwise
+/// as soon as the bytes read pass the limit, so an endless body is never
+/// buffered whole.
+///
+/// # Errors
+///
+/// [`StatusCode::PAYLOAD_TOO_LARGE`].
+pub async fn read_bounded(
+    request: axum::extract::Request,
+    limit: usize,
+) -> Result<(axum::http::HeaderMap, axum::body::Bytes), StatusCode> {
+    let (parts, body) = request.into_parts();
+    let declared = parts
+        .headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared.is_some_and(|length| length > limit) {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    let bytes = axum::body::to_bytes(body, limit)
+        .await
+        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    Ok((parts.headers, bytes))
+}
+
+/// Put a daemon's read model behind the estate's operator tokens.
+///
+/// `401` without a body for anybody else — including everybody, when the estate
+/// names no operator: a read model nobody configured access to is one nobody
+/// may read, not one everybody may. An admitted request carries its operator
+/// as an [`crate::Actor`] extension ([`acting`]).
+pub fn operator_only(routes: Router, operators: crate::authority::Operators) -> Router {
+    routes.layer(axum::middleware::from_fn(
+        move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+            let operators = operators.clone();
+            async move {
+                let offered = request
+                    .headers()
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok());
+                if let Some(actor) = operators.admit(offered).cloned() {
+                    acting(&mut request, actor);
+                    next.run(request).await
+                } else {
+                    axum::response::IntoResponse::into_response(StatusCode::UNAUTHORIZED)
+                }
+            }
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +445,44 @@ mod tests {
             call(&mut router, "/about").await.1,
             "testd 0.1.0",
             "and the daemon says who it is"
+        );
+    }
+
+    #[tokio::test]
+    async fn sr_034_a_read_model_answers_its_operators_and_nobody_else() {
+        use crate::authority::{Operators, Token};
+        let model = Router::new().route("/v1/testd", get(|| async { "{}" }));
+        let mut guarded = operator_only(
+            model.clone(),
+            Operators::new(vec![(
+                crate::Actor::operator("ops").unwrap(),
+                Token::new("ops"),
+            )]),
+        );
+        let request = |token: Option<&str>| {
+            let mut builder = Request::builder().uri("/v1/testd");
+            if let Some(token) = token {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            builder.body(Body::empty()).unwrap()
+        };
+        let status = |response: axum::response::Response| response.status();
+        assert_eq!(
+            status(guarded.call(request(Some("ops"))).await.unwrap()),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(guarded.call(request(Some("guess"))).await.unwrap()),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(guarded.call(request(None)).await.unwrap()),
+            StatusCode::UNAUTHORIZED
+        );
+        let mut unconfigured = operator_only(model, Operators::default());
+        assert_eq!(
+            status(unconfigured.call(request(Some(""))).await.unwrap()),
+            StatusCode::UNAUTHORIZED
         );
     }
 }

@@ -1,64 +1,87 @@
 # sited
 
-**The site controller: the § 14a wire, both ends of it.** A grid operator writes
-a setpoint to a site over EEBUS; the site shares that power out among its charge
-points and tells each one what it may draw over OCPP.
+The site controller for § 14a EnWG: receives a grid operator's power limit over EEBUS, shares it among the site's charge points, and turns the result into OCPP charging profiles — designed to run at the site, next to the grid connection.
 
-Three crates own every rule in that sentence:
+## Status
+
+| | |
+|---|---|
+| ✅ library | `sited::Sited` reads an EEBUS limit write, tracks the LPC state with a watchdog, allocates power, produces OCPP charging profiles, and keeps the log of instructions and answers — tested in `tests/a_setpoint_arrives_over_the_wire.rs` |
+| ✅ daemon | starts with an **empty** site (0 kW connection, no devices) and logs the LPC state; `GET /v1/sited` shows that state to the estate's operators |
+| ⏳ not yet | the site register, the SHIP/EEBUS session (`eebus` with its `runtime` feature) and the OCPP leg. It has no journal, so the instruction log is in memory only |
+
+## What it owns
+
+Three crates own every rule; `sited` owns **when**, because telling a setpoint
+from a silence needs a clock and domain crates have none.
 
 | Crate | Owns |
 |---|---|
-| `emob-eebus` | the value, off SPINE's `ScaledNumber`, exactly — and which of `[LPC §2.3.2]`'s five states a silence has put the site in |
-| `emob-smart` | what the site may draw, and what it keeps a claim to `[BK6-22-300 Ziff. 4.5]` |
+| `emob-eebus` | the exact limit off SPINE's `ScaledNumber`, and which of `[LPC §2.3.2]`'s five states a silence has put the site in |
+| `emob-smart` | what the site may draw, and the minimum it keeps a claim to `[BK6-22-300 Ziff. 4.5]` |
 | `emob-ocpp` | the charging profile a station obeys, at a purpose an optimiser cannot outrank `[BK6-22-300 Ziff. 4.6]` |
 
-What is here is the half none of them can have: **when**. A setpoint is a
-message and a failsafe is a silence, and telling those apart needs a clock —
-the one thing a domain crate in this workspace may not have.
+`Sited::on_limit` reads a write through `emob_eebus::read_limit_write`;
+`Sited::allocate` calls `emob_smart::allocate`; `Sited::charging_profiles` calls
+`emob_ocpp::to_charging_profiles`. None of them chooses a number.
 
-## The edge is where the WAN is not
+### Why it runs at the site
 
-This is the only service designed to run *at a site* rather than in a data
-centre, and the reason is in the statute. `[LPC-912]` puts a site into its
-failsafe when the Energy Guard goes quiet and `[LPC-021]` gives that timer a
-floor of two hours — so a site whose controller is on the far side of a broken
-WAN link is held at 4.2 kW because **this process** could not be reached, not
-because a grid operator asked. The decision belongs next to the connection
-point.
+`[LPC-912]` puts a site into its failsafe when the Energy Guard (the grid
+operator's control box) goes silent, and `[LPC-021]` floors that timer at two
+hours. A controller in a data centre behind a broken WAN link would hold the
+site at its failsafe because **this process** was unreachable, not because the
+grid operator asked.
 
-## Silence is not permission
+### Silence is not permission
 
-`GridLimit::none()` would stand for three different facts: nobody has ever
-asked, the operator released the site, and the control box is dead. A site at
-60 kW because it may and one at 60 kW because its controller died are the same
-number and different problems, so the timer walks `[LPC-912]`'s failsafe and
-`[LPC-022]`'s release after two to 24 hours, and each carries a note saying
-which it is (D302).
+"No limit" stands for three facts: never asked, released by the operator, or the
+control box is gone. `Sited::limit_at` walks `[LPC-912]`'s failsafe and
+`[LPC-022]`'s release after two to 24 hours, and each state carries a note.
 
-## The record § 14a asks for
+### The evidence § 14a asks for
 
-`[LPC §4.1.5]` makes the **pair** the operator's evidence: what was asked for
-beside what was answered, refusals included. A setpoint nobody can show was
-honoured is a setpoint nobody honoured.
-
-## No rule lives here
-
-`Sited::on_limit` reads a write through `emob_eebus::read_limit_write` and does
-not look at the number; `Sited::allocate` calls `emob_smart::allocate` and does
-not choose a ceiling; `Sited::charging_profiles` calls
-`emob_ocpp::to_charging_profiles` and does not choose a purpose. A daemon is the
-worst place to keep a rule, because CI does not run it.
+`[LPC §4.1.5]` makes the **pair** — what the grid operator asked for and what was
+answered, refusals included — the operator's evidence. `Sited::log` is that pair,
+in order.
 
 ## Configuration
 
-| Variable | Default | What |
+| Variable | Default | Purpose |
 |---|---|---|
-| `SITED_HTTP_BIND` | `127.0.0.1:9586` | the readiness and health endpoint |
-| `EMOB_HTTP_BIND` | — | the estate-wide bind address, which `SITED_HTTP_BIND` wins over. Every default here is **loopback**, and loopback inside a container is reachable by nothing |
+| `EMOB_ESTATE` | `./estate.toml` | `[[operators]]` |
+| `EMOB_OPERATOR_TOKEN` | **required** | the variable `[[operators]]` names: the read model's bearer |
+| `SITED_HTTP_BIND` | `127.0.0.1:9586` | health/readiness shell |
+| `EMOB_HTTP_BIND` | — | estate-wide shell address, used when `SITED_HTTP_BIND` is unset; defaults are loopback, unreachable inside a container |
+| `SITED_FAILSAFE_KW` | `4.2` | failsafe consumption limit in kW `[LPC-901/1]` — the `[BK6-22-300 Ziff. 4.5]` minimum unless the connection contract says otherwise |
+| `RUST_LOG` | `info,sited=debug` | log filter |
 
-The SHIP session itself is a socket a deployment supplies; this daemon opens
-none yet (M12).
+The failsafe period is fixed at the two-hour floor of `[LPC-021]` until the
+Energy Guard writes its own.
+
+## Running
+
+```console
+EMOB_ESTATE=deploy/estate.example.toml EMOB_OPERATOR_TOKEN=… cargo run -p sited
+```
+
+Or `just up` for the whole estate (`sited`'s shell on `localhost:8087`).
+
+## Endpoints
+
+| Path | Answers |
+|---|---|
+| `GET /v1/sited` | operator token: the LPC state |
+| `GET /health/live` | `200` while the process runs |
+| `GET /health/ready` | `200` once the site inventory is loaded; `503` listing `site-inventory` until then |
+| `GET /about` | name and version |
+
+## Built on
+
+`emob-eebus`, `emob-smart`, `emob-ocpp`, `emob-service`. See
+[Smart charging](https://hupe1980.github.io/emob/docs/smart-charging/) and the
+[workspace README](../../README.md).
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0

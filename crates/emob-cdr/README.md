@@ -1,40 +1,30 @@
 # emob-cdr
 
-Charge detail records: the claim two companies settle against. Built so they
-cannot fail their own arithmetic, priced from their own periods, accepted
-exactly once, and validated without ever being silently repaired.
+Charge detail records (CDRs) for charge point operators and e-mobility
+providers: built so they cannot fail their own arithmetic, priced from their own
+periods, accepted exactly once, and validated without being silently repaired.
+
+[![crates.io](https://img.shields.io/crates/v/emob-cdr.svg)](https://crates.io/crates/emob-cdr) [![docs.rs](https://img.shields.io/docsrs/emob-cdr)](https://docs.rs/emob-cdr) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-cdr.svg)](#license)
+
+A session is what happened; a CDR is a claim about it, sent to a company that
+was not there and will pay against it. This crate builds CDRs whose periods sum
+to their total, whose price comes from those same periods, and whose signed
+evidence is referenced by digest. It accepts incoming CDRs exactly once, telling
+a retransmission from a restatement, and pre-flights a partner's record by
+reporting every problem at once.
 
 ```console
 cargo add emob-cdr
 ```
 
-📖 The reasoning behind this crate, with the regulation it cites, is in
-**[Sessions and settlement](https://hupe1980.github.io/emob/docs/settlement/)**.
-The signatures are on [docs.rs](https://docs.rs/emob-cdr).
-
-
-## A CDR is a claim, not a session with a total on it
-
-A session is what happened. A CDR is a claim about it, sent to somebody who was
-not there and who will pay against it. Four things follow:
-
-**It carries its own arithmetic.** The periods sum to the total, exactly,
-checked at construction — because the recipient will check, and finding out then
-costs a dispute.
-
-**It names its evidence.** Every CDR built here references the signed records it
-rests on by content digest, so *which meter values is this €8.82 made of* is
-answerable years later.
-
-**It carries its money, and the money comes from the same periods.**
-`rated_with` prices the record's own charging periods, so every euro traces to a
-quarter hour that traces to a signed reading. Rating in a separate service is how
-a CDR and its invoice line come to disagree about one session.
-
-**It is immutable.** A correction is a new CDR that supersedes the old one, so
-sender and recipient can never hold different versions of one id.
+## Example
 
 ```rust
+use emob_cdr::{CdrBuilder, CdrLedger, EvidenceRef};
+use emob_core::Direction;
+
+let evidence_ref = EvidenceRef::from_evidence(&evidence, "OCMF");
+
 let cdr = CdrBuilder::from_session(&session, Direction::Import)?
     .key(party, "cdr-1".parse()?)
     .evidence(evidence_ref)
@@ -44,292 +34,47 @@ let cdr = CdrBuilder::from_session(&session, Direction::Import)?
 assert!(cdr.conserves());
 assert!(cdr.fully_measured());
 assert_eq!(cdr.total_cost().unwrap().to_string(), "8.82 EUR");
+
+let mut ledger = CdrLedger::new();
+ledger.accept(cdr.clone());  // Stored
+ledger.accept(cdr);          // Duplicate — one session, one invoice line
 ```
 
-Because the periods *are* the rating periods, a tiered tariff prices the quarter
-hours the split produced — and a receiving party re-rating the record reads
-exactly the slices the issuer did, cut at the tariff's own thresholds so the
-total does not depend on the slicing.
+## What it guarantees
 
-## The slot and the window are different facts
+- **Its own arithmetic holds.** Periods sum to the total exactly, checked at
+  construction.
+- **Every euro traces to a signed reading.** `rated_with` prices the record's own
+  charging periods, so the CDR and its invoice line cannot disagree.
+- **It names its evidence** by content digest, so "which meter values is this
+  €8.82 made of?" is answerable years later.
+- **It is immutable.** A correction is a new CDR that supersedes the old one.
+- **The builder and the validator agree.** A property test generates a thousand
+  realistic sessions and asserts every record that builds passes `validate`,
+  partitions its session, and states the price its own periods produce.
+- **Nothing is repaired.** A partner's record that does not add up is reported,
+  never adjusted.
+- **No I/O, no clock.** The ledger is in memory; persisting it is a service's job.
 
-A session that starts at 10:07 has its first period reported under the quarter
-hour beginning **10:00** — that is the settlement period the energy belongs to
-`[A6 §IV.1]` — while the period itself runs from **10:07**, because that is when
-the session began. Collapsing the two into one timestamp produces a record whose
-first period starts before its own session, which every partner's validator
-flags and none can fix.
+## The cross-checks between session and signed record
 
-```rust
-assert_eq!(cdr.periods[0].quarter_hour.start(), at("10:00"));
-assert_eq!(cdr.periods[0].start, at("10:07"));
-```
+The builder compares the session's own account with what the meter signed. Each
+check removes only what it must:
 
-The window comes from the **slot's own readings**, not from the quarter hour
-clamped to the session. The two differ whenever a session is wider than its
-meter series — a station that authorises at 10:00 and sends its first meter
-value at 10:20 — and clamping would claim twenty minutes of measurement that
-never happened.
+| Check | Source | Fails when | Effect |
+|---|---|---|---|
+| Energy verified | `[MessEG §33]` | the chain did not verify | refused |
+| Direction | `[OCMF Tab. 25]` | the record claims import over an export (`C`) register | refused — import and export never net |
+| Identification | `[OCMF Tab. 11]` | the session's auth path supports less than the signed record claims | refused; under-reporting is fine |
+| Duration billable | `[OCMF Tab. 19]` | a per-minute tariff over a clock the record does not vouch for | refused, "price this session per kWh" |
+| Clock resolution | `[REA 6-A §3.1]` | a per-minute charge on a span below the clock's resolution (default 60 s) | refused, "price this session per kWh" |
+| Tariff change | `[OCMF Tab. 7, TX=T]`, `[AFIR Art. 5(4)]` | the meter marks a price change inside a session priced by one version | refused |
 
-## A span too short to resolve is not a span to bill
-
-`[REA 6-A §3.1]`: "Messwerte unterhalb der kürzest möglichen Zeitspanne werden
-nicht für Abrechnungszwecke verwendet", and the shortest measurable span of a
-conforming clock may be no worse than sixty seconds.
-
-```rust
-CdrBuilder::from_session(&thirty_second_session, Direction::Import)?
-    .rated_with(&per_minute_tariff)
-    .build()
-// Err: the session lasted 30 s, below the 60 s its clock can resolve
-//      [REA 6-A §3.1] … The energy is unaffected — price this session per kWh
-```
-
-The mirror of the unsynchronised-clock rule, arriving from the other end: there
-the clock cannot be *placed* `[OCMF Tab. 19]`, here the span cannot be
-*resolved*. A station whose type approval states a better figure says so with
-`.clock(ClockResolution::stated(…))`; until it does, the builder assumes the
-worst case the regulation permits, because it has not been told otherwise.
-
-**And the record carries it.** The resolution decides a price, so a record
-priced by a ten-second station and replayed by anyone who was not told comes back
-at the sixty-second price — which is not a replay. `Cdr::clock` is the field, and
-it removes an argument rather than adding one somebody has to remember:
-`chargeable()` carries it and `rerated_with` reads it.
-
-## A reservation is on the record, and it is not a period of the session
-
-`[OCPI 2.3.0]` prices a reservation over a window that *"starts when the
-reservation is made, and ends when the driver starts charging … or when the
-reservation expires"* — before the cable went in, so no meter measured it and the
-session's own history says nothing about it. `Cdr::reservation` carries the
-window, `Cost::reservation` carries its rating, and the two cross in the
-`total_reservation_cost` the specification keeps for exactly this.
-
-It is a second `Rated` rather than lines inside the first for the reason the
-specification uses a restriction rather than a dimension: a tariff whose
-unrestricted element prices `TIME` and whose reservation element also prices
-`TIME` would have the reservation's minutes and the charging minutes competing
-for one dimension, and the per-dimension rule would drop one of them.
-
-`Cdr::total_cost` is both, which is what makes a partner's own sum of the
-per-dimension fields close. It **adds** the two rather than dropping either: a
-total short by a term the record states is a plausible number in the right
-currency, and it reaches the invoice and the ledger's restatement comparison
-alike.
-
-`validate` asks of the reservation's rating everything it asks of the session's,
-through one function that records **which** part a finding came from. Three
-shapes are blocking: two currencies on one record, a priced reservation the
-record does not place in time, and a reservation billed for longer than its own
-window ran.
-
-## Occupancy is a fact the record states
-
-A period that moved no energy is **not** therefore occupancy. A car at 100 %
-state of charge can leave a quarter hour at exactly `0.000 kWh` while the
-session's own state machine says `Charging`, and pricing that quarter hour at
-the occupancy fee `[AFIR Art. 5(4)]` permits charges a driver for parking they
-were told was charging.
-
-```rust
-assert!(cdr.periods[1].energy.is_zero());
-assert_eq!(cdr.periods[1].activity, Activity::Charging); // a taper
-```
-
-So `ChargingPeriod::activity` is a **stated fact**, taken from the session
-history — the same history that already refuses a record whose meter and state
-machine disagree — and `validate` blocks a partner's record whose two halves
-contradict each other. A check fed by an inference is not a check.
-
-### …and "not charging" is two facts, not one
-
-`[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]` corrected its own definition of
-`PARKING_TIME` — from "time not charging" to "time during which the **vehicle is
-not requesting power**" — and said why: under the old reading drivers "would be
-exposed to penalizing loitering fees … when the EVSE is not offering energy to
-the vehicle while the vehicle is still requesting power".
-
-That second case is a charging profile at zero, a `[EnWG §14a]` dimming, a grid
-limit, a fault — the operator declining to deliver, not the driver loitering. So
-the record carries three activities and not a boolean:
-
-| | priced as | energy transferred |
-|---|---|---|
-| `Charging` | `TIME` | ✅ |
-| `Parked` — the vehicle stopped asking | `PARKING_TIME` | |
-| `Withheld` — the point stopped offering | *nothing* | |
-
-OCPP has distinguished the two since 2.0.1 (`SuspendedEV` against
-`SuspendedEVSE`) and the seam was discarding it. A withheld minute is still
-inside the record's `total_time`, and inside its `total_parking_time` — that
-field is defined on energy *transfer* rather than on demand, so the two figures
-differ by exactly the withheld time and neither is derived from the other.
-
-## …and occupancy is time nobody metered
-
-The meter series spans the readings; the session spans the parking space. A car
-that finishes charging at 11:00 and is collected at 13:00 leaves two hours the
-split knows nothing about — and those two hours are precisely what
-`[AFIR Art. 5(4)]`'s occupancy fee exists for.
-
-A record that stops at the last reading cannot bill them; one that stretches the
-last reading over them bills energy that did not flow. So the builder fills the
-gap with periods carrying **no energy**, marked `Interpolated` because the zero
-is an assumption rather than a measurement, and split on the same quarter-hour
-grid as everything else.
-
-**Their activity is read too.** "The meter said nothing" and "the vehicle
-was not charging" are different claims, and only the second is one the operator's
-own records make — a station that stops sending `MeterValues` while its own state
-machine still says `Charging` would otherwise be billed an occupancy fee per
-minute for time it says the car was taking energy. So the fill is built where
-the session history is in scope, cuts at its state changes as well as at the
-grid, and asks `Session::activity_throughout` — the **one** question every
-period on the record is asked, metered or not. One question rather than two
-booleans, and it can answer *neither*: `Pending` and `Ended` are exactly the
-"connected and not charging" the fee prices, and asking "not suspended" of a
-metered period billed the minute a car sat `EVConnected` before its charge began
-as charging time.
-
-And when the meter and the state machine disagree — energy across a period the
-session says it was not charging in — the builder refuses rather than picking
-one, because guessing is how a driver is billed for a charge the operator's own
-log says never happened. The split holds the register flat across the session's
-idle intervals, so the disagreement it reports is the meter's own rather than one
-a straight line between two readings invented.
-
-## The other half: re-rating a partner's record
-
-A CPO issues a CDR priced with its own tariff. The eMSP that receives it owes its
-**driver** a different number and owes the CPO a comparison — so a partner's
-record arrives unpriced and this is what prices it:
-
-```rust
-let mine = theirs.rerated_with(&retail_tariff)?;
-assert_eq!(mine.periods, theirs.periods);      // the same session, by construction
-assert!(mine.was_priced_with(&retail_tariff)); // …and it names which tariff
-```
-
-It exists rather than being left to the caller because the composition is where
-the gates get skipped. Reaching for `chargeable()` and `emob_tariff::rate`
-directly — the obvious way, and what this crate's own fixtures did — silently
-drops all five: a chain that did not verify, a tariff that was not in force when
-the session ran, a version the meter says was superseded mid-session, a duration
-the signed records do not vouch for, and the clock resolution `[REA 6-A §3.1]`
-puts under a per-minute fee. `priced` is the one place a `Cost` is made, and both
-doors open onto it — and it takes no resolution argument, because the record
-states its own.
-
-The first gate lived in `build` alone until it was noticed that the *other* door
-does not go through `build` at all: `emob_roam::ocpi::from_ocpi` assembles a
-partner's document into a `Cdr` directly, because a partner's record is not built
-from a session. So the record this side refuses to issue was priced at this
-side's retail tariff on re-rating — a settled record for a forged session,
-reached through the door that was added to prevent exactly that class of drift.
-Evidence that is *absent* still prices: which regime an unsigned record falls
-under is the billing layer's question, and evidence that is present and failed is
-worse than evidence that is absent.
-
-## The two halves are held to each other as a property
-
-`tests/the_builder_and_the_validator_agree.rs` generates a thousand sessions with
-the shapes real ones have — a wait before the charge, a suspension after it, a
-meter series narrower than the session window — and asserts of each record that
-builds: that the validator blocks nothing in it, that its periods partition the
-session with no gap and no overlap, and that its stated price is what rating its
-own periods produces. A builder that emits what its validator refuses is two
-rules about one record, and which one a settlement sees then depends on which
-side of the wire it is standing on.
-
-## The cross-checks nobody runs
-
-### Where the price changed
-
-`[OCMF Tab. 7, TX=T]` is the station's own record of where its price changed,
-and a CDR is priced by the **one** version in force when the session started
-`[AFIR Art. 5(4)]`:
-
-```rust
-CdrBuilder::from_session(&session, Direction::Import)?
-    .evidence(evidence_marking_a_change_at(at(15)))
-    .rated_with(&tariff)
-    .build()
-// Err: the signed records mark a tariff change at … [OCMF Tab. 7, TX=T], inside
-//      this session, and a record is priced by the one version in force when it
-//      started [AFIR Art. 5(4)]: the station says two prices applied and this
-//      record states one
-```
-
-Billing either of them is picking a number over a signed statement that
-contradicts it, and OCPP 2.1's `ChangeTransactionTariff` makes this a shape the
-protocol produces rather than a hypothetical. Where the change did not land on a
-settlement boundary the message says so too, because
-`[PTB-A 50.7 §3.1.7.2]` does not permit one there. A change at the session's own
-edges is not inside it, and an unrated record has no price to contradict.
-
-### The session fee no check could reach
-
-Every other cross-check here compares money against a quantity the record
-carries: the priced energy against its kilowatt-hours, the priced minutes of each
-time dimension against the seconds its own periods account for. `FLAT` has
-neither, because a session fee is charged against *the session itself*.
-
-So a partner's line stating **96 × € 0.50** reconciles exactly, sits beside an
-energy figure and minutes that both match the record, and bills ninety-six
-session fees for one session.
-`[OCPI 2.3.0 §mod_tariffs_tariffdimensiontype_enum]` defines `FLAT` as *"fixed
-amount for the whole charging session"*; `rate` charges it once by construction
-and gives it no `step_size` to round with, so any quantity above one is blocking
-. Asked of both of a record's ratings, because a reservation fee is one fee
-too.
-
-### …and what is inside the value
-
-`EvidenceRef::compensated_loss` carries the cable loss the meter compensated
-`[OCMF Tab. 7, CL]`. Nothing is subtracted — the compensation is already inside
-the register the session billed — and it travels because a partner disputing the
-energy asks exactly this, and because `[REA 6-A §3.2]` makes telling the affected
-party what is inside a measured value a duty rather than a courtesy.
-
-### Who was charging
-
-A session records *how* it was authorised. The signed meter record states *how
-strongly* the driver was identified. Those are two statements about one event,
-and they can disagree:
-
-```rust
-// The session says ad-hoc — a card at the point. The signed record claims the
-// identity was established by a secure feature, which ad-hoc cannot do.
-CdrBuilder::from_session(&ad_hoc_session, Direction::Import)?
-    .key(party, id)
-    .evidence(secure_evidence)
-    .build()
-// Err: the session claims ad-hoc authorisation, which supports at most
-//      trusted identification, but the signed record reports secure
-```
-
-When they disagree, the one with a signature behind it is the one to believe —
-so the CDR is refused rather than billed at the stronger claim's tariff.
-Under-reporting is fine: a station being conservative is not a fault.
-
-The check is only worth anything if nobody can hand it the answer, so the
-strength is read off the records rather than passed in:
-
-```rust
-let evidence_ref = EvidenceRef::from_evidence(&evidence, "OCMF");
-```
-
-It is the **weakest** level any record asserted, because a chain is only as
-strong as its weakest claim — and a hand-filled field can be filled with
-whatever value makes the record build.
-
-### Whether a duration may be billed at all
-
-OCMF states how far the station's clock can be trusted `[OCMF Tab. 19]` and
-flags a time value as unusable separately from an energy one. A tariff charging
-per minute — the occupancy fee `[AFIR Art. 5(4)]` permits at 50 kW and above —
-is billing a duration:
+Read the identification strength off the evidence with
+`EvidenceRef::from_evidence`; it is the weakest level any record asserted and
+cannot be filled in by hand. A station with a better clock states it with
+`.clock(ClockResolution::stated(…))`, and the record carries it in `Cdr::clock`
+so a re-rating uses the same figure.
 
 ```rust
 CdrBuilder::from_session(&session, Direction::Import)?
@@ -341,75 +86,100 @@ CdrBuilder::from_session(&session, Direction::Import)?
 //      billing a duration … The energy is unaffected — price this session per kWh
 ```
 
-The energy really is unaffected, so the error names the fix rather than blocking
-the session. The same gate runs again in the pre-flight, on records a partner
-built.
+`EvidenceRef::compensated_loss` carries the cable loss the meter compensated
+`[OCMF Tab. 7, CL]`. Nothing is subtracted (it is already inside the register);
+it travels because `[REA 6-A §3.2]` entitles the customer to know.
 
-### Which way the energy went
+## Charging periods: settlement slot, window and activity
 
-`[OCMF Tab. 25]` reserves the OBIS range `B0`–`B3` for import and `C0`–`C3` for
-export, so the signed register states the direction. A record claiming the other
-one is a V2G discharge billed as consumption:
+Each `ChargingPeriod` states three facts:
 
 ```rust
-CdrBuilder::from_session(&session, Direction::Import)?   // the session says draw
-    .evidence(evidence_ref)                              // the register says C2
-    .build()
-// Err: the record claims import but the signed register measured export
-//      [OCMF Tab. 25]: import and export never net
+assert_eq!(cdr.periods[0].quarter_hour.start(), at("10:00")); // settlement period [A6 §IV.1]
+assert_eq!(cdr.periods[0].start, at("10:07"));                 // when its readings began
+assert_eq!(cdr.periods[1].activity, Activity::Charging);       // stated, not inferred
 ```
 
-A register whose code the verifier could not classify states no direction, and
-the record is free to claim one.
+- **The window comes from the slot's own readings**, not from the quarter hour
+  clamped to the session, so the record never claims measurement that did not
+  happen.
+- **Activity is a stated fact** from the session history. A period at
+  `0.000 kWh` can still be `Charging` (a full battery tapering), and pricing it as
+  occupancy would bill a driver for parking. `validate` blocks a record whose
+  energy and activity contradict each other.
+- **Not charging is two facts.** OCPI 2.3.0 defines `PARKING_TIME` as time the
+  vehicle is not requesting power `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`:
 
-## Accepted exactly once — and a conflict is not a retry
+| `Activity` | priced as | energy transferred |
+|---|---|---|
+| `Charging` | `TIME` | ✅ |
+| `Parked` — the vehicle stopped asking | `PARKING_TIME` | |
+| `Withheld` — the point stopped offering | *nothing* | |
 
-Roaming transports retry. A partner that does not get a `200` in time sends the
-CDR again. The usual handling is an upsert keyed on the CDR id, which is wrong
-in both directions:
+`Withheld` time still counts in `total_time` and `total_parking_time` (defined on
+energy transfer), so those two differ by exactly the withheld time.
+
+### Unmetered occupancy
+
+A car that finishes at 11:00 and leaves at 13:00 occupies the space for two hours
+the meter series does not cover — exactly what the occupancy fee
+`[AFIR Art. 5(4)]` is for. The builder fills that gap with zero-energy periods
+marked `Interpolated`, cut at the session's state changes and the quarter-hour
+grid, and asks `Session::activity_throughout` for each. If the meter and the
+state machine disagree, the builder refuses rather than picking one.
+
+## Reservations
+
+OCPI prices a reservation from when it is made until charging starts or it
+expires `[OCPI 2.3.0]` — before any meter measured anything. `Cdr::reservation`
+carries the window, `Cost::reservation` its rating, and both appear in
+`total_reservation_cost`. It is a separate rating so reservation minutes and
+charging minutes do not compete for one `TIME` dimension. `Cdr::total_cost` adds
+both. `validate` blocks two currencies on one record, a priced reservation with
+no window, and a reservation billed longer than its window.
+
+## Re-rating a partner's record
+
+An eMSP receives a CPO's CDR and owes its driver a different price:
+
+```rust
+let mine = theirs.rerated_with(&retail_tariff)?;
+assert_eq!(mine.periods, theirs.periods);      // the same session, by construction
+assert!(mine.was_priced_with(&retail_tariff)); // …and it names which tariff
+```
+
+`build` and `rerated_with` go through one pricing function, so the gates above
+(verified chain, tariff in force at session start, no mid-session version
+change, billable duration, clock resolution) apply to records assembled from a
+partner's document too. Absent evidence still prices — which legal regime
+applies is the billing layer's question — but evidence that is present and
+failed does not.
+
+## Accepted exactly once
+
+Roaming transports retry. An upsert keyed on the CDR id is wrong both ways: a
+retransmission must not create a second invoice line, and a different record
+under the same id is a partner restating a settled number.
 
 ```rust
 ledger.accept(cdr.clone());  // Stored
-ledger.accept(cdr.clone());  // Duplicate — one session, one record, one invoice line
+ledger.accept(cdr.clone());  // Duplicate
 ledger.accept(restated);     // Conflict { difference: "total energy 18.000 kWh → 118.000 kWh" }
-```
 
-A **retransmission** must not produce a second invoice line. A **different**
-record under the same id is not a retry — it is a partner silently restating a
-settled number, and an upsert accepts it without a sound. `Acceptance` tells
-them apart, and the original is left untouched.
-
-The key is the `(party, id)` pair, never the bare id: OCPI makes a CDR id unique
-per party, so two CPOs may each have a CDR `1` and a ledger keyed on the id
-alone will drop one of them.
-
-### …and a correction chain has one end
-
-A correction is a *new* CDR, so a ledger holding a session and its correction
-holds both. Two records that both supersede one key are two corrections of one
-session — both live, neither superseded, and the session billed twice, which is
-the failure content equality is checked to prevent arriving one link along.
-
-```rust
-ledger.accept(first);                     // Stored
-ledger.accept(correction_of(&first));     // Stored
-ledger.accept(another_correction_of(&first));
-// Forked { supersedes: DE*ABC/1, held: DE*ABC/2 }
+ledger.accept(first);                          // Stored
+ledger.accept(correction_of(&first));          // Stored
+ledger.accept(another_correction_of(&first));  // Forked { supersedes: DE*ABC/1, held: DE*ABC/2 }
 
 let owed: Energy = ledger.live().map(|cdr| cdr.total_energy).sum();
 ```
 
-`live()` is the set a billing run sums: everything the ledger holds that nothing
-else in it supersedes. `iter()` is every record, superseded ones included. A
-record that supersedes *itself* is refused for the mirror reason — stored, it
-would be superseded by its own presence and billed by nothing — and a correction
-that arrives **before** the record it corrects is still stored, because roaming
-transports do not order deliveries.
+- The key is `(party, id)`: OCPI makes a CDR id unique per party only.
+- `live()` is what a billing run sums — everything nothing else supersedes;
+  `iter()` includes superseded records.
+- A record that supersedes itself is refused; a correction arriving before the
+  record it corrects is stored, because transports do not order deliveries.
 
-## Validation reports, and never repairs
-
-A CDR this crate builds cannot fail its own arithmetic. One that arrives from a
-roaming partner was built by somebody else's code.
+## Validation of incoming CDRs
 
 ```rust
 let report = validate(&incoming);
@@ -417,78 +187,56 @@ if !report.is_settleable() {
     for reason in report.reasons() { eprintln!("{reason}"); }
     // the periods sum to 18.000 kWh but the record claims 20.000 kWh
     // the period at 2026-01-02 10:15 is out of time order
-    // the signed record claims secure identification but the authorisation
-    //   path supports at most hearsay
-    // the price was computed for 18.000 kWh but the record claims 20.000 kWh
     // the price charges 1800 s of TIME and the record's own periods account
     //   for 900 s
 }
 ```
 
-Every problem at once, not the first — a partner integration is debugged by
-seeing all of what is wrong in one pass.
+Every problem is reported in one pass, as blocking or warning:
 
-The quantity is checked for the **energy and the minutes**, and the two are not
-symmetric. `[AFIR Art. 5(4)]` prices occupancy per minute, so the minutes are
-the half of a settlement most often disputed — but charging for *less* time than
-the record spans is the ordinary shape of a lawful tariff: an occupancy fee that
-begins after four hours prices nothing on a thirty-minute session. So a
-shortfall is revenue nobody charged and an excess is money the payer is asked to
-accept on the sender's word, and only the excess blocks. And nothing is mutated: a CDR whose
-periods do not sum to its total is never quietly adjusted to sum, because that
-would be inventing a number on behalf of somebody who will be invoiced for it.
+| Finding | Severity | Why |
+|---|---|---|
+| Periods do not sum to the total, or are out of order | blocking | the arithmetic is wrong |
+| Price computed for more energy or minutes than the record states | blocking | money the payer must take on trust |
+| Price for fewer minutes than the record spans | not a finding | an occupancy fee that starts after four hours is lawful |
+| `FLAT` charged more than once `[OCPI 2.3.0 §mod_tariffs_tariffdimensiontype_enum]` | blocking | a session fee is per session |
+| Missing signed evidence | warning | blocks a German invoice `[MessEG §33]`, lawful elsewhere — the billing layer decides |
+| Every note the rating made (minimum charge, block rounding) | warning | a term of the price, surfaced |
 
-The builder is held to the same rules. A meter series reaching past the
-session's own `ended_at` — ordinary, because OCPP delivers `MeterValues`
-asynchronously — produces periods outside the session window. The builder refuses
-that rather than clamping the window and inventing time nobody can say the driver
-was there for; a test asserts the property directly, that **every record this
-builder emits passes its own validator**.
+Quantities are compared against `Rated::accounted_quantity_for`: the billed
+quantity, less the rounding block a `step_size` adds
+`[OCPI 2.3.0 §mod_cdrs_step_size]`, plus any quantity no tariff element priced
+(free, per `[OCPI 2.3.0 §Tariff]` — how "the first 10 kWh are free" is written).
 
-Findings are separated into blocking and warning. Missing signed evidence is a
-**warning**, deliberately: it blocks a German energy invoice under `[MessEG §33]`
-and is merely notable elsewhere, so the decision belongs to the billing layer
-that knows which regime applies. Reporting it as blocking here would make this
-crate refuse perfectly lawful settlement outside Germany.
+## API at a glance
 
-Money that was computed for a different quantity than the record states is
-**blocking** — it is the settlement fault that costs the most to unwind. It is
-raised only where an energy price was actually charged: `quantity_for` returns
-zero for a dimension with no lines, so comparing it unconditionally read "this
-tariff charges nothing per kWh" as "this price was computed for 0 kWh" and
-refused every lawful per-minute tariff below 50 kW. The other case is a warning,
-because a dropped energy line looks identical from the record alone. Every
-note the rating made is surfaced as a warning, so a minimum charge or a block
-rounding reaches the receiving party as a term of the price rather than as a
-discrepancy they have to discover.
+| Item | Purpose |
+|---|---|
+| `CdrBuilder::from_session` … `.build()` | Build a consistent, priced CDR |
+| `CdrBuilder::rated_with_history`, `reserved`, `supersedes`, `clock` | Tariff history, reservations, corrections, clock resolution |
+| `Cdr::rerated_with`, `was_priced_with`, `total_cost` | Re-rate and inspect |
+| `EvidenceRef::from_evidence` | Reference signed evidence by digest |
+| `CdrLedger::accept`, `live`, `Acceptance` | Exactly-once acceptance |
+| `validate`, `Report`, `Finding`, `Severity` | Pre-flight for a partner's record |
 
-### …and the quantity it is compared against is the rating's own
+## Feature flags
 
-Two things stand lawfully between what a price charged for and what a meter
-measured, and the rating states both on the record. A `step_size` bills up to one
-block **more** `[OCPI 2.3.0 §mod_cdrs_step_size]`; a dimension no element matched
-is charged **nothing at all** — *"there will be no costs for that Tariff
-Dimension"* `[OCPI 2.3.0 §Tariff]`, which is how *the first 10 kWh are free* is
-written.
+| Feature | Default | Effect |
+|---|---|---|
+| `serde` | yes | `Serialize`/`Deserialize` for every public type |
 
-So the comparison is against `Rated::accounted_quantity_for`: the billed
-quantity, less the block the rating declared, plus the quantity it reported
-unpriced. What is left over is a price computed for a different session.
+## Standards and sources
 
-Both halves were wrong in opposite directions before. Comparing the billed figure
-alone blocked a promotional first tier as an arithmetic fault — a record the
-builder emits and the validator refuses, which stops a month of invoices over a
-discount the operator gave on purpose — while the excuse beside it was the mere
-*presence* of a block note, so a partner declaring a `step_size` could over-bill
-that dimension without bound. One identity answers both, and it is exact because
-every term is in the dimension's base unit: an hour is 3600 seconds and most
-durations have no decimal in hours at all.
+OCPI 2.3.0 (CDRs, tariffs); OCMF tables 7, 11, 19, 25; MessEG § 33; REA 6-A;
+PTB-A 50.7; AFIR Art. 5(4); BNetzA BK6-20-160 Anlage 6.
 
-## No I/O, no clock
+## Part of emob
 
-The ledger is in memory and persisting it is a service's job, so a month of
-roaming traffic replays as a unit test.
+emob is an open-source e-mobility stack for charge point operators and
+e-mobility service providers. See
+[sessions and settlement](https://hupe1980.github.io/emob/docs/settlement/) on
+the documentation site and the [root README](https://github.com/hupe1980/emob).
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of Apache License 2.0 or MIT, at your option.

@@ -37,7 +37,7 @@ fn contract() -> ContractId {
 }
 
 fn provider() -> Empd {
-    Empd::new(me(), *b"a key nobody outside this service holds")
+    Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32]))
         .with(Contract::new(contract(), date!(2026 - 01 - 01)))
 }
 
@@ -82,8 +82,11 @@ fn the_uid_is_held_here_and_reaches_only_the_record_that_is_leaving() {
 
     // The digest is keyed, so a second provider holding the same card cannot
     // recompute this one's references — which is the whole privacy property.
-    let mut other = Empd::new(PartyId::new("NL", "TNM").unwrap(), *b"a different key")
-        .with(Contract::new(contract(), date!(2026 - 01 - 01)));
+    let mut other = Empd::new(
+        PartyId::new("NL", "TNM").unwrap(),
+        emob_service::vault::DataKey::from_bytes(&[2; 32]),
+    )
+    .with(Contract::new(contract(), date!(2026 - 01 - 01)));
     let elsewhere = other
         .issue_token(
             &contract(),
@@ -101,10 +104,9 @@ fn a_mistyped_contract_identifier_is_refused_at_the_counter() {
     // the last place anyone looks"*. This is one place earlier, and it is the
     // difference between refusing a card and discovering three weeks later that
     // a month of sessions was billed to somebody else's contract.
-    let mut provider = Empd::new(me(), *b"key").with(Contract::new(
-        "NL-TNM-000122045-X".parse().unwrap(),
-        date!(2026 - 01 - 01),
-    ));
+    let mut provider = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32])).with(
+        Contract::new("NL-TNM-000122045-X".parse().unwrap(), date!(2026 - 01 - 01)),
+    );
     let refused = provider.issue_token(
         &"NL-TNM-000122045-X".parse().unwrap(),
         "04A1B2C3D4E5F6",
@@ -119,7 +121,7 @@ fn a_mistyped_contract_identifier_is_refused_at_the_counter() {
 
 #[test]
 fn a_contracts_window_is_a_clock_question_and_the_answer_is_expired() {
-    let mut provider = Empd::new(me(), *b"key")
+    let mut provider = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32]))
         .with(Contract::new(contract(), date!(2026 - 01 - 01)).until(date!(2026 - 06 - 30)));
     let token = provider
         .issue_token(&contract(), "04A1", TokenType::AppUser, Whitelist::Allowed)
@@ -152,7 +154,7 @@ fn a_contracts_window_is_a_clock_question_and_the_answer_is_expired() {
 fn no_credit_is_a_question_about_sessions_nobody_has_invoiced() {
     // The answer that needs a ledger. A document cannot give it: the sessions
     // it is about are precisely the ones no document has been written for.
-    let mut provider = Empd::new(me(), *b"key").with(
+    let mut provider = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32])).with(
         Contract::new(contract(), date!(2026 - 01 - 01))
             .limited_to(Money::new(dec("50.00"), Currency::EUR)),
     );
@@ -245,7 +247,7 @@ fn a_session_offered_twice_is_counted_once_and_a_re_rating_moves_the_difference(
     // leaves: `invoiced` takes off what the document billed, which is the true
     // figure, and the difference sits on the contract refusing a driver against
     // a limit they are not over (D309).
-    let mut provider = Empd::new(me(), *b"key").with(
+    let mut provider = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32])).with(
         Contract::new(contract(), date!(2026 - 01 - 01))
             .limited_to(Money::new(dec("50.00"), Currency::EUR)),
     );
@@ -427,7 +429,8 @@ fn a_price_list_with_no_country_in_it_cannot_surcharge_the_border() {
 
     // A provider that has stated no price list at all discloses nothing, and the
     // calendar says so rather than assuming the best.
-    let silent = Empd::new(me(), *b"key").provider_profile();
+    let silent =
+        Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32])).provider_profile();
     let report = emob_core::obligation::assess_provider(&silent, date!(2026 - 06 - 01));
     assert!(
         report
@@ -447,7 +450,7 @@ fn the_fee_is_owed_by_a_contract_that_never_charged() {
     let ended = "NL-TNM-000122046-Z".parse::<ContractId>().unwrap();
     let future = "NL-TNM-000122047-W".parse::<ContractId>().unwrap();
 
-    let provider = Empd::new(me(), *b"key")
+    let provider = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32]))
         .with(
             Contract::new(quiet.clone(), date!(2026 - 01 - 01))
                 .charging(Fee::monthly("network access", dec("4.99"))),
@@ -475,7 +478,8 @@ fn the_fee_is_owed_by_a_contract_that_never_charged() {
 
     // A contract with no fee produces no line, which is the ordinary pay-as-you-
     // go driver rather than a zero somebody has to read past.
-    let bare = Empd::new(me(), *b"key").with(Contract::new(contract(), date!(2026 - 01 - 01)));
+    let bare = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32]))
+        .with(Contract::new(contract(), date!(2026 - 01 - 01)));
     assert!(
         bare.fees_for(date!(2026 - 06 - 01), date!(2026 - 06 - 30))
             .is_empty()
@@ -495,6 +499,7 @@ fn the_fee_is_owed_by_a_contract_that_never_charged() {
 // its owner reported stolen, and a lost running total authorises every session
 // past the credit limit that was the point of holding it.
 
+use emob_service::Actor;
 use emob_service::journal::{File, Journal};
 use empd::{Book, BookError};
 
@@ -511,7 +516,7 @@ impl Scratch {
 
     fn book(&self) -> Book<File> {
         Book::open(
-            Empd::new(me(), *b"a key nobody outside this service holds"),
+            Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32])),
             File::open(&self.0).expect("the journal opens"),
         )
         .expect("the journal folds")
@@ -530,15 +535,31 @@ fn a_token_issued_before_a_restart_still_authorises_and_a_blocked_one_still_does
 
     let (good, lost) = {
         let mut book = scratch.book();
-        book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
-            .expect("the contract is held");
+        book.with(
+            &Actor::Estate,
+            Contract::new(contract(), date!(2026 - 01 - 01)),
+        )
+        .expect("the contract is held");
         let good = book
-            .issue_token(&contract(), "04A1", TokenType::AppUser, Whitelist::Allowed)
+            .issue_token(
+                &Actor::Estate,
+                &contract(),
+                "04A1",
+                TokenType::AppUser,
+                Whitelist::Allowed,
+            )
             .expect("issued");
         let lost = book
-            .issue_token(&contract(), "04B2", TokenType::Rfid, Whitelist::Allowed)
+            .issue_token(
+                &Actor::Estate,
+                &contract(),
+                "04B2",
+                TokenType::Rfid,
+                Whitelist::Allowed,
+            )
             .expect("issued");
-        book.block(&lost).expect("the driver reported it stolen");
+        book.block(&Actor::Estate, &lost)
+            .expect("the driver reported it stolen");
         (good, lost)
     };
 
@@ -561,18 +582,31 @@ fn a_credit_limit_is_judged_against_sessions_the_restart_did_not_forget() {
     let token = {
         let mut book = scratch.book();
         book.with(
+            &Actor::Estate,
             Contract::new(contract(), date!(2026 - 01 - 01))
                 .limited_to(Money::new(dec("50.00"), Currency::EUR)),
         )
         .expect("held");
         let token = book
-            .issue_token(&contract(), "04A1", TokenType::AppUser, Whitelist::Allowed)
+            .issue_token(
+                &Actor::Estate,
+                &contract(),
+                "04A1",
+                TokenType::AppUser,
+                Whitelist::Allowed,
+            )
             .expect("issued");
         let first: SessionId = "s-1".parse().unwrap();
         let second: SessionId = "s-2".parse().unwrap();
-        book.ran_up(&contract(), &first, Money::new(dec("31.04"), Currency::EUR))
-            .expect("counted");
         book.ran_up(
+            &Actor::service("csmsd"),
+            &contract(),
+            &first,
+            Money::new(dec("31.04"), Currency::EUR),
+        )
+        .expect("counted");
+        book.ran_up(
+            &Actor::service("csmsd"),
             &contract(),
             &second,
             Money::new(dec("24.70"), Currency::EUR),
@@ -600,9 +634,13 @@ fn a_session_counted_before_a_restart_is_not_counted_again_after_one() {
 
     {
         let mut book = scratch.book();
-        book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
-            .expect("held");
+        book.with(
+            &Actor::Estate,
+            Contract::new(contract(), date!(2026 - 01 - 01)),
+        )
+        .expect("held");
         book.ran_up(
+            &Actor::service("csmsd"),
             &contract(),
             &session,
             Money::new(dec("31.04"), Currency::EUR),
@@ -614,6 +652,7 @@ fn a_session_counted_before_a_restart_is_not_counted_again_after_one() {
     let mut book = scratch.book();
     assert_eq!(
         book.ran_up(
+            &Actor::service("csmsd"),
             &contract(),
             &session,
             Money::new(dec("31.04"), Currency::EUR)
@@ -629,14 +668,24 @@ fn a_journal_edited_in_the_middle_will_not_start_the_provider() {
     let scratch = Scratch::new("tamper");
     {
         let mut book = scratch.book();
-        book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
-            .expect("held");
+        book.with(
+            &Actor::Estate,
+            Contract::new(contract(), date!(2026 - 01 - 01)),
+        )
+        .expect("held");
         for (n, uid) in ["04A1", "04B2", "04C3"].into_iter().enumerate() {
             let _ = book
-                .issue_token(&contract(), uid, TokenType::Rfid, Whitelist::Allowed)
+                .issue_token(
+                    &Actor::Estate,
+                    &contract(),
+                    uid,
+                    TokenType::Rfid,
+                    Whitelist::Allowed,
+                )
                 .expect("issued");
             let session: SessionId = format!("s-{n}").parse().unwrap();
             book.ran_up(
+                &Actor::service("csmsd"),
                 &contract(),
                 &session,
                 Money::new(dec("1.00"), Currency::EUR),
@@ -651,7 +700,7 @@ fn a_journal_edited_in_the_middle_will_not_start_the_provider() {
     std::fs::write(&scratch.0, format!("{}\n", lines.join("\n"))).expect("written");
 
     let refused = Book::open(
-        Empd::new(me(), *b"a key nobody outside this service holds"),
+        Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32])),
         File::open(&scratch.0).expect("opens"),
     )
     .expect_err("a journal with a record removed is not this provider's ledger");
@@ -662,20 +711,31 @@ fn a_journal_edited_in_the_middle_will_not_start_the_provider() {
 fn the_journal_names_what_kind_of_fact_each_record_is() {
     let scratch = Scratch::new("kinds");
     let mut book = scratch.book();
-    book.with(Contract::new(contract(), date!(2026 - 01 - 01)))
-        .expect("held");
+    book.with(
+        &Actor::Estate,
+        Contract::new(contract(), date!(2026 - 01 - 01)),
+    )
+    .expect("held");
     let token = book
-        .issue_token(&contract(), "04A1", TokenType::Rfid, Whitelist::Allowed)
+        .issue_token(
+            &Actor::Estate,
+            &contract(),
+            "04A1",
+            TokenType::Rfid,
+            Whitelist::Allowed,
+        )
         .expect("issued");
     let session: SessionId = "s-1".parse().unwrap();
     book.ran_up(
+        &Actor::service("csmsd"),
         &contract(),
         &session,
         Money::new(dec("1.00"), Currency::EUR),
     )
     .expect("counted");
-    book.invoiced(&contract(), &[session]).expect("invoiced");
-    book.block(&token).expect("blocked");
+    book.invoiced(&Actor::service("csmsd"), &contract(), &[session])
+        .expect("invoiced");
+    book.block(&Actor::Estate, &token).expect("blocked");
 
     let kinds: Vec<String> = book
         .journal()
@@ -689,16 +749,97 @@ fn the_journal_names_what_kind_of_fact_each_record_is() {
         ["contracted", "issued", "ran_up", "invoiced", "blocked"]
     );
 
-    // The one fact it must **not** have written: a token's uid never reaches
-    // the journal in the clear. The store is keyed by a digest, and a file that
-    // held the uid beside it would make every digest in it reversible by
-    // anybody holding the file.
+    // SR-100: each fact names who caused it — the estate seeded the contract
+    // and its token, `csmsd`'s requests ran the session up and invoiced it.
+    let actors: Vec<String> = book
+        .journal()
+        .records()
+        .expect("the chain holds")
+        .into_iter()
+        .map(|r| r.actor.to_string())
+        .collect();
+    assert_eq!(
+        actors,
+        [
+            "estate",
+            "estate",
+            "service:csmsd",
+            "service:csmsd",
+            "estate"
+        ]
+    );
+
+    // SR-046: the one fact it must **not** have written — a token's uid in the
+    // clear. It is sealed under the data key, and the reference beside it is
+    // an HMAC with the key's id (SR-047).
     let raw = book.journal().records().expect("records");
     assert!(
-        raw.iter().any(|r| r.body.contains("04A1")),
-        "the uid is in the token record, which is what makes this a real question"
+        !raw.iter().any(|r| r.body.contains("04A1")),
+        "SR-046: a journal copy holds no uid"
+    );
+    let issued = raw.iter().find(|r| r.kind == "issued").expect("issued");
+    assert!(
+        issued.body.contains(book.state().key_id().as_str()),
+        "SR-047: the key id is journalled beside the reference: {}",
+        issued.body
     );
     let _ = BookError::Halted { why: String::new() };
+}
+
+#[test]
+fn sr_046_destroying_the_key_erases_every_uid_and_keeps_the_chain() {
+    let scratch = Scratch::new("erasure");
+    let token = {
+        let mut book = scratch.book();
+        book.with(
+            &Actor::Estate,
+            Contract::new(contract(), date!(2026 - 01 - 01)),
+        )
+        .expect("held");
+        let token = book
+            .issue_token(
+                &Actor::Estate,
+                &contract(),
+                "04A1B2C3D4E5F6",
+                TokenType::Rfid,
+                Whitelist::Allowed,
+            )
+            .expect("issued");
+        assert!(
+            book.state().present(&token).is_ok(),
+            "presentable under its key"
+        );
+        token
+    };
+    // The deployment's key is destroyed and replaced.
+    let reopened = Book::open(
+        Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[42; 32])),
+        File::open(&scratch.0).expect("opens"),
+    )
+    .expect("the chain still verifies and folds");
+    assert!(
+        matches!(
+            reopened.state().present(&token),
+            Err(empd::ProviderError::Erased { .. })
+        ),
+        "the uid is unreadable"
+    );
+    assert_ne!(
+        reopened.state().reference_for("04A1B2C3D4E5F6"),
+        token,
+        "and the card no longer resolves to its old reference"
+    );
+}
+
+#[test]
+fn sr_047_the_reference_is_an_hmac_under_the_data_key() {
+    let a = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[1; 32]));
+    let b = Empd::new(me(), emob_service::vault::DataKey::from_bytes(&[2; 32]));
+    assert_eq!(a.reference_for("04A1"), a.reference_for("04A1"));
+    assert_ne!(a.reference_for("04A1"), b.reference_for("04A1"));
+    let expected =
+        emob_service::vault::DataKey::from_bytes(&[1; 32]).digest("empd/token-ref", b"04A1");
+    assert_eq!(a.reference_for("04A1").as_str(), expected.hex());
 }
 
 /// A re-rated record moves the total, and the move is a fact.
@@ -715,11 +856,13 @@ fn a_re_rated_session_still_moves_the_total_after_a_restart() {
     {
         let mut book = scratch.book();
         book.with(
+            &Actor::Estate,
             Contract::new(contract(), date!(2026 - 01 - 01))
                 .limited_to(Money::new(dec("50.00"), Currency::EUR)),
         )
         .expect("held");
         book.ran_up(
+            &Actor::service("csmsd"),
             &contract(),
             &session,
             Money::new(dec("10.00"), Currency::EUR),
@@ -727,6 +870,7 @@ fn a_re_rated_session_still_moves_the_total_after_a_restart() {
         .expect("counted");
         assert!(matches!(
             book.ran_up(
+                &Actor::service("csmsd"),
                 &contract(),
                 &session,
                 Money::new(dec("48.00"), Currency::EUR)
@@ -739,6 +883,7 @@ fn a_re_rated_session_still_moves_the_total_after_a_restart() {
     let mut book = scratch.book();
     assert_eq!(
         book.ran_up(
+            &Actor::service("csmsd"),
             &contract(),
             &session,
             Money::new(dec("48.00"), Currency::EUR)

@@ -152,7 +152,12 @@ impl Dispatcher {
     ///
     /// The document is sent **as this workspace wrote it** — see the module
     /// documentation — and the answer is one of three things, never two.
-    pub async fn deliver(&self, to: &Registration, document: &Outbound) -> Answer {
+    pub async fn deliver(
+        &self,
+        to: &Registration,
+        key: &emob_service::vault::DataKey,
+        document: &Outbound,
+    ) -> Answer {
         let Some(endpoint) = to.endpoint("cdrs", "RECEIVER") else {
             return Answer::Unreached {
                 why: format!(
@@ -162,7 +167,7 @@ impl Dispatcher {
                 ),
             };
         };
-        let peer = match to.as_client_peer() {
+        let peer = match to.as_client_peer(key) {
             Ok(peer) => peer,
             Err(error) => {
                 return Answer::Unreached {

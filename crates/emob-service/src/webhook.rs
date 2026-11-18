@@ -236,6 +236,80 @@ fn mac(delivery: &Delivery<'_>, secret: &Secret) -> String {
     base64::engine::general_purpose::STANDARD.encode(hmac.finalize().into_bytes())
 }
 
+/// Why a receiver refused a delivery before reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// A Standard Webhooks header is missing or not text.
+    #[error("the delivery carries no {0} header")]
+    Unsigned(&'static str),
+    /// The timestamp is not a number.
+    #[error("the webhook-timestamp is not Unix seconds")]
+    BadTimestamp,
+    /// The timestamp is further from the receiver's clock than it tolerates.
+    #[error(
+        "the delivery was signed {skew} s away from this receiver's clock, beyond the {tolerance} s \
+         it accepts — a replay, or a sender whose clock is wrong"
+    )]
+    Stale {
+        /// How far, in seconds.
+        skew: i64,
+        /// The tolerance, in seconds.
+        tolerance: i64,
+    },
+    /// No signature in the header verifies under any configured secret.
+    #[error("no signature on the delivery verifies under this receiver's secret")]
+    Forged,
+}
+
+/// Check a delivery as it arrives: the three headers, the freshness, and the
+/// signature — and return its `webhook-id`.
+///
+/// The receiver half of [`sign`], with the tolerance [`verify`] leaves to its
+/// caller made an argument: a receiver that verified the signature and not the
+/// timestamp would accept a captured delivery for ever.
+///
+/// # Errors
+///
+/// [`Refusal`], naming which check failed.
+pub fn receive(
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+    secrets: &[Secret],
+    now: time::OffsetDateTime,
+    tolerance: time::Duration,
+) -> Result<String, Refusal> {
+    let header = |name: &'static str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(Refusal::Unsigned(name))
+    };
+    let id = header(ID_HEADER)?;
+    let timestamp: i64 = header(TIMESTAMP_HEADER)?
+        .parse()
+        .map_err(|_| Refusal::BadTimestamp)?;
+    let signature = header(SIGNATURE_HEADER)?;
+
+    let skew = (now.unix_timestamp() - timestamp).abs();
+    let limit = tolerance.whole_seconds();
+    if skew > limit {
+        return Err(Refusal::Stale {
+            skew,
+            tolerance: limit,
+        });
+    }
+    let delivery = Delivery {
+        id,
+        timestamp,
+        payload: body,
+    };
+    if !verify(&delivery, secrets, signature) {
+        return Err(Refusal::Forged);
+    }
+    Ok(id.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +471,80 @@ mod tests {
         assert_eq!(
             Secret::standard("whsec_not base64!"),
             Err(SecretError::NotBase64)
+        );
+    }
+
+    fn headers(id: &str, at: time::OffsetDateTime, signature: &str) -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(ID_HEADER, id.parse().unwrap());
+        headers.insert(
+            TIMESTAMP_HEADER,
+            at.unix_timestamp().to_string().parse().unwrap(),
+        );
+        headers.insert(SIGNATURE_HEADER, signature.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn sr_029_a_receiver_takes_its_own_senders_delivery_and_refuses_a_forgery() {
+        let secret = Secret::standard("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw").unwrap();
+        let body = br#"{"kind":"de.emob.cdr.issued"}"#;
+        let signed = sign(&Delivery::new("DE*ABC/CP-1-1", at(), body), &secret);
+        let tolerance = time::Duration::minutes(5);
+
+        assert_eq!(
+            receive(
+                &headers("DE*ABC/CP-1-1", at(), &signed),
+                body,
+                std::slice::from_ref(&secret),
+                at() + time::Duration::seconds(3),
+                tolerance,
+            ),
+            Ok("DE*ABC/CP-1-1".to_owned())
+        );
+
+        let other = Secret::raw("somebody else's");
+        let forged = sign(&Delivery::new("DE*ABC/CP-1-1", at(), body), &other);
+        assert_eq!(
+            receive(
+                &headers("DE*ABC/CP-1-1", at(), &forged),
+                body,
+                std::slice::from_ref(&secret),
+                at(),
+                tolerance,
+            ),
+            Err(Refusal::Forged)
+        );
+        assert_eq!(
+            receive(
+                &axum::http::HeaderMap::new(),
+                body,
+                std::slice::from_ref(&secret),
+                at(),
+                tolerance
+            ),
+            Err(Refusal::Unsigned(ID_HEADER))
+        );
+    }
+
+    #[test]
+    fn sr_030_a_signature_older_than_the_tolerance_is_a_replay() {
+        let secret = Secret::raw("shared");
+        let body = b"{}";
+        let signed = sign(&Delivery::new("id-1", at(), body), &secret);
+        let refusal = receive(
+            &headers("id-1", at(), &signed),
+            body,
+            std::slice::from_ref(&secret),
+            at() + time::Duration::minutes(10),
+            time::Duration::minutes(5),
+        );
+        assert_eq!(
+            refusal,
+            Err(Refusal::Stale {
+                skew: 600,
+                tolerance: 300
+            })
         );
     }
 }

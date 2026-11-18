@@ -1,0 +1,47 @@
+[package]
+name        = "deskd"
+description = "The operator's page: Heute — what needs a person today, headed by the charging success rate, rendered from the read models of the daemons that decided it"
+publish     = false
+version.workspace      = true
+authors.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+# The domain the page words and never decides: the calendar's duties, the
+# chain's findings (an exhaustive `match` over their kinds), the tally's rate.
+emob-core      = { workspace = true }
+emob-eichrecht = { workspace = true }
+emob-session   = { workspace = true }
+emob-service   = { workspace = true }
+
+anyhow         = { workspace = true }
+axum           = { workspace = true }
+# The client half of the three reads. Already in the graph (csmsd, roamd);
+# `json` only, so it adds no crate.
+reqwest        = { version = "0.13", default-features = false, features = ["json"] }
+rust_decimal   = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+time           = { workspace = true }
+tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
+tracing        = { workspace = true }
+
+[dev-dependencies]
+# The estate, started in-process: the daemons Heute reads, and the two it
+# needs to have something to read.
+billd          = { path = "../billd" }
+csmsd          = { path = "../csmsd" }
+empd           = { path = "../empd" }
+roamd          = { path = "../roamd" }
+base64         = { workspace = true }
+emob-core      = { workspace = true }
+reqwest        = { version = "0.13", default-features = false, features = ["json"] }
+serde_json     = { workspace = true }
+emob-sim       = { workspace = true }
+ocpp-kit       = { workspace = true, features = ["std", "tokio", "csms", "station", "testkit", "v1_6"] }
+time           = { workspace = true, features = ["macros"] }
+tokio          = { version = "1.45", features = ["rt-multi-thread", "macros", "time", "net"] }
+tower-service  = "0.3"

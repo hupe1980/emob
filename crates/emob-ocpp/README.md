@@ -1,135 +1,101 @@
 # emob-ocpp
 
-**The OCPP seam, in both directions** — a charging station's transaction events
-become a session that can be billed; the tariff that bills it becomes the price
-on the station's own screen, and a § 14a allocation becomes the limit it charges
-under. With the rule that no float from the telemetry ledger ever becomes a
-kilowatt-hour on an invoice.
+The OCPP seam for CSMS developers: turns a charging station's transaction events
+into a billable session, and carries tariffs and § 14a grid limits back to the
+station.
+
+[![crates.io](https://img.shields.io/crates/v/emob-ocpp.svg)](https://crates.io/crates/emob-ocpp) [![docs.rs](https://img.shields.io/docsrs/emob-ocpp)](https://docs.rs/emob-ocpp) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-ocpp.svg)](#license)
+
+OCPP carries two kinds of meter value, and only one is money. The numeric ones
+(`meterStart`, `meterStop`, `SampledValue.value`) are operational telemetry; the
+signed one — an OCMF record inside a `SignedMeterValueType` — is the only thing
+that becomes a billed kilowatt-hour. This crate makes that structural: its input
+vocabulary has **no numeric meter value at all**, so there is no path from
+telemetry to a CDR. In the other direction it puts the tariff that rates the
+session onto the station's display via OCPP 2.1, and a grid operator's limit
+onto the station as a charging profile.
 
 ```console
 cargo add emob-ocpp
 ```
 
-📖 The reasoning behind this crate, with the regulation it cites, is in
-**[The OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/)**.
-The signatures are on [docs.rs](https://docs.rs/emob-ocpp).
+## Example
 
-Part of [emob](https://github.com/hupe1980/emob), the open-source e-mobility
-operating stack. It is the only crate here that depends on
-[`ocpp-kit`](https://github.com/hupe1980/ocpp-kit); the five that decide money do
-not — see *Why this is a crate* below.
+```rust
+use emob_ocpp::{SignedMeterValue, SignedReading, Transaction, TransactionEvent};
+use emob_session::{Authorization, EndReason};
+use emob_core::Direction;
 
-## The rule this crate makes structural
+let transaction = Transaction::new(
+    "t-96".parse()?,
+    "DE*SIM*E00001".parse()?,
+    Authorization::ad_hoc(),
+)
+.with(TransactionEvent::started(started, vec![]))
+.with(TransactionEvent::ended(
+    ended,
+    vec![SignedReading::new(
+        SignedMeterValue::new(raw_ocmf),
+        Some("Transaction.End".to_owned()),
+    )],
+    EndReason::Local,
+));
 
-OCPP carries two kinds of meter value, and only one of them is money.
+let assembled = transaction.assemble(Direction::Import)?;
+assert_eq!(
+    assembled.session.total(Direction::Import).unwrap().to_string(),
+    "0.636 kWh",
+);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-The **numeric** ones — `meterStart`, `meterStop`, `SampledValue.value` — are
-operational telemetry: they answer whether every event arrived and whether the
-sequence is complete. They are exact, not floating point, because `ocpp-kit`
-carries every OCPP number as a decimal. **Exact is not billable.**
+## What it guarantees
 
-The Open Charge Alliance's own example message makes the point. Its `meterStop`
-is **108814** — the meter's *lifetime* register, in watt-hours — while the
-transaction's signed difference is **0.636 kWh**. A CSMS billing the protocol's
-number would bill a figure nothing signed, from a register that is not the
-session's, out by a factor of a hundred and seventy `[OCA SMV §5.2]`, and every
-digit of it correct.
+- **No telemetry number reaches an invoice.** The Open Charge Alliance's own
+  example sends `meterStop` = **108814** (the meter's lifetime register, in Wh)
+  for a transaction whose signed difference is **0.636 kWh** `[OCA SMV §5.2]`.
+  Only the signed value is lifted.
+- **A transport retry is not a reading.** Records are de-duplicated by the digest
+  of their signed bytes, so a retried `MeterValues` does not look like a missing
+  record. Records that differ under one pagination counter are both kept — that
+  is a fault the chain must see. `Assembled::duplicates_dropped` counts retries.
+- **The price on the screen is the price on the invoice.** The OCPP 2.1 tariff is
+  built from the same `emob_tariff::Tariff` that rates the CDR.
+- **What the wire cannot carry exactly is refused or accounted for**, never
+  silently rounded.
+- **The money crates stay protocol-free.** `emob-core`, `emob-session`,
+  `emob-eichrecht`, `emob-tariff` and `emob-cdr` build with no OCPP in their
+  dependency tree; this crate is the only one on both sides.
+- **No I/O, no clock.** `just purity` fails the build if that changes.
 
-The **signed** one is a `SignedMeterValueType` carrying an OCMF data set, and it
-is the only thing here that becomes a billed kilowatt-hour.
+## Inbound: from transaction events to a session
 
-That is a property of the types rather than a rule somebody remembers: **the
-input vocabulary has no numeric meter value in it at all.** `TransactionEvent`
-carries signed values, instants, and whether energy was flowing. There is no
-field to put a float in, so there is no path from one to a `Cdr`.
-
-## The protocol half is not here any more
-
-What a station sends is an OCMF data set wrapped three deep, and every layer is
-somewhere an implementation goes wrong: OCPP 2.x has a typed field for it, while
-**OCPP 1.6 serialises the whole object into the `value` string** of a
-`SampledValue` whose `format` is `SignedData` — a string holding JSON holding
-Base64 holding the record `[OCA SMV §3.2.1]`. The `publicKey` beside it is Base64
-over a colon-separated envelope, `oca:base16:asn1:<hex>`, whose last component is
-the key *as printed on the certified meter* — and the same document's own example
-then sends Base64 over plain hex with no envelope at all, so a reader that
-implemented only the specification would reject the specification's own example
-`[OCA SMV §3.2.2]`.
-
-None of that lives here. It is spec knowledge every OCPP CSMS doing German
-Eichrecht has to reimplement, which is the definition of something belonging in
-the protocol kit, so `ocpp-kit` owns it: `metering::SignedMeterValue::decoded_str`,
-`metering::decode_public_key`, and a version-neutral `csms::events::DomainEvent`
-that carries the signed values through. One `match` covers all three versions
-here.
-
-The public key is still a **claim**, wherever it is decoded: OCMF is explicit
-that the key travels out of band, and a key arriving on the same socket as the
-record it signs proves only that whoever holds that socket owns a private key.
-The key that decides anything comes from `emob_eichrecht::KeyRegistry`.
-
-## A retry is not a reading
-
-OCPP transports retry. A `MeterValues.req` that does not get its confirmation in
-time is sent again, and the same signed record arrives twice — with the same
-pagination counter, because the meter produced one. A CSMS that appends both
-hands the chain a duplicate, and the chain answers `PaginationBreak`: a
-transport retry reported as a missing record, on a session that is intact.
-
-Records are de-duplicated by the digest of the bytes their signature covers. Two
-that hash the same *are* one record; two that differ are both kept, because a
-station that reused a counter for different content is exactly the fault the
-chain exists to find. `Assembled::duplicates_dropped` reports how often the link
-retried.
-
-## What comes from where
-
-Two sources describe one charging process and neither is sufficient alone.
+`ocpp-kit` decodes the protocol — OCPP 1.6 nests the signed record as a string
+holding JSON holding Base64 `[OCA SMV §3.2.1]`, and the `publicKey` envelope has
+two spellings `[OCA SMV §3.2.2]` — and delivers a version-neutral
+`csms::events::DomainEvent`. `emob_ocpp::kit` maps that event onto a
+`TransactionEvent`, and `Transaction::assemble` builds the session:
 
 | Fact | Source | Why not the other |
 |---|---|---|
 | The register, and its scale | the **signed record** | OCPP's numbers are telemetry |
-| When the transaction opened and closed | the **OCPP events** | OCMF's clock is often `I` — informative — and the CSMS knows when it authorised |
-| Charging, or merely connected | the **OCPP events** | the meter cannot tell a taper from an occupancy, and `[AFIR Art. 5(4)]` prices them differently |
+| When the transaction opened and closed | the **OCPP events** | OCMF's clock is often only informative, and the CSMS knows when it authorised |
+| Charging, or merely connected | the **OCPP events** | the meter cannot tell a taper from occupancy, and `[AFIR Art. 5(4)]` prices them differently |
 | Whether a reading is clock-aligned | the **OCPP `ReadingContext`** | nothing in the record says why it was taken |
 
-So `Transaction::assemble` takes the *shape* of the session from the protocol
-and every *number* from the signature.
+Where the signed record has its own opinion — OCMF's `S` (suspended) marker
+`[OCMF Tab. 7, TX]` — disagreements with the OCPP events are reported in
+`Assembled::charging_disagreements` for an operator, not silently resolved.
 
-### …except where the signature has a second opinion
+The public key a station sends is only a claim; the key that decides anything
+comes from `emob_eichrecht::KeyRegistry`. This crate does not verify:
+`emob_eichrecht::Evidence::assemble` does.
 
-One row is not quite a monopoly. `[OCMF Tab. 7, TX]` defines `S` — "Suspended =
-Transaction active, but currently not charging" — so a signature component can
-state the occupancy interval too, and some do.
+## Outbound: the tariff on the station's display
 
-```rust
-for disagreement in &assembled.charging_disagreements {
-    // the signed records say suspended; the OCPP events say charging
-}
-```
-
-It does not replace the protocol's account: `S` is optional, so its absence says
-nothing and most of the fleet never emits one. Where it is emitted and disagrees,
-that is worth an operator's attention rather than a silent preference for either
-side — `[AFIR Art. 5(4)]` prices those minutes differently, and the invoicing
-party controls only one of the two accounts.
-
-## The price goes the other way
-
-The money comes **in** across this seam, out of a signature. The **price** goes
-out across it.
-
-`[AFIR Art. 5(4)]` requires the ad-hoc price to be "known to end users **before
-they initiate** a recharging session", and the place a driver learns it is the
-charge point's own display. Until OCPP 2.1 there was no structured way to put it
-there — 2.0.1 could send a `DisplayMessage` string and a running `CostUpdated`
-number, both computed somewhere else — so the price on the screen came from a
-field somebody typed while the price on the invoice came from the tariff engine.
-That is the drift `emob-tariff` exists to make unrepresentable, surviving in the
-one place the article regulates.
-
-OCPP 2.1's *Tariff and Cost* block closes it, and `emob_ocpp::to_ocpp` is the
-crossing:
+AFIR requires the ad-hoc price to be known *before* the driver starts
+`[AFIR Art. 5(4)]`, and the station display is where that happens. OCPP 2.1's
+*Tariff and Cost* block makes it structured:
 
 ```rust
 let crossing = emob_ocpp::to_ocpp(&tariff, at)?;          // the same Tariff that rates
@@ -137,92 +103,73 @@ let request = v2_1::SetDefaultTariffRequest::new(0, crossing.value);
 for note in crossing.reasons() { /* what the wire could not carry exactly */ }
 ```
 
-**The two models are one model.** OCPI orders *elements* and picks, per
-dimension, the first whose restrictions match; OCPP 2.1 orders *prices* inside
-each dimension and picks the first whose conditions match. Projecting the
-element list onto one price list per dimension — in order — is exactly the
-projection `emob_tariff::matching_component` already performs at rating time, so
-the station selects the component the invoice is built from by construction.
+OCPI orders elements and picks the first match per dimension; OCPP 2.1 orders
+prices within each dimension and picks the first match. Projecting one onto the
+other is exactly `emob_tariff::matching_component`, so the station selects the
+component the invoice is built from. The required `description` is
+`describe().full_disclosure()`, and `cost_updated` turns a `Rated` into the
+running total `CostUpdated` carries.
 
-The tariff's `description`, which OCPP 2.1 requires the station to **show**, is
-`describe().full_disclosure()`: every tier with its conditions, in the order the
-article prescribes. And `cost_updated` turns a `Rated` into the running total
-`CostUpdated` carries — the same figure the CDR will state.
+A loss in the driver's disfavour is a **refusal**:
 
-### What the wire cannot say is a refusal, not a note
-
-The rule is the roaming edge's: a loss in the driver's disfavour that the
-document does not show is a refusal, because a note attached to a number the
-receiver reads at face value is not something they can act on.
-
-| What | Why it is refused |
+| Refused | Why |
 |---|---|
-| a time price with no exact per-minute spelling | OCPP's field **is** `priceMinute` — the article's own unit — and €2.50 an hour is €0.041666… a minute. A rounded figure is a price the station charges and the tariff does not. Quote an hourly rate divisible by three |
-| a dimension charged at two VAT rates | OCPP carries one `taxRates` list per dimension, so the second tier would be taxed at the first tier's rate |
-| a session fee conditioned on a quantity | `TariffConditionsFixed` carries the wall clock and nothing else. Published without its condition the fee is not narrower but **wider**: the station charges it on every session |
-| an unevaluable restriction | for the reason `emob-roam` refuses it onto OCPI |
+| a time price with no exact per-minute spelling | OCPP's field is `priceMinute`; €2.50/h is €0.041666…/min. Quote an hourly rate divisible by three |
+| a dimension charged at two VAT rates | OCPP carries one `taxRates` list per dimension |
+| a session fee conditioned on a quantity | `TariffConditionsFixed` carries only the wall clock, so the fee would be charged on every session |
+| an unevaluable restriction | the station could not check the condition |
 
-What is merely *visible* is carried with an account: a `step_size` OCPP has no
-field for, a `valid_until` it has no field for, the residual a gross price
-leaves when the wire quotes net, and the tiers past the tenth that OCPP's
-ten-line `description` cannot hold — that last one a note rather than a refusal
-because it changes nothing that is *charged*, and a station displaying no price
-at all is a worse breach of the same article than one displaying ten tiers of
-twelve.
+What only affects *display* is carried with a note in the `Crossing`: a
+`step_size` or `valid_until` OCPP has no field for, the residual when a gross
+price is quoted net, and tiers beyond the ten `description` lines OCPP allows.
+The finished document is then checked by `ocpp-kit`'s own schema validator.
 
-The finished document is then handed to `ocpp-kit`'s own validator, because the
-bounds above are a list somebody maintains and the schema is the kit's to own. A
-tariff a station would refuse is refused here instead.
+## Outbound: § 14a grid limits as charging profiles
 
-## And the grid's limit goes the same way
+`to_charging_profiles` carries an `emob_smart::Allocation` — what a site may draw
+under a distribution grid operator's setpoint (§ 14a EnWG, German controllable
+loads) — to its stations at the purpose `ChargingStationExternalConstraints`.
+The purpose is fixed: OCPP resolves overlapping profiles by purpose first, and a
+`TxDefaultProfile` would sit in the same tier as the operator's own optimiser,
+which the grid operator outranks `[BK6-22-300 Ziff. 4.6]`.
 
-An `emob_smart::Allocation` is what a site may draw under a grid operator's
-setpoint. `to_charging_profiles` carries it to the stations that have to obey
-it, at **`ChargingStationExternalConstraints`** — the purpose OCPP reserves for
-an external actor, which is what a distribution grid operator is.
+Three facts have no OCPP field and are reported through the `Crossing`: the site
+ceiling (OCPP addresses EVSEs), the headroom (curtailed vs. nobody plugged in),
+and whether full power is granted or the grid operator has gone silent.
 
-The purpose is fixed here and is not a parameter. OCPP resolves overlapping
-profiles by purpose first and stack level second, so a setpoint sent as a
-`TxDefaultProfile` would sit in the same tier as the optimiser
-`[BK6-22-300 Ziff. 4.6]` says it outranks — and the station would settle the two
-by a stack level somebody typed.
+## API at a glance
 
-Three facts an allocation holds have no field on that wire, and each is reported
-through `Crossing` rather than dropped: the site ceiling, because OCPP addresses
-EVSEs; the headroom, which separates *"we held you down"* from *"nobody was
-plugged in"*; and whether a site at full power is being allowed it or has simply
-stopped being spoken to.
+| Item | Purpose |
+|---|---|
+| `Transaction`, `TransactionEvent`, `SignedReading` | Inbound events, signed values only |
+| `Transaction::assemble`, `Assembled` | Session + records, duplicates dropped, disagreements reported |
+| `kit::event_from` and helpers | Map `ocpp-kit`'s `DomainEvent` onto this vocabulary |
+| `record_of` | Extract the OCMF record from a signed value |
+| `to_ocpp`, `cost_updated` | Tariff and running cost onto OCPP 2.1 |
+| `to_charging_profiles`, `Setpoint` | § 14a allocation onto charging profiles |
+| `SignedMeterValue` | Re-exported from `ocpp-kit` |
 
-## What it does not do
+## Feature flags
 
-It does not speak OCPP. [`ocpp-kit`](https://github.com/hupe1980/ocpp-kit) does
-that — framing, the sans-I/O engine, transports, security profiles, and the
-version-neutral `DomainEvent` this crate reads. `emob_ocpp::kit` is a `match`
-over that event and nothing more.
+| Feature | Default | Effect |
+|---|---|---|
+| `serde` | yes | `Serialize`/`Deserialize` for every public type |
 
-It also does not verify. `Transaction::assemble` gets the bytes out of the
-transport intact; `emob_eichrecht::Evidence::assemble` decides whether they hold
-up, against a registry.
+OCPP 1.6J, 2.0.1 and 2.1 support comes from
+[`ocpp-kit`](https://github.com/hupe1980/ocpp-kit) 0.5 and is always enabled.
 
-## Why this is a crate
+## Standards and sources
 
-It holds one job, and it is a boundary rather than a quarantine. Folding it into
-`emob-cdr` would put **`ocpp-kit` in the dependency graph of every
-crate that decides money**. Today `emob-core`, `emob-session`, `emob-eichrecht`,
-`emob-tariff` and `emob-cdr` build with no OCPP anywhere in their tree, and this
-crate is the reason: it is the only one on both sides. That is also why the
-tariff crossing lives here and the edge points **this** way — `emob-ocpp`
-depends on `emob-tariff`, never the reverse.
+OCPP 1.6J, 2.0.1, 2.1 (Tariff and Cost, smart charging); OCA Signed Meter Values
+whitepaper; OCMF; AFIR Art. 5(4); BNetzA BK6-22-300 (§ 14a EnWG).
 
-The billing chain should be buildable, testable and auditable without a protocol
-implementation in it, and a boundary the compiler enforces is the only kind that
-stays true.
+## Part of emob
 
-## No I/O, no clock
-
-Nothing here opens a socket, reads a file or asks the time. `just purity` fails
-the build if that stops being true.
+emob is an open-source e-mobility stack for charge point operators and
+e-mobility service providers. This crate is the library under the `csmsd`
+daemon. See [the OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/) on the
+documentation site and the [root README](https://github.com/hupe1980/emob).
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of Apache License 2.0 or MIT, at your option.

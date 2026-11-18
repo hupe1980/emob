@@ -1,85 +1,112 @@
 +++
 title = "Getting started"
 weight = 1
-description = "Install the crates, verify a charging session under German calibration law, price it, publish that price to three audiences, close a month into an e-invoice."
+description = "Try emob with just demo, then walk one EV charging session in Rust: verify Eichrecht OCMF meter values, price it under AFIR, build a CDR and an e-invoice."
 
 [extra]
 nav = "Getting started"
 +++
 
-Fifteen crates are built from this workspace today, with eight daemons on top of
-them. Everything on this page runs. ✅
+The fastest way to see emob is to run it: `just demo` starts the whole estate —
+every daemon, three simulated charge points and a roaming partner — on your
+machine. The rest of this tutorial takes one charging session from the meter to
+the money in library code: you verify the station's signed meter values, split
+the energy into quarter hours, price it with a tariff, build a charge detail
+record (CDR) and close a month into an EN 16931 e-invoice. ✅
+
+## Try the whole estate: `just demo`
+
+You need Rust, [`just`](https://just.systems) and `openssl`; `just doctor`
+checks them and prints the command that installs anything missing. Without
+Rust, `just demo` runs the released `ghcr.io/hupe1980/emob` image with Docker
+instead, from the first release that publishes it (0.3).
 
 ```console
-cargo add emob-core emob-eichrecht emob-session emob-cdr emob-tariff \
-          emob-ocpp emob-poi emob-roam emob-billing emob-thg emob-smart \
-          emob-eebus emob-pnc emob-service emob-sim
+git clone https://github.com/hupe1980/emob && cd emob
+just doctor      # what is missing, and the command that installs it
+just demo        # the estate on loopback: Heute, a receipt and the partner's inbox
 ```
 
-## Which one do I need?
+Within a minute it prints three links: **Heute**, the operator page, signed in;
+a driver's **receipt**; and the roaming partner's **inbox** — and after the
+simulated month end, the partner's **invoice** page with its XRechnung files. Open the receipt
+on a phone and tap *Selbst prüfen* to check the signed meter values on the
+device. Ctrl-C ends the run and removes its journals.
 
-They compose, but each answers on its own — take the one whose question is
-yours, and its dependencies come with it.
+<div class="shot-pair">
+<figure class="shot phone">
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/heute-mobile-dark.webp"><img src="../../img/heute-mobile-light.webp" width="390" height="844" loading="lazy" alt="Heute on a phone: the charging success rate, its causes and the sessions that need attention"></picture>
+<figcaption>Heute at phone width.</figcaption>
+</figure>
+<figure class="shot phone">
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/receipt-dark.webp"><img src="../../img/receipt-light.webp" width="390" height="844" loading="lazy" alt="A billed driver receipt: measured, signed, verified, with energy, duration, price and the charging site"></picture>
+<figcaption>The driver receipt.</figcaption>
+</figure>
+</div>
+
+`cargo run -q -p emob-cli -- demo --check` plays the same morning at full speed
+and asserts every outcome — CI runs it on every push, followed by `just a11y`,
+which checks every page a person reads for accessibility. What the demo starts, the
+estate file and how to run the daemons yourself are on
+[Run the estate](@/docs/run-the-estate.md).
+
+## Install the crates
+
+emob needs Rust **1.94** or later (`emob-roam` needs 1.96, because its OCPI
+library does). Add the crates for the steps you follow:
+
+```console
+cargo add emob-core emob-eichrecht emob-session emob-cdr emob-tariff emob-billing
+```
+
+Each crate answers one question, and its dependencies come with it:
 
 | I want to… | Crate |
 |---|---|
 | Check that a signed meter value is genuine, and say why if it is not | `emob-eichrecht` |
-| Give a driver a file their own verifier accepts | `emob-eichrecht` |
-| Split a session across the quarter hours the market settles on | `emob-session` |
+| Split a session across the 15-minute intervals the energy market settles on | `emob-session` |
 | Turn a session into a record another company will pay against | `emob-cdr` |
 | Price a session, and show the same price before it starts | `emob-tariff` |
-| Ask whether a charge point, a provider or the company is ready for a date in the regulation | `emob-core` |
-| Parse an eMAID or EVSE id without losing how it was written | `emob-core` |
-| Lift a signed value out of an OCPP transaction | `emob-ocpp` |
-| Put the price on the charge point's own screen, over OCPP 2.1 | `emob-ocpp` |
+| Parse identifiers (EVSE id, eMAID), exact money and energy; check regulatory duties | `emob-core` |
+| Turn a month of records into an e-invoice, a SEPA direct debit and postings | `emob-billing` |
+| Lift signed values out of OCPP traffic; send a tariff to a station | `emob-ocpp` |
 | Publish locations and prices to the national access point | `emob-poi` |
-| Send a record to a roaming partner, or check one that arrived | `emob-roam` |
-| Turn a month of records into an e-invoice, a SEPA collection and postings | `emob-billing` |
-| File the year's THG-Quote notification, and find out which points are not eligible | `emob-thg` |
-| Ask which charge points § 14a reaches, and share a site's power out under a setpoint | `emob-smart` |
-| Read a grid operator's setpoint off the EEBUS wire without losing a watt | `emob-eebus` |
-| Check a Plug & Charge contract certificate, and which ecosystem it belongs to | `emob-pnc` |
-| Write a daemon: settings, a readiness probe, a graceful stop — and decide whether a credential may reach a record | `emob-service` |
-| Test all of the above against a fleet that signs for real | `emob-sim` |
+| Exchange records with roaming partners over OCPI or OICP | `emob-roam` |
+| File the greenhouse-gas quota (THG-Quote) | `emob-thg` |
+| Share a site's power under a § 14a grid setpoint | `emob-smart`, `emob-eebus` |
+| Check a Plug & Charge contract certificate | `emob-pnc` |
+| Build a daemon: settings, health probes, graceful shutdown | `emob-service` |
+| Test against a simulated fleet that signs real records | `emob-sim` |
 
-Every **domain** crate does no I/O and reads no clock — instants and keys are
-arguments. That is what makes a two-year-old dispute answerable by replaying the
-check exactly as it ran, and it is enforced by a build guard rather than by
-review. `emob-service` is the one shared place that stops being true, and it is
-where the daemons live.
+The domain crates do no I/O and never read the clock: every instant and every
+key is an argument. That makes any past check reproducible — you can replay a
+two-year-old disputed session exactly as it ran. `emob-service` is the one
+shared crate that does I/O, and it is what the daemons build on.
 
 ```mermaid
 flowchart LR
     A["emob-eichrecht<br/>verify"] --> B["emob-session<br/>split"]
     B --> C["emob-cdr<br/>record + price"]
     T["emob-tariff"] --> C
-    O["emob-ocpp<br/>the seam"] --> B
-    C --> R["emob-roam<br/>partner"]
     C --> I["emob-billing<br/>invoice · SEPA · books"]
-    T --> P["emob-poi<br/>access point"]
-    T --> O
-    K["emob-core<br/>ids · money · duties"] -.-> A & B & C & T & R & P & O & I
-
-    classDef base fill:#88888818,stroke:#888,stroke-dasharray:4 3
-    class K base
+    C --> R["emob-roam<br/>partners"]
+    K["emob-core<br/>ids · money · duties"] -.-> A & B & C & T & I
 ```
 
-The rest of this page walks that chain left to right.
+## Step 1: verify a charging session (Eichrecht)
 
-## Verify a charging session
-
-A station emits OCMF records — signed meter values — at the start and end of a
-session, and often at quarter-hour boundaries in between. Turning them into a
-number you may invoice takes four checks, and `Evidence::assemble` runs all of
-them in the order that makes each one meaningful.
+A charging station with an Eichrecht-approved meter emits **OCMF** records — the
+Open Charge Metering Format, in which the calibrated meter signs each reading.
+German calibration law lets you bill only a value the customer can verify
+`[MessEG §33]`. `Evidence::assemble` runs every check: signature, key binding,
+completeness of the record chain, and meter state.
 
 ```rust
-use emob_core::IdentificationStrength;
 use emob_eichrecht::{ComponentRef, Evidence, KeyRegistry, RegisteredKey};
 use ocmf::{Curve, PublicKey, Record};
 
-// The key binding arrives out of band — from the station's type approval or
-// your provisioning system. Never from the record you are about to check.
+// The station's public key comes from its type approval or your provisioning
+// system — never from the record you are about to check.
 let mut registry = KeyRegistry::new();
 registry.insert(
     ComponentRef::Meter { serial: "BQ27400330016".into() },
@@ -87,10 +114,9 @@ registry.insert(
         PublicKey::from_text(station_public_key, Some(Curve::Secp256r1))?,
         "type approval 2026-01",
     ),
-)?;   // refuses a window overlapping one this component already holds
+)?; // refuses a validity window that overlaps one already registered
 
-// The texts outlive the records: a `Record` borrows the bytes its signature
-// covers, which is the format's central rule rather than an inconvenience.
+// A `Record` borrows the exact bytes its signature covers, so keep the texts alive.
 let records = raw_records
     .iter()
     .map(|r| Record::parse(r))
@@ -106,257 +132,187 @@ match evidence.billable_energy() {
 }
 ```
 
-`billable_energy()` returns `None` whenever *anything* is wrong, and
-`reasons()` says what. There is no other way to reach the number, which is the
-point: the rule "a value that does not verify does not bill" is enforced by the
-type rather than remembered by a developer.
+`billable_energy()` returns `None` if *anything* is wrong, and `reasons()` says
+what. There is no other way to obtain a billable quantity, so "a value that does
+not verify does not bill" is enforced by the type system.
 
-The energy is not the only answer. A duration is a separate claim with separate
-flags, and so is who was charging:
-
-```rust
-assert!(evidence.is_billable_for_time());     // the clock was synchronised
-assert_eq!(evidence.identification_strength(), Some(IdentificationStrength::Trusted));
-assert_eq!(evidence.direction(), Some(Direction::Import));  // from the OBIS code
-```
-
-A session on an unsynchronised clock has a register an invoice may use and a
-duration it may not — so a per-kWh tariff bills it and a per-minute occupancy fee
-must not.
-
-## Hand the driver the file they check it with
-
-`[MessEG §33]` does not require the value to be *correct*, it requires the
-affected party to be able to **check** it. So the deliverable is a file the
-independent S.A.F.E. Transparenzsoftware reads:
+Energy, duration and identity are separate answers. A station with an
+unsynchronised clock still has billable energy, but no billable duration — so a
+per-kWh price applies and a per-minute fee does not:
 
 ```rust
-use emob_eichrecht::transparency;
-
-let xml = transparency::to_xml(&evidence)?;
+assert!(evidence.is_billable_for_time());            // the clock was synchronised
+assert_eq!(evidence.direction(), Some(Direction::Import)); // read off the OBIS code
 ```
 
-Each record verbatim, beside the public key it was checked against — the one the
-registry supplied out of band, never one chosen later to make the file verify.
-A session that does *not* bill still gets a file, because a dispute is exactly
-when it matters.
-
-### What blocks a session
-
-Each of these is a real message the workspace can produce, and each corresponds
-to a check some production platform has been found not to make:
+Typical reasons a session is blocked:
 
 ```text
 record 2: the signature does not match the payload
 pagination jumped from 1 to 3: a record is missing or duplicated
-the chain does not open with TX=B
 the meter was in state Substitute at record 2, which may not be billed
-record 2 flags its energy value as unusable (EF contains 'E')
-record 2 reports the user assignment as Invalid: the energy was measured, but nobody is provably behind it
-2 transactions open in this chain: two charging processes were concatenated
 the register ran backwards: 2965.100 then 2935.600
-the opening and closing readings are on different registers
-the signing component changed mid-session: BQ1 then BQ2
 no public key is registered for signing component "meter:BQ1"
 ```
 
-The pagination one deserves attention. Every signature in that session is
-genuine — dropping records does not invalidate the ones that remain. Only the
-chain check sees it.
+The pagination case matters most: every remaining signature is genuine, and
+only the chain check notices a record was removed. See
+[The Eichrecht chain](@/docs/eichrecht.md) for every check.
 
-## Split a session across quarter hours
+### Give the driver a file they can check
+
+The law requires the customer to be able to **check** the value. The
+deliverable is the XML file read by the S.A.F.E. Transparenzsoftware, the
+independent verifier used in Germany:
 
 ```rust
-use emob_session::split;
-
-let split = split::into_quarter_hours(&series)?;   // the grid alone
-let split = session.split(Direction::Import)?;     // …and the state changes too
-
-assert!(split.conserves());        // exactly, for every session
-assert!(split.fully_measured());   // …and every boundary had a reading on it
+let xml = emob_eichrecht::transparency::to_xml(&evidence)?;
 ```
 
-The sum equals the session total to the last digit, whatever the ratios work out
-to — see [Sessions and settlement](@/docs/settlement.md) for why that is by
-construction rather than by reconciliation.
+It contains each record verbatim beside the registered key it was checked
+against. A session that does not bill still gets a file, because a dispute is
+when the driver needs it most.
 
-## Build a CDR
+## Step 2: split the session into quarter hours
+
+Electricity is settled in 15-minute intervals. `emob-session` splits a session's
+meter series on that grid so the parts sum *exactly* to the total:
+
+```rust
+let split = session.split(Direction::Import)?;
+
+assert!(split.conserves());       // parts sum to the total, to the last digit
+assert!(split.fully_measured());  // every boundary had a meter reading
+```
+
+A `Session` is opened with `Session::open` and given its readings with
+`attach_series`; in production the OCPP seam builds it from station traffic. See
+[Sessions and settlement](@/docs/settlement.md) for why the split conserves by
+construction.
+
+## Step 3: price it and build a CDR
+
+A tariff rates the session's own quarter hours, and the **same** tariff produces
+the price text a driver sees before starting — so the price shown is the price
+charged `[AFIR Art. 5(4)]`.
 
 ```rust
 use emob_cdr::{Acceptance, CdrBuilder, CdrLedger, EvidenceRef};
 use emob_core::TimeZone;
-use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, describe};
+use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, check_afir, describe};
 
-// A tariff's time-of-day restrictions are local civil time at the charge point,
-// so the tariff carries the zone they are read in.
+// Time-of-day restrictions are local time at the charge point.
 let berlin = TimeZone::new("Europe/Berlin")?;
 
-let tariff = Tariff::simple(id, Currency::EUR, TariffKind::AdHoc, berlin, vec![
+let tariff = Tariff::simple("ad-hoc-dc".parse()?, Currency::EUR, TariffKind::AdHoc, berlin, vec![
     PriceComponent::new(Dimension::Energy, dec("0.49")).with_vat(dec("19")),
     PriceComponent::new(Dimension::ParkingTime, dec("6.00")).with_vat(dec("19")),
 ]);
 
-// What the driver is shown, before anything happens, in the order AFIR
-// prescribes — derived from the tariff that is about to rate them.
+// What the driver is shown, in the order AFIR prescribes.
 assert_eq!(describe(&tariff, session.started_at).one_line(),
            "0.49 EUR / kWh · 0.10 EUR / min");
 
+// May a 150 kW charger offer this tariff at all?
+assert!(check_afir(&tariff, dec("150")).is_lawful());
+
 let cdr = CdrBuilder::from_session(&session, Direction::Import)?
     .key(party, "cdr-1".parse()?)
-    // Read off the verified records — never filled in by hand, or the
-    // cross-checks below become a formality.
-    .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
-    .rated_with(&tariff)          // priced from its own quarter hours
+    .evidence(EvidenceRef::from_evidence(&evidence, "OCMF")) // read off the verified records
+    .rated_with(&tariff)
     .build()?;
 
-assert_eq!(cdr.total_cost().unwrap().to_string(), "8.82 EUR");
+assert_eq!(cdr.total_cost().unwrap().to_string(), "8.82 EUR"); // 18.000 kWh × 0.49
 
 let mut ledger = CdrLedger::new();
 assert_eq!(ledger.accept(cdr.clone()), Acceptance::Stored);
-assert_eq!(ledger.accept(cdr), Acceptance::Duplicate);  // a retry, not a second invoice
+assert_eq!(ledger.accept(cdr), Acceptance::Duplicate); // a retry, not a second invoice
 ```
 
-The record carries its own price, computed from its own charging periods — so
-every euro traces to a quarter hour that traces to a signed reading, and a
-tiered tariff prices the quarter hours the split produced rather than repricing
-the whole session at whichever tier it ended in.
+The builder refuses a record whose claims contradict its signed evidence: a
+stronger authorisation than the record supports, a per-minute price on a session
+whose clock cannot carry a duration, or a direction that contradicts the meter's
+register.
 
-Three things the builder refuses, all read off the evidence rather than passed
-in: a session claiming stronger authorisation than its signed record supports, a
-per-minute price on a session whose clock cannot carry a duration — that one
-names the fix in the message, because the energy is unaffected — and a record
-whose claimed direction contradicts the OBIS register the meter signed.
-
-## Get the numbers an invoice needs
+An invoice needs the taxable amount per VAT rate (EN 16931), not one gross
+figure. The rated cost provides it:
 
 ```rust
 let rated = &cdr.cost.as_ref().unwrap().rated;
-
 for line in rated.tax_summary() {
     println!("{} %: net {} + tax {} = {}", line.rate, line.net, line.tax, line.gross);
     // 19 %: net 7.41 + tax 1.41 = 8.82
 }
-assert_eq!(rated.net().amount() + rated.tax().amount(), rated.gross().amount());
 ```
 
-EN 16931 wants the taxable amount per VAT rate, not one gross number — a session
-whose electricity and service fee sit in different categories has two of each.
+See [Tariffs and price transparency](@/docs/pricing.md) for tiers, time
+restrictions and the AFIR shape rules.
 
-And whether the tariff is one this charger may lawfully offer at all:
+## Step 4: settle the month
+
+`emob-billing` turns the month's accepted CDRs into an EN 16931 e-invoice, a
+SEPA direct-debit file (pain.008) and balanced bookkeeping postings. Rounding
+happens once, per line, as EN 16931 requires; the difference against the exact
+total is reported rather than hidden.
 
 ```rust
-use emob_tariff::check_afir;
+use emob_billing::{InvoiceBuilder, Specification, Syntax, en16931, postings};
 
-assert!(check_afir(&tariff, dec("150")).is_lawful());
+let crossing = InvoiceBuilder::new("R-2026-0001", issued, (from, to), cpo, driver)
+    .supplied_from("DE", dec("19"))  // country of supply and its VAT rate
+    .ledger(&ledger)
+    .due_on(due)
+    .build()?;
+
+let invoice = crossing.value;
+assert!(invoice.reconciles());                     // subtotals reproduce the lines
+assert_eq!(invoice.gross_total().to_string(), "31.04 EUR");
+for reason in crossing.reasons() { eprintln!("{reason}"); }
+// /totals/taxable: the records came to 26.0800840336… exactly and this invoice
+//                  states 26.08 EUR
+
+// Validate against the EN 16931 rules, then write UBL (or CII).
+assert!(en16931::to_en16931(&invoice, Specification::Core)?.value.is_valid());
+let xml = en16931::write(&invoice, Specification::Core, Syntax::Ubl)?.value;
+
+assert!(postings::postings_for(&invoice).balances());
 ```
 
-## Ask whether a charge point is compliant
+The VAT treatment follows from the parties: an invoice to an e-mobility provider
+established in another member state becomes a reverse charge `[UStG §3g]`, with
+no VAT on the document. Every date is an argument, so re-running a billing job
+produces the same bytes. See [Sessions and settlement](@/docs/settlement.md).
+
+## Check a charge point against the regulations
+
+`emob-core` holds an obligation calendar — dated, cited duties from AFIR (the EU
+Alternative Fuels Infrastructure Regulation), German law and NIS2. Ask it about a
+charge point on a date:
 
 ```rust
 use emob_core::obligation::{assess, Verdict};
-use emob_core::station::{AdHocPayment, ChargePointProfile, V2gCommunication};
+use emob_core::station::{AdHocPayment, ChargePointProfile};
 use time::macros::date;
 
 let mut point = ChargePointProfile::bare("DE*AB7*E840*6487".parse()?, date!(2026-06-01));
 point.ad_hoc_payment = AdHocPayment::CardReader;
-point.v2g = V2gCommunication::both_generations();
 
 let report = assess(&point, date!(2027-01-01));
-
 for finding in report.breaches() {
     println!("{}  {}", finding.obligation.citation, finding.obligation.remedy);
 }
-assert_eq!(report.verdict(), Verdict::Failing);  // the data and register duties are still open
+assert_eq!(report.verdict(), Verdict::Failing);
 ```
 
-`breaches()` rather than `failing()`, because one entry in the calendar is not a
-duty: the greenhouse-gas quota's preconditions are worth money and break no law
-when unmet, so they are `forgone()` and the verdict does not read them.
+`ChargePointProfile::bare` starts every field at its non-compliant value, so a
+test exercises the duty it was written for. Provider and company duties are
+assessed with `assess_provider` and `assess_undertaking`; see
+[The obligation calendar](@/docs/compliance.md).
 
-Duties that bind the **provider** rather than the point — `[AFIR Art. 5(5)]`'s
-disclosure obligation and its outright ban on cross-border roaming surcharges —
-are asked of a `ProviderProfile` instead:
+## Test against a simulated fleet
 
-```rust
-use emob_core::obligation::assess_provider;
-use emob_core::station::ProviderProfile;
-
-let mut provider = ProviderProfile::bare(PartyId::new("DE", "MSP")?);
-provider.surcharges_cross_border_roaming = true;
-
-assert_eq!(assess_provider(&provider, date!(2026-09-01)).verdict(), Verdict::Failing);
-```
-
-An operator whose every charge point is faultless can still be in breach as a
-provider — and in Germany, where one company usually wears both hats, that is
-the half nobody checks.
-
-And the **company itself** is a third subject. `[NIS2 Anh. I]` names charge point
-operators in the Energy sector by their role, and nothing it asks is a fact about
-a point:
-
-```rust
-use emob_core::obligation::{assess_undertaking, ObligationId, Status};
-use emob_core::station::{RiskManagement, UndertakingProfile};
-
-let mut operator = UndertakingProfile::bare(PartyId::new("DE", "CPO")?);
-operator.operates_recharging_points = true;
-operator.employees = 400;
-operator.risk_management = RiskManagement::complete();
-operator.risk_management.supply_chain_security = false;
-
-// Nine of ten is not ninety per cent of a duty: the article says the measures
-// "shall include at least the following".
-assert_eq!(operator.risk_management.missing(), vec!["(d) supply-chain security"]);
-assert_eq!(
-    assess_undertaking(&operator, date!(2026-09-01))
-        .status_of(ObligationId::Nis2RiskManagement),
-    Some(Status::Failing),
-);
-```
-
-`ChargePointProfile::bare` starts every flag at its **non-compliant** value on
-purpose. A fixture that starts compliant hides the obligation it was written to
-exercise.
-
-### Planning ahead
-
-```rust
-use emob_core::obligation::starting_between;
-use time::macros::date;
-
-// What lands on the fleet between now and the end of 2027?
-for obligation in starting_between(date!(2026-09-01), date!(2027-12-31)) {
-    println!("{}  {}  {}", obligation.applies_from, obligation.citation, obligation.title);
-}
-```
-
-## Identifiers that survive a round trip
-
-```rust
-use emob_core::EvseId;
-
-let separated: EvseId = "DE*AB7*E840*6487".parse()?;
-let packed: EvseId = "DEAB7E8406487".parse()?;
-
-assert_eq!(separated, packed);                          // one charge point
-assert_eq!(separated.to_string(), "DE*AB7*E840*6487");  // written back verbatim
-assert_eq!(separated.operator_id(), "AB7");
-
-// `-` is a separator in a contract id and not in an EVSE id: eating it would
-// make this parse as a charge point and compare equal to a real one.
-assert!(EvseId::parse("DE-AB7-E840-6487").is_err());
-```
-
-Hubject compares the identifier in a URL against your TLS client certificate as
-*text*, and answers a mismatch with `017 Unauthorized Access`. So equality is
-canonical and `Display` is verbatim, and the two never get confused.
-
-## Run a fleet
-
-Everything above is one session. `emob-sim` runs a day of them — virtual posts
-that **sign genuine OCMF**, driven through the same verifier, split, rating and
-ledger, with faults seeded on purpose.
+`emob-sim` runs a day of sessions on virtual stations that sign genuine OCMF,
+with faults injected, through the same verifier, split, rating and ledger:
 
 ```rust
 use emob_sim::{FaultPlan, Rate, ReferenceDay};
@@ -372,250 +328,33 @@ println!("{}", outcome.summary());
 // 400 sessions: 197 settled (8969.120 kWh), 203 refused (9555.738 kWh),
 //               metered 18524.858 kWh
 
-assert!(outcome.reconciles());                  // billed + refused == metered
+assert!(outcome.reconciles());                 // settled + refused == metered
 assert!(outcome.every_refusal_has_a_reason());
-assert!(outcome.every_record_conserves());
 ```
 
-The assertion is deliberately **not** "everything billed" — a run that threw
-sessions away would pass that. It is that every kilowatt-hour a meter moved
-either reached a settled record or was refused with a reason.
+The assertion is not "everything billed" but that every kilowatt-hour either
+settled or was refused with a reason. A run is fully determined by its seed.
 
-One seed is one day: no clock, no entropy source, so a failing run is reproduced
-from its seed alone.
-
-```rust
-for refusal in &outcome.refused {
-    println!("{}: {}", refusal.session_id, refusal.reasons.join(" | "));
-    // sim-00001-000: the signed records this record rests on do not support
-    //                billing its energy [MessEG §33] … | record 2: the
-    //                signature does not match the payload
-}
-```
-
-A refusal names its session, the energy its meter moved anyway, the faults that
-were injected and every reason the chain gave — in the order it gave them, so
-the gate that fired first is the first thing read. A residual nobody can explain
-is a leak with a total attached.
-
-## Send it to a roaming partner
-
-A CDR settles between two companies, and getting it to the other one means a
-translation. `emob-roam` returns the translated record **and** the account of
-what the translation cost:
-
-```rust
-use emob_roam::{Partner, PartnerRegistry, Reach};
-
-let registry = PartnerRegistry::new("DE*CPO".parse()?)
-    .with(Partner::hub("DE*HUB".parse()?))
-    .with(Partner::emsp("NL*TNM".parse()?).on_signed_data());
-
-// Routed by the issuer the contract identifier itself names — not by a map
-// somebody maintains beside it.
-let Some(Reach::Direct(party)) = registry.route(&"NL-TNM-C00122045-K".parse()?)
-else { unreachable!() };
-
-let crossing = emob_roam::ocpi::cdr::to_ocpi(&cdr, registry.get(&party).unwrap(), &context)?;
-
-assert_eq!(crossing.value.total_energy.get().to_string(), "18.000");
-for reason in crossing.reasons() {
-    eprintln!("{reason}");
-}
-```
-
-The notes are the point. OCPI carries `total_time` and every period's `TIME` in
-**hours**, and `3600 = 2⁴ · 3² · 5²` — only the twos and fives divide out, so a
-duration has an exact decimal spelling exactly when nine divides its seconds.
-Twenty-one minutes does: `0.35`. Twenty does not:
-
-```text
-/total_time: 1200 s is 0.3333 h rounded to 4 places: an hour has 3600 seconds
-             and 3600 has two factors of three, so most durations have no exact
-             decimal in hours. The cost beside it was computed from whole
-             seconds, so re-deriving it from this figure will not reproduce it
-```
-
-That is the same factor of three that makes an occupancy fee of €2.50 an hour
-unlawful under `[AFIR Art. 5(4)]`, met one layer out — and without the note, a
-partner whose re-rating disagrees with yours has nothing in either document to
-explain the gap.
-
-Where a note would be a lie, the crossing refuses. OCPI's `ENERGY_EXPORT` is
-marked *Session Only* and a CDR's `total_energy` carries no sign, so a V2G
-discharge would arrive as an ordinary draw and settle backwards:
-
-```rust
-to_ocpi(&discharge, partner, &context)
-// Err: ENERGY_EXPORT is Session-only and `total_energy` has no sign, so the
-//      partner would read 3.400 kWh as a draw and pay the wrong way round
-```
-
-An unrated record is refused for the same reason — `total_cost` is required and
-the specification gives 0.00 its own meaning, *free of charge* — and so is a
-tariff element published without a restriction this build cannot evaluate, which
-does not narrow the element but widens it.
-
-## Publish it to the national access point
-
-`[AFIR Art. 20(2)]` obliges an operator to publish static and dynamic data
-through the national access point, free of charge — in Germany the Mobilithek, in
-the DATEX II Recharging profile, from **14 April 2026**.
-
-```rust
-use emob_poi::{Feed, rate};
-use emob_poi::datex::{InformationStatus, Publisher};
-
-// The feed publishes the tariff that rates the session, not a copy of it.
-let (published, notes) = rate::publish(&tariff, "rate-1");
-for note in &notes { eprintln!("{note}"); }
-
-let json = Feed { publisher, information_status: InformationStatus::Test,
-                  table, table_name, sites, rate_for: &|_| Some(published.clone()) }
-    .table(published_at)?
-    .to_json()?;
-
-assert!(json.contains(r#""value": 0.49"#));        // exact decimal, end to end
-assert!(json.contains(r#""maxPowerAtSocket": 150000"#));   // and watts, as asked
-```
-
-A point the register knows is decommissioned cannot be published as `available`:
-the type that carries a status has no constructor for that pair, so the document
-cannot be built. See [Locations](@/docs/locations.md).
-
-## Put the price on the charge point's own screen
-
-`[AFIR Art. 5(4)]` regulates the price a driver is shown **before** they start,
-and the place they see it is the station. OCPP 2.1's *Tariff and Cost* block is
-the first structured way to put it there:
-
-```rust
-use ocpp_kit::v2_1::SetDefaultTariffRequest;
-
-let crossing = emob_ocpp::to_ocpp(&tariff, at)?;      // the same Tariff that rates
-for reason in crossing.reasons() {
-    eprintln!("{reason}");
-    // /energy/prices/0: OCPP 2.1 quotes prices excluding tax and carries at
-    //                   most eighteen decimals: 0.49 at 19 % is …
-}
-let request = SetDefaultTariffRequest::new(0, crossing.value);  // evseId 0 = all
-```
-
-The station selects the tier the CDR will be rated at **by construction**: OCPI
-picks the first element with a component for a dimension whose restrictions
-match, OCPP picks the first price inside that dimension whose conditions match,
-and projecting one onto the other in order is the projection the rating engine
-already performs.
-
-Four things are refused rather than noted, because they would widen the price
-against the driver invisibly — a time price with no exact per-minute spelling
-(OCPP's field *is* per minute), a dimension charged at two VAT rates, a session
-fee conditioned on a quantity, and an unevaluable restriction. Everything else
-crosses with an account, and the finished document goes through `ocpp-kit`'s own
-schema validator before it is returned.
-
-## Close a month
-
-A CDR is a claim; an invoice is a demand, and it is the document a tax authority
-reads. `emob-billing` is the seam, and its one real decision is **where the
-rounding happens**: EN 16931 states its totals as sums of the line amounts, so it
-happens at the line — and what that costs is reported rather than absorbed.
-
-```rust
-use emob_billing::{
-    Counterparty, InvoiceBuilder, Specification, Syntax, TaxStatus, en16931, payment, postings,
-};
-
-let crossing = InvoiceBuilder::new("R-2026-0001", issued, (from, to), cpo, driver)
-    .supplied_from("DE", dec("19"))   // the points' country, and its rate
-    .ledger(&ledger)          // `live`, never `iter`: a correction is a new record
-    .due_on(due)
-    .build()?;
-
-let invoice = crossing.value;
-assert!(invoice.reconciles());                     // subtotals reproduce the lines
-assert_eq!(invoice.gross_total().to_string(), "31.04 EUR");
-for reason in crossing.reasons() { eprintln!("{reason}"); }
-// /totals/taxable: the records came to 26.0800840336… exactly and this invoice
-//                  states 26.08 EUR: a difference of −0.0000840336…
-
-// The European document, and the verdict on it before anything is sent.
-// `Specification` is BT-24 *and* the rules the document is judged by, so it
-// cannot claim one profile having been checked against another; `Syntax` is
-// UBL or CII, the two CEN/TS 16931-2 makes mandatory. Neither has a default.
-let crossed = en16931::to_en16931(&invoice, Specification::Core)?;
-assert!(crossed.value.is_valid());
-let xml = en16931::write(&invoice, Specification::Core, Syntax::Ubl)?.value;
-
-// …and the books, balanced before an account is named.
-assert!(postings::postings_for(&invoice).balances());
-```
-
-Sell the same three sessions to an e-mobility provider in another member state
-and the document changes shape, because `[UStG §3g]` taxes a supply of
-electricity to a **reseller** where the reseller is established:
-
-```rust
-let emsp = Counterparty::new("Mobilité SAS", "Lyon",
-                             TaxStatus::reseller("FR", "FR12345678901"));
-// …
-assert_eq!(invoice.treatment.category, VatCategory::ReverseCharge);
-assert_eq!(invoice.tax_total().to_string(), "0 EUR");
-assert!(!postings_for(&invoice).roles().iter()
-    .any(|r| matches!(r, Role::VatPayable { .. })));   // not our liability
-```
-
-Every date is an argument — the issue date, the due date, the collection date,
-the pain.008 timestamp — so two runs of one billing job produce the same bytes.
-See [Sessions and settlement](@/docs/settlement.md).
-
-## Building the workspace
+## Build and run the workspace
 
 ```console
 just            # list every recipe
-just ci         # fmt, clippy, purity, tests, guards, deny, docs
-just guards     # no-floats, check-citations, check-manifests, check-wire,
-                # check-prose, check-concepts, check-reach, check-api,
-                # check-constructors, check-graph
-just purity     # no clock, no I/O, no unsafe in the domain crates
-just msrv       # the crates that promise 1.94 still build on 1.94
+just ci         # fmt, clippy, purity, tests, guards, cargo-deny, docs — what CI runs
+just guards     # the workspace's consistency checks (citations, API names, counts …)
+just msrv       # the crates that promise Rust 1.94 still build on it
+just a11y       # accessibility of every page, light and dark, 320 and 1280 px
 ```
 
-`just ci` is what CI runs, in CI order.
+To run the daemons — `just demo`, `just desk`, `just up` with compose, the
+estate file, the data keys and TLS — see [Run the estate](@/docs/run-the-estate.md).
 
-## Running the estate
+## Next
 
-```console
-just images     # all eight daemons, from one Dockerfile
-just up         # the estate on one machine, a volume per journal
-just down       # …and back down, keeping the journals
-```
-
-`EMPD_TOKEN_KEY` has no default and `just up` refuses without it: a token
-reference is a keyed digest of an RFID uid, and a key everybody has is a store
-whose digests anybody can recompute.
-
-| Variable | Default | What |
-|---|---|---|
-| `EMOB_JOURNAL_DIR` | `var` | where a daemon folds its ledger from. Not a temporary directory: a service that silently journalled to `/tmp` comes back from a reboot with an empty ledger and no error |
-| `EMOB_HTTP_BIND` | — | the estate-wide bind address; a daemon's own `<DAEMON>_HTTP_BIND` wins over it. Every default is **loopback**, because a platform that decides money should not become reachable by somebody forgetting to configure it |
-
-The MSRV is checked separately because it is not one number. Everything that
-decides money promises **1.94** — the floor the sibling workspaces carry and
-consume — while `emob-roam` declares 1.96, because `ocpi-kit` does. Raising the
-shared floor to take one wire would make every downstream pay for a protocol it
-does not use.
-
-## Where next
-
-| If you want to know… | Read |
+| To learn… | Read |
 |---|---|
-| why a signed meter value is harder than it looks | [The Eichrecht chain](@/docs/eichrecht.md) |
-| how the protocol's numbers stay out of the money | [The OCPP seam](@/docs/ocpp.md) |
-| why the quarter-hour split conserves exactly | [Sessions and settlement](@/docs/settlement.md) |
-| why the price shown is the price charged | [Tariffs and price transparency](@/docs/pricing.md) |
-| what a feed can and cannot say about a price | [Locations and the national access point](@/docs/locations.md) |
-| what a crossing costs, and when it refuses | [Roaming](@/docs/roaming.md) |
-| where an invoice's rounding happens, and who owes the VAT | [Sessions and settlement](@/docs/settlement.md) |
-| which of three subjects a duty binds | [The obligation calendar](@/docs/compliance.md) |
-| how the crates fit together, and why | [Architecture](@/docs/architecture.md) |
+| running the daemons, the operator page and the driver receipt | [Run the estate](@/docs/run-the-estate.md) |
+| every check between a meter's signature and a bill | [The Eichrecht chain](@/docs/eichrecht.md) |
+| how signed values are taken from OCPP, and a price sent back | [The OCPP seam](@/docs/ocpp.md) |
+| sending CDRs to roaming partners over OCPI and OICP | [Roaming](@/docs/roaming.md) |
+| publishing to the national access point | [Locations](@/docs/locations.md) |
+| how the crates and daemons fit together | [Architecture](@/docs/architecture.md) |

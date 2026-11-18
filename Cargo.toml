@@ -16,9 +16,12 @@ members = [
     "crates/emob-smart",
     "crates/emob-roam",
     "crates/emob-service",
+    "crates/emob-verify",
+    "crates/emob-cli",
     "services/agentd",
     "services/billd",
     "services/csmsd",
+    "services/deskd",
     "services/empd",
     "services/poid",
     "services/roamd",
@@ -28,7 +31,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.1.0"
+version      = "0.3.0"
 authors      = ["hupe1980"]
 edition      = "2024"
 license      = "MIT OR Apache-2.0"
@@ -56,7 +59,7 @@ time       = { version = "0.3", features = ["std", "macros", "parsing", "formatt
 # database in; the platform and zoneinfo lookups that would read the filesystem
 # or `TZ` are off, so `just purity` holds and `Cargo.lock` pins what a replay
 # replays against.
-jiff       = { version = "0.2", default-features = false, features = ["std", "tzdb-bundle-always"] }
+jiff       = { version = "1", default-features = false, features = ["std", "tzdb-bundle-always"] }
 anyhow     = "1"
 
 # Every quantity in this workspace either *is* money or *becomes* money. A
@@ -76,7 +79,7 @@ rust_decimal = { version = "1", features = ["macros", "serde-with-str"] }
 # out of both the 2.x field and the 1.6 `SignedData` string that holds the same
 # object. Every verdict type is `#[must_use]`, which is the compiler reaching
 # across a repository boundary that no guard here can (D306, D327).
-ocpp-kit = { version = "0.3", default-features = false }
+ocpp-kit = { version = "0.5", default-features = false }
 
 # ── The OCPI wire ───────────────────────────────────────────────────────────
 # The wire *model* for `emob-roam`; `roamd` adds `client` on top, because the
@@ -114,7 +117,7 @@ oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp"
 # RustCrypto generation beside `ocmf`'s (D304). The EXI codec, the message sets
 # and the session engines are a station's and a vehicle's; nothing speaks to a
 # car.
-iso15118 = { version = "0.5", default-features = false }
+iso15118 = { version = "0.9", default-features = false }
 
 # ── The § 14a wire ──────────────────────────────────────────────────────────
 # SHIP, SPINE and the use-case descriptors, **without `runtime`**: no tokio, no
@@ -124,7 +127,7 @@ iso15118 = { version = "0.5", default-features = false }
 # What this workspace takes is the *protocol*. The **rule** — what a site draws
 # while nobody is telling it anything — is `emob-smart`'s, read from
 # `[LPC §2.3.2]` and decided there (D302).
-eebus = { version = "0.9", default-features = false, features = ["std"] }
+eebus = { version = "0.11", default-features = false, features = ["std"] }
 
 # ── The money leaves the platform ───────────────────────────────────────────
 # Only `emob-billing` sees these. Three standards this workspace has no business
@@ -137,7 +140,7 @@ eebus = { version = "0.9", default-features = false, features = ["std"] }
 # produce a different number for the same session is the drift this workspace
 # exists to make unrepresentable. `time` rather than `chrono`, because every
 # instant here is a `time::OffsetDateTime`.
-en16931 = { version = "0.7", default-features = false, features = ["time"] }
+en16931 = { version = "0.10", default-features = false, features = ["time"] }
 
 # The syntax half: **both** the formats CEN/TS 16931-2 makes mandatory. UBL is
 # what the German platforms take by default and CII is what a partner may
@@ -145,7 +148,7 @@ en16931 = { version = "0.7", default-features = false, features = ["time"] }
 # binding serves the next consumer too. `zugferd` itself is the hybrid PDF and
 # stays off: `en16931-formats` reads those and does not write them, and `lopdf`
 # takes the graph from thirteen crates to fifty-seven.
-en16931-formats = { version = "0.7", default-features = false, features = ["ubl", "cii"] }
+en16931-formats = { version = "0.10", default-features = false, features = ["ubl", "cii"] }
 
 # pain.008 for the collection, and the IBAN/BIC/Creditor-Id validation that
 # stops an unpayable instruction being written in the first place. Its `time`
@@ -157,8 +160,8 @@ en16931-formats = { version = "0.7", default-features = false, features = ["ubl"
 # differs between two runs of one billing job is a file no bank reconciles
 # (D304). `created_at` is the one that stays optional; `emob-billing` passes it,
 # and `just purity` keeps it passing.
-doubleentry = { version = "0.7", default-features = false }
-sepa = { version = "0.7", default-features = false, features = ["time"] }
+doubleentry = { version = "0.9", default-features = false }
+sepa = { version = "0.9", default-features = false, features = ["time"] }
 
 # ── Eichrecht: the OCMF format ──────────────────────────────────────────────
 # The format is `ocmf`'s and the law is `emob-eichrecht`'s: that crate keeps only
@@ -195,27 +198,27 @@ hex       = "0.4"
 base64    = "0.23"
 
 # ── Internal (path + version so the domain crates can be published) ─────────
-emob-core      = { path = "crates/emob-core",      version = "0.1" }
-emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.1" }
-emob-session   = { path = "crates/emob-session",   version = "0.1" }
-emob-cdr       = { path = "crates/emob-cdr",       version = "0.1" }
-emob-tariff    = { path = "crates/emob-tariff",    version = "0.1" }
-emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.1" }
-emob-eebus     = { path = "crates/emob-eebus",     version = "0.1" }
-emob-pnc       = { path = "crates/emob-pnc",       version = "0.1" }
-emob-poi       = { path = "crates/emob-poi",       version = "0.1" }
-emob-sim       = { path = "crates/emob-sim",       version = "0.1" }
-emob-smart     = { path = "crates/emob-smart",     version = "0.1" }
-emob-roam      = { path = "crates/emob-roam",      version = "0.1" }
-emob-billing   = { path = "crates/emob-billing",   version = "0.1" }
-emob-thg       = { path = "crates/emob-thg",       version = "0.1" }
-emob-service   = { path = "crates/emob-service",   version = "0.1" }
+emob-core      = { path = "crates/emob-core",      version = "0.3" }
+emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.3" }
+emob-session   = { path = "crates/emob-session",   version = "0.3" }
+emob-cdr       = { path = "crates/emob-cdr",       version = "0.3" }
+emob-tariff    = { path = "crates/emob-tariff",    version = "0.3" }
+emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.3" }
+emob-eebus     = { path = "crates/emob-eebus",     version = "0.3" }
+emob-pnc       = { path = "crates/emob-pnc",       version = "0.3" }
+emob-poi       = { path = "crates/emob-poi",       version = "0.3" }
+emob-sim       = { path = "crates/emob-sim",       version = "0.3" }
+emob-smart     = { path = "crates/emob-smart",     version = "0.3" }
+emob-roam      = { path = "crates/emob-roam",      version = "0.3" }
+emob-billing   = { path = "crates/emob-billing",   version = "0.3" }
+emob-thg       = { path = "crates/emob-thg",       version = "0.3" }
+emob-service   = { path = "crates/emob-service",   version = "0.3" }
 
 # ── The daemon shell ────────────────────────────────────────────────────────
 # Only `emob-service` and the daemons above it see these. Every domain crate
 # stays sans-I/O: the clock and the socket live here so a two-year-old dispute
 # can be replayed without either.
-axum               = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum               = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "query", "tokio"] }
 tokio              = { version = "1", default-features = false }
 tokio-util         = { version = "0.7", default-features = false }
 tracing            = { version = "0.1", default-features = false, features = ["std"] }
@@ -228,6 +231,16 @@ toml               = { version = "1.1", default-features = false, features = ["p
 # timing at a time.
 hmac   = { version = "0.12", default-features = false }
 subtle = { version = "2", default-features = false }
+
+# Data at rest (spec 005): AES-256-GCM and the system RNG from `aws-lc-rs`,
+# which `rustls` already links into every daemon through `reqwest` — so sealing a
+# token adds no crate, and it is not RustCrypto, so D304's one-generation rule is
+# untouched. The keyed digests stay on `hmac`/`sha2` above.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+# Station passwords are stored as Argon2id hashes. 0.5, not 0.6: 0.5 takes
+# `blake2` 0.10 / `digest` 0.10, the generation `ocmf` pins (D304); 0.6 would be
+# a second SHA/digest implementation in the binary.
+argon2    = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 
 # ── The policy an operator writes ───────────────────────────────────────────
 # Only `emob-service`, behind a feature that is **off** by default, and only
@@ -248,10 +261,20 @@ cedar-policy = { version = "4.12", default-features = false, features = ["dateti
 # performed at most once, written to an append-only hash-chained log, and read
 # back on replay. `manifest` because what an agent may do has to be a file a
 # reviewer sees in a diff rather than a builder call nobody reads.
-agentplane = { version = "0.30", default-features = false, features = ["redb", "manifest"] }
+agentplane = { version = "0.61", default-features = false, features = ["redb", "manifest"] }
 
 [profile.release]
 opt-level     = 3
 lto           = "thin"
 codegen-units = 1
 strip         = "debuginfo"
+
+# The receipt's WebAssembly verifier (`just wasm`): size over speed, because the
+# module crosses a phone's mobile link and then checks two signatures.
+[profile.wasm]
+inherits      = "release"
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"
+strip         = true

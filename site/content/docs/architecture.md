@@ -1,19 +1,28 @@
 +++
 title = "Architecture"
-weight = 11
-description = "What is built, what is designed, how emob sits beside the protocol kits it consumes, and the roaming stance that decides how the rest gets written."
+weight = 13
+description = "emob architecture: sans-I/O Rust crates for Eichrecht, OCPP, OCPI and billing, nine journalled daemons wired by signed webhooks, and the protocol kits."
 
 [extra]
 nav = "Architecture"
 +++
 
-## Two roles, one platform
+emob is a Rust workspace of **15 library crates** that hold every rule about
+charging, metering, pricing and settlement, plus **nine daemons** that run
+those rules as services from one estate file. Since release 0.2 the daemons are
+wired: stations connect to `csmsd`, `empd` authorises, `billd` invoices and
+`roamd` roams, each with a journal it rebuilds its state from, and the operator
+page `deskd` reads them all. Since 0.3 every journal fact names its actor, and
+each journal signs where it ends for a witness to check. emob does not implement the charging protocols
+itself: it builds on separate protocol libraries (OCPP, OCPI, OICP, ISO 15118,
+EEBUS, OCMF) and adds the business rules on top.
 
-A German charging business usually wears both hats at once: it **operates**
-charge points, and it **sells** charging to drivers as a provider. Those are
-different regulatory subjects with different duties, and a stack that models only
-the first can be faultless at every point it owns and still in breach as a
-provider.
+## Two roles: charge point operator and mobility service provider
+
+A German charging business usually plays two roles. As **CPO** (charge point
+operator) it runs the stations; as **EMP/eMSP** (e-mobility service provider) it
+holds the driver's contract and bills them. The law gives each role different
+duties, so emob models both.
 
 ```mermaid
 flowchart TB
@@ -21,7 +30,7 @@ flowchart TB
 
     subgraph cpo["CPO — operating the points"]
         CS -->|"OCPP 1.6J · 2.0.1 · 2.1"| CSMS["csmsd"]
-        CSMS --> SES["session ledger"]
+        CSMS --> SES["session"]
         SES --> EICH["Eichrecht evidence"]
         SES --> CDR["CDR + rating"]
         POI["locations · tariffs"]
@@ -31,7 +40,7 @@ flowchart TB
 
     subgraph roam["roaming — roamd"]
         P2P["OCPI peers"]
-        HUB["Hubject · GIREVE"]
+        HUB["Hubject (OICP)"]
     end
 
     subgraph emp["EMP — holding the driver contract"]
@@ -45,7 +54,7 @@ flowchart TB
     P2P & HUB --> TOK
     TOK --> INV
     CSMS <-->|authorize| TOK
-    PNC -.->|"OPCP"| TOK
+    PNC -.-> TOK
 
     classDef built fill:#0a7d3322,stroke:#0a7d33
     classDef planned fill:#88888818,stroke:#888,stroke-dasharray:4 3
@@ -53,170 +62,152 @@ flowchart TB
     class PNC planned
 ```
 
-Solid is built; dashed is designed and not yet written.
+Solid boxes have their rules built in a library; dashed is designed only. The
+arrows between daemons describe the target wiring, not what runs today.
 
-A session between an operator's own EMP and its own CPO is **self-roaming
-through the same canonical model** — same validation, same pricing, same
-evidence — so going multi-party changes the transport and never the arithmetic.
+When an operator's own EMP charges at its own stations, the session goes through
+the same model as a roaming session — same validation, pricing and evidence — so
+adding partners changes the transport, never the arithmetic.
 
-## What exists today ✅
+## Workspace layout: domain crates, the service shell and daemons
+
+| Layer | Where | Does I/O? |
+|---|---|---|
+| Domain crates | `crates/emob-*` (14 crates) | No — sans-I/O, no clock, no floats |
+| Service shell | `crates/emob-service` | Yes — HTTP, config, journals, shutdown |
+| Daemons | `services/*` (8 binaries) | Yes — sockets, clock, files |
+| Protocol kits | separate crates on crates.io | the wire formats |
+
+### Domain crates ✅
 
 | Crate | Holds |
 |---|---|
-| `emob-core` | Identifiers in both grammars, text-preserving; exact energy and money; the settlement grid; the charge-point, provider **and undertaking** profiles; the obligation calendar over all three; and `Crossing`, the account a value owes when it is carried onto somebody else's wire |
-| `emob-eichrecht` | The **law** over the format: the station key registry, a chain that answers energy/duration/identity/direction separately, the evidence record, and the transparency file the driver checks the bill with. The format itself — parsing, verification, the tables, the OBIS code, the container — is the [`ocmf`](https://crates.io/crates/ocmf) crate's, written from the whole S.A.F.E. reference corpus with OpenSSL as an oracle |
-| `emob-session` | Authorisation paths, cumulative meter series, a timestamped state machine, and the quarter-hour split that conserves exactly |
-| `emob-cdr` | The record, **its price**, idempotent acceptance, and pre-flight validation |
-| `emob-tariff` | Period-based rating with tiers and a VAT breakdown, the display derived from the rating tariff, the AFIR shape check, validity windows and a content fingerprint |
-| `emob-ocpp` | The OCPP seam, both ways: signed meter values lifted out of transaction events with no field a float could arrive in, and the tariff carried onto OCPP 2.1's *Tariff and Cost* block so the price on the station's screen is the object that rates the CDR |
-| `emob-poi` | The register and the national access point feed: DATEX II AFIR Recharging, publishing the tariff that rates the session rather than a copy of it |
-| `emob-roam` | The roaming edge: a canonical CDR, tariff and location onto OCPI 2.3.0 and down to 2.2.1, each crossing returning the value **and** the account of what it cost; routing read out of the contract identifier's own issuer |
-| `emob-pnc` | **Plug & Charge, from the platform's side**: which ecosystem a contract belongs to — because one minted elsewhere *validates*, every signature checking, and the driver has no relationship with this platform `[V2G2-925]` — whether anything on its path has been **withdrawn**, which the protocol libraries name as what they do not answer, and the eMAID read off the certificate's own Common Name rather than taken beside it |
-| `emob-eebus` | **The § 14a wire**: a grid operator's setpoint off the SPINE datagram's own `ScaledNumber` as an exact decimal, and which of `[LPC §2.3.2]`'s five states a silence has put the site in — including the release `[LPC-022]` gives it after two to 24 hours, which every summary of § 14a drops |
-| `csmsd` | The CSMS socket: OCPP on `ocpp-kit` transport, the two ledgers side by side — with the operational one's verdict **read**, so a station's retry is not a second session |
-| `sited` | The site controller, and the only service meant to run **at a site**: a controller behind a broken WAN link is a site held at 4.2 kW because this process could not be reached rather than because a grid operator asked. It holds no rule — only the clock that tells a setpoint from a silence |
-| `emob-billing` | The last seam: rated records become an EN 16931 invoice whose rounding happens once, at the line, and whose residual is reported; the VAT treatment derived from the parties, so a roaming settlement is taxed where the reseller is established `[UStG §3g]`; a SEPA collection; and postings addressed by role rather than by account number |
-| `emob-thg` | The greenhouse-gas quota: `[38k §6(3)]`'s **four** conditions as four fields in the paragraph's own order, a notification built only from energy a meter signed, and no factor held as a constant — the emissions value is announced annually in the Bundesanzeiger, so it is an argument carried with the notice |
-| `emob-service` | The shell every daemon shares, and the three parts of it that are about charging: an OCPI-party authority model, the CloudEvents catalogue, one webhook signature |
-| `agentd` | The advisory plane on `agentplane`: specialists that correlate across many exact answers, and cannot move money by construction. Three — evidence triage, the tariff sweep, and a compliance sweep that judges duties which have not started binding yet against the estate as it stands |
-| `billd` | The service that closes a month: what number an invoice carries, that a period closes once, which document supersedes which, and which account each posting lands in |
-| `empd` | The provider side: the token store two crates refuse to be, whether a contract authorises a session now, and what the driver is quoted before it starts |
-| `roamd` | The roaming node: who a record goes to, whether it may go at all, when it is late, and what to do with one that arrives. Every document is `emob-roam`'s; what is here is the ledger of what was sent to whom — the one thing no crate can hold, because `[OCPI 2.3.0 §mod_cdrs]` seals a record once the eMSP has it and gives a correction an order, and neither rule is a property of a document |
-| `emob-sim` | A deterministic fleet, assembled from OCPP transaction events: virtual stations that **sign genuine OCMF**, a rated power per post, eight seeded faults, and a reference day whose energy reconciles exactly |
+| `emob-core` | Identifiers (EVSE id, eMAID, party id) that compare canonically and print verbatim; exact energy and money; the 15-minute settlement grid; charge-point, provider and company profiles; the obligation calendar; `Crossing`, the account of what a translation lost |
+| `emob-eichrecht` | German calibration law over OCMF records: the key registry, the chain check, the evidence record, and the transparency file a driver checks the bill with |
+| `emob-session` | Authorisation paths, meter series, the session state machine, and the quarter-hour split that conserves energy exactly |
+| `emob-cdr` | The charge detail record with its price, idempotent acceptance, and pre-flight validation |
+| `emob-tariff` | Rating with tiers and VAT breakdown, the price display derived from the same tariff, the AFIR shape check, validity windows |
+| `emob-ocpp` | The OCPP seam: signed meter values out of transaction events, and the tariff onto OCPP 2.1's *Tariff and Cost* messages |
+| `emob-poi` | The location register and the DATEX II feed for the national access point |
+| `emob-roam` | CDRs, tariffs and locations onto OCPI 2.3.0 / 2.2.1 and OICP, each translation returning an account of what it cost; routing by the contract id's issuer |
+| `emob-pnc` | Plug & Charge from the platform's side: which ecosystem a contract certificate belongs to, revocation, and the eMAID read from the certificate |
+| `emob-eebus` | The § 14a wire: a grid operator's EEBUS setpoint as an exact decimal, and the failsafe states of the *Limitation of Power Consumption* use case |
+| `emob-smart` | Which charge points § 14a reaches, the guaranteed minimum power, and allocation under a grid limit |
+| `emob-billing` | EN 16931 invoices with per-line rounding, VAT treatment derived from the parties, SEPA direct debits, and postings by role |
+| `emob-thg` | The greenhouse-gas quota (THG-Quote): eligibility conditions and notifications built only from signed energy |
+| `emob-sim` | A deterministic simulated fleet whose stations sign genuine OCMF, with seeded faults |
 
-**1075 tests**. The domain crates do no I/O, read no clock and hold no binary floats;
-`emob-service` is the one shared place that stops being true, and everything
-above it is a daemon. `just ci` green.
+### Daemons
 
-An end-to-end test drives the whole chain: OCMF records signed with a real key
-at test time, verified, assembled into evidence, matched against a session, split
-across quarter hours, built into a CDR, priced from those same quarter hours,
-validated as a partner would, accepted exactly once, serialised, and exported as
-a transparency file — with the displayed price asserted equal to the charged one
-and the taxable amount an invoice needs asserted beside it. It also proves the
-failures: one changed digit, a deleted middle record, a substitute reading, an
-unregistered station and an unsynchronised clock each stop the part of the chain
-they should, each with a reason that names what went wrong.
+| Daemon | Owns | State |
+|---|---|---|
+| `csmsd` | The CSMS: OCPP 1.6J / 2.0.1 / 2.1 with security profiles 1–3, settlement, the outbox, driver receipts | ✅ |
+| `empd` | Contracts, tokens, authorisation (`POST /v1/authorize`) | ✅ · ⏳ OCPI tokens endpoint, fees |
+| `billd` | Receiving CDRs, closing each partner's month into an invoice, numbering, postings; the invoice page and signed delivery to the operator system | ✅ · ⏳ SEPA runs |
+| `roamd` | OCPI in both directions behind a reach-back guard; who a record goes to | ✅ OCPI · ⏳ OICP transport |
+| `deskd` | The operator page Heute; the witness of every journal's signed head | ✅ |
+| `tarifd` | Publishing the estate's tariff versions | ✅ read model · ⏳ push clients |
+| `poid` | The inventory for the national access point | ✅ inventory from the estate · ⏳ push |
+| `sited` | The § 14a site controller, run **at** the site | ⏳ SHIP session, OCPP leg |
+| `agentd` | Advisory specialists over many records, run under the read-only advisory principal | ✅ runtime · ⏳ event feed |
+| `pncd`, `opsd`, `thgd` | Plug & Charge, operations, THG filing | 📐 designed |
 
-A second end-to-end test takes that same session **out of the building**. It
-settles at the same money over three paths — self-roaming, OCPI 2.3.0 and OCPI
-2.2.1 — the signed records arrive verbatim and re-verify at the far end against
-the *receiver's* registry rather than the key the document carries, and every
-crossing reports what it cost by JSON Pointer into the partner's own copy.
+The edges between them:
 
-A third closes a **month**. Three genuinely signed sessions become an EN 16931
-invoice whose own subtotals reproduce its own lines, a pain.008 that draws the
-total to the cent, and postings that balance before an account is named — and
-the same three sold to an e-mobility provider in another member state come out
-as a reverse charge, with no VAT on the document and none in the books.
+| From → to | How |
+|---|---|
+| station → `csmsd` | OCPP over `wss://`; Basic against an Argon2id hash, or a client certificate |
+| `csmsd` → `empd` | `POST /v1/authorize` with the service token; a timeout answers `Invalid` (fail closed) |
+| `csmsd` → `billd`, `roamd` | the outbox: each settled session as a Standard-Webhooks-signed `POST /v1/deliveries`, retried until a `2xx`, journalled |
+| `roamd` ↔ partner | OCPI 2.3.0 credentials, CDRs |
+| `deskd` → `csmsd`, `billd`, `roamd` | the operator read models, `GET /v1/<daemon>` |
+| `deskd` → `csmsd`, `billd`, `roamd`, `empd` | the signed journal heads, `GET /v1/<daemon>/head`, every 30 s |
+| `billd` → operator system | each issued invoice as a Standard-Webhooks-signed UBL or CII file, retried until answered |
 
-### The account a crossing returns
+Every daemon serves `/health/live`, `/health/ready` and `/about`, and its read
+model behind the operator token. `emob demo` runs the daemons' own
+`daemon::run` functions in one process — the same code path as their `main`,
+configured rather than forked — and `deskd` takes its clock as a parameter, so
+the demo can play a morning at 60×. See [Run the estate](@/docs/run-the-estate.md).
 
-Translating a record into another company's model is where roaming money goes
-missing, because a `From` impl makes each of those decisions once, silently, and
-the consequence surfaces weeks later as two companies holding two numbers for
-one session. So each translation returns a `Crossing`: the value, and the note,
-by JSON Pointer into the document the **recipient** will be reading.
+**1291 tests** cover the workspace.
 
-The type lives in `emob-core`, beside the settlement grid, for the same reason
-that one does: three seams now owe an account. OCPI in `emob-roam`, the DATEX II
-national access point feed in `emob-poi`, and OCPP 2.1's tariff in `emob-ocpp`
-answer one question, and a partner reading what a version downgrade cost and an
-operator reading what a charge point's screen cannot show should be reading the
-same kind of sentence.
+An end-to-end test drives the full chain: OCMF records signed with a real key at
+test time, verified, matched against a session, split into quarter hours, built
+into a CDR, priced from those quarter hours, validated as a partner would,
+accepted once and exported as a transparency file — with the displayed price
+asserted equal to the charged one. It also proves the failures: a changed digit,
+a deleted record, a substitute reading, an unregistered station and an
+unsynchronised clock each stop the right part of the chain with a named reason.
+Two further tests take the same session through OCPI 2.3.0, OCPI 2.2.1 and
+self-roaming at the same money, and close a month into an invoice, a pain.008
+file and balanced postings.
 
-The sharpest note is arithmetic this stack has met before. OCPI carries
-`total_time` and every period's `TIME` in **hours**, and `3600 = 2⁴ · 3² · 5²` —
-so a duration has an exact decimal spelling exactly when nine divides its
-seconds. Twenty-one minutes does (`0.35`); twenty does not. It is the same factor
-of three that makes an occupancy fee of €2.50 an hour unlawful
-`[AFIR Art. 5(4)]`, one layer out — and it bites because the money was computed
-from whole seconds, so a partner re-deriving it from the rounded figure gets
-something else and no document says why. The quarter-hour grid this workspace
-settles on is always exact, which is precisely why the failure stays invisible
-until a session starts or stops between two boundaries.
+## Sans-I/O domain crates: why the rules never touch a clock
 
-Where a note would be a lie, the crossing refuses instead. `ENERGY_EXPORT` is
-*Session Only* in OCPI and `total_energy` carries no sign, so a V2G discharge
-would arrive as an ordinary draw and settle backwards — the provider paying for
-energy the driver supplied. An unrated record cannot cross because `total_cost`
-is required and 0.00 means *free of charge*. And a tariff element cannot be
-published stripped of a restriction nobody can evaluate: that does not narrow
-the element, it widens it, and the partner then prices the session under
-conditions nobody checked.
+The domain crates never read a clock, open a socket or touch the filesystem.
+Every instant is an argument and the key registry is passed in already loaded.
 
-## The daemon shell, and why it is emob's own
+The reason is disputes. Eichrecht gives a customer years to question a bill, and
+the answer is to replay the verification exactly as it ran — same records, same
+keys, same instant. A replay that consults the ambient world is no longer a
+replay. `just purity` and `check-graph` fail the build if a domain crate, or any
+of its dependencies, reaches for a clock, a socket or a database.
 
-Two sibling workspaces extracted one and they disagree about how much belongs in
-it. `mako-service` is eighteen modules — Cedar, OIDC, CloudEvents with a
-transactional outbox, webhooks, metrics, rate limiting. `hems-service` is eight
-small ones, and it says why it did not take mako's: that layer's OIDC carries a
-market-role claim and its Cedar schema is built on **Marktrollen** a household
-energy manager does not have.
+The same crates hold no binary floating point (`no-floats`): every quantity is
+or becomes money, and `f64` cannot represent 0.10.
 
-The same reasoning decides it here and adds a term. emob is neither a market
-participant nor a box on a wall: its principals are **OCPI parties**, and the
-question the shell exists to answer is one neither sibling has a reason to ask.
+## The `Crossing`: every translation reports what it cost
 
-### A valid token is not permission to read somebody else's session
+Translating a record into another company's format is where roaming money goes
+missing: a silent conversion makes a lossy decision, and weeks later two
+companies hold two numbers for one session. So every translation returns a
+`Crossing` — the translated value **and** notes, addressed by JSON Pointer into
+the recipient's document, saying what was assumed or lost.
 
-A roaming node holds several companies' sessions in one process, and its worst
-failure is not losing one. It is serving party A's CDRs to party B — a
-competitor's charging volumes, its tariffs, its drivers' movements — out of an
-endpoint that answered a perfectly good credential. A reverse proxy cannot catch
-it, because the proxy does not know which party owns a record.
+Three seams use it: OCPI and OICP in `emob-roam`, DATEX II in `emob-poi`, and the
+OCPP 2.1 tariff in `emob-ocpp`. An example: OCPI states durations in **hours**,
+and most durations have no exact decimal in hours (an hour has 3600 seconds, and
+3600 has two factors of three). Twenty minutes becomes 0.3333 h, and the note
+says that the cost beside it was computed from whole seconds.
+
+Where a note would not be enough, the translation refuses. A V2G discharge has no
+signed representation in an OCPI CDR, so it would arrive as an ordinary draw and
+settle backwards; an unrated record cannot cross because 0.00 means *free of
+charge*. Details are on the [roaming](@/docs/roaming.md) page.
+
+## The daemon shell: `emob-service`
+
+`emob-service` is the shared shell every daemon builds on: settings, telemetry,
+health probes, graceful shutdown, a journal, CloudEvents, webhook signatures, and
+an authority model for OCPI parties.
+
+### Authority: a valid token is not access to someone else's records
+
+A roaming node holds several companies' sessions in one process. Its worst
+failure is serving party A's CDRs to party B in answer to a perfectly valid
+credential. A reverse proxy cannot catch that, because it does not know who owns
+a record. So a `Principal` answers three separate questions — who, what, and
+whose records:
 
 ```rust
 let peer = Principal::peer(theirs, Role::Emsp, Capabilities::of([caps::CDR_READ]));
 
 peer.may_act_for(caps::CDR_READ, &theirs);   // true
-peer.may_act_for(caps::CDR_READ, &ours);     // false — valid token, somebody else's record
-peer.may_act_for(caps::CDR_WRITE, &theirs);  // false — reaching it is not writing it
+peer.may_act_for(caps::CDR_READ, &ours);     // false — someone else's record
+peer.may_act_for(caps::CDR_WRITE, &theirs);  // false — reading is not writing
 ```
 
-Three questions kept apart — **who**, **what**, **whose records** — because
-collapsing any two is how every roaming leak has happened. Capabilities rather
-than roles, because an agent has to be able to hold *less* than the operator it
-acts for, and `attenuate` returns nothing rather than clamping when a request
-would widen either axis.
+`attenuate` derives a narrower principal and returns nothing rather than
+widening. Misconfiguration fails closed: an empty grant permits nothing, an empty
+readiness set is not ready, and a webhook verifier without a secret rejects.
 
-An empty grant permits nothing, an empty readiness set is not ready, and a
-webhook verifier with no secret rejects. The state a misconfiguration falls into
-is the safe one, because the deployment where somebody forgot is exactly the one
-nobody would notice.
+### Optional Cedar policies
 
-### The probe that does not lie, and the stop that does not drop a record
-
-Almost every readiness endpoint in this industry returns `200` unconditionally.
-An orchestrator then routes stations to a CSMS whose key registry has not loaded,
-and every session for the next thirty seconds is refused for want of a key —
-which looks like a fleet fault and is a deployment one.
-
-So readiness is a set of named dependencies, each reporting for itself, and the
-body of a `503` lists which are missing. Liveness stays separate: a liveness
-probe that failed on a dependency would make a restart the cure for something
-that was never in the process, and restarting a CSMS drops every station's
-socket.
-
-Stopping is two steps for the same reason. The daemon stops being **ready**, so
-the orchestrator takes it out of rotation, and only then drains — because killing
-a CSMS mid-transaction does not lose a request, it loses the `StopTransaction`
-that carries the signed meter record.
-
-### …and a policy an operator wrote, for the question a capability set cannot ask
-
-The typed model above already takes its values at runtime: a `Principal` is built
-from configuration, not from a `const`. So a policy engine buys nothing until
-there is a question that model has **no vocabulary for** — and onboarding a
-partner while the node runs is where one appears:
-
-> charge detail records, **until the trial ends**
-
-A set of dotted capability patterns cannot say *until*, and inventing a grammar
-that can is how a capability model becomes a policy language nobody specified.
-Cedar is that language, with a schema and a validator — behind a feature that is
-off by default, because it costs a hundred and eight crates and only the roaming
-node needs it.
+For conditions a capability list cannot express — "CDRs, **until the trial
+ends**" — the optional `policy` feature adds [Cedar](https://www.cedarpolicy.com/)
+policies. It is off by default because it adds many dependencies and only the
+roaming node needs it.
 
 ```cedar
 @id("nl-tnm-trial")
@@ -229,551 +220,239 @@ when { resource.owner == principal }
 unless { context.at > datetime("2027-01-01T00:00:00Z") };
 ```
 
-Four things make it more than a dependency.
+- The Cedar schema is **derived** from the capability list, so a policy cannot
+  name an action nobody can be granted.
+- A policy can grant but never widen: the typed check runs first, and its "no"
+  is final.
+- Cedar warnings are errors — including confusable Unicode in identifiers, which
+  in a party id is a data leak.
+- A policy that fails to evaluate counts as a refusal, not a pass.
 
-**The schema is derived from the capability list, not written beside it.** One
-action per capability and one entity type per family, read out of
-`emob.<family>.<verb>`. A second list would let a policy validate against an
-action nobody can ever be granted — a rule that never matches, which fails open
-on a `forbid` and silently on a `permit`.
+### Readiness and shutdown
 
-**A policy may grant, and it may never widen a delegation.** The typed ceiling is
-asked first and a `no` there is final. A roaming peer still reaches only its own
-records however the text is written, and the sharper half: an agent's principal
-is *derived* by `attenuate` rather than configured, so **no agent can hold a
-capability that writes** survives a policy file. An engine consulted instead of
-the typed model would make a structural property depend on what somebody wrote
-this morning.
+Readiness is a set of named dependencies, and a `503` lists which are missing,
+so an orchestrator never routes stations to a CSMS whose key registry has not
+loaded. Liveness is separate, because restarting a CSMS drops every station's
+connection. Shutdown first stops reporting ready, then drains, so a stopping
+CSMS does not lose the final transaction message that carries the signed meter
+record.
 
-**A warning is an error.** Cedar's own typechecker reports a condition that can
-never be true — a rule that does not run. Its other warnings are about confusable
-identifiers: a mixed script, a bidirectional control character, a homoglyph. In a
-policy set whose whole job is keeping one company's records away from another's,
-a party id that merely *looks* like `NL*TNM` is the leak above, spelled in
-Unicode.
+## The journal: state that survives a restart ✅
 
-**And what cannot be evaluated is not assumed open.** Cedar skips a policy that
-errors and carries on, which is right for a large policy store and wrong here: a
-`forbid` that could not be evaluated is a refusal that silently did not happen.
-That is the same sentence the pricing engine says about an element carrying a
-restriction it cannot judge.
+The domain crates are stateless. The daemons hold the rules about **history**:
+an invoice number is used only once `[UStG §14(4) Nr. 4]`; a CDR is sealed once
+the eMSP has it `[OCPI 2.3.0 §mod_cdrs]`; a card is blocked; a contract has run
+up these sessions. Held only in memory, each of these answers wrongly after a
+restart.
 
-The roaming node asks it **before** it reads the document, because the other five
-answers are information — telling a caller it does not accept which of its
-charging periods do not sum is telling it about a session it has no business
-knowing exists. And a reload that does not validate leaves the running set
-deciding: default deny makes an empty policy set a total outage rather than a
-degraded state.
+`emob_service::journal` stores them. A daemon appends the **facts** it decided,
+in order, and rebuilds its state on startup by folding them. Because every
+instant and key is an argument, the fold gives the same answer every time.
 
-### MCP is dated rather than declined
+- **Facts, not commands.** Replaying commands would re-decide them with today's
+  tariffs and clock.
+- **Hash-chained.** Each entry chains to the previous one, so an edited or
+  deleted middle entry breaks every digest after it and the daemon refuses to
+  start. The file is newline-delimited and checkable with `sha256sum`.
+- **A failed write halts the daemon.** Continuing would leave state ahead of the
+  record.
+- **Every fact names its actor.** Beside its `kind`, each record carries who
+  caused it — `station:<identity>`, `partner:<party>`, `operator:<name>`,
+  `service:<daemon>`, `timer` or `estate` — taken from what the daemon
+  authenticated and covered by the digest. It reads without the data key
+  (`jq -r .actor`).
+- **The end is signed.** A chain cannot show that its last records were cut
+  off. So after every append the daemon signs its head — position and hash —
+  with its Ed25519 key as a [C2SP signed note](https://c2sp.org/signed-note) in
+  `<journal>.head`, and refuses to start from a journal shorter than that head
+  or diverging from it.
+- **Somebody else remembers.** The `.head` file can be deleted with the
+  journal, so a **witness** (`deskd`, or `emob witness`) reads each head from
+  `GET /v1/<daemon>/head` and alarms on a regression, a fork or a new key. A
+  history rewritten *and* extended past the witnessed position is beyond it: the
+  journal is a chain, not a Merkle tree.
 
-An MCP surface is what an agent reaches a daemon's read side through, and emob's
-specialists read data a daemon already holds. When one lands the rule is `hems`'s
-unchanged: **server side only** — a daemon that could *call* a model is a daemon
-whose answers depend on one, and none of these answers may.
+`csmsd`, `billd`, `roamd`, `empd` and `poid` fold their journals on start. A
+journal is the file most likely to leave the building in a backup, so record
+bodies are sealed with AES-256-GCM under a per-daemon data key while the hash
+chain runs over the sealed bytes — it verifies without the key, and no card UID
+or credential sits on disk in clear. A daemon with a journal is a **single
+writer**, so the deployment runs no replicas.
 
-## The state a daemon holds, and the journal it is folded from ✅
+## Deployment
 
-The domain crates hold no state, which is the whole of the purity argument. The
-daemons hold the rules that are about a **pair** — what was true before a call
-and what may be true after — because no value can carry one:
-`[UStG §14(4) Nr. 4]` spends an invoice number *once*;
-`[OCPI 2.3.0 §mod_cdrs]` seals a record the moment the eMSP has it; a card is
-blocked; a contract has run up these sessions.
+One `Dockerfile` builds all nine daemons and the `emob` command line, selected by a build argument, on a
+`distroless/cc` runtime (no shell, no package manager). `docker-bake.hcl` builds
+them all; `compose.yaml` starts them on one machine with a named volume per
+journal. Every default bind address is loopback, so nothing is reachable until
+you configure it, and `csmsd` refuses a non-loopback OCPP bind without TLS.
+Release images are `ghcr.io/hupe1980/emob-<daemon>:<version>` plus
+`ghcr.io/hupe1980/emob` (which `just demo` runs where there is no Rust
+toolchain), `linux/amd64` only, with build provenance. See
+[Run the estate](@/docs/run-the-estate.md).
 
-Each of those is a fact about the **past**, and a service that held one only in
-memory answers a restart with the wrong one. A counter that starts again at one
-hands a second document a number the first already carries. An empty consignment
-ledger re-opens every record already sent, to partners who have billed them. A
-running total of zero authorises every session past the credit limit that was
-the point of holding it — and raises nothing, because a limit that is never
-reached looks exactly like a limit that is never exceeded.
+## The OCPP seam and `csmsd`
 
-**Enforcement is about a call; keeping is about where the answer lives.**
+OCPP carries two kinds of meter value and only one is billable. The numeric ones
+(`meterStop`, `SampledValue.value`) tell you whether every event arrived; the
+signed OCMF data set is what you may bill. The Open Charge Alliance's own example
+carries `meterStop: 108814` — the meter's lifetime register in Wh — beside a
+signed value of `0.636 kWh` for the transaction.
 
-`emob_service::journal` is where. A service does not persist its aggregate: it
-appends the facts it decided, in order, and the service on the way up is the
-fold of those facts. That is sound here for the reason the purity rule exists —
-every instant and every key is an argument, never a reading, so the fold gives
-the same answer twice.
+`emob-ocpp` makes the separation structural: its input types have **no numeric
+meter value field**, so nothing from the protocol's numbers can reach a CDR. It
+is a crate of its own so that `emob-core`, `emob-session`, `emob-eichrecht`,
+`emob-tariff` and `emob-cdr` build without any OCPP in their dependency tree; it
+depends on `emob-tariff`, never the reverse.
 
-- **Facts, not commands.** An entry says what was decided, not what was asked. A
-  command log re-decides at replay, re-reading the tariff, the parties and the
-  clock that decided the first time; a platform whose invoice numbers move when
-  a tariff is corrected is not one anybody can keep books with.
-- **The records chain**, the way a meter's do. A record edited in place or
-  removed from the middle breaks every digest after it, and a daemon whose
-  journal does not chain refuses to start. It is a newline-delimited file, so a
-  reader who does not trust the platform can check it with `sha256sum`.
-- **A write that fails halts the service.** The record is appended after the
-  decision and before the caller is told: killed between the two, both are lost,
-  which is the safe direction. A journal that *refuses* leaves the state ahead
-  of the record, and a platform that keeps issuing invoices it cannot account
-  for is worse than one that stops and says so.
+`csmsd` is deliberately thin. It runs two ledgers side by side: `ocpp-kit`'s
+operational ledger (did every message arrive? was this a retry?) and the
+Eichrecht chain (what may be billed?). The operational verdict is read, so a
+station's retried stop message is not treated as a second session. A station
+must be provisioned before it is admitted — an unknown identity in the WebSocket
+URL is answered **404** `[OCPP 2.0.1 Part 4 §3.1.1]` — and its public key comes
+from type approval, never from the station itself. An integration test runs a
+real `ocpp-kit` station against `csmsd` over a TCP WebSocket and bills the OCA
+example at **0.636 kWh**. See [The OCPP seam](@/docs/ocpp.md).
 
-What the chain cannot do is said rather than implied: it proves nothing was
-**rewritten** and cannot prove nothing was removed from the **end**, because a
-truncated journal is byte-for-byte one that was never written. `Journal::head`
-is the digest the file ends on; recorded outside the process, a head that has
-gone backwards is a truncated tail.
+## Advisory agents: `agentd` proposes, it cannot move money
 
-All four ledgers are folded this way — `billd`, `roamd`, `empd` and `poid` — in
-the order of what losing each costs: a document, a double settlement, a credit
-limit, then a republished snapshot. The last is why that order mattered. Losing
-`poid`'s manifest makes a status message **refuse**, which is the safe direction
-and still a gap, because a publisher that re-sends its whole estate after every
-restart is one an access point rate-limits.
-
-## It ships ✅
-
-One `Dockerfile` for all eight daemons, selected by a build argument, because
-they are the same binary shape and eight copies of six lines is seven chances
-for the wrong one to be the one nobody re-reads. The runtime is
-`distroless/cc` — no shell, no package manager. `docker-bake.hcl` builds them
-all; `compose.yaml` brings the estate up on one machine with a **named volume
-per journal**, declared rather than defaulted, because a container without one
-is a daemon whose ledger dies with it.
-
-A daemon with a journal is a **single writer** by construction: two processes
-behind one file interleave two chains into one. So the compose file carries no
-replica count, and says why.
-
-## One wire dials out ✅
-
-`roamd` pushes a charge detail record to the peer the contract identifier named,
-over a real socket, with three integration tests against a receiver that answers
-the way `[OCPI 2.3.0 §mod_cdrs]` says a receiver answers: one that takes it and
-returns a `Location`, one that refuses it with an OCPI envelope, and one that is
-not there.
-
-**An outbox holds the message, not a recipe for one.** The crossing that
-produces the partner's copy also produces *the account of what carrying it there
-cost*, by JSON Pointer into that copy. The document is rendered once, when the
-record is routed, and journalled with the decision — a second rendering at send
-time, from a session that may since have been re-rated, puts a document on the
-wire that the account does not describe. Both are valid, both validate, and
-nothing downstream fails.
-
-**A push has three outcomes, not two.** A receiver that answered has *seen* the
-record: it leaves the queue and a person reads the reason. A connection that
-died is not an answer, so nothing is recorded and the next drain sends it again
-— safe because the paragraph above keys a CDR and makes the receiver treat the
-second copy as the first. Reading the first as the second retries a partner for
-ever with a document it has already judged; reading the second as the first
-drops a record nobody received.
-
-## Four wires do not 📐
-
-`tarifd`'s `SetDefaultTariff` onto a 2.1 estate, `poid`'s Mobilithek
-subscription, `sited`'s SHIP session, and the OICP broker behind mutual TLS —
-for which the **document** is built already, because the crossing refuses what
-that wire cannot carry rather than flattening it, so what is missing is a socket
-and a credential.
-
-The drain loop **warns** for a wire it has no client for: a queue that silently
-holds a record it cannot send is a backlog nobody is told about.
-
-## An agent proposes; it cannot move money ✅
-
-Every crate below answers a question about **one** thing: is this chain sound,
-does this record add up, is this tariff lawful at this power. None of them
-answers the question an operator has at eight in the morning, which is about a
-**population**:
+The libraries answer questions about **one** thing. An operator's morning
+question is about a population: four hundred refused sessions may be four hundred
+tickets or one faulty meter.
 
 ```text
 [evidence-triage] BQ27400330016: the meter was in state Substitute at record 2,
                   which may not be billed
                   (3800.000 kWh at risk across 380) — a device fault rather than
                   a dispute: raise it with the station vendor…
-[evidence-triage] BQ99999999999: pagination jumped from 4 to 6
-                  (20.000 kWh at risk across 20) — records are missing from the
-                  middle of these sessions…
 ```
 
-Four hundred refused sessions are four hundred support tickets or one meter
-fault, and the difference is whether anybody grouped them. Ranked by the
-workspace's own quantities — kilowatt-hours that cannot be billed, points in
-breach — and never *across* kinds, because there is no exchange rate between a
-kilowatt-hour and a euro this daemon is entitled to invent.
-
-**"Advisory only" is a property rather than a promise.** The output type is a
-leaf: nothing in the workspace consumes an `Advice`, so there is no path from an
-agent's answer into a document. And a specialist's principal comes from
-`attenuate`, which refuses to widen, so no agent principal can hold a capability
-that writes — asserted for every write capability the workspace names.
-
-The specialists are deterministic functions and none calls a model. What
-`agentplane` provides for one is not inference but the **journal**: the run, its
-input, its answer and every effect in an append-only hash-chained log, and a
-replay that re-executes the logic while reading each effect back rather than
-performing it again. "Why did the queue say that in March" becomes a replay
-instead of an argument.
-
-## A grid operator may switch a charge point down, and there is a rule about it
-
-`[EnWG §14a]` lets a grid operator reduce the draw of *steuerbare
-Verbrauchseinrichtungen* to relieve a local overload, and
-`[BK6-22-300 Ziff. 2.4.1]` says which devices those are. The first condition
-decides whether any of it applies, and it is the one every summary drops:
-
-> ein Ladepunkt für Elektromobile, **der kein öffentlich zugänglicher Ladepunkt
-> im Sinne des § 2 Nr. 5 der Ladesäulenverordnung (LSV) ist**
-
-A **publicly accessible** point is not one at all. The fast charger on the
-forecourt is outside § 14a; the depot behind the fence, the workplace car park
-and the fleet yard are inside it. And charge points are counted one by one,
-because `Ziff. 2.4.2`'s grouping of several devices into one names only the
-heat-pump and space-cooling families — so a yard of nine wall boxes is nine
-devices, which is what the Mindestleistung formula's `n` is.
-
-```rust
-SteuVe::of(&forecourt, Control::Ems)   // Err: publicly accessible
-SteuVe::of(&depot,     Control::Ems)   // Ok
-```
-
-### The ceiling is a door rather than a check
-
-`Ziff. 4.6` makes the grid operator's reduction outrank *"marktliche
-Laststeuerung"* — a dynamic tariff, a departure schedule, a driver in a hurry.
-Every one of those is a reason somebody writes code that reaches past the limit,
-so the limit is not something that gets checked: `Allocation` has no constructor
-and no public fields, `allocate` is the only thing that returns one and it takes
-the grid limit, and a market plan is a `Demand` going **in**. A property over
-four thousand generated sites asserts there is no way out.
-
-### …and the operator keeps a claim the site does not give up quietly
-
-`Ziff. 4.5` owes the operator 4.2 kW per directly controlled device, and for the
-ones on an energy-management system
-
-```text
-Pmin = 4,2 kW + (n − 1) × GZF × 4,2 kW
-```
-
-where `n` counts **only** those. Folding the directly controlled boxes in is the
-mistake and it falls the way that hurts: a yard of two direct and six on the EMS
-is owed 25.2 kW, and counting all eight as one group gives 18.9 — six and a third
-kilowatts the site would have stopped asking for. A setpoint below the minimum is
-one the grid operator may not give, so the site holds at the minimum and says so.
-
-### Why 4.2 kW is 4.14 kW rounded up
-
-`DIN EN 61851-1` signals the charging current over the pilot's PWM duty cycle and
-cannot express less than **6 A**, so a three-phase point cannot be told to draw
-under `3 × 230 V × 6 A = 4.14 kW`. The first draft of the Festlegung said 3.7 kW;
-the consultation reply was that a point told to draw it would *abort the session*
-and could not restart itself.
-
-Which is why a proportional share is the wrong arithmetic. Dividing 10 kW across
-four boxes gives each a number none of them can signal, and the site draws
-nothing while reporting that it allocated everything. Points are seated at their
-own floor first, in the order the operator hands them, and one that cannot be
-seated is held at zero and named.
-
-## What is designed 📐
-
-| Crate | Holds |
-|---|---|
-| `emob-roam` (eMIP) | GIREVE legacy, beside the OCPI and OICP halves that are built. Only if a partner forces it — GIREVE speaks OCPI |
-| `emob-smart` (the rest) | The § 14a rule and **both ends of its wire** are built. What is designed is what sits beyond them: `Ziff. 4.4.a` *Direktansteuerung*, which addresses a device rather than a site; DER control on OCPP 2.1, behind a capability flag; and the V2G flow model, which waits on a regulator's decision rather than on a crate |
-| `emob-sim` (the rest) | MockHubject and an OCPI peer-in-a-process. The Plug & Charge half is built: a station signs `ISO15118_PNC` into the payload its private key covers, so the contract a session claims and the assignment its meter record states are two independent claims that can be compared |
-
-Services — `csmsd`, `agentd`, `poid`, `tarifd`, `roamd`, `billd`, `empd` and the
-edge controller `sited` are built; `pncd`, `opsd` and `thgd` are 📐. What is
-built is their **decisions**, a journal those decisions survive a restart in for
-each of the four that hold a ledger, and — on the roaming wire — the socket that
-puts a record on somebody else's server.
-
-## One inventory, three audiences
-
-A charge point is described to the outside world three times — to a roaming
-partner, to the public through the national access point, and to the driver
-standing in front of it — and so is its price. Almost every stack generates each
-from a different source, so they drift and nobody compares them.
-
-Here `emob-poi` holds one inventory and `emob-tariff` one price, and the three
-crossings read them rather than copying them. That is why the roaming crate
-depends on the location crate, which looks like a layering mistake and is the
-whole argument: one inventory, several audiences.
-
-[Locations and the national access point](@/docs/locations.md) covers the feed —
-the register that gates what it may say, the dangling reference that takes a
-charger off every map with no error anywhere, and the two things the profile's
-price vocabulary cannot express.
-
-## A hundred stations, and nothing unaccounted for
-
-A verifier tested against its own fixtures proves the code agrees with itself. A
-*fleet* tested the same way proves nothing at all — so `emob-sim` runs a
-reference day and asserts the one thing a silent failure cannot satisfy.
-
-```rust
-let outcome = ReferenceDay::builder()
-    .stations(100)
-    .sessions_per_station(4)
-    .faults(FaultPlan::everything(Rate::one_in(9)))
-    .build()
-    .run();
-
-// 400 sessions: 197 settled (8969.120 kWh), 203 refused (9555.738 kWh),
-//               metered 18524.858 kWh
-assert!(outcome.reconciles());              // billed + refused == metered, exactly
-assert!(outcome.every_refusal_has_a_reason());
-```
-
-The assertion is **not** "everything billed". It is that every kilowatt-hour a
-meter moved either reached a settled record or was refused with a reason —
-`Σ allocated + residual = total` over a day rather than a session. A run
-asserting "no errors" would pass by throwing sessions away.
-
-The stations are imaginary; their **signatures are not**. Every session is signed
-with a real ECDSA key over the real payload bytes, verified through the real
-verifier, split on the real settlement grid, priced by the real rating engine and
-accepted by the real ledger. Eight faults are seeded — a substitute reading, a
-dropped record, a tampered byte, an unsynchronised clock, an export register
-billed as a draw, a `TX=X` exception, an unregistered station, and a **tariff the
-post may not offer** — and the run asserts that **each one is actually
-exercised**.
-
-The eighth is nothing to do with the meter, and it is why the fleet carries a
-rated power: half the posts are 22 kW and half 150 kW, and a per-minute-only
-tariff is an ordinary product on the first and unlawful on the second
-`[AFIR Art. 5(4)]`.
-
-One seed is one day, with no clock and no entropy source, so a failing run is
-reproduced from its seed alone.
-
-### What it found
-
-The first fleet run produced a **settled record for a forged session**. A CDR's
-energy comes from the session's meter series rather than from its evidence, so a
-record could be built and priced off a register nothing verified while carrying
-an evidence reference that made it look checked. Every unit test passed; the
-composition did not.
-
-Evidence that is present and **failed** is worse than evidence that is absent,
-and is refused. Testing the pieces is not testing the seam between them, and the
-seams are where money is made.
-
-## The seam, and why it is a crate
-
-OCPP carries two kinds of meter value and only one of them is money. The numeric
-ones — `meterStart`, `meterStop`, a `SampledValue.value` — answer whether every
-event arrived. They are exact rather than floating point on a current protocol
-library, and **exact is still not billable**: the Open Charge Alliance's own
-example carries `meterStop: 108814`, correct to the digit and reporting the
-meter's *lifetime* register, beside a signed data set reporting `0.636 kWh` for
-the transaction.
-
-`emob-ocpp` makes that structural rather than remembered: **its input vocabulary
-has no numeric meter value in it at all**, so there is no field a float could
-arrive in and no path from one to a CDR. [The OCPP seam](@/docs/ocpp.md) covers
-the three envelopes, the retry that looks like a missing record, and the tariff
-that goes back the other way.
-
-**Why it stays a crate of its own.** Folding it into `emob-cdr` would put a
-protocol implementation in the dependency graph of every crate that decides
-money. `emob-core`, `emob-session`, `emob-eichrecht`, `emob-tariff` and
-`emob-cdr` build with no OCPP anywhere in their tree, and the seam is the only
-crate on both sides.
-
-That is also why the **price** crosses here and the dependency points this way:
-`emob-ocpp` depends on `emob-tariff`, never the reverse. It is the only place
-both vocabularies are in scope, in either direction.
-
-## The socket
-
-`csmsd` is the CSMS a station connects to: an OCPP 1.6J / 2.0.1 / 2.1 endpoint on
-`ocpp-kit` transport. It is deliberately the thinnest thing in the repository.
-
-**Thin is about rules, not about care.** Every rule that could be *wrong* lives
-in `emob-ocpp` and is tested there. What stays behind is the daemon's own error
-handling, which is where a thin layer's bugs live: every mutex is taken through
-one `lock()` that recovers from poisoning, because the guarded values are plain
-collections and a CSMS that answers a panic elsewhere by quietly dropping the
-record of what it billed is the worse failure.
-
-**Two ledgers, side by side, doing different jobs.** `ocpp-kit`'s own
-`csms::ledger` answers whether the traffic arrived — every event accounted for,
-the sequence complete, a retry recognised as a retry — from the protocol's own
-numeric register, which is exactly right for that question. The Eichrecht chain
-answers what may be billed. They run beside each other, never one instead of the
-other, and the type system keeps them apart: nothing in the billing path can see
-a float, because `emob_ocpp::TransactionEvent` has no field for one.
-
-**Side by side is not the same as unread.** The operational ledger's verdict on
-each message — `Ingested` — carries the rule on the variant: *"the station
-retried; do not bill it twice."* OCPP guarantees delivery by retrying, so a
-station that loses one answer sends its `StopTransaction` again — and a CSMS that
-drops that verdict opens a fresh transaction out of the second copy and puts it
-through the whole chain. What comes back is a **refusal**: a record claiming
-measurement outside a window one message cannot have, so a session that billed
-correctly lands in the operator's failure queue naming a metrology fault that
-never happened. The verdict is read, and a message arriving after a transaction
-has ended is named rather than made into a second session — the signed value it
-carries is energy that is *not* on the record that settled, which is a fact about
-a station and has its own fix.
-
-No guard here could have found that: `check-reach` asks whether anything in this
-workspace names a public function, and a *sibling's* return value discarded at a
-call site needs no binding to discard. The one mechanism that reaches across is
-the compiler's, and it is the sibling's to apply — `ocpp-kit` 0.3 marks every
-verdict `#[must_use]` (D306).
-
-The attribute catches the easy half. A verdict that is **bound** and swept into
-a catch-all is a value nothing dropped: `AppliedWithGap` carries the `seqNo`s
-that never arrived, and matching it beside `Applied` consumes the value while
-discarding the list (D327).
-
-**One funnel, three versions.** `observe_v16`, `observe_v201` and `observe_v21`
-all produce the same observation, so the billing path is one function for all
-three generations. The only per-version difference left is the transaction id,
-because 1.6 assigns it in the *response* and therefore makes it the CSMS's
-problem. An observation also carries warnings, and one of them decides money: a
-station that declares `format: SignedData` and sends an unparseable document
-looks, to anything reading only the billable events, exactly like a station
-sending none — so that transaction is refused **by name**, on its first session
-rather than after a month of unbillable ones.
-
-**The two bindings a station may not supply for itself.** The `Identity` in a
-WebSocket URL is whatever the station was configured with, so an unprovisioned
-one is answered **404** rather than admitted `[OCPP 2.0.1 Part 4 §3.1.1]` —
-otherwise its sessions are attributed to a charge point nobody provisioned. The
-binding is made once, at authentication, and travels with the connection, so no
-later lookup can disagree with it. And the public key comes from a type
-approval, never from the `publicKey` a station sends beside its own signed
-values.
-
-**The test that proves it** runs a real `ocpp-kit` station against a real
-`ocpp-kit` CSMS over a real TCP WebSocket, with `csmsd` as the handler. The
-station sends the Open Charge Alliance's own published `StopTransaction.req`
-from a DZG GSH01.1K2L; its `meterStop` says **108814** watt-hours of lifetime
-register, and the record that comes out bills **0.636 kWh**.
-
-## Standing on the kits
-
-emob does not implement charging protocols. **Six** sibling workspaces already
-do, and they are the hard sixty per cent of a platform:
-
-| Sibling | What emob takes |
-|---|---|
-| `ocmf` | The Open Charge Metering Format itself — parsed without disturbing the bytes the signature covers, seven signature algorithms, and the S.A.F.E. transparency container. It refuses to decide money, which is exactly the seam `emob-eichrecht` sits on |
-| `ocpp-kit` | OCPP 1.6J / 2.0.1 / 2.1 payloads, a sans-I/O engine, transport, the CSMS ledger — whose verdicts are `#[must_use]`, the compiler reaching across a repository boundary no guard here can |
-| `ocpi-kit` | OCPI 2.1.1 / 2.2.1 / 2.3.0 models, version translation at the edge, and the client `roamd` pushes with. **Not** its tariff engine: `emob-tariff` decides what a session costs, and a second engine that could produce a different number for the same session is the drift this workspace exists to prevent |
-| `oicp-kit` | Hubject, both halves, delta-sync, CDR pre-flight, and a mock hub for CI |
-| `iso15118` | The EXI codec, the -2/-20 message sets, and the Annex F path validation `emob-pnc` is built on — taken with `pnc` and nothing else, which pulls no cryptography at all. Also a **dev**-dependency of `emob-core`, where it owns the unambiguous spelling of a vehicle-communication generation |
-| `eebus` | The § 14a wire: SHIP, SPINE and the four certifiable use cases, on both sides. Taken **without `runtime`**, so `emob-eebus` stays a domain crate and the sockets are `sited`'s |
-
-The billing half comes from `en16931` (+ formats) and `sepa`, with
-`doubleentry` reserved for the daemon that holds a journal; the
-market-communication half — German pass-through charging under NZR-EMob — from
-`mako`. Three siblings are deliberately **not** taken: `billing`, because the
-hard part of an OCPI tariff is which element prices which second and a second
-pricing engine is the drift `emob-tariff` exists to prevent; `rubo4e`, because
-the seam it would serve consumes `mako-emob`'s own `Ladevorgang` rather than a
-BO4E object; and `rutmf`, because the contract model a TM Forum surface
-would expose is four types in `empd` rather than a product catalogue, and an API
-model adopted before the domain it exposes is the daemon deciding *what*. Each is recorded with its reason in the concepts, so
-nobody reaches for it twice.
-
-### Why the CDR depends on the Eichrecht crate
-
-Three of the builder's checks read facts that only the signed records know: how
-strongly the user was identified, whether the clock can carry a duration at all,
-and which way the OBIS register says the energy went. `EvidenceRef::from_evidence` reads them off a verified `Evidence` rather
-than taking them as arguments, because a hand-filled field can be filled with
-whatever value makes the record build — which is the opposite of a check.
-
-### Why the CDR depends on the tariff
-
-A CDR is what two companies settle against, so it carries what they settle: the
-energy *and* the money. Rating lives in `emob-tariff` and the record holds its
-result, rather than the two being joined in a service where nothing checks that
-the euros and the kilowatt-hours came from the same view of the session.
-
-It is also what makes tiers work. The quarter-hour slots the split produces are
-the periods the rating walks, so the arithmetic that settles the energy is the
-arithmetic that prices it.
-
-### Why `emob-core` has its own identifiers
-
-`ocpi-kit` and `oicp-kit` each carry an `EvseId` that is correct for its own
-wire. A platform that speaks both needs one type its handlers are written
-against, or the translation layer becomes a web of conversions between two
-vocabularies that already agree.
-
-They do have to agree, though, and that is a test rather than a hope:
-`oicp-kit` documents `DE*ABC*E123 == deabce123`, so `emob-core` asserts the same
-equality. The two meet in the roaming layer, and an id that compares equal on
-one side and not the other routes a session to nobody.
-
-Agreeing is not the same as being permissive. `*` is optional throughout an EVSE
-id and every one of them is stripped; `-` is **not** a separator here, unlike in
-a contract id, because the eMI3 grammar does not define one and eating it would
-make `DE-AB7-E840` parse as a charge point.
-
-## The roaming stance
-
-One canonical model; every wire native; translation cost recorded.
+`agentd`'s three specialists — evidence triage, a tariff sweep and a compliance
+sweep that judges upcoming duties against today's estate — are deterministic
+functions on [`agentplane`](https://crates.io/crates/agentplane); none calls a
+language model. "Advisory only" is structural: nothing in the workspace consumes
+their output type, and a specialist's principal is derived with `attenuate`, so
+it cannot hold a write capability. Each specialist is started by its read
+capability, and the runtime acts as the advisory principal's delegation chain:
+`agentplane` refuses at admission a run whose capability is outside it.
+`agentplane` records each run in a hash-chained log that can be replayed.
+
+## Testing with a simulated fleet
+
+`emob-sim` runs a reference day: virtual stations that sign genuine OCMF with
+real ECDSA keys, run through the real verifier, split, rating engine and ledger.
+Eight faults are seeded — a substitute reading, a dropped record, a tampered
+byte, an unsynchronised clock, an export register billed as a draw, a `TX=X`
+exception, an unregistered station, and a tariff the post may not offer — and the
+run asserts each is exercised.
+
+The key assertion is that energy **reconciles**: every kilowatt-hour a meter
+moved either reached a settled record or was refused with a reason. Half the
+posts are 22 kW and half 150 kW, because a per-minute-only tariff is lawful on
+the first and not on the second `[AFIR Art. 5(4)]`. The fleet run is what showed
+that evidence which is present but **failed** must be refused, not just evidence
+that is absent.
+
+## Protocol kits emob builds on
+
+emob does not implement charging protocols; it depends on these libraries:
+
+| Library | Version | What emob uses |
+|---|---|---|
+| [`ocmf`](https://crates.io/crates/ocmf) | 0.1 | Parsing and verifying OCMF records without disturbing the signed bytes; the S.A.F.E. transparency container |
+| [`ocpp-kit`](https://crates.io/crates/ocpp-kit) | 0.5 | OCPP 1.6J / 2.0.1 / 2.1 messages, transport and the CSMS ledger |
+| [`ocpi-kit`](https://crates.io/crates/ocpi-kit) | 0.4 | OCPI 2.1.1 / 2.2.1 / 2.3.0 models, version translation and the client. **Not** its tariff engine: one pricing engine means one answer |
+| [`oicp-kit`](https://crates.io/crates/oicp-kit) | 0.1 | Hubject OICP, CPO and EMP sides |
+| [`iso15118`](https://crates.io/crates/iso15118) | 0.9 | Certificate path validation for Plug & Charge |
+| [`eebus`](https://crates.io/crates/eebus) | 0.11 | SHIP and SPINE for § 14a; used without its runtime, so `emob-eebus` stays sans-I/O |
+| [`en16931`](https://crates.io/crates/en16931), `en16931-formats` | 0.10 | The European e-invoice model, validation, UBL and CII |
+| [`sepa`](https://crates.io/crates/sepa) | 0.9 | SEPA direct debit (pain.008) |
+| [`doubleentry`](https://crates.io/crates/doubleentry) | 0.9 | Bookkeeping in `billd` |
+| [`agentplane`](https://crates.io/crates/agentplane) | 0.61 | The run journal for `agentd` |
+
+The crates that decide money keep Rust 1.94 as their minimum version so that
+sibling workspaces (`mako` for German market communication, `hems` for home
+energy management) can consume them; `emob-roam` needs 1.96 because `ocpi-kit`
+does.
+
+## Why the dependencies point the way they do
+
+- **`emob-cdr` depends on `emob-eichrecht`.** Three of the builder's checks —
+  identification strength, whether the clock can carry a duration, and energy
+  direction — read facts only the signed records know.
+  `EvidenceRef::from_evidence` takes them from verified evidence, because a
+  hand-filled field can be filled with whatever makes the record build.
+- **`emob-cdr` depends on `emob-tariff`.** A CDR carries both energy and money,
+  and the quarter-hour periods the split produces are the periods the rating
+  walks — so tiers price what was actually settled.
+- **`emob-core` has its own identifiers.** `ocpi-kit` and `oicp-kit` each have an
+  `EvseId` correct for their wire; handlers need one type that agrees with both.
+  `DE*ABC*E123` equals `deabce123`, and `-` is not a separator in an EVSE id, so
+  `DE-AB7-E840` cannot parse as a charge point.
+- **`emob-roam` depends on `emob-poi`.** One location inventory and one price
+  feed the roaming partner, the national access point and the station's screen,
+  so the three never drift apart. See [Locations](@/docs/locations.md).
+
+## Roaming protocols
 
 | Wire | Partner | Via | State |
 |---|---|---|---|
-| OCPI 2.3.0 (2.2.1 translated at the edge) | peers, most hubs | `ocpi-kit` | ✅ |
-| OICP 2.3 | Hubject | `oicp-kit` | ✅ out; `roamd` chooses the wire off the partner and owns the transport |
-| eMIP | GIREVE legacy | only if a partner forces it — GIREVE speaks OCPI | 📐 |
-| OCHP | e-clearing.net | not planned; the spec froze in 2016 | ✖ |
+| OCPI 2.3.0 (2.2.1 translated at the edge) | peers, most hubs | `ocpi-kit` | ✅ library and `roamd` |
+| OICP 2.3 | Hubject | `oicp-kit` | ✅ library (outbound documents) · ⏳ `roamd` transport |
+| eMIP | GIREVE legacy | — | 📐 only if a partner requires it; GIREVE speaks OCPI |
+| OCHP | e-clearing.net | — | not planned; the specification froze in 2016 |
 
-Three rules carry over from the kits and become platform invariants:
+The rules that hold across every wire:
 
-**Nothing a peer sent is thrown away.** Unknown fields and enum values survive a
-round trip, because a hub that damages a vendor extension is how real data gets
-lost.
+- **Nothing a peer sent is thrown away** — unknown fields and enum values survive
+  a round trip.
+- **Identifiers compare canonically and print verbatim.**
+- **Routing comes from the identifier.** A contract id names its issuer in its
+  first five characters; a partner's declared namespaces override that default.
+- **Translation cost is reported** through `Crossing`.
+- **An unevaluable restriction never matches.** A tariff element with a
+  restriction this build does not understand is not applied, and the rating says
+  so.
 
-**Identity is text-preserving.** Identifiers compare canonically and write back
-verbatim.
+## § 14a: controllable charge points
 
-**Routing comes out of the identifier.** A contract id names its issuer in its
-first five characters, and that is the party holding the driver who will pay.
-Routing settlement off a hand-maintained map from something else is where
-roaming money reaches the wrong company — and OCPI warns outright that a party
-id has no direct link with the contract's issuer, so the prefix is the default
-and a partner's declared namespaces beat it.
+`[EnWG §14a]` lets a grid operator reduce the draw of controllable devices, and
+`[BK6-22-300 Ziff. 2.4.1]` excludes **publicly accessible** charge points — so
+§ 14a reaches depots, workplaces and fleet yards, not the public fast charger.
+`emob-smart` allocates power so the grid limit cannot be exceeded (`allocate` is
+the only way to get an `Allocation`, and it takes the limit), and keeps the
+minimum power the operator is owed. See [§ 14a and the grid](@/docs/smart-charging.md).
 
-**Translation cost is reported.** A 2.2.1 partner has no `tax_included`; a 2.3.0
-one requires it. Every crossing yields the value *and* a note of what was
-assumed. Disputes are won with that note.
+## Build guards
 
-**What cannot be evaluated is not assumed open.** A tariff element carrying a
-restriction this build does not understand never matches, and the rating says so
-in a note that travels with the record. Treating an unknown condition as absent
-applies a price under conditions nobody checked — the translation-layer analogue
-of billing on an unverified signature. That rule is already enforced in
-`emob-tariff`, before any wire adapter exists to exercise it.
-
-## Purity, and why it is a build failure
-
-The domain crates never read a clock, open a socket or touch the filesystem.
-Every instant is an argument and the key registry is handed in already
-populated.
-
-That is not architectural taste. A dispute about a session from two years ago is
-answered by replaying the verification exactly as it ran — same records, same
-keys, same instant — and the replay stops being a replay the moment any part of
-it consults the ambient world. `just purity` fails the build if a domain crate
-reaches for one.
-
-## The guards
+`just guards` runs checks the compiler cannot:
 
 | Guard | Prevents |
 |---|---|
-| `no-floats` | a workspace exact everywhere it was reviewed and approximate in the helper nobody read |
-| `check-citations` | a rule citing a document nobody can produce — in the prose as well as the code: the READMEs, this site, and every comment that names a paragraph. The documents themselves are third-party and not in this repository, so on a clone the guard cannot ask whether each is *indexed* and says so — while the half that asks whether a citation is a form the workspace recognises at all runs from a table compiled into the binary, and therefore runs in CI |
+| `no-floats` | binary floating point anywhere money is computed |
+| `check-citations` | a regulatory citation in code or docs that names no known document |
 | `check-manifests` | a `cargo publish` that fails after the version is spent |
-| `purity` | a domain crate that reaches for a clock, a socket or the filesystem in **its own** source |
-| `check-constructors` | a rule with a door around it. `Energy::from_kwh` refuses a negative so a discharge can never cancel a draw; `TokenRef::new` refuses anything that is not a keyed digest so a raw RFID UID is never stored; `PartyId::new` upper-cases so `DE*ABC` and `DEABC` are not two entries in one routing table. A `derive(Deserialize)` restores the value and asks none of it — and that is the path values arrive by, out of a store, an outbox or a partner's document. So a type whose fields are **private** and whose construction can **refuse** may not derive it. Both halves matter: a bag of public fields has no door to guard, and "can refuse" is recognised by shape rather than by a list of names, because a search for `new` and `parse` walks past `Energy::from_kwh` |
-| `check-reach` | a rule with no caller. `dead_code` sees an unused private item and `cargo tree --invert` sees an unused crate; neither sees a `pub fn`, because `pub` is a promise to a downstream and the compiler takes it at face value — and here the downstream is this workspace. A public function whose name appears nowhere but its own definition, in no other crate, no test, no doc comment and nowhere on this site, is a rule stated and not enforced. A textual search rather than a call graph, deliberately: it over-approximates reachability, so it can miss a dead function and can never invent one |
-| `check-api` | the mirror of `check-reach`, and the half nothing looked for. A deleted function takes its callers with it — the compiler sees to that — and leaves every page that explained it standing, because no compiler reads a Markdown file. A path `A::B` counts when `A` is a type, an enum, a trait or a module **this workspace declares**, so somebody else's promise is left alone, and `B` then has to exist in the source with the comments stripped |
-| `check-graph` | the other half: a clock, a socket or a database reaching a domain crate through a **dependency**, which `purity` greps past — a `uuid`/`v7` identifier is `SystemTime::now` behind a manifest line |
-| `check-prose` | a sentence a person reads with a hole in it. Rust joins a `\`-continued string literal with no separator, so dropping the backslash moves the continuation's indentation *inside* the string: it still compiles, every test matching a substring still passes, and the message reaches an operator with a run of spaces in the middle of it. The six that had accumulated were all in refusal texts — the longest strings here, and the only thing a person sees when the platform says no |
-| `check-wire` | a date or an instant in a serialisable type going out as `time`'s derived **nine-element array** instead of RFC 3339. Nothing fails when it does — a round trip through the same library succeeds either way — so every such field has to name the module it writes with |
-| `check-concepts` | a design document that states a count it does not hold — how many decisions the log records, how many rules the README heads, how big the test suite is, how many properties this repository's own first sentence counts, and how many tests each crate's own row claims — and a `D` number that repeats or leaves a gap. Prose has no test, and a claim nothing holds drifts one-directionally and silently. The per-crate column is the lesson: a guard on a total is not a guard on the figures that make it up. It also checks the **shape** of every Markdown table, because Markdown drops a surplus cell and blanks a missing one without complaining, and a paragraph that moves one row down a table is simply gone. The internal notes it is named for are not in this repository, so the half that reads them skips **by name** and the half over published prose runs anyway: a guard that skips in silence reads exactly like one that passed |
+| `purity` / `check-graph` | a domain crate reaching a clock, socket or database, directly or through a dependency |
+| `check-constructors` | a type with a validating constructor that derives `Deserialize`, which would let wire data bypass the validation |
+| `check-reach` | a public function nothing calls — a rule nobody enforces |
+| `check-api` | documentation naming an API that no longer exists |
+| `check-prose` | a user-facing string with a hole from a lost line continuation |
+| `check-wire` | a date serialised in a format partners cannot read instead of RFC 3339 |
+| `check-concepts` | a count stated in documentation that does not match its source, and malformed Markdown tables |
+| `check-actions` | a GitHub Action not pinned by commit SHA, a base image not pinned by digest, a workflow without declared `permissions:` |
+
+## Not yet built 📐
+
+- `tarifd` pushing `SetDefaultTariff` to stations, `poid`'s access-point
+  subscription, `sited`'s SHIP session, and the OICP transport — the documents
+  are built; the sockets and credentials are not.
+- `pncd`, `opsd` and `thgd`.
+- In `emob-smart`: direct device control (`Ziff. 4.4.a`), DER control over OCPP
+  2.1, and V2G flows. (The MiSpeL levy arithmetic for bidirectional points is
+  built in `emob-session`; see [Bidirectional charging](@/docs/bidirectional.md).)
+- In `emob-sim`: a mock Hubject and an in-process OCPI peer.
+
+Related: [Getting started](@/docs/getting-started.md) ·
+[The Eichrecht chain](@/docs/eichrecht.md) · [Roaming](@/docs/roaming.md) ·
+[threat model](https://github.com/hupe1980/emob/blob/main/THREAT_MODEL.md)

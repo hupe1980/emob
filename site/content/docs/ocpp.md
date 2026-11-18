@@ -1,15 +1,20 @@
 +++
 title = "The OCPP seam"
-weight = 3
-description = "The seam between the OCPP wire and the money: signed meter values lifted out of transaction events, and the tariff carried onto the charge point's own screen."
+weight = 4
+description = "How emob turns OCPP 1.6, 2.0.1 and 2.1 transaction events into Eichrecht-signed CDRs, and pushes the same tariff to the charge point display via OCPP 2.1."
 
 [extra]
 state = "built"
 nav = "OCPP seam"
 +++
 
-OCPP is how a charge point and a backend talk. It is **not** how a kilowatt-hour
-becomes a euro, and the difference is the whole content of this page.
+OCPP — the Open Charge Point Protocol — is how a charge point and its backend
+(the CSMS) talk. `emob-ocpp` is the seam between that wire and the money: it
+lifts **signed meter values** out of OCPP transaction events for the Eichrecht
+chain, takes the session's *shape* (start, stop, charging or idle) from the
+events, and sends the **tariff** back to the charge point's display through
+OCPP 2.1. It supports OCPP 1.6, 2.0.1 and 2.1 through
+[`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.5.
 
 ```mermaid
 flowchart LR
@@ -37,112 +42,87 @@ flowchart LR
     class SEAM hot
 ```
 
-## Two kinds of meter value, and only one is money
+## Only signed meter values are billed
 
-OCPP carries the register twice.
+OCPP carries the meter register twice, and only one copy is money.
 
-The **numeric** fields — `meterStart`, `meterStop`, a `SampledValue.value` — are
-operational telemetry. They answer whether every event arrived and whether the
-sequence is complete. They are exact rather than floating point on a modern
-stack, and **exact is still not billable**: the Open Charge Alliance's own
-example message carries `meterStop: 108814`, correct to the digit and reporting
-the meter's *lifetime* register in watt-hours, beside a signed data set reporting
-`0.636 kWh` for the transaction. A backend billing the protocol's number would
-bill a figure nothing signed, taken from a register that is not the session's.
+- The **numeric** fields — `meterStart`, `meterStop`, `SampledValue.value` — are
+  operational telemetry. They show whether every event arrived. They are not
+  billable: the Open Charge Alliance's own example carries `meterStop: 108814`,
+  the meter's *lifetime* register in watt-hours, beside a signed data set
+  reporting `0.636 kWh` for the transaction.
+- The **signed** value is a `SignedMeterValueType` carrying an OCMF data set —
+  the Open Charge Metering Format, in which a calibrated meter signs each
+  reading. It is the only thing that becomes a billed kilowatt-hour.
 
-The **signed** one is a `SignedMeterValueType` carrying an OCMF data set, and it
-is the only thing here that becomes a billed kilowatt-hour.
+This is enforced by types: **the seam's input vocabulary has no numeric meter
+value in it.** A `TransactionEvent` carries signed readings, instants and
+whether energy was flowing — there is no field to put a float in. A workspace
+guard also fails the build on any `f32` or `f64` outside tests.
 
-That is a property of the types rather than a rule somebody remembers: **the
-seam's input vocabulary has no numeric meter value in it at all.** A transaction
-event carries signed values, instants and whether energy was flowing. There is no
-field to put a float in, so there is no path from one to a record — and a build
-guard fails the workspace on an `f32` or an `f64` anywhere outside a test.
+## Reading OCMF out of OCPP 1.6 and 2.x
 
-## Three envelopes, and 1.6 is the awkward one
+The OCMF data set arrives wrapped in up to three layers:
 
-What a station sends is an OCMF data set wrapped three deep, and each layer is
-somewhere an implementation goes wrong.
+- **OCPP 2.x** has a typed `signedMeterValue` field.
+- **OCPP 1.6** serialises the whole object into the `value` string of a
+  `SampledValue` whose `format` is `SignedData` — a string holding JSON holding
+  Base64 holding the record.
+- The `publicKey` is Base64 over `oca:base16:asn1:<hex>`; the same application
+  note's own example sends Base64 over plain hex with no envelope. Both are
+  accepted.
 
-OCPP 2.x has a typed field. **OCPP 1.6 serialises the whole object into the
-`value` string** of a `SampledValue` whose `format` is `SignedData` — a string
-holding JSON holding Base64 holding the record. The `publicKey` beside it is
-Base64 over a colon-separated envelope, `oca:base16:asn1:<hex>`, whose last
-component is the key *as printed on the certified meter* — and the same
-application note's own example then sends Base64 over plain hex with no envelope
-at all, so a reader that implemented only the specification would reject the
-specification's own example. Both are read.
+The envelope parsing lives in `ocpp-kit`, so one `match` in `emob_ocpp::record_of`
+covers all three generations.
 
-None of that lives in this workspace: it is protocol knowledge every OCPP backend
-doing Eichrecht has to reimplement, which is the definition of something
-belonging in the protocol library. One `match` covers all three generations here.
+A public key that arrives on the same socket as the record proves only that the
+sender holds *a* private key. OCMF says the key travels out of band, so the key
+that decides anything comes from the operator's meter registry — see
+[Eichrecht](@/docs/eichrecht.md).
 
-The public key is a **claim** wherever it is decoded. OCMF is explicit that the
-key travels out of band, and a key arriving on the same socket as the record it
-signs proves only that whoever holds that socket owns a private key. The key that
-decides anything comes from the registry — see
-[Eichrecht](@/docs/eichrecht.md#the-key-binding-travels-out-of-band).
+## A retried MeterValues is not a second reading
 
-## A retry is not a reading
-
-OCPP guarantees delivery by retrying. A `MeterValues` request that does not get
-its confirmation in time is sent again, and the same signed record arrives twice
-— with the same pagination counter, because the meter produced one. A backend
-that appends both hands the chain a duplicate, and the chain answers
-`PaginationBreak`: a transport retry reported as a *missing record*, on a session
-that is perfectly intact.
+OCPP guarantees delivery by retrying, so the same signed record can arrive twice
+with the same pagination counter. Appended twice, the Eichrecht chain would report
+`Finding::PaginationBroken` — a transport retry misreported as a missing record.
 
 Records are de-duplicated by the digest of the bytes their signature covers. Two
-that hash the same **are** one record — that is what the digest means — and two
-that differ are both kept, because a station that reused a counter for different
-content is exactly the fault the chain exists to find.
+with the same digest are one record. Two that differ are both kept, because a
+station that reused a counter for different content is exactly the fault the
+chain exists to find.
 
-## What comes from where
-
-Two sources describe one charging process and neither is sufficient alone.
+## Which fact comes from OCPP and which from OCMF
 
 | Fact | Source | Why not the other |
 |---|---|---|
 | The register, and its scale | the **signed record** | OCPP's numbers are telemetry |
-| When the transaction opened and closed | the **OCPP events** | OCMF's clock is often *informative*, and the backend knows when it authorised |
-| Charging, or merely connected | the **OCPP events** | the meter cannot tell a taper from an occupancy, and the two are priced differently |
+| When the transaction opened and closed | the **OCPP events** | OCMF's clock is often only *informative*, and the backend knows when it authorised |
+| Charging, or merely connected | the **OCPP events** | a meter cannot tell a taper from an occupancy, and the two are priced differently |
 | Whether a reading is clock-aligned | the **OCPP reading context** | nothing in the record says why it was taken |
 
-So a transaction is assembled with its **shape** from the protocol and every
+A transaction is assembled with its **shape** from the protocol and every
 **number** from the signature.
 
-### …except where the signature has a second opinion
+One exception is reported rather than resolved. OCMF's transaction marker `S`
+(*"Suspended = Transaction active, but currently not charging"*) lets a meter
+sign an occupancy interval too. It is optional, so its absence means nothing; but
+where it is present and disagrees with the OCPP events, the seam reports a
+`ChargingDisagreement`. `[AFIR Art. 5(4)]` prices those minutes differently, so
+an operator should look rather than silently prefer either account.
 
-One row is not quite a monopoly. OCMF defines a transaction marker `S` —
-*"Suspended = Transaction active, but currently not charging"* — so a signature
-component can state the occupancy interval too, and some do.
+## Showing the tariff on the charge point with OCPP 2.1
 
-It does not replace the protocol's account: `S` is optional, so its absence says
-nothing and most of the fleet never emits one. Where it **is** emitted and
-disagrees, that is worth an operator's attention rather than a silent preference
-for either side — `[AFIR Art. 5(4)]` prices those minutes differently, and the
-party that issues the invoice controls only one of the two accounts. The
-comparison is reported, not resolved.
-
-## The seam runs both ways
-
-The money comes **in** across this seam, out of a signature. The **price** goes
-out across it.
-
-`[AFIR Art. 5(4)]` requires the ad-hoc price to be *"known to end users before
-they initiate a recharging session"*, and the place a driver learns it is the
-charge point's own display. Until OCPP 2.1 there was no structured way to put it
-there — 2.0.1 could send a display string and a running cost number, both
-computed somewhere else — so the price on the screen came from a field somebody
-typed while the price on the invoice came from the tariff engine. That is
-precisely the drift the [tariff model](@/docs/pricing.md) exists to make
-unrepresentable, surviving in the one place the article regulates.
-
-OCPP 2.1's *Tariff and Cost* block closes it:
+`[AFIR Art. 5(4)]` — the EU Alternative Fuels Infrastructure Regulation —
+requires the ad-hoc price to be *"known to end users before they initiate a
+recharging session"*, and the place a driver learns it is the charge point's
+display. OCPP 2.0.1 could only send a display string and a running cost computed
+elsewhere, so the screen and the invoice came from different places. OCPP 2.1's
+*Tariff and Cost* block closes that gap, and `emob_ocpp::to_ocpp` converts the
+same `Tariff` that rates the session:
 
 ```rust
-let crossing = emob_ocpp::to_ocpp(&tariff, at)?;       // the same Tariff that rates
-let request = SetDefaultTariffRequest::new(0, crossing.value);   // evseId 0 = all
+let crossing = emob_ocpp::to_ocpp(&tariff, at)?;                  // the same Tariff that rates
+let request = v2_1::SetDefaultTariffRequest::new(0, crossing.value); // evseId 0 = all EVSEs
 
 for reason in crossing.reasons() {
     eprintln!("{reason}");
@@ -151,84 +131,91 @@ for reason in crossing.reasons() {
 }
 ```
 
-### The two tariff models are one model
+The result is a `Crossing`: the OCPP value plus an account of anything the wire
+could not carry, each note addressed by JSON Pointer.
 
-OCPI orders *elements* and picks, per dimension, the first whose restrictions
-match. OCPP 2.1 orders *prices* inside each dimension and picks the first whose
-conditions match — *"an entry with no conditions always matches, so it should be
-placed last as a fallback"*, which is OCPI's own advice written from the other
-side.
+### The station selects the same tier the invoice uses
 
-Projecting the element list onto one price list per dimension, **in order**, with
-each element's restrictions becoming that price's conditions, is exactly the
-projection the rating engine already performs. So the station selects the
-component the invoice is built from *by construction* rather than by agreement —
-and had the two rules differed, the honest answer would have been to refuse the
-crossing entirely. A charge point showing a different tier from the CDR is worse
-than a charge point showing nothing.
+OCPI orders tariff *elements* and picks, per dimension, the first whose
+restrictions match. OCPP 2.1 orders *prices* inside each dimension and picks the
+first whose conditions match. Projecting the element list onto one price list per
+dimension, in order, is the projection the rating engine already performs — so
+the station selects the component the invoice is built from **by construction**.
 
-OCPP 2.1 also requires the station to **display** the tariff's own description,
-and that is the full disclosure the article asks for: every tier with its
-conditions, in the order it prescribes. The display duty and the rating travel in
-one object.
+OCPP 2.1 also requires the station to display the tariff's description. emob
+fills it with every tier and its conditions in the order AFIR prescribes, so the
+disclosure duty and the rating travel in one object.
 
-### What the wire cannot say is a refusal, not a note
+### What OCPP 2.1 cannot express is refused, not noted
 
-The line is the same one the [roaming edge](@/docs/roaming.md) draws: **a loss in
-the driver's disfavour that the document does not show is a refusal**, because a
-note attached to a number the receiver is entitled to read at face value is not
-something they can act on.
+A loss in the driver's disfavour that the document does not show is a
+**refusal**, because the receiver is entitled to read the number at face value.
+[Roaming](@/docs/roaming.md) applies the same rule.
 
 | Refused | Why |
 |---|---|
-| a time price with no exact per-minute spelling | OCPP's field **is** `priceMinute` — the article's own unit — and €2.50 an hour is €0.041666… a minute. A rounded figure is a price the station charges and the tariff does not |
+| a time price with no exact per-minute value | OCPP's field is `priceMinute`, and €2.50 an hour is €0.041666… a minute; a rounded figure is a price the station charges and the tariff does not |
 | a dimension charged at two VAT rates | OCPP carries one tax-rate list per dimension, so the second tier would be taxed at the first tier's rate |
-| a session fee conditioned on a quantity | the conditions for a fixed fee carry the wall clock and nothing else, so published stripped the fee is not narrower but **wider**: the station charges it on every session |
-| an unevaluable restriction | for the reason the OCPI crossing refuses it |
+| a session fee conditioned on a quantity | a fixed fee's conditions carry only the wall clock, so the stripped fee would apply to **every** session |
+| a restriction emob cannot evaluate | stripping a condition widens the price, as on the [OCPI side](@/docs/roaming.md) |
+| a reservation element | OCPP 2.1 prices a transaction; a reservation runs before one exists |
 
-What is merely *visible* is carried with an account: a block size OCPP has no
-field for, a version expiry it has no field for, the residual a gross price
-leaves when the wire quotes net, and the tiers past the tenth its ten-line
-description cannot hold. That last one is a note rather than a refusal because it
-changes nothing that is *charged* — and a station displaying no price at all is a
-worse breach of the same article than one displaying ten tiers of twelve.
+What is merely *invisible* is carried with a note: a block size and a version
+expiry OCPP has no field for, the residual when a gross price is quoted net, and
+tiers beyond the ten lines the description can hold. The finished document is
+then checked against `ocpp-kit`'s OCPP 2.1 schema validator, so a tariff a
+station would reject is rejected here first.
 
-The finished document is then handed to the protocol library's own schema
-validator. The bounds above are a list somebody maintains; the schema is the
-library's to own, and a tariff a station would refuse is refused here instead.
+### CostUpdated shows the invoice's own figure
 
-### The running cost is the invoice's own figure
+`CostUpdated` carries the running cost *including taxes*. `emob_ocpp::cost_updated`
+takes it from the rated session's gross, rounded the way the invoice rounds — per
+VAT category, then summed — so the number on the screen during charging is the
+number on the invoice afterwards.
 
-`CostUpdated` carries the cost *including taxes*, so it is the rated session's
-gross — rounded the way an invoice rounds it, per VAT category and then summed. A
-station showing a running total computed any other way is showing a number the
-invoice will not match, which is the failure this seam exists to prevent, arriving
-during the session instead of after it.
+## Why the OCPP seam is a separate crate
 
-## Why this is a crate of its own
+Folding OCPP into the record layer would put a protocol implementation in the
+dependency graph of every crate that decides money. The identifier, session,
+evidence, tariff and record crates build with no OCPP in their tree; `emob-ocpp`
+is the only crate that sees both vocabularies. It depends on the tariff model,
+never the reverse.
 
-It is a boundary rather than a quarantine. Folding it into the record layer would
-put a protocol implementation in the dependency graph of **every crate that
-decides money**. The identifier, session, evidence, tariff and record crates build
-with no OCPP anywhere in their tree, and this seam is the only one on both sides.
+## The csmsd daemon
 
-That is also why the price crosses *here* and the dependency points this way: the
-seam depends on the tariff model, never the reverse. It is the only place both
-vocabularies are in scope, in either direction.
+`csmsd` is the endpoint a station connects to — OCPP 1.6J, 2.0.1 and 2.1 over
+WebSocket — and it routes every transaction event into the Eichrecht chain
+described above. ✅
 
-## The socket
+- **Who the station is.** Each station has an OCPP security profile
+  `[OCPP 2.0.1 Part 2 §A00]`: Basic against an Argon2id hash (profile 1, or 2
+  over TLS) or a TLS client certificate whose CN is its identity (profile 3). An
+  unknown identity gets `404`, a wrong credential `401`, and a station that does
+  not offer its provisioned OCPP version is refused. A second connection under a
+  known identity supersedes the older one — the credential check is what tells
+  an impostor from a reconnect.
+- **Authorisation.** `Authorize`, and every transaction start, is answered by
+  `empd`. A timeout or an unreachable `empd` answers `Invalid`: it fails closed,
+  and a refused start opens no transaction.
+- **Nothing is lost on restart.** The CDR ledger, outcomes, in-flight events and
+  the OCPP 1.6 transaction counter are folded from `csmsd`'s journal; each
+  settled session is delivered to `billd` and `roamd` from a journalled outbox.
+- **The driver gets the evidence.** Every session has a receipt page the driver
+  can check on a phone.
 
-`csmsd` is the daemon a station actually connects to — an OCPP 1.6J / 2.0.1 / 2.1
-endpoint. It is deliberately the thinnest thing in the workspace, and
-[Architecture](@/docs/architecture.md#the-socket) covers what that means: every
-rule that could be *wrong* lives here and is tested here, so the daemon is
-sockets, routing and bookkeeping.
+See [Run the estate](@/docs/run-the-estate.md) and
+[Architecture](@/docs/architecture.md) for how daemons stay thin.
 
-## What is not here 📐
+## Not yet built 📐
 
-Smart charging profiles and OCPP 2.1 DER control are a separate crate.
+- Smart-charging profiles from a § 14a allocation are in `emob_ocpp::to_charging_profiles`
+  — see [§ 14a and the grid](@/docs/smart-charging.md). OCPP 2.1 DER control is not
+  built.
+- Deciding *when* a tariff version takes effect is `tarifd`'s. The OCPP 2.1
+  tariff object has no expiry field, so a version's expiry is reported in the
+  crossing's notes and retiring a version is a separate `ClearTariffs` call.
 
-Deciding *when* a version takes effect is `tarifd`'s and the socket is `csmsd`'s.
-The one thing the payload itself cannot carry is a version's expiry — the 2.1
-tariff object has no field for it — so it is reported with the crossing's other
-costs, and retiring a version is a separate `ClearTariffs` call.
+**Related:** [Eichrecht](@/docs/eichrecht.md) ·
+[Tariffs and price transparency](@/docs/pricing.md) ·
+[Sessions and settlement](@/docs/settlement.md) ·
+[Glossary](@/docs/glossary.md)

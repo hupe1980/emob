@@ -1,172 +1,163 @@
 +++
 title = "§ 14a and the grid"
-weight = 9
-description = "A grid operator's § 14a setpoint off the EEBUS wire as an exact decimal, shared out under a ceiling nothing can raise."
+weight = 10
+description = "§ 14a EnWG smart charging: which charge points a grid operator may curtail, EEBUS LPC setpoints as exact decimals, and allocation under an OCPP 2.1 ceiling."
 
 [extra]
 state = "built"
 nav = "§ 14a"
 +++
 
-Since 1 January 2024 a German distribution grid operator may reduce the draw of
-a *steuerbare Verbrauchseinrichtung* — a controllable consumer device — and a
-charge point over 4.2 kW in low voltage is one of them. In exchange the operator
-of the site keeps a claim to a minimum draw, and pays a reduced grid fee.
+Since 1 January 2024, **§ 14a EnWG** lets a German distribution grid operator
+reduce the draw of a *steuerbare Verbrauchseinrichtung* (SteuVE, a controllable
+consumer device) — which includes a non-public charge point over 4.2 kW on the
+low-voltage grid. In return the site keeps a guaranteed minimum draw and pays a
+reduced grid fee `[EnWG §14a]` `[BK6-22-300]`. emob splits this into three
+crates: `emob-smart` decides **which** points the rule reaches and **what** the
+site may draw; `emob-eebus` reads the grid operator's setpoint off the EEBUS
+wire; `emob-ocpp` sends the result to each charge point as an OCPP 2.1 charging
+profile.
 
-That is `[EnWG §14a]` and the Festlegung `[BK6-22-300]` underneath it, and it is
-the first subject in this workspace whose unit is power rather than money. It is
-also three separate problems that a single "smart charging" module runs together
-and gets wrong: **which** points the statute reaches, **what** the site may draw,
-and **how** the instruction gets there.
+## Which charge points § 14a covers: public ones are excluded
 
-## The condition every summary drops
-
-`[BK6-22-300 Ziff. 2.4.1]` defines the device it reaches as
+`[BK6-22-300 Ziff. 2.4.1]` — the Bundesnetzagentur's ruling under § 14a —
+defines the device it covers as
 
 > ein Ladepunkt für Elektromobile, **der kein öffentlich zugänglicher Ladepunkt
 > im Sinne des § 2 Nr. 5 der Ladesäulenverordnung (LSV) ist**
 
-A **publicly accessible** point is not a steuerbare Verbrauchseinrichtung at all.
-The fast charger on the forecourt is outside § 14a and always will be; the depot
-behind the fence, the workplace car park and the fleet yard are inside it. Every
-popular summary of the rule says the opposite, and a platform that curtails a
-public charger because a grid operator asked has broken a contract with a driver
-over a duty that does not exist.
+A **publicly accessible** charge point is not a SteuVE. The forecourt fast
+charger is outside § 14a; the depot, the workplace car park and the fleet yard
+are inside it. A platform that curtails a public charger because a grid operator
+asked breaks its promise to a driver over a duty that does not exist.
 
-The conditions are read off facts this workspace already holds about a charge
-point — the same facts the obligation calendar judges — so a compliance answer
-and a load manager cannot disagree about whether the statute binds a point.
+`SteuVe::of` reads the conditions — accessibility, grid level, rated power above
+`THRESHOLD_KW` — off the same charge-point facts the compliance calendar judges,
+and returns `NotSteuVe` with the reason otherwise. A compliance answer and the
+load manager therefore cannot disagree about whether the statute applies.
 
-## Five states, and three of them are full power
+## The five EEBUS LPC states, three of them at full power
 
-`[LPC §2.3.2]` — the EEBUS use case the Festlegung is carried over — gives a
-controllable system five states. Three of them allow full power, and they are
-three different facts:
+The Festlegung is implemented over the EEBUS use case *Limitation of Power
+Consumption* `[LPC §2.3.2]`, which gives a controllable system five states:
 
-| State | What it means | What an operator does |
+| State | What it means | What the operator does |
 |---|---|---|
-| no Energy Guard | nobody has commissioned a control box | nothing |
+| no Energy Guard | no control box commissioned | nothing |
 | `limited` | a setpoint is in force | obey it |
-| `unlimited/controlled` | the grid operator is speaking and allowing full power `[LPC-905]` | nothing |
+| `unlimited/controlled` | the grid operator is connected and allows full power `[LPC-905]` | nothing |
 | `failsafe state` | the Energy Guard has been silent past the Failsafe Duration Minimum `[LPC-912]` | replace the control box |
 | `unlimited/autonomous` | the silence has outlasted `[LPC-022]`'s release, two to 24 hours | tell the grid operator it cannot curtail this site |
 
-A model with *limited* and *unlimited* cannot write the difference down, let
-alone report it. A depot at full power because its grid operator says so and one
-at full power because the box died four hours ago are the same number and
-different problems — and the last row is the one every summary drops, because it
-is counter-intuitive: a site **leaves** its failsafe. A building throttled to
-4.2 kW for a week because a control box died is not what § 14a asks for, and a
-grid operator that believes it can still curtail such a site is wrong about
-something it needs to be right about.
+A *limited / unlimited* flag cannot tell these apart. A depot at full power
+because its grid operator allows it and one at full power because the box died
+four hours ago draw the same number and are different problems. The last row
+matters most: a site **leaves** failsafe. `emob_eebus::Watchdog::limit_at`
+computes the state from the last time the Energy Guard was heard and the
+instant asked about; `FAILSAFE_AFTER` defaults to two hours.
 
-## Sixty watts
+## Reading the EEBUS setpoint as an exact decimal
 
-`[BK6-22-300 Ziff. 4.5]`'s Mindestleistung is 4.2 kW. Three-phase at 6 A —
-the lowest a `DIN EN 61851-1` pilot can signal — is 4.14 kW. Sixty watts, and a
-platform that cannot tell them apart cannot say whether it honoured an Anspruch.
+The minimum draw (*Mindestleistung*) is 4.2 kW `[BK6-22-300 Ziff. 4.5]`.
+Three-phase at 6 A — the lowest current the `DIN EN 61851-1` control pilot can
+signal — is 4.14 kW. Sixty watts apart, and a platform must tell them apart to
+show it honoured the claim.
 
-SPINE carries power as a `ScaledNumber`: an integer mantissa and a power of ten,
-which *is* a decimal. The use-case library converts it to a binary float, which
-is right for a library whose implementation guides talk in watts and wrong for
-the one thing this workspace does not do — 70 % of a 9.9 kW array is
-`6930.000000000001` in `f64`, and one statute along that is a figure a feed-in
-payment is computed against.
-
-So the value that binds an allocation comes off the datagram, exactly:
+SPINE (the EEBUS data model) carries power as a `ScaledNumber`: an integer
+mantissa and a power of ten, which is a decimal. Converting it to `f64` (as the
+upstream use-case library does) loses that — 70 % of 9.9 kW is
+`6930.000000000001` in `f64`. `emob_eebus::watts_of` reads it exactly:
 
 ```rust
+use emob_eebus::watts_of;
+
 assert_eq!(watts_of(&ScaledNumber::new(42,  2)), Some(Decimal::from(4200)));
 assert_eq!(watts_of(&ScaledNumber::new(414, 1)), Some(Decimal::from(4140)));
 ```
 
-A scale no decimal can hold is a **NACK**, not an approximation. A `scale` is a
-signed 16-bit number the peer chooses, so an unrepresentable figure is one
-well-formed message away — and a substituted value is a limit nobody asked for
-applied to a site that will obey it.
+A scale no decimal can hold returns `None` and the write is **NACKed**, not
+approximated: `scale` is a signed 16-bit number the peer chooses, and a
+substituted value would be a limit nobody asked for, applied to a site that will
+obey it. This mirrors the OCPP seam — the protocol library handles the
+communication; the number that decides anything comes from an exact source.
 
-This is the same line the CSMS keeps with OCPP: the protocol library answers the
-*communication* question from a numeric register, and the number that decides
-anything comes from somewhere else — off the signed record there, off the
-`ScaledNumber` here.
+## Allocating power under the grid operator's ceiling
 
-## The ceiling is the only door
-
-The allocation has no constructor. One function returns it, that function takes
-the grid limit, and a market plan — a tariff optimiser, a departure schedule, a
-fleet scheduler — is a `Demand` going **in**:
+`Allocation` has no public constructor. `emob_smart::allocate` is the only way to
+get one, it takes the grid limit, and every market plan — a tariff optimiser, a
+departure schedule, a fleet scheduler — enters as a `Demand`:
 
 ```rust
+use emob_smart::allocate;
+
 let allocation = allocate(&site, &market_plan, &grid_limit);
 assert!(allocation.total_kw() <= allocation.ceiling_kw());
+assert!(allocation.within_ceiling());
 ```
 
-That is `[BK6-22-300 Ziff. 4.6]`'s own priority rule — the grid operator's
-reduction outranks *marktliche Laststeuerung* — made structural rather than
-remembered. There is no code path in which a plan asks for more than the grid
-allows, because there is no way to build an allocation that is not the result of
-that call.
+This is `[BK6-22-300 Ziff. 4.6]`'s priority rule — the grid operator's reduction
+outranks market-driven load control (*marktliche Laststeuerung*) — made
+structural: no allocation exists that did not pass through the ceiling.
 
-Two more rules ride on it. A setpoint **below** the Mindestleistung is answered
-by holding at the Mindestleistung and saying so, because obeying quietly is
-giving up a legal claim nobody would ever find out had been given up. And a
-point is at its own 6 A floor or at zero and never between: `DIN EN 61851-1` has
-no duty cycle that means *charge slowly*, so a proportional share is a site
-drawing nothing while reporting that it allocated everything.
+Two more rules:
 
-## A regulator's priority rule is a purpose, not a level
+- A setpoint **below** the Mindestleistung is answered by holding at the
+  Mindestleistung and saying so in a `SmartNote`; obeying silently would give up
+  a legal claim without anyone noticing.
+- A charge point gets its own 6 A floor or zero, never something in between.
+  `DIN EN 61851-1` has no duty cycle meaning "charge slowly", so a proportional
+  share below the floor is a site drawing nothing while reporting it allocated
+  everything.
 
-The allocation leaves as an OCPP 2.1 charging profile, and here the same
-priority has to survive a profile stack another actor also writes into.
+## Sending the limit as an OCPP 2.1 charging profile
 
-OCPP resolves overlapping profiles by **purpose first and stack level second**,
-and `ChargingStationExternalConstraints` is the purpose reserved for an external
-actor — which is what a distribution grid operator is. A setpoint sent as a
-`TxDefaultProfile` — the obvious choice, and the one a smart-charging backend
-reaches for — sits in the same tier as the optimiser it is supposed to outrank,
-and the station then resolves the two by a stack level somebody typed: a number
-an operator chose, deciding a limit a regulator set.
+`emob_ocpp::to_charging_profiles` turns an allocation into OCPP 2.1 charging
+profiles. OCPP resolves overlapping profiles by **purpose first, stack level
+second**. `ChargingStationExternalConstraints` is the purpose reserved for an
+external actor such as a distribution grid operator. Sent as a
+`TxDefaultProfile` instead, the grid limit would share a tier with the optimiser
+it must outrank, and the station would decide between them by a stack level
+someone typed.
 
-So the purpose is fixed by the crossing and is not a parameter, and the stack
-level is **zero**, deliberately the lowest: level separates two profiles of the
-same purpose, and there is only ever one external constraint here.
+So the purpose is fixed, not a parameter, and the stack level is **zero**:
+there is only ever one external constraint.
 
 Three facts an allocation holds have no field on that wire, and each is reported
-rather than dropped — the site ceiling, which OCPP has no message for because it
-addresses EVSEs; the headroom, which is the difference between *"we held you
-down"* and *"nobody was plugged in"*; and which of the full-power states the site
-is in.
+in the crossing's notes rather than dropped: the site ceiling (OCPP addresses
+EVSEs, not sites), the headroom (*"we held you down"* versus *"nobody was
+plugged in"*), and which full-power state the site is in.
 
-## The record the statute actually asks for
+## The evidence § 14a asks for
 
 `[LPC §4.1.5]` makes the **pair** the operator's evidence: what the grid operator
-asked for, and what was answered. Neither half alone is worth anything — a
-setpoint nobody can show was honoured is a setpoint nobody honoured, and an
-allocation with no instruction behind it is a site throttling itself.
+asked for, and what was answered. A setpoint nobody can show was honoured was not
+honoured; an allocation with no instruction behind it is a site throttling
+itself. The `sited` library keeps that pair in order, refusals included
+(`Sited::log`).
 
-The site controller keeps that pair in order, refusals included, and it is the
-one piece of state it holds that is not a timer.
+## sited: the site controller runs at the edge
 
-## The edge is where the WAN is not
+`sited` is the one service designed to run **at the site** rather than in a data
+centre. A controller behind a broken WAN link would hold a site at 4.2 kW
+because the process could not be reached, not because a grid operator asked.
 
-The controller is the only service in this workspace designed to run **at a
-site** rather than in a data centre, and the reason is in the timers. A
-controller behind a broken WAN link is a site that will be held at 4.2 kW because
-*that process* could not be reached, not because a grid operator asked. The
-decision belongs next to the connection point.
+Northbound it speaks SHIP over TLS 1.2 (EEBUS); southbound, OCPP. The rules live
+in the crates and the daemon holds none of them, so the whole exchange —
+including the commissioning `[LPC §3.3]` prescribes — runs as an ordinary test
+with two engines, real datagrams and time as a variable. The `sited` daemon
+starts with an empty site and shows its LPC state to operators (`GET /v1/sited`);
+⏳ the SHIP session and the OCPP leg are not wired yet.
 
-Everything else is a socket: SHIP over TLS 1.2 northbound, an OCPP call
-southbound. The rules are in the crates, tested there, and the daemon holds none
-of them — which is why the whole exchange, including the commissioning
-`[LPC §3.3]` prescribes, runs as an ordinary test with two engines, real
-datagrams and time as a variable.
+## Not yet built 📐
 
-## What is not here 📐
+- `Ziff. 4.4.a` *Direktansteuerung*, where a grid operator addresses a single
+  **device** rather than a site.
+- OCPP 2.1 DER control, behind a capability flag until certification catches up.
+- The other § 14a device families — heat pumps, space cooling, storage — which
+  belong to a household energy manager; emob meets their formula at `Ziff. 4.5.2`
+  (`minimum_for`) rather than at a socket.
+- A V2G flow model, which waits on a regulator's decision.
 
-`Ziff. 4.4.a` *Direktansteuerung*, where a grid operator addresses a **device**
-rather than a site — a different actor, not a different message. DER control on
-OCPP 2.1, behind a capability flag until certification catches up. The other
-three device families § 14a names — heat pumps, space cooling and storage — which
-belong to a household energy manager, and whose formula this workspace meets at
-`Ziff. 4.5.2` rather than at a socket. And the V2G flow model, which waits on a
-regulator's decision rather than on a crate.
+**Related:** [The OCPP seam](@/docs/ocpp.md) ·
+[Compliance](@/docs/compliance.md) ·
+[Sessions and settlement](@/docs/settlement.md) · [Glossary](@/docs/glossary.md)

@@ -221,10 +221,10 @@ impl TimeZone {
         self.instants_at(date, at).first().copied()
     }
 
-    fn zoned(&self, at: time::OffsetDateTime) -> jiff::Zoned {
+    fn zoned(&self, at: time::OffsetDateTime) -> jiff::ZonedDateTime {
         let timestamp = jiff::Timestamp::from_second(at.unix_timestamp())
             .unwrap_or(jiff::Timestamp::UNIX_EPOCH);
-        timestamp.to_zoned(self.tz.clone())
+        timestamp.to_zoned_datetime(self.tz.clone())
     }
 }
 

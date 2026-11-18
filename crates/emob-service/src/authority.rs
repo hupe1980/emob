@@ -54,6 +54,8 @@ use std::collections::BTreeSet;
 
 use emob_core::{PartyId, Role};
 
+use crate::actor::Actor;
+
 /// A set of dotted capability patterns.
 ///
 /// Deliberately in the shape `agentplane`'s scopes use, because that is the
@@ -421,6 +423,56 @@ pub mod caps {
     ];
 }
 
+/// The operators who may read a daemon's read models — a set of bearer
+/// tokens from the estate's `[[operators]]`.
+///
+/// Every token is compared, in constant time, and the comparison does not stop
+/// at the first match: which of several operators a request belongs to is not
+/// something its timing should say. An **empty** set admits nobody — a
+/// deployment that forgot to configure an operator is the one nobody would
+/// notice answering everyone.
+///
+/// Each token is held with the operator it belongs to, as an
+/// [`Actor::Operator`] named after the estate's `[[operators]] name`: that name
+/// — never the token — is what a journal record and a log line say did it.
+#[derive(Clone, Default)]
+pub struct Operators(std::sync::Arc<Vec<(Actor, Token)>>);
+
+impl Operators {
+    /// The operators holding these tokens.
+    #[must_use]
+    pub fn new(tokens: Vec<(Actor, Token)>) -> Self {
+        Self(std::sync::Arc::new(tokens))
+    }
+
+    /// Which operator an `Authorization` header value of `Bearer <token>`
+    /// belongs to, if any.
+    #[must_use]
+    pub fn admit(&self, authorization: Option<&str>) -> Option<&Actor> {
+        let offered = authorization.and_then(|value| value.strip_prefix("Bearer "))?;
+        // Every token is compared; the loop does not stop at a match.
+        let mut found = None;
+        for (operator, token) in self.0.iter() {
+            if token.verify(offered) && found.is_none() {
+                found = Some(operator);
+            }
+        }
+        found
+    }
+
+    /// Whether no operator is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for Operators {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Operators({} token(s))", self.0.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,5 +636,31 @@ mod tests {
         assert_eq!(Role::Cpo.as_str(), "CPO");
         assert!(a.may(caps::CDR_READ));
         assert!(!a.may_reach(&b));
+    }
+
+    #[test]
+    fn sr_034_an_operator_is_a_bearer_token_and_nobody_is_admitted_by_default() {
+        let one = Actor::operator("leitstelle").unwrap();
+        let two = Actor::operator("nachtschicht").unwrap();
+        let operators = Operators::new(vec![
+            (one, Token::new("ops-1")),
+            (two.clone(), Token::new("ops-2")),
+        ]);
+        // SR-101: the operator's name, never its token.
+        assert_eq!(operators.admit(Some("Bearer ops-2")), Some(&two));
+        assert_eq!(two.to_string(), "operator:nachtschicht");
+        assert!(operators.admit(Some("Bearer ops-3")).is_none());
+        assert!(
+            operators.admit(Some("ops-1")).is_none(),
+            "the scheme is part of it"
+        );
+        assert!(operators.admit(None).is_none());
+
+        let nobody = Operators::default();
+        assert!(nobody.is_empty());
+        assert!(
+            nobody.admit(Some("Bearer ")).is_none(),
+            "an estate with no operator answers nobody, not everybody"
+        );
     }
 }

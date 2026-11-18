@@ -9,10 +9,11 @@
 //!
 //! Northbound is **EEBUS**: SHIP over TLS 1.2, mDNS discovery, and a SPINE
 //! engine underneath. The grid operator's control box is the client and this is
-//! the Controllable System. `eebus`'s `runtime` feature is what serves it, and
-//! it is enabled **here and nowhere else** — `emob-eebus` takes the same crate
-//! without it, so `cargo xtask check-graph` can hold the seam to no tokio and
-//! no sockets.
+//! the Controllable System. `eebus`'s `runtime` feature is what would serve it,
+//! and this workspace enables it **nowhere** — `sited` takes `eebus` only to
+//! name the SPINE types that cross the socket, and `emob-eebus` takes it the
+//! same way, so `cargo xtask check-graph` can hold the seam to no tokio and no
+//! sockets. The SHIP session itself is the deployment's to supply.
 //!
 //! Southbound is **OCPP**: the profiles this site's own points are given. In a
 //! deployment that is either a local controller role or a call up to `csmsd`,
@@ -31,7 +32,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context as _, Result};
-use emob_service::{Identity, Readiness, Server, Shutdown, identity};
+use emob_service::{Identity, Readiness, Server, Shutdown, estate, identity};
 use rust_decimal::Decimal;
 use sited::Sited;
 
@@ -53,10 +54,17 @@ const FAILSAFE_KW: &str = "4.2";
 /// rather than shorter.
 const FAILSAFE_AFTER: time::Duration = time::Duration::hours(2);
 
+/// What `sited` reads of the estate.
+#[derive(Debug, serde::Deserialize)]
+struct Estate {
+    #[serde(default)]
+    operators: Vec<emob_service::estate::Operator>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let me: Identity = identity!();
-    emob_service::telemetry::init(me, "info,sited=debug", false);
+    emob_service::telemetry::init(me, "info,sited=debug");
 
     let http: SocketAddr = emob_service::serve::bind_address("sited", "127.0.0.1:9586")?;
 
@@ -78,22 +86,48 @@ async fn main() -> Result<()> {
     let service = Sited::new(site, failsafe_kw, FAILSAFE_AFTER);
     readiness.up(INVENTORY);
 
-    // The SHIP session itself is the socket a deployment supplies: `eebus`'s
-    // `runtime` with a node identity, a trust store and the pairing the
-    // installer ran. What reaches [`Sited`] is a decoded SPINE payload and an
-    // instant, which is exactly what a replay two years later can be given
-    // again.
+    // Who may read the read model: the estate's operators, and nobody when
+    // the estate names none.
+    let path = estate::path();
+    let estate: Estate =
+        estate::load(&path).with_context(|| format!("reading the estate at {}", path.display()))?;
+    let operators = estate::operator_tokens(&estate.operators, &estate::process_env())?;
+
+    // The SHIP session itself is the socket a deployment supplies — `eebus`'s
+    // `runtime`, which this build does not enable, with a node identity, a
+    // trust store and the pairing the installer ran. What reaches [`Sited`] is
+    // a decoded SPINE payload and an instant, which is exactly what a replay
+    // two years later can be given again.
     let now = time::OffsetDateTime::now_utc();
     tracing::info!(
         state = ?service.limit_at(now).lpc_state(),
         "the site is waiting for its Energy Guard"
     );
-    let _ = &service;
+    let service = std::sync::Arc::new(std::sync::Mutex::new(service));
+    let view = axum::Router::new()
+        .route(
+            "/v1/sited",
+            axum::routing::get(
+                |axum::extract::State(service): axum::extract::State<
+                    std::sync::Arc<std::sync::Mutex<Sited>>,
+                >| async move {
+                    let now = time::OffsetDateTime::now_utc();
+                    let held = service
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    axum::Json(serde_json::json!({
+                        "lpc_state": format!("{:?}", held.limit_at(now).lpc_state()),
+                    }))
+                },
+            ),
+        )
+        .with_state(service);
 
     let signal = shutdown.clone();
     tokio::spawn(async move { signal.on_signal().await });
 
     Server::new(me, readiness, shutdown)
+        .with(emob_service::serve::operator_only(view, operators))
         .draining_for(std::time::Duration::from_secs(3))
         .listen(http)
         .await?;

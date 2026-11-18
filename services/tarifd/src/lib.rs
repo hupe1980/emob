@@ -58,6 +58,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
+pub mod http;
 use std::collections::{BTreeMap, BTreeSet};
 
 use emob_core::{Crossing, Note, PartyId, TariffId};

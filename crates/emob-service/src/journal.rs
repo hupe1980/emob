@@ -39,11 +39,22 @@
 //! written, which is the file a process killed mid-append leaves — and
 //! [`File::records`] has to tolerate that one.
 //!
-//! So the tail is closed by a witness. [`Journal::head`] is the digest the
-//! journal ends on; an operator who needs truncation detectable records it
-//! where this process cannot reach, and a head that has gone **backwards**
-//! between two observations is a lost tail. Saying so is better than a
-//! `verify()` that returns `true` for the one case it cannot see.
+//! So the tail is closed twice. [`crate::head::Signing`] signs [`Journal::head`]
+//! after every append and keeps it beside the journal, and refuses to open a
+//! journal shorter than what it signed; [`crate::witness`] keeps the heads it
+//! was shown somewhere this process cannot reach, and a head that has gone
+//! **backwards** between two observations is a lost tail — the case where the
+//! signed head was removed with it. Saying so is better than a `verify()` that
+//! returns `true` for the one case it cannot see.
+//!
+//! # Who decided it
+//!
+//! Every record names its [`Actor`], inside the digest. `[NIS2 Art. 21(2)]`
+//! asks for incident handling, and a disputed block or a cancelled invoice that
+//! cannot be attributed is an incident nobody can write up. The actor is set by
+//! the daemon from whoever **authenticated** — never from what a request says
+//! about itself — and it is readable without the data key, so attribution
+//! survives a key destroyed on purpose.
 //!
 //! # Wiring one
 //!
@@ -70,14 +81,16 @@
 //! // the same call with the same semantics and a disk behind it.
 //! let mut folded = Folded::open(0_u64, Memory::new(), apply)?;
 //!
-//! // A decision, then the record of it — and the caller is told last.
-//! folded.record(Fact::Counted(7))?;
-//! folded.record(Fact::Counted(5))?;
+//! // A decision, then the record of it — and the caller is told last. Every
+//! // fact names who caused it; one without an author does not compile.
+//! let by = emob_service::journal::Actor::Timer;
+//! folded.record(&by, Fact::Counted(7))?;
+//! folded.record(&by, Fact::Counted(5))?;
 //! assert_eq!(*folded.state(), 12);
 //!
 //! // …and the chain over what it decided.
 //! assert_eq!(folded.journal().records()?.len(), 2);
-//! assert_ne!(folded.journal().head()?, emob_service::journal::GENESIS);
+//! assert_eq!(folded.journal().head()?.position, 2);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -86,10 +99,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Serialize, de::DeserializeOwned};
+
+pub use crate::actor::{Actor, ActorError};
 use sha2::{Digest as _, Sha256};
 
 /// The digest a first record chains from: thirty-two zero bytes, as hex.
 pub const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Where a journal ends: the last record's position and digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Head {
+    /// The last record's `seq`; `0` for an empty journal.
+    pub position: u64,
+    /// The last record's digest, or [`GENESIS`].
+    pub hash: String,
+}
+
+impl Head {
+    /// The head of an empty journal.
+    #[must_use]
+    pub fn genesis() -> Self {
+        Self {
+            position: 0,
+            hash: GENESIS.to_owned(),
+        }
+    }
+}
 
 /// What went wrong reaching the journal.
 #[derive(Debug, thiserror::Error)]
@@ -132,6 +167,73 @@ pub enum JournalError {
         /// The digest the chain produces.
         expected: String,
     },
+
+    /// The journal is shorter than the head this daemon last signed.
+    ///
+    /// Records were removed from the end — a cut file, or a restore from an
+    /// older backup. The chain cannot see this; the signed head beside it can.
+    #[error(
+        "the journal holds {journal} records and this daemon signed a head at {signed}: the \
+         last {missing} were removed or an older copy was restored — the daemon does not start \
+         from a history shorter than one it vouched for"
+    )]
+    Truncated {
+        /// How many records the journal holds.
+        journal: u64,
+        /// The position the last signed head names.
+        signed: u64,
+        /// How many are missing.
+        missing: u64,
+    },
+
+    /// The record at the signed position is not the one that was signed.
+    #[error(
+        "journal record {position} is not the record this daemon signed at {position}: the \
+         history was rewritten after it was vouched for"
+    )]
+    Diverged {
+        /// The signed position.
+        position: u64,
+    },
+
+    /// The journal runs past its last signed head by more than the one record
+    /// a crash between the append and the signature can leave.
+    #[error(
+        "the journal holds {journal} records and the last signed head is at {signed}: records \
+         were added without this daemon signing them, or its signed head was removed"
+    )]
+    Unsigned {
+        /// How many records the journal holds.
+        journal: u64,
+        /// The last signed position (`0` when there is no signed head).
+        signed: u64,
+    },
+
+    /// The signed head beside the journal does not read or does not verify
+    /// under this daemon's signing key.
+    #[error(
+        "the signed head at {path} is not one this daemon can vouch for: {reason} — restore the \
+         signing key it was made under"
+    )]
+    HeadUnreadable {
+        /// Which file.
+        path: PathBuf,
+        /// Why.
+        reason: String,
+    },
+
+    /// A sealed record does not open under this daemon's data key
+    /// ([`crate::vault::Sealing`]).
+    #[error(
+        "journal record {seq} is sealed and does not open: {reason} — the daemon does not start \
+         from records it cannot read; restore the data key the journal was written under"
+    )]
+    Sealed {
+        /// Which record.
+        seq: u64,
+        /// Why.
+        reason: String,
+    },
 }
 
 /// One journal record, as it is written.
@@ -146,10 +248,12 @@ pub struct Record {
     pub seq: u64,
     /// The digest of the record before this one.
     pub prev: String,
-    /// This record's digest, over `prev`, `seq`, `kind` and `body`.
+    /// This record's digest, over `prev`, `seq`, `kind`, `actor` and `body`.
     pub hash: String,
     /// What kind of fact this is, for a reader with no schema to hand.
     pub kind: String,
+    /// Who caused it.
+    pub actor: Actor,
     /// The event, serialised.
     pub body: String,
 }
@@ -157,13 +261,15 @@ pub struct Record {
 impl Record {
     /// The digest a record with these parts must carry.
     #[must_use]
-    pub fn digest(prev: &str, seq: u64, kind: &str, body: &str) -> String {
+    pub fn digest(prev: &str, seq: u64, kind: &str, actor: &Actor, body: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(prev.as_bytes());
         hasher.update(b"\x1f");
         hasher.update(seq.to_string().as_bytes());
         hasher.update(b"\x1f");
         hasher.update(kind.as_bytes());
+        hasher.update(b"\x1f");
+        hasher.update(actor.to_string().as_bytes());
         hasher.update(b"\x1f");
         hasher.update(body.as_bytes());
         hex(&hasher.finalize())
@@ -185,13 +291,14 @@ fn hex(bytes: &[u8]) -> String {
 /// disk: [`Memory`] for a test and for a daemon told to keep nothing, [`File`]
 /// for one an operator runs.
 pub trait Journal: Send + Sync + 'static {
-    /// Append one already-encoded record part, and return the record written.
+    /// Append one already-encoded fact, caused by `actor`, and return the
+    /// record written.
     ///
     /// # Errors
     ///
     /// [`JournalError::Io`] when the record cannot be made durable. A caller
     /// must treat that as the decision not having been made.
-    fn append(&self, kind: &str, body: &str) -> Result<Record, JournalError>;
+    fn append(&self, kind: &str, actor: &Actor, body: &str) -> Result<Record, JournalError>;
 
     /// Every record, in order, with the chain checked.
     ///
@@ -202,21 +309,24 @@ pub trait Journal: Send + Sync + 'static {
     /// before it.
     fn records(&self) -> Result<Vec<Record>, JournalError>;
 
-    /// The digest the journal ends on, or [`GENESIS`] for an empty one.
+    /// Where the journal ends: the last position and digest, or
+    /// [`Head::genesis`] for an empty one.
     ///
-    /// The witness for the half a chain cannot prove about itself. See the
-    /// module documentation: a head recorded outside this process and compared
-    /// later is what makes a truncated tail visible, and nothing inside the
-    /// file can do that job.
+    /// The half a chain cannot prove about itself. See the module
+    /// documentation: a head signed, kept and compared later is what makes a
+    /// truncated tail visible, and nothing inside the file can do that job.
     ///
     /// # Errors
     ///
     /// Whatever [`Self::records`] could not do.
-    fn head(&self) -> Result<String, JournalError> {
+    fn head(&self) -> Result<Head, JournalError> {
         Ok(self
             .records()?
             .last()
-            .map_or_else(|| GENESIS.to_owned(), |record| record.hash.clone()))
+            .map_or_else(Head::genesis, |record| Head {
+                position: record.seq,
+                hash: record.hash.clone(),
+            }))
     }
 }
 
@@ -225,7 +335,7 @@ fn verify(records: &[Record]) -> Result<String, JournalError> {
     let mut prev = GENESIS.to_owned();
     for (index, record) in records.iter().enumerate() {
         let seq = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
-        let expected = Record::digest(&prev, seq, &record.kind, &record.body);
+        let expected = Record::digest(&prev, seq, &record.kind, &record.actor, &record.body);
         if record.prev != prev || record.hash != expected || record.seq != seq {
             return Err(JournalError::Broken {
                 seq,
@@ -255,7 +365,7 @@ impl Memory {
 }
 
 impl Journal for Memory {
-    fn append(&self, kind: &str, body: &str) -> Result<Record, JournalError> {
+    fn append(&self, kind: &str, actor: &Actor, body: &str) -> Result<Record, JournalError> {
         let record = {
             let mut held = self
                 .0
@@ -269,9 +379,10 @@ impl Journal for Memory {
                 .map_or_else(|| GENESIS.to_owned(), |r| r.hash.clone());
             let record = Record {
                 seq,
-                hash: Record::digest(&prev, seq, kind, body),
+                hash: Record::digest(&prev, seq, kind, actor, body),
                 prev,
                 kind: kind.to_owned(),
+                actor: actor.clone(),
                 body: body.to_owned(),
             };
             held.push(record.clone());
@@ -393,7 +504,7 @@ impl File {
 }
 
 impl Journal for File {
-    fn append(&self, kind: &str, body: &str) -> Result<Record, JournalError> {
+    fn append(&self, kind: &str, actor: &Actor, body: &str) -> Result<Record, JournalError> {
         // One writer at a time, and the read of the tail happens inside it: two
         // appends that each read the same last digest would produce two records
         // claiming one position, which is the shape `[UStG §14(4) Nr. 4]`
@@ -412,9 +523,10 @@ impl Journal for File {
             .map_or_else(|| GENESIS.to_owned(), |r| r.hash.clone());
         let record = Record {
             seq,
-            hash: Record::digest(&prev, seq, kind, body),
+            hash: Record::digest(&prev, seq, kind, actor, body),
             prev,
             kind: kind.to_owned(),
+            actor: actor.clone(),
             body: body.to_owned(),
         };
         let mut line = serde_json::to_string(&record).map_err(|source| JournalError::Encoding {
@@ -528,18 +640,18 @@ where
         })
     }
 
-    /// Record a fact and fold it in.
+    /// Record a fact `by` its actor and fold it in.
     ///
     /// # Errors
     ///
     /// Whatever the journal could not do. The state is **not** advanced when
     /// the record could not be written.
-    pub fn record(&mut self, event: E) -> Result<Record, JournalError> {
+    pub fn record(&mut self, by: &Actor, event: E) -> Result<Record, JournalError> {
         let body = serde_json::to_string(&event).map_err(|source| JournalError::Encoding {
             doing: "written",
             source,
         })?;
-        let record = self.journal.append(event.kind(), &body)?;
+        let record = self.journal.append(event.kind(), by, &body)?;
         (self.apply)(&mut self.state, event);
         Ok(record)
     }
@@ -558,12 +670,12 @@ where
     /// # Errors
     ///
     /// Whatever the journal could not do.
-    pub fn note(&mut self, event: &E) -> Result<Record, JournalError> {
+    pub fn note(&mut self, by: &Actor, event: &E) -> Result<Record, JournalError> {
         let body = serde_json::to_string(event).map_err(|source| JournalError::Encoding {
             doing: "written",
             source,
         })?;
-        self.journal.append(event.kind(), &body)
+        self.journal.append(event.kind(), by, &body)
     }
 
     /// The folded state.
@@ -628,9 +740,15 @@ mod tests {
     #[test]
     fn a_fold_over_a_memory_journal_is_the_sum_of_its_facts() {
         let mut folded = Folded::open(0_i64, Memory::new(), apply).expect("an empty journal folds");
-        folded.record(Fact::Added(7)).expect("recorded");
-        folded.record(Fact::Added(5)).expect("recorded");
-        folded.record(Fact::Removed(2)).expect("recorded");
+        folded
+            .record(&Actor::Timer, Fact::Added(7))
+            .expect("recorded");
+        folded
+            .record(&Actor::Timer, Fact::Added(5))
+            .expect("recorded");
+        folded
+            .record(&Actor::Timer, Fact::Removed(2))
+            .expect("recorded");
         assert_eq!(*folded.state(), 10);
     }
 
@@ -643,8 +761,12 @@ mod tests {
         {
             let mut folded = Folded::open(0_i64, File::open(&path).expect("opened"), apply)
                 .expect("an empty journal folds");
-            folded.record(Fact::Added(41)).expect("recorded");
-            folded.record(Fact::Added(1)).expect("recorded");
+            folded
+                .record(&Actor::Timer, Fact::Added(41))
+                .expect("recorded");
+            folded
+                .record(&Actor::Timer, Fact::Added(1))
+                .expect("recorded");
             assert_eq!(*folded.state(), 42);
         }
 
@@ -665,9 +787,15 @@ mod tests {
         {
             let mut folded =
                 Folded::open(0_i64, File::open(&path).expect("opened"), apply).expect("folds");
-            folded.record(Fact::Added(10)).expect("recorded");
-            folded.record(Fact::Added(10)).expect("recorded");
-            folded.record(Fact::Added(10)).expect("recorded");
+            folded
+                .record(&Actor::Timer, Fact::Added(10))
+                .expect("recorded");
+            folded
+                .record(&Actor::Timer, Fact::Added(10))
+                .expect("recorded");
+            folded
+                .record(&Actor::Timer, Fact::Added(10))
+                .expect("recorded");
         }
         // Somebody edits the middle of the file — the amount, not the digest,
         // which is what an edit made to change an answer looks like.
@@ -686,6 +814,56 @@ mod tests {
     }
 
     #[test]
+    fn sr_100_an_edited_actor_breaks_the_chain() {
+        let journal = Memory::new();
+        let station = Actor::station("CP-1").unwrap();
+        journal.append("added", &station, "{}").unwrap();
+        journal.append("added", &Actor::Timer, "{}").unwrap();
+        let mut records = journal.records().unwrap();
+        records[0].actor = Actor::operator("somebody else").unwrap();
+        let refused = verify(&records).expect_err("the actor is inside the digest");
+        assert!(
+            matches!(refused, JournalError::Broken { seq: 1, .. }),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn sr_100_a_record_without_an_actor_does_not_read_back() {
+        let line = r#"{"seq":1,"prev":"0000000000000000000000000000000000000000000000000000000000000000","hash":"ab","kind":"added","body":"{}"}"#;
+        assert!(serde_json::from_str::<Record>(line).is_err());
+    }
+
+    #[test]
+    fn sr_101_an_actor_is_a_closed_kind_and_a_narrow_alphabet() {
+        for text in [
+            "station:CP-1",
+            "partner:DE*MSP",
+            "operator:demo operator",
+            "service:csmsd",
+            "timer",
+            "estate",
+            "station:urn:emob:cp=1",
+        ] {
+            let actor: Actor = text.parse().unwrap();
+            assert_eq!(actor.to_string(), text);
+            let json = serde_json::to_string(&actor).unwrap();
+            assert_eq!(serde_json::from_str::<Actor>(&json).unwrap(), actor);
+        }
+        for refused in [
+            "station:",
+            "user:alice",
+            "operator:Bearer abc/def",
+            "station:CP-1\nforged",
+            "operator:\"quoted\"",
+            "timer:x",
+            &format!("station:{}", "x".repeat(65)),
+        ] {
+            assert!(refused.parse::<Actor>().is_err(), "{refused}");
+        }
+    }
+
+    #[test]
     fn a_half_written_line_is_a_decision_that_did_not_happen() {
         let dir = std::env::temp_dir().join(format!("emob-journal-tail-{}", std::process::id()));
         let path = dir.join("killed.ndjson");
@@ -693,7 +871,9 @@ mod tests {
         {
             let mut folded =
                 Folded::open(0_i64, File::open(&path).expect("opened"), apply).expect("folds");
-            folded.record(Fact::Added(3)).expect("recorded");
+            folded
+                .record(&Actor::Timer, Fact::Added(3))
+                .expect("recorded");
         }
         // The process died with half a record on the disk.
         let mut text = std::fs::read_to_string(&path).expect("read");

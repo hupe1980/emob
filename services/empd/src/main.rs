@@ -18,129 +18,38 @@
 //! **contracts in force** rather than from the records, because the fee is owed
 //! *"regardless of whether the user actually purchased electricity"*.
 //!
-//! # What is not here
+//! # What is here now
 //!
-//! The socket the operator asks over, and the store behind the key. A peer is
-//! somebody else's server behind a credentials exchange, exactly as `csmsd`'s
-//! WebSocket and the Mobilithek subscription are, and CI cannot run it.
-
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+//! `POST /v1/authorize`, which `csmsd` asks before a transaction opens, and the
+//! operator's `GET /v1/empd` — both in [`empd::http`], started by
+//! [`empd::daemon::run`]. This file is configuration only.
 
 use anyhow::{Context as _, Result};
-use emob_core::PartyId;
-use emob_service::journal::Journal as _;
-use emob_service::{Identity, Readiness, Server, Shutdown, identity};
-use empd::{Book, Empd};
-
-/// What the daemon waits for before it takes traffic.
-///
-/// The token store. A provider that answers `[OCPI 2.3.0 §mod_tokens]` before
-/// its own contracts are loaded answers `EXPIRED` for every driver it has, and
-/// an operator that gets that answer stops the session at the point.
-const CONTRACTS: &str = "contracts";
-
-/// How often the calendar is asked for a period that has turned.
-const TICK: std::time::Duration = std::time::Duration::from_secs(3600);
+use emob_service::{Identity, Shutdown, estate, identity, journal};
+use empd::daemon::{Options, run};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let me: Identity = identity!();
-    emob_service::telemetry::init(me, "info,empd=debug", false);
+    emob_service::telemetry::init(me, "info,empd=debug");
 
-    let http: SocketAddr = emob_service::serve::bind_address("empd", "127.0.0.1:9585")?;
+    let path = estate::path();
+    let estate: empd::daemon::Estate =
+        estate::load(&path).with_context(|| format!("reading the estate at {}", path.display()))?;
 
-    // The key the token store is hashed under. A deployment supplies it; a
-    // default would be a store whose digests anybody holding this source can
-    // recompute, which is the privacy property `TokenRef` exists for.
-    let key = std::env::var("EMPD_TOKEN_KEY")
-        .context("EMPD_TOKEN_KEY is unset: the token store is keyed, and a default key is a store whose digests anybody can recompute")?;
-
-    let readiness = Readiness::new().expecting(CONTRACTS);
     let shutdown = Shutdown::new();
-
-    // The contracts, the tokens and the running totals come back from the
-    // journal. Everything this service answers is derived from them, so the
-    // fold runs **before** the readiness probe goes up: answering first is
-    // answering with an empty book, which refuses every driver, admits every
-    // card an owner reported stolen, and authorises every session past the
-    // credit limit that was the point of holding one.
-    let party = PartyId::new("DE", "MSP").context("the provider's own party id")?;
-    let journal = emob_service::journal::for_daemon("empd")
-        .context("opening empd's journal — see EMOB_JOURNAL_DIR")?;
-    tracing::info!(path = %journal.path().display(), "folding the journal");
-    let book = Book::open(Empd::new(party, key.into_bytes()), journal)
-        .context("folding empd's journal")?;
-    tracing::info!(
-        contracts = book.state().contracts().count(),
-        head = %book.journal().head().unwrap_or_default(),
-        "the book is what the journal says it is"
-    );
-    let service = Arc::new(Mutex::new(book));
-    readiness.up(CONTRACTS);
-
-    let calendar = Arc::clone(&service);
-    let stopping = shutdown.clone();
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(TICK);
-        loop {
-            ticker.tick().await;
-            if stopping.is_stopping() {
-                return;
-            }
-            report_the_price_list(&calendar);
-        }
-    });
-
     let signal = shutdown.clone();
     tokio::spawn(async move { signal.on_signal().await });
 
-    Server::new(me, readiness, shutdown)
-        .draining_for(std::time::Duration::from_secs(3))
-        .listen(http)
-        .await?;
+    let running = run(Options {
+        http: emob_service::serve::bind_address("empd", "127.0.0.1:9585")?,
+        journal: journal::dir().join("empd.ndjson"),
+        estate,
+        env: estate::process_env(),
+        shutdown,
+        identity: me,
+    })
+    .await?;
+    running.wait().await;
     Ok(())
-}
-
-/// One turn of the calendar.
-///
-/// Split out because the only two things this daemon schedules are here: the
-/// fees a period owes, and the compliance answer the price list itself gives.
-fn report_the_price_list(service: &Mutex<Book<emob_service::journal::File>>) {
-    let provider = lock(service);
-
-    // `emob_core::ProviderProfile` takes four booleans and this derives them, so
-    // an operator's compliance report is a fact about the price list rather than
-    // a claim somebody entered. A provider with no price list discloses nothing,
-    // and `[AFIR Art. 5(5)]` binds it from the day the Regulation applied.
-    let profile = provider.state().provider_profile();
-    let assessment =
-        emob_core::obligation::assess_provider(&profile, time::OffsetDateTime::now_utc().date());
-    for breach in assessment.breaches() {
-        tracing::error!(
-            obligation = %breach.obligation.id,
-            citation = breach.obligation.citation,
-            remedy = breach.obligation.remedy,
-            "the price list does not meet a duty that binds this provider"
-        );
-    }
-
-    // A real deployment closes the period here: `fees_for` over the month that
-    // has turned, handed to `billd` as the `Subscription` on each driver's
-    // document. The list is derived from the contracts in force, so a driver who
-    // charged nothing is still on it.
-    tracing::debug!(contracts = provider.state().contracts().count(), "in force");
-}
-
-/// A lock that survives a panic elsewhere.
-///
-/// The guarded value is a book of contracts, and a provider that answered a
-/// poisoned lock by refusing every authorisation is a worse failure than the one
-/// it is avoiding — the same reasoning `csmsd` states for its ledgers.
-fn lock(
-    service: &Mutex<Book<emob_service::journal::File>>,
-) -> std::sync::MutexGuard<'_, Book<emob_service::journal::File>> {
-    service
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

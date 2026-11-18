@@ -389,9 +389,9 @@ pub fn write(
 /// Prove the invoice against one profile and write it in one syntax.
 ///
 /// Generic over the profile marker so the proof and the stamped BT-24 are the
-/// same decision — `write_validated` takes `P::PROFILE.specification_id` — and
-/// so a specification added to [`Specification`] is a `match` arm rather than a
-/// second validation path.
+/// same decision — `en16931_formats::write` stamps
+/// `P::PROFILE.specification_id` — and so a specification added to
+/// [`Specification`] is a `match` arm rather than a second validation path.
 fn serialise<P>(
     invoice: en16931::Invoice,
     specification: Specification,
@@ -406,7 +406,7 @@ where
                 reason: format!(
                     "this invoice does not satisfy {specification}: {}",
                     rejected
-                        .1
+                        .report()
                         .fatal()
                         .map(|finding| format!("{} {}", finding.path, finding.rule))
                         .collect::<Vec<_>>()
@@ -415,8 +415,8 @@ where
             }
         })?;
     Ok(match syntax {
-        Syntax::Ubl => en16931_formats::ubl::write_validated(&validated).xml,
-        Syntax::Cii => en16931_formats::cii::write_validated(&validated).xml,
+        Syntax::Ubl => en16931_formats::write(&validated, en16931_formats::Syntax::Ubl).xml,
+        Syntax::Cii => en16931_formats::write(&validated, en16931_formats::Syntax::Cii).xml,
     })
 }
 
@@ -438,8 +438,13 @@ fn totals_of(invoice: &Invoice) -> Result<en16931::invoice::DocumentTotals, Bill
         vat_total_accounting: None,
         gross_total: amount(invoice.gross_total().amount(), invoice, "gross total")?,
         paid: None,
-        rounding: None,
-        due: amount(invoice.gross_total().amount(), invoice, "amount due")?,
+        // BT-114 where the document reproduces the receipts it was built from,
+        // and BT-115 is then what they said (`BR-CO-16`). See
+        // `Invoice::payable_total`.
+        rounding: non_zero(invoice.payable_rounding)
+            .map(|rounding| amount(rounding, invoice, "rounding amount"))
+            .transpose()?,
+        due: amount(invoice.payable_total().amount(), invoice, "amount due")?,
     })
 }
 
@@ -544,7 +549,10 @@ fn invoice_line(
     // `[REA 6-A §3.2]` requires — and it is required **here**, because the
     // paragraph names *"einem Messwert oder einer Rechnung"* and this is the
     // line stating the measured value (D253).
-    built.note = Some(line.compensated_loss.map_or_else(
+    //
+    // And where the session has one, the receipt link: the page the driver
+    // checks this line's signed values on `[MessEG §33]` (spec 003).
+    let note = line.compensated_loss.map_or_else(
         || format!("CDR {}", line.cdr),
         |loss| {
             format!(
@@ -553,7 +561,11 @@ fn invoice_line(
                 line.cdr
             )
         },
-    ));
+    );
+    built.note = Some(match &line.receipt {
+        Some(receipt) => format!("{note} — Beleg: {receipt}"),
+        None => note,
+    });
     Ok(built)
 }
 
@@ -580,7 +592,7 @@ fn payer_notes(
             .as_ref()
             .map_or_else(|| note.text.clone(), |cdr| format!("{cdr}: {}", note.text));
         builder = builder
-            .coded_note(en16931::invoice::InvoiceNote::new(text).with_subject(GENERAL_INFORMATION));
+            .note(en16931::invoice::InvoiceNote::new(text).with_subject(GENERAL_INFORMATION));
     }
     builder
 }

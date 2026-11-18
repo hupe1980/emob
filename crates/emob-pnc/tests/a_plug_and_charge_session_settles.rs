@@ -33,8 +33,8 @@ use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_ocpp::Transaction;
 use emob_pnc::fixtures;
 use emob_pnc::{
-    Contract, ContractBook, Pool, PoolId, PoolRegistry, RevocationList, TrustAnchor, Withdrawals,
-    verify_contract, verify_provisioning,
+    Contract, ContractBook, Generation, Pool, PoolId, PoolRegistry, RevocationList, TrustAnchor,
+    Withdrawals, verify_contract, verify_provisioning,
 };
 use emob_session::{AuthPath, Authorization};
 use emob_sim::{Identification, Rng, SessionPlan, VirtualStation};
@@ -114,8 +114,15 @@ fn a_vehicles_contract_authorises_a_session_and_its_kilowatt_hours_settle() {
         der(fixtures::OEM_SUB_CA_2),
         der(fixtures::OEM_SUB_CA_1),
     ];
-    let vehicle = verify_provisioning(&platform, &pool, &refs(&provisioning), &status, at())
-        .expect("a chain to the root this pool publishes");
+    let vehicle = verify_provisioning(
+        &platform,
+        &pool,
+        Generation::Iso2,
+        &refs(&provisioning),
+        &status,
+        at(),
+    )
+    .expect("a chain to the root this pool publishes");
 
     // ── 2. The contract the Mobility Operator wrote against it ──────────────
     //
@@ -131,6 +138,7 @@ fn a_vehicles_contract_authorises_a_session_and_its_kilowatt_hours_settle() {
     let verified = verify_contract(
         &platform,
         &pool,
+        Generation::Iso2,
         &refs(&contract_chain),
         &status,
         at(),

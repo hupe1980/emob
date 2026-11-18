@@ -58,10 +58,14 @@ pub struct TariffReview;
 /// The name this specialist is invoked under.
 pub const NAME: &str = "tariff-review";
 
+/// The one capability this specialist answers, and the one the runtime checks
+/// against the advisory principal before it runs (SR-104): it reads.
+pub const CAPABILITY: &str = emob_service::caps::TARIFF_READ;
+
 #[async_trait]
 impl Skill for TariffReview {
     fn descriptor(&self) -> SkillDescriptor {
-        SkillDescriptor::new(NAME)
+        SkillDescriptor::new(NAME).provides(CAPABILITY)
     }
 
     async fn invoke(

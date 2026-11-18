@@ -37,6 +37,12 @@ pub struct ChargePoint {
     /// ad-hoc price must be based on a price per kWh, and only there may an
     /// occupancy fee be added.
     pub rated_power_kw: rust_decimal::Decimal,
+    /// The tariff that rates its sessions — the one `tarifd` publishes, from
+    /// the same estate entry, so the price shown is the price billed.
+    pub tariff: emob_tariff::Tariff,
+    /// The OCPP version it was provisioned for; a station that does not offer
+    /// it is not let in.
+    pub ocpp: ocpp_kit::Version,
 }
 
 /// The fleet a CSMS will accept.
@@ -95,6 +101,17 @@ mod tests {
         ChargePoint {
             evse_id: "DE*ABC*E00001".parse().unwrap(),
             rated_power_kw: rust_decimal::Decimal::from(150),
+            tariff: emob_tariff::Tariff::simple(
+                "ad-hoc".parse().unwrap(),
+                emob_core::Currency::EUR,
+                emob_tariff::TariffKind::AdHoc,
+                emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+                vec![emob_tariff::PriceComponent::new(
+                    emob_tariff::Dimension::Energy,
+                    rust_decimal::Decimal::from_str_exact("0.49").unwrap(),
+                )],
+            ),
+            ocpp: ocpp_kit::Version::V1_6,
         }
     }
 

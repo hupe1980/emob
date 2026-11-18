@@ -275,6 +275,30 @@ fn invariants_hold(node: &Roamd, keys: &[CdrKey], now: time::OffsetDateTime) -> 
             ));
         }
     }
+
+    // 4. The operator view's index (spec 007) is exactly the records nobody
+    //    has accepted — no accepted one left in it, no open one missing — and
+    //    its positions only grow, so a page cut at one is stable.
+    let indexed: Vec<(u64, &CdrKey)> = node
+        .unaccepted_before(u64::MAX)
+        .map(|(position, consignment)| (position, &consignment.key))
+        .collect();
+    let open = node
+        .consignments()
+        .filter(|consignment| !consignment.delivery.is_accepted())
+        .count();
+    if indexed.len() != open || node.unaccepted_count() != open {
+        return Err(format!(
+            "the view indexes {} records and {open} are not accepted",
+            indexed.len()
+        ));
+    }
+    if let Some((_, key)) = indexed.iter().find(|(_, key)| {
+        node.consignment(key)
+            .is_none_or(|held| held.delivery.is_accepted())
+    }) {
+        return Err(format!("{key} is accepted and still in the view's index"));
+    }
     Ok(())
 }
 
@@ -388,8 +412,13 @@ fn the_seal_and_the_correction_order_hold_under_any_sequence_of_calls() {
 // the partner has already billed them. The seal is exactly as durable as the
 // place the answer is kept (D297, one layer down).
 
+use emob_service::Actor;
 use emob_service::journal::{File, Journal};
 use roamd::{Node, NodeError};
+
+fn data_key() -> emob_service::vault::DataKey {
+    emob_service::vault::DataKey::from_bytes(&[5; 32])
+}
 
 struct Scratch(std::path::PathBuf);
 
@@ -403,8 +432,12 @@ impl Scratch {
     }
 
     fn node(&self) -> Node<File> {
-        Node::open(node(), File::open(&self.0).expect("the journal opens"))
-            .expect("the journal folds")
+        Node::open(
+            node(),
+            File::open(&self.0).expect("the journal opens"),
+            data_key(),
+        )
+        .expect("the journal folds")
     }
 }
 
@@ -422,9 +455,16 @@ fn a_record_the_partner_has_taken_is_still_sealed_after_a_restart() {
 
     let key = {
         let mut node = scratch.node();
-        let key = node.consign(&cdr, &token, None).expect("it is routed");
-        node.accepted(&key, at(30), Some("https://emsp/cdrs/one".to_owned()))
-            .expect("the partner took it");
+        let key = node
+            .consign(&Actor::service("csmsd"), &cdr, &token, None)
+            .expect("it is routed");
+        node.accepted(
+            &Actor::Timer,
+            &key,
+            at(30),
+            Some("https://emsp/cdrs/one".to_owned()),
+        )
+        .expect("the partner took it");
         key
     };
 
@@ -432,7 +472,7 @@ fn a_record_the_partner_has_taken_is_still_sealed_after_a_restart() {
     let mut node = scratch.node();
 
     let refused = node
-        .consign(&cdr, &token, None)
+        .consign(&Actor::service("csmsd"), &cdr, &token, None)
         .expect_err("a CDR cannot be changed or replaced once sent");
     assert!(
         matches!(
@@ -457,15 +497,18 @@ fn a_replacement_still_cannot_overtake_its_reversal_after_a_restart() {
 
     let key = {
         let mut node = scratch.node();
-        let key = node.consign(&original, &token, None).expect("routed");
-        node.accepted(&key, at(30), None).expect("taken");
+        let key = node
+            .consign(&Actor::service("csmsd"), &original, &token, None)
+            .expect("routed");
+        node.accepted(&Actor::Timer, &key, at(30), None)
+            .expect("taken");
         key
     };
 
     let mut node = scratch.node();
     let replacement = issued("two-r", Some(key.clone()));
     let refused = node
-        .consign(&replacement, &token, None)
+        .consign(&Actor::service("csmsd"), &replacement, &token, None)
         .expect_err("the Credit CDR has not been taken");
     assert!(
         matches!(
@@ -484,8 +527,10 @@ fn a_refused_record_may_still_be_sent_again_after_a_restart() {
 
     {
         let mut node = scratch.node();
-        let key = node.consign(&cdr, &token, None).expect("routed");
-        node.refused(&key, at(30), "the periods do not sum")
+        let key = node
+            .consign(&Actor::service("csmsd"), &cdr, &token, None)
+            .expect("routed");
+        node.refused(&Actor::Timer, &key, at(30), "the periods do not sum")
             .expect("the partner said why");
     }
 
@@ -493,7 +538,7 @@ fn a_refused_record_may_still_be_sent_again_after_a_restart() {
     // re-sending it is the whole remedy. A restart must not turn a refusal into
     // one.
     let mut node = scratch.node();
-    node.consign(&cdr, &token, None)
+    node.consign(&Actor::service("csmsd"), &cdr, &token, None)
         .expect("a refused record is still this node's to send");
 }
 
@@ -504,8 +549,11 @@ fn a_journal_edited_in_the_middle_will_not_start_the_node() {
         let mut node = scratch.node();
         for id in ["four", "five", "six"] {
             let cdr = issued(id, None);
-            let key = node.consign(&cdr, &token(), None).expect("routed");
-            node.accepted(&key, at(30), None).expect("taken");
+            let key = node
+                .consign(&Actor::service("csmsd"), &cdr, &token(), None)
+                .expect("routed");
+            node.accepted(&Actor::Timer, &key, at(30), None)
+                .expect("taken");
         }
     }
 
@@ -516,7 +564,7 @@ fn a_journal_edited_in_the_middle_will_not_start_the_node() {
     lines.remove(1);
     std::fs::write(&scratch.0, format!("{}\n", lines.join("\n"))).expect("written");
 
-    let refused = Node::open(node(), File::open(&scratch.0).expect("opens"))
+    let refused = Node::open(node(), File::open(&scratch.0).expect("opens"), data_key())
         .expect_err("a journal with a record removed is not this node's ledger");
     assert!(refused.to_string().contains("does not chain"), "{refused}");
 }
@@ -539,8 +587,11 @@ fn a_truncated_tail_is_not_detectable_from_the_file_and_the_head_is_the_witness(
 
     let witnessed = {
         let mut node = scratch.node();
-        let key = node.consign(&cdr, &token(), None).expect("routed");
-        node.accepted(&key, at(30), None).expect("taken");
+        let key = node
+            .consign(&Actor::service("csmsd"), &cdr, &token(), None)
+            .expect("routed");
+        node.accepted(&Actor::Timer, &key, at(30), None)
+            .expect("taken");
         // What an operator would have written down somewhere else.
         node.journal().head().expect("a head")
     };
@@ -550,7 +601,7 @@ fn a_truncated_tail_is_not_detectable_from_the_file_and_the_head_is_the_witness(
     std::fs::write(&scratch.0, format!("{}\n", lines[0])).expect("written");
 
     // The node starts, because nothing in the file is wrong.
-    let node = Node::open(node(), File::open(&scratch.0).expect("opens"))
+    let node = Node::open(node(), File::open(&scratch.0).expect("opens"), data_key())
         .expect("a truncated journal is indistinguishable from a shorter one");
     assert!(
         !node

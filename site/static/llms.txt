@@ -1,0 +1,24 @@
+# emob
+
+> Open-source EV charging back office for Europe, written in Rust: charge point operator (CSMS, OCPP 1.6/2.0.1/2.1) and e-mobility service provider (contracts, OCPI 2.3.0 / OICP 2.3 roaming, EN 16931 e-invoices, SEPA) in one workspace. Signed meter values (OCMF) are verified under German calibration law (Eichrecht); money is exact decimal; EU and German charging regulation (AFIR, LSV, PAngV, NIS2, CRA) is modelled as dated, cited duties. Fifteen domain crates do no I/O and read no clock; nine daemons run them from one estate file (release 0.2): OCPP security profiles 1–3, journalled and sealed ledgers, an operator page (Heute) and a driver receipt verifiable in the browser. `just demo` runs the whole estate on one machine.
+
+## Docs
+
+- [Run the estate](https://hupe1980.github.io/emob/docs/run-the-estate/): `just demo`, the estate file, the operator page Heute and the driver receipt
+- [Getting started](https://hupe1980.github.io/emob/docs/getting-started/): install the crates, verify a session, price it, settle it
+- [Eichrecht](https://hupe1980.github.io/emob/docs/eichrecht/): how an OCMF signed meter value becomes an invoice line
+- [OCPP](https://hupe1980.github.io/emob/docs/ocpp/): the seam between the station protocol and the money
+- [Settlement](https://hupe1980.github.io/emob/docs/settlement/): quarter-hour split, CDRs, EN 16931 invoices, SEPA
+- [Pricing](https://hupe1980.github.io/emob/docs/pricing/): one tariff that rates and displays; AFIR price transparency
+- [Locations](https://hupe1980.github.io/emob/docs/locations/): the charge point register and the DATEX II feed
+- [Roaming](https://hupe1980.github.io/emob/docs/roaming/): OCPI 2.3.0/2.2.1 and OICP 2.3
+- [Plug & Charge](https://hupe1980.github.io/emob/docs/plug-and-charge/): ISO 15118 contract certificates
+- [Smart charging](https://hupe1980.github.io/emob/docs/smart-charging/): § 14a EnWG over EEBUS
+- [Compliance](https://hupe1980.github.io/emob/docs/compliance/): the obligation calendar
+- [Architecture](https://hupe1980.github.io/emob/docs/architecture/): crates, daemons, journal, sibling kits
+- [Glossary](https://hupe1980.github.io/emob/docs/glossary/): CPO, eMSP, OCPP, OCPI, OCMF, Eichrecht, AFIR, CDR and more
+
+## Source
+
+- [Repository](https://github.com/hupe1980/emob)
+- [Threat model](https://github.com/hupe1980/emob/blob/main/THREAT_MODEL.md)

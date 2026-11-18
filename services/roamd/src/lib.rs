@@ -57,10 +57,13 @@
 
 use std::collections::BTreeMap;
 
+pub mod daemon;
 pub mod dispatch;
 pub mod inbound;
 pub mod node;
 pub mod peering;
+pub mod reach;
+pub mod receive;
 
 pub use dispatch::{Answer, Dispatcher};
 pub use inbound::{Handshake, Inbox};
@@ -439,6 +442,14 @@ pub struct Roamd {
     /// keyed: a party and an id, because OCPI makes an id unique per party and
     /// two CPOs may each have a CDR `1`.
     outbound: BTreeMap<CdrKey, Consignment>,
+    /// The consignments no partner has accepted yet, by the position they were
+    /// filed at — what the operator view pages without walking every record
+    /// ever sent (spec 007). An accepted record leaves it for good.
+    unaccepted: BTreeMap<u64, CdrKey>,
+    /// …and each one's position, to remove it on acceptance.
+    position_of: BTreeMap<CdrKey, u64>,
+    /// The next position.
+    filed: u64,
     /// The **document** for each of those, as it will go on the wire.
     ///
     /// A transactional outbox holds the message, not a recipe for one. The
@@ -488,6 +499,9 @@ impl Roamd {
         Self {
             registry,
             outbound: BTreeMap::new(),
+            unaccepted: BTreeMap::new(),
+            position_of: BTreeMap::new(),
+            filed: 0,
             outbox: BTreeMap::new(),
             peers: crate::peering::Peers::new(),
             inbound: CdrLedger::new(),
@@ -692,7 +706,7 @@ impl Roamd {
             supersedes: cdr.supersedes.clone(),
             credits: None,
         };
-        Ok(self.outbound.entry(cdr.key.clone()).or_insert(consignment))
+        Ok(self.file(consignment))
     }
 
     /// Address the **Credit CDR** that reverses a record already sent.
@@ -718,7 +732,7 @@ impl Roamd {
             });
         };
         let consignment = Consignment {
-            key: credit_key.clone(),
+            key: credit_key,
             reach: sent.reach.clone(),
             wire: sent.wire,
             ended_at,
@@ -726,7 +740,7 @@ impl Roamd {
             supersedes: None,
             credits: Some(original.clone()),
         };
-        Ok(self.outbound.entry(credit_key).or_insert(consignment))
+        Ok(self.file(consignment))
     }
 
     /// Build the OCPI document for a consignment, in the version its partner
@@ -847,6 +861,11 @@ impl Roamd {
     #[must_use]
     pub fn document(&self, key: &CdrKey) -> Option<&emob_roam::ocpi::cdr::Outbound> {
         self.outbox.get(key)
+    }
+
+    /// Every consignment, whatever its delivery says.
+    pub fn consignments(&self) -> impl Iterator<Item = &Consignment> {
+        self.outbound.values()
     }
 
     /// Every consignment still waiting to be sent, in the order they were keyed.
@@ -1087,7 +1106,51 @@ impl Roamd {
             });
         }
         consignment.delivery = delivery;
+        self.reindex(key);
         Ok(())
+    }
+
+    /// Keep a consignment, unless one for the record is already held — which
+    /// stands, refusal and all.
+    fn file(&mut self, consignment: Consignment) -> &Consignment {
+        let key = consignment.key.clone();
+        self.outbound.entry(key.clone()).or_insert(consignment);
+        self.reindex(&key);
+        &self.outbound[&key]
+    }
+
+    /// Keep [`Self::unaccepted`] in step with one consignment.
+    fn reindex(&mut self, key: &CdrKey) {
+        let Some(consignment) = self.outbound.get(key) else {
+            return;
+        };
+        if consignment.delivery.is_accepted() {
+            if let Some(position) = self.position_of.remove(key) {
+                self.unaccepted.remove(&position);
+            }
+        } else if !self.position_of.contains_key(key) {
+            let position = self.filed;
+            self.filed += 1;
+            self.position_of.insert(key.clone(), position);
+            self.unaccepted.insert(position, key.clone());
+        }
+    }
+
+    /// The consignments no partner has accepted, with their positions in
+    /// ascending order, strictly before `before`.
+    pub fn unaccepted_before(
+        &self,
+        before: u64,
+    ) -> impl DoubleEndedIterator<Item = (u64, &Consignment)> {
+        self.unaccepted
+            .range(..before)
+            .filter_map(|(position, key)| Some((*position, self.outbound.get(key)?)))
+    }
+
+    /// How many consignments no partner has accepted.
+    #[must_use]
+    pub fn unaccepted_count(&self) -> usize {
+        self.unaccepted.len()
     }
 
     /// Whether a partner has taken this record.

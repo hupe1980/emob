@@ -28,11 +28,11 @@
 //! `doubleentry` in one manifest, `services/accountingd`, and in no crate;
 //! `billd` is where it belongs here.
 //!
-//! Nor is it only layering: `doubleentry` takes `uuid` with `v7`, and a v7
-//! identifier comes from `SystemTime::now()`. `just purity` greps this
-//! workspace's source and cannot see into a dependency, so that promise is kept
-//! by what the manifests do not declare as much as by what the code does not
-//! call.
+//! Nor is it only layering: `doubleentry` salts a memo from the OS random
+//! source, which a crate that promises replay may not call. `just purity`
+//! greps this workspace's source and cannot see into a dependency, so that
+//! promise is kept by what the manifests do not declare as much as by what the
+//! code does not call.
 //!
 //! What crosses the seam is [`Postings`]: a currency, a booking date, and a
 //! balanced set of role-addressed movements. A service maps [`Role`] onto its
@@ -183,8 +183,9 @@ impl Postings {
 
 /// The postings an invoice makes.
 ///
-/// Debit the receivable with the gross; credit revenue with the taxable amount,
-/// split between energy and everything else; credit VAT with the tax.
+/// Debit the receivable with the amount due (BT-115); credit revenue with the
+/// taxable amount and any stated rounding (BT-114), split between energy and
+/// everything else; credit VAT with the tax.
 ///
 /// # The revenue is the **taxable** amount, not the line total
 ///
@@ -221,7 +222,7 @@ pub fn postings_for(invoice: &Invoice) -> Postings {
     postings.push(Posting {
         role: Role::Receivable,
         side: Side::Debit,
-        amount: invoice.gross_total().amount(),
+        amount: invoice.payable_total().amount(),
     });
 
     // Revenue, split by what was sold. The split is over the *rounded* figures,
@@ -238,6 +239,15 @@ pub fn postings_for(invoice: &Invoice) -> Postings {
         } else {
             service += signed;
         }
+    }
+
+    // BT-114 is outside the taxable amount and inside what is owed, so it is
+    // revenue without tax: it lands on the revenue the document mostly is, and
+    // the entry still balances against the receivable, which is BT-115.
+    if energy.is_zero() && !service.is_zero() {
+        service += invoice.payable_rounding;
+    } else {
+        energy += invoice.payable_rounding;
     }
 
     for (role, amount) in [

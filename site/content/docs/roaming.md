@@ -1,28 +1,27 @@
 +++
 title = "Roaming"
-weight = 7
-description = "One canonical record, every roaming wire native — OCPI 2.3.0 and 2.2.1 both ways, OICP 2.3 through Hubject, translation cost recorded rather than absorbed."
+weight = 8
+description = "EV roaming with OCPI 2.3.0, 2.2.1 and OICP 2.3 (Hubject) from one canonical CDR: lossy conversions reported, false ones refused, partner CDRs pre-flighted."
 
 [extra]
 state = "built"
 nav = "Roaming"
 +++
 
-A driver plugs into somebody else's charger. The operator issues a record, the
-driver's provider pays it, and the two companies have to agree on a number
-neither of them can independently re-measure.
+**Roaming** is when a driver charges at another company's charger: the charge
+point operator (CPO) issues a CDR — a charge detail record — and the driver's
+e-mobility service provider (eMSP) pays it. The two companies must agree on a
+number neither can re-measure. `emob-roam` keeps one canonical `Cdr` and
+translates it to each wire — [OCPI](https://evroaming.org/) 2.3.0 and 2.2.1 in
+both directions (via `ocpi-kit` 0.4), OICP 2.3 to Hubject (via `oicp-kit` 0.1) —
+and every translation states what it lost.
 
-Everything on this page is about the gap between those two copies.
+## One canonical CDR, every roaming protocol native
 
-## One canonical model, every wire native
-
-Almost every stack picks one protocol version as its internal model and converts
-at the edges. The versions then disagree about what a field means, and the
-internal one wins by accident — so a partner on an older version silently gets a
-narrower record, and nobody can point at where it narrowed.
-
-Here the canonical model is `emob`'s own, and each wire is a translation *out of*
-it with the cost written down:
+Most stacks pick one protocol version as the internal model and convert at the
+edges; a partner on another version then silently gets a narrower record. In emob
+the canonical model is emob's own, and each wire is a translation *out of* it
+with its cost written down:
 
 ```mermaid
 flowchart LR
@@ -39,32 +38,29 @@ flowchart LR
     X23 --> ACC["Crossing&lt;T&gt;<br/>the value and the account,<br/>by JSON Pointer"]
     X22 --> ACC
     SELF --> ACC
+    OICP --> ACC
     X23 -->|"a partner's record,<br/>read back unpriced"| CDR
 
     classDef built fill:#0a7d3322,stroke:#0a7d33
     classDef planned fill:#88888818,stroke:#888,stroke-dasharray:4 3
-    class X23,X22,SELF,ACC built
-    class OICP,EMIP planned
+    class X23,X22,SELF,ACC,OICP built
+    class EMIP planned
 ```
 
-Solid is built; dashed is designed and not yet written.
+Solid is built; dashed is designed. A session between an operator's own CPO and
+its own EMP (self-roaming) takes the same path as a stranger's, so adding a
+partner changes only the transport.
 
-A session between an operator's own CPO and its own EMP takes the same path as a
-stranger's. Going multi-party then changes the transport and nothing else, which
-is a property worth having before the first partner rather than after.
+## Every conversion returns a Crossing
 
-## Translation cost is recorded, not absorbed
-
-A hand-written `From` impl makes every lossy decision once, silently, at the
-moment nobody is looking. Six weeks later two companies hold two numbers for one
-session and neither document explains the gap.
-
-So every translation returns a `Crossing`: the value, and the account of what
-reaching this partner cost — each note carrying a JSON Pointer into the document
-the partner actually reads.
+A hand-written `From` impl makes each lossy decision silently. Instead every
+translation returns a `Crossing`: the value plus notes on what reaching this
+partner cost, each with a JSON Pointer into the document the partner reads.
 
 ```rust
-let crossing = ocpi::cdr::to_ocpi(&cdr, partner, &context)?;
+use emob_roam::ocpi::cdr::for_partner;
+
+let crossing = for_partner(&cdr, &partner, &context)?;   // 2.3.0 or 2.2.1, per partner
 
 for reason in crossing.reasons() {
     eprintln!("{reason}");
@@ -76,421 +72,279 @@ for reason in crossing.reasons() {
 }
 ```
 
-### …and the rating's own account crosses with it
+- **`for_partner` writes the version the registry records.** A `Partner` carries
+  the OCPI version the peer speaks; `for_partner` applies every refusal, then
+  writes 2.3.0 or downgrades to 2.2.1, and returns a value naming which. (Use
+  `emob_roam::ocpi::cdr::to_ocpi` for 2.3.0 directly.)
+- **The rating's own notes cross too.** OCPI states a quantity and a cost per
+  dimension with nothing between them, so `total_energy: 30` beside a cost for
+  20 kWh (a free first tier, a night-only price, a `step_size`) does not multiply
+  out. The notes that are terms of the price — the same ones `emob-billing` prints
+  on the invoice — cross as `Crossing` notes on that dimension's total. Faults in
+  the operator's own tariff stay with the operator.
+- **Hours rarely terminate.** OCPI carries `total_time` and each period's `TIME`
+  and `PARKING_TIME` in hours. Since `3600 = 2⁴ · 3² · 5²`, a duration has an
+  exact decimal in hours only when nine divides its seconds: 21 minutes is `0.35`,
+  20 and 22 minutes are not. The money was computed from whole seconds, so a
+  partner re-deriving it from the rounded hours gets something else — and the
+  note says so.
 
-`RatingNote` is serialisable because it is meant to travel: *"a note that stays
-behind in the process that produced it is a note nobody can invoke."* The invoice
-has read it since it was written, and the wire did not.
+## Conversions that would be false are refused
 
-OCPI states a quantity and a cost **per dimension** and has no field for the
-distance between them. A partner receiving `total_energy: 30` beside a
-`total_energy_cost` computed for twenty kilowatt-hours reads a document that does
-not multiply out — and the reason is almost always a discount the operator gave
-on purpose: a promotional first tier, a night-only energy price, any tariff whose
-energy element is conditional. A `step_size` produces the same shape in the other
-direction.
-
-So the half of the notes that are *terms of the price the payer is being asked to
-pay* — the same half `emob-billing` puts on the invoice, selected by the same
-predicate — crosses as `Crossing` notes, each pointed at the dimension's own
-total. The rest stay with the operator: a fault in this side's tariff is not
-something a partner can act on.
-
-### The version the registry records is the version that goes out
-
-A `Partner` carries which OCPI version the peer speaks. Nothing read it: the
-canonical crossing produced 2.3.0 for everybody and the downgrade was a second
-call a sender had to remember, so a peer on 2.2.1 — the ordinary case in this
-market — was one forgotten step from a document it cannot parse. `for_partner`
-applies every refusal and then the recorded version, and returns a value that
-names which one it wrote.
-
-### The note nobody else reports
-
-OCPI carries `total_time`, and every period's `TIME` and `PARKING_TIME`, as a
-number of **hours**. An hour is 3600 seconds and `3600 = 2⁴ · 3² · 5²` — only
-the twos and fives divide out, so a duration has an exact decimal spelling
-exactly when nine divides its seconds. Twenty-one minutes does (`0.35`). Twenty
-does not. Twenty-two does not.
-
-It is the same factor of three that makes an occupancy fee of €2.50 an hour
-unshowable per minute under `[AFIR Art. 5(4)]`, met again one layer out. The
-money on the record was computed from whole seconds, multiplied before it was
-divided; a partner re-deriving it from the rounded figure gets something else.
-
-The quarter-hour grid this workspace settles on is always exact — 900 is
-divisible by nine — which is precisely why the failure stays invisible until a
-session starts or stops between two boundaries, which is every session.
-
-## Some crossings are a falsehood, and those are refused
-
-A note explains a number that is *approximately* right. Where the number would
-be *wrong*, a note is worse than useless, because it attaches an explanation to
-something a partner will act on.
+A note explains a number that is approximately right. Where the number would be
+**wrong** in the driver's or payer's disfavour, the conversion is refused:
 
 | Refused | Why a note would not do |
 |---|---|
-| A **V2G discharge** | `ENERGY_EXPORT` is Session-only and `total_energy` carries no sign, so the partner reads a discharge as a draw and settles backwards — paying the operator for energy the *driver* supplied |
-| An **unrated** record | `total_cost` is required, and the specification gives the obvious placeholder its own meaning: `0.00` is *free of charge*. Sending zero answers the question permanently, in the partner's favour |
-| A tariff element stripped of an **unevaluable restriction** | Dropping a condition does not narrow the element, it *widens* it — at the partner it then matches wherever the rest holds, and their re-rating disagrees with ours in the driver's disfavour, from a document we published |
-| A **gross price bound** on a tariff mixing VAT rates | `min_price`/`max_price` bound the cost *before taxes* and the field is mandatory. The gross figure written there is a minimum the partner enforces a VAT rate too high, against the driver. Where the components agree on a rate the bound is converted at it; where they state **none**, there is no tax to strip and the two figures are the same number; only where they state *different* rates is there no pre-tax figure, and inventing one is the failure |
-| A restriction that does **not fit** its field | OCPI's local time and local date are narrower than the types a tariff restricts on, and a bound that will not fit has two silent outcomes: dropped, the element widens; **defaulted, it moves**. A start time falling back to midnight publishes a night tariff as an all-day one — not a wider price but a different one |
-| The **zone** a time restriction is read in | OCPI writes those restrictions in local civil time at the charge point and carries the zone on the **Location** (`time_zone`, an IANA name, mandatory) rather than on the Tariff. The crossing cannot state it in the object it produces, so it names the tariff's own zone by JSON Pointer: every Location the tariff applies at has to publish the same one, and a partner evaluating `22:00` in any other zone prices the night rate at the wrong hours |
+| A **V2G discharge** | `ENERGY_EXPORT` is Session-only and `total_energy` has no sign, so a partner would read a discharge as a draw and settle backwards |
+| An **unrated** record | `total_cost` is required and `0.00` means *free of charge* — sending zero settles the question in the partner's favour |
+| A tariff element with an **unevaluable restriction** | dropping a condition *widens* the element, so the partner's re-rating disagrees with ours against the driver |
+| A **gross price bound** on a tariff mixing VAT rates | `min_price`/`max_price` must state a pre-tax figure. With one rate it is converted; with no rate the figures coincide; with *different* rates no pre-tax figure exists, and inventing one is the failure |
+| A restriction that **does not fit** its OCPI field | OCPI's local time/date types are narrower; dropped, the element widens; defaulted, it *moves* (a start time falling back to midnight turns a night tariff into an all-day one) |
 
-The unevaluable-restriction rule is the outward face of a rule
-[the rating engine](@/docs/pricing.md) applies inward: a condition this build
-cannot judge never matches, so it can neither price a session nor be published as
-though it were absent.
+One thing is stated rather than refused: OCPI evaluates time restrictions in the
+charge point's local time and carries the zone on the **Location** (`time_zone`,
+IANA, mandatory), not on the Tariff. The tariff crossing names the tariff's zone
+by JSON Pointer; every Location it applies at must publish the same one.
 
-### The same line, one wire along
+This is the outward face of the [rating engine](@/docs/pricing.md)'s rule that a
+condition it cannot judge never matches. The [OCPP seam](@/docs/ocpp.md) and the
+[national access point feed](@/docs/locations.md) return the same `Crossing`
+type and draw the line in the same place: **a loss in the driver's disfavour that
+the document does not show is a refusal.**
 
-[The OCPP seam](@/docs/ocpp.md#what-the-wire-cannot-say-is-a-refusal-not-a-note)
-is not a roaming wire and draws the line in exactly the same place, because the
-argument is not about roaming: **a loss in the driver's disfavour that the
-document does not show is a refusal.** Three seams now return the same
-`Crossing` — the roaming edge, the charge point's own screen, and the national
-access point feed — and the type lives in the shared vocabulary crate for that
-reason rather than in whichever one needed it first.
+## OCPI PARKING_TIME has two definitions
 
+`[OCPI 2.3.0]` uses the words twice for two quantities:
 
-## Two `PARKING_TIME`s, and the specification defines both
+- The `ChargingPeriod` **dimension** `PARKING_TIME` was corrected by an erratum
+  to *"time during which the **vehicle is not requesting power**"*, because the
+  old reading exposed drivers to loitering fees while the EVSE withheld power.
+- The CDR **field** `total_parking_time` was not corrected: it is still time when
+  *"no energy was transferred between EVSE and EV"*.
 
-`[OCPI 2.3.0]` uses the words twice with two definitions, and they are not the
-same quantity. The `ChargingPeriod` **dimension** was corrected by an erratum to
-the vehicle's own demand — "time during which the **vehicle is not requesting
-power**", because the old reading exposed drivers "to penalizing loitering fees
-… when the EVSE is not offering energy to the vehicle while the vehicle is still
-requesting power". The CDR **field** `total_parking_time` was not corrected: it
-is still "no energy was transferred between EVSE and EV".
+They differ by exactly the time the charge point withheld power, so neither can
+be derived from the other. The crossing takes the dimension from
+`Dimension::pricing` and the field from `Activity::transfers_energy`. A withheld
+period crosses with its energy and **no time dimension**, its seconds still in
+`total_time`; read back, such a period is read as withheld, which costs the driver
+nothing on a re-rating.
 
-The two differ by exactly the time the point withheld power, so computing one
-from the other is wrong in whichever one you derived. The crossing takes each
-from the question that defines it: the dimension from `Dimension::pricing`, the
-field from `Activity::transfers_energy`.
+## Reading a partner's CDR back
 
-A withheld period therefore crosses with its energy and **no time dimension at
-all**, its seconds still inside `total_time`. Read back, a period stating neither
-`TIME` nor `PARKING_TIME` and moving no energy is read as withheld rather than as
-occupancy — OCPI's dimensions are volumes, so no time volume is no billable time.
-It costs the driver nothing on a re-rating, it is noted, and this workspace's own
-document round-trips exactly.
-
-## …and the record comes back
-
-`from_ocpi` reads a partner's CDR into the canonical model, and the test that
-matters is the round trip: the record this crate writes is one it can read back
-— same key, same window, same periods, same energy — and a pre-flight that
-settles it.
-
-The two directions are not mirror images:
+`emob_roam::from_ocpi` reads a partner's OCPI CDR into the canonical model. The
+round trip holds — same key, window, periods and energy — but the directions are
+not mirror images:
 
 | Canonical | OCPI | Coming back |
 |---|---|---|
-| a period's `end` | a start and no end | the next period's start, and the last from `end_date_time` |
-| `activity` | the period's dimensions | `TIME` says charging and `PARKING_TIME` says the vehicle was not asking `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`. A period stating **both** is reported, because the fallback — energy moved — reads a taper as occupancy. A period stating **neither** and moving no energy is read as time the point *withheld*, which is what this side writes for one and costs the driver nothing on a re-rating |
-| `provenance` | nothing at all | interpolated, for every period: a number whose provenance nobody stated is not one this side may call measured |
-| `auth_path` | three values for six paths | narrowed by the token type, and noted where it cannot be |
+| a period's `end` | a start and no end | the next period's start; the last from `end_date_time` |
+| `activity` | the period's dimensions | `TIME` = charging, `PARKING_TIME` = vehicle not asking `[OCPI 2.3.0 §mod_cdrs_chargingperiod_class]`. **Both** is reported (the fallback reads a taper as occupancy); **neither** with no energy is read as withheld |
+| `provenance` | nothing | interpolated, for every period — unstated provenance is not *measured* |
+| `auth_path` | three values for six paths | narrowed by the token type, noted where it cannot be |
 | `cost` | totals, no unit prices | **not** rebuilt |
-| `supersedes` | nothing on the replacement | `None` — the pairing is the receiving ledger's, from the Credit CDR it saw first |
+| `supersedes` | nothing on the replacement | `None` — pairing is the receiving ledger's job, from the Credit CDR it saw first |
 
-The last one is the argument. A canonical price carries one line per distinct
-price, each reproducing its own amount from its own quantity and unit price.
-Rebuilding that from totals means inventing the numbers that make it add up —
-and then the pre-flight checks the arithmetic of a document *this* crate wrote
-rather than the one that arrived. So the record comes back unpriced, the
-partner's own figure comes back beside it, and an eMSP re-rates with its own
-tariff and compares.
+The record comes back **unpriced** because rebuilding unit prices from totals
+means inventing the numbers that make it add up. The partner's own figure comes
+back beside it, and an eMSP re-rates with its own tariff and compares. Signed
+payloads come back for the [Eichrecht chain](@/docs/eichrecht.md) to verify
+against **this side's** meter registry; the verified result is passed into the
+conversion.
 
-Verification stays where it belongs: the payloads come back for the Eichrecht
-crate to check against **this side's** registry, and the verified result is an
-argument to the conversion rather than something it produces.
+### Re-rating a partner's CDR with your own tariff
 
-### …and re-rating goes through the same door the issuer used
+`Cdr::rerated_with` prices a partner's record with this side's tariff and applies
+every gate the issuing side applies — which `rate(&retail, &cdr.chargeable()?)`
+skips: a chain that did not verify against this side's registry, a tariff not in
+force when the session ran, a version the meter says was superseded mid-session,
+a duration the signed records do not vouch for, and the clock resolution under a
+per-minute fee. Without the first gate, a forged session would be priced at the
+retail tariff and invoiced to a driver.
 
-`Cdr::rerated_with` prices a partner's record with this side's own tariff, and
-applies every gate the issuing side applies. That matters because the obvious
-composition — `rate(&retail, &cdr.chargeable()?)` — skips all five: a chain that
-did not verify against **this** side's registry, a tariff not in force when the
-session ran, a version the meter says was superseded mid-session, a duration the
-signed records do not vouch for, and the clock resolution under a per-minute fee
-— which the record carries, so a replay cannot be told a different one. The
-periods, the energy and the evidence stay the record's own, so the two prices are
-about the same session by construction.
+`crates/emob-roam/tests/the_other_hat.rs` runs the whole EMP half: a partner's
+OCPI document, verified against this side's registry, re-rated, invoiced to a
+driver, and the books balanced.
 
-The first of those gates is the newest and it is the reason this door matters. A
-partner's record is **assembled** into the canonical model rather than built from
-a session, so it never passes `CdrBuilder`, and the gate lives at the door a
-`Cost` is made through instead.
-Re-rating a record whose payloads failed verification therefore priced a forged
-session at this side's retail tariff and invoiced it to a driver, which is the
-one outcome the EMP path exists to prevent.
+### Corrections: Credit CDR, then a new CDR
 
-`tests/the_other_hat.rs` runs the whole EMP half: a partner's OCPI document,
-verified against **this** side's registry, re-rated at this side's retail price,
-invoiced to a driver, and the books balanced.
+OCPI never amends a CDR. It reverses one with a **Credit CDR** — `credit = true`,
+`credit_reference_id` naming the original, only `total_cost` negated — then sends
+*"a new CDR with a new unique ID"*. `to_ocpi_credit` writes the first; `to_ocpi`
+writes the second from the superseding record. Inbound, a Credit CDR is refused
+by name: it repeats the original's kilowatt-hours with negated money, and read as
+a session it would enter the ledger twice.
 
-### A correction is two documents, and neither is the other
+## Checking a partner's invoice against your CDRs
 
-OCPI has no way to amend a CDR. It reverses one with a Credit CDR — `credit =
-true`, `credit_reference_id` naming the original, and **only** `total_cost`
-negated — and then sends "a new CDR with a new unique ID and the fields `credit`
-and `credit_reference_id` omitted". `to_ocpi_credit` writes the first; `to_ocpi`
-writes the second from the superseding record and says in its account that the
-replacement names nothing. Inbound, a Credit CDR is refused by name rather than
-read: it repeats the original's kilowatt-hours with the money negated, and read
-as a session it would put them in the ledger twice.
+`[OCPI 2.3.0 §mod_invoice_reconciliation_module]` adds a small record: an invoice
+identifier and the CDR ids that invoice covers. `emob_roam::ocpi::reconciliation::check`
+reads it against this side's `CdrLedger`, where every record carries its own
+rating, so the sum is exact. It returns four separate answers:
 
-## The invoice a partner is entitled to check
+- an id nobody here holds — a **transport** question;
+- an id this side has since corrected (superseded) — a **settlement** question,
+  reported beside the replacing record;
+- an id held but **unrated** — a partner's record priced by nobody;
+- a **second currency** — a total that cannot be compared with one invoice amount.
 
-`[OCPI 2.3.0 §mod_invoice_reconciliation_module]` is the one module the wire
-added for the half this workspace is about, and it is four fields: an invoice
-identifier and the list of CDR ids that invoice covers.
-
-It closes the last seam. Inside one process a CDR and its invoice line cannot
-disagree — the record carries the price its own periods produced. Between two
-**companies** nothing tied them together: the records cross over OCPI, the
-invoice arrives over an access point, and neither document says which records the
-other is about, so a settlement dispute began with somebody exporting a
-spreadsheet.
-
-The check is **this side's** rather than the wire's. A party holding only OCPI
-documents adds up OCPI CDRs; this side holds the canonical records, each carrying
-the rating that priced it, so the sum is exact and a second currency makes the
-total absent rather than approximate. And it reads the ledger the way every other
-consumer does: a correction is a new record that supersedes the old one, so an
-invoice naming the **superseded** id is one for a session this side has since
-restated — reported beside the record that replaced it, because *"your invoice
-covers a record we have corrected"* is a conversation rather than an error.
-
-Four answers, not one verdict: an id nobody here holds is a **transport**
-question, an id this side has corrected is a **settlement** one, an id held
-**unrated** is a partner's own record priced by nobody, and a second currency is a
-total that means nothing beside a single invoice amount.
-
-## A node you can register with ✅
+## OCPI credentials: a node you can register with
 
 > *The Credentials module is symmetric and has to be implemented by all OCPI
 > implementations.* `[OCPI 2.3.0 §credentials]`
 
-A platform that can push a document and cannot be **registered with** is not an
-OCPI implementation. `roamd` serves `versions`, `credentials` and the CDRs
-receiver, and four things about the receiving half are decisions rather than
-transcription.
+The `roamd` library implements the receiving side — `versions`, `credentials`
+and the CDRs receiver — and its tests run the handshake through `ocpi-kit`'s
+client, reading every URL from this node's own version-details document. Four
+rules:
 
-- **The reach-back is a precondition, not a courtesy.** A `POST credentials` is
-  not answered until this node has read the client's versions *with the token it
-  was just handed* — `3001` when it cannot. Skipping it leaves a credential for
-  a platform this node cannot reach: it looks like a registration and fails the
-  day a record is owed.
-- **A registration is a fact about the past**, so it is journalled before the
-  peer is told. A node that forgot the tokens answers `401` to every partner it
-  has onboarded, and re-issues values partners are still presenting.
-- **The principal comes from the credential, never from the document.** A push
-  is judged by asking whether the caller may write records for the party the
-  document names; built from that same document, the question compares a claim
-  with itself and passes for everything.
-- **The path served, the URL advertised and the `Location` returned are one
-  computation.** Work any of them out separately and the node answers on paths
-  nobody was told about, or hands back a `Location` that 404s. Every byte
-  well-formed, nothing working, nothing logged.
+- **Reach back before answering.** A `POST credentials` is not answered until
+  this node has read the client's versions *with the token it was just handed*,
+  replying `3001` if it cannot.
+- **Journal before replying.** A registration is a fact, so it is persisted
+  before the peer is told; otherwise a restart answers `401` to every onboarded
+  partner.
+- **The principal comes from the credential**, never from the pushed document.
+- **One computation** yields the served path, the advertised URL and the
+  returned `Location`, so they cannot disagree.
 
-And the two halves close a loop: **registering is what makes a partner
-reachable**. The handshake keeps the endpoints it reads off the peer's version
-details — the only moment they are on offer — and the outbound client holds no
-peer list at all. A second one beside the registrations would be a second answer
-to *where does a record go*, stale the moment a token is rotated.
+Registering is what makes a partner reachable: the handshake keeps the endpoints
+it reads from the peer, and the outbound client holds no separate peer list.
+The `roamd` daemon mounts these endpoints at `/ocpi` ✅. Partners and their
+Token A come from the estate, and each CDR `csmsd` delivers is consigned to the
+contract's issuer with the station's location and the verbatim OCMF records,
+then pushed. During registration a partner names a URL `roamd` will call back;
+a **reach-back guard** admits only `https`, and `http` or private, loopback and
+link-local addresses only for hosts the estate allows, so a registering partner
+cannot aim the node at an internal service. ⏳ OICP transport to Hubject is not
+wired yet. See [Run the estate](@/docs/run-the-estate.md).
 
-The tests run the handshake from the other side through the client's own
-implementation and read every URL out of this node's version-details document,
-because a test against paths this workspace chose would pass while a real peer
-failed.
+The testing rule for inbound formats: a document you **receive** needs a test
+that starts from a string, not from a Rust value — otherwise a serialisation
+setting elsewhere in the workspace can break every inbound document while the
+suite stays green.
 
-## A number has to survive the parse
+## Routing by contract identifier
 
-Every test here once built its OCPI documents in Rust and handed them over as
-values. None of them read one from bytes — and a `serde_json` feature chosen
-elsewhere in the workspace made every numeric field of every inbound document
-undeserialisable, while the suite stayed green. One test even compared the bytes
-that arrived against a re-serialisation of what was sent, and passed: both sides
-were wrong the same way.
+A contract identifier (eMAID) names its issuer in its first five characters —
+the party holding the driver and paying the bill. emob routes on that prefix. OCPI
+warns that a party id need not match a contract's issuer, so an explicit issuer
+list (`Partner::issuing`) overrides the prefix — useful after an acquisition.
+`PartnerRegistry::route` does the lookup.
+The check digit is verified at that edge: a mistyped identifier still parses and
+routes, and would bill somebody else's contract.
 
-The rule is the workspace's own, in the direction nobody was looking. It already
-said a format you *read* needs an artefact somebody else wrote, and a format you
-*write* needs its consumer read. This is the third: **a document you receive
-needs a test that starts from a string.**
+## Pre-flighting an inbound OCPI CDR
 
-## Routing comes out of the identifier
-
-A contract identifier names its issuer in its first five characters, and that is
-the party holding the driver and paying the bill. A hand-maintained map from
-anything else is where roaming money reaches the wrong company.
-
-OCPI itself warns that a party id has no direct link with a contract's issuer, so
-the prefix is the default and an explicit issuer list overrides it — which is how
-an acquired partner is routed without editing every record.
-
-The check digit is verified at that edge, because once the record has reached the
-provider a transcribed identifier still parses, still routes, and bills somebody
-else's contract while the operator has already been paid.
-
-## The pre-flight an eMSP owes itself
-
-A record arriving from a partner is not a canonical CDR yet. It is JSON that
-decoded, and the questions worth asking are OCPI's own — asked of the document
-that *arrived*, before any conversion has had the chance to repair it.
+Before conversion has a chance to repair anything, `emob_roam::preflight` asks
+OCPI's own questions of the document as it **arrived**:
 
 ```rust
-let report = ocpi::inbound::preflight(&arrived, SignedDataPolicy::Required);
+use emob_roam::{SignedDataPolicy, preflight};
 
+let report = preflight(&arrived, SignedDataPolicy::Required);
 if !report.is_settleable() {
     for reason in report.reasons() { eprintln!("blocked: {reason}"); }
 }
 ```
 
-It asks whether the periods sum to the stated total, whether the durations in the
-document agree with its own timestamps, whether the parts of the cost add to the
-whole, whether the periods are in order — OCPI gives a period no end, so a reader
-derives every span from the *next* one's start, and out of order every duration
-is silently wrong — and whether the contract identifier passes its own check
-digit.
+It checks that periods sum to the stated totals, durations agree with
+timestamps, cost parts add to the whole, periods are in order (OCPI periods have
+no end, so out of order every derived duration is wrong) and the contract
+identifier passes its check digit. Findings are **blocking** or **warning** —
+settlement is a business decision — but a warning never carries a *quantity* out
+of the check: `ENERGY_IMPORT` is read alongside `ENERGY`, so a partner using the
+wrong dimension name cannot make its energy invisible to the sum.
 
-Findings are separated into blocking and warning, because settlement is a
-business decision and a spelling deviation is not the same as a missing
-kilowatt-hour. A warning must never carry a *quantity* out of the check, though:
-`ENERGY_IMPORT` is read alongside `ENERGY` so that a partner using the wrong
-dimension name cannot make their own energy invisible to the sum meant to find
-it.
+The pre-flight verifies no signatures. It hands back the signed records and the
+key the document **claims**; the Eichrecht chain checks them against the registry
+this side holds. A matching claimed key narrows a dispute to the numbers; a
+different one points to a meter swapped without the registry being told.
 
-### Signatures are verified against *this* side's registry
+## The roamd ledger: who was sent what
 
-The pre-flight verifies nothing itself. It hands back the signed records and the
-key the document claims, and the Eichrecht chain checks them against the registry
-**this** side holds — never the key travelling in the file, which is the artefact
-under examination. A reader that verified against the document's own key would
-have proven only that whoever wrote it owned a private key.
+`roamd` (library) holds what no document can: a **ledger of what was sent to
+whom**.
 
-The claimed key is still worth reading. One that matches narrows a dispute to the
-numbers; one that differs names a meter swapped without the registry hearing
-about it. The checks themselves are [the Eichrecht chain](@/docs/eichrecht.md).
+- **An accepted CDR is sealed.** `[OCPI 2.3.0 §mod_cdrs]`: *"it cannot be changed
+  or replaced once sent to the eMSP… Instead, a Credit CDR can be sent."*
+  Re-consigning one is refused by name, and an acceptance is terminal — a later
+  `refused` cannot reopen it.
+- **A reversal is owed only where there is something to reverse.** A record the
+  partner refused needs no Credit CDR before its replacement.
+- **Lateness is per partner.** The same paragraph allows any agreed cadence
+  (*"once a month, that is also allowed"*), so `Roamd::unsettled` judges each
+  record against *that partner's* settlement window.
 
-## What is proven
-
-One genuinely signed session settles at the **same money** over three paths —
-self-roaming, OCPI 2.3.0 and OCPI 2.2.1 — with the signed records arriving
-verbatim and re-verifying at the far end against the receiver's own registry.
-
-The same session also goes out over **Hubject**, through `MockHubject` — the
-broker in a process, which validates a record the way the live one does — and
-comes back with its energy and its evidence intact. That property is a different
-sentence, because the wire is: see below.
-
-The tariff crosses too, and the same session's price reads identically to the
-partner, to the driver at the point and to the national access point — see
-[Tariffs](@/docs/pricing.md#one-price-three-audiences).
-
-eMIP (GIREVE legacy) is 📐: designed, not written. So are OCPI's Sessions and
-Tokens modules, which are a service's publishing surface rather than a settlement
-question.
-
-## …and the half a crossing cannot decide
-
-`roamd` is the node around the two wires, and everything in it is about a
-**ledger of what was sent to whom**. A document is what a domain crate says it
-is; who is owed it, whether it may go at all, when it is late and what to do with
-one that arrives are not properties of any document.
-
-**A record the partner has taken is sealed.** `[OCPI 2.3.0 §mod_cdrs]`: *"Because
-a CDR is for billing purposes, it cannot be changed or replaced once sent to the
-eMSP. Changes are simply not allowed. Instead, a Credit CDR can be sent."* And the
-repair has an order — the reversal, then the replacement. Every piece of that was
-already built: the Credit CDR the specification spells out, the `supersedes` link
-on the record, a ledger that refuses to bill both halves. None of them knows
-whether the original ever left the building, which is the one fact both rules turn
-on.
-
-**And an acceptance is terminal.** The seal is enforced where a record is
-consigned, by reading the delivery — which made it exactly as durable as the
-field: one `refused` after the fact overwrote the acceptance and the same record
-could go to the same partner again, who then holds two records for one session
-and settles both. Recording the same outcome twice is idempotent, because a
-location that arrives late is a fact about one delivery rather than a second one.
-
-**And a reversal is owed only where one happened.** A Credit CDR reverses a
-record the eMSP **has**; for one they refused there is nothing to reverse and no
-credit will ever be accepted. Requiring one before every replacement deadlocked
-the correction of every refused record — against the rule the same paragraph
-states and this node's own documentation repeats, that nothing refused is sealed.
-
-**Late is per partner, not per node.** The same paragraph makes the cadence a
-contract: *"if there is an agreement between parties to send them, for example,
-once a month, that is also allowed by OCPI."* So a node peering with a monthly
-settler and a same-day settler has two answers to one question, and a single
-constant would report the first in breach every day.
-
-**And a document that is wrong is a different answer from a claim that does not
-hold.** Three checks run in the order that makes them mean something — the
-document, the conversion, the record — and the verdict has five values rather
-than one error:
+An inbound record is checked in order — authorisation, the document
+(`preflight`), the conversion (`from_ocpi`) and the record (`emob_cdr::validate`)
+— and `Roamd::receive` returns one of six verdicts:
 
 | Verdict | Means | What the sender does |
 |---|---|---|
+| `Unauthorised` | this credential may not push this record (decided before the document is read) | nothing it can retry |
 | `Accepted` | the document holds up and the record is new | nothing; it is settled |
-| `Disputed` | the document is fine, the claim does not hold here | talks to you |
+| `Disputed` | the document is fine; the claim does not hold here | talks to you |
 | `Duplicate` | already held, unchanged | nothing; the retry was harmless |
 | `Conflicted` | already held, and this one differs | a human answers |
-| `Rejected` | it does not answer OCPI's own questions | fixes it and re-sends |
+| `Rejected` | it fails OCPI's own checks | fixes it and re-sends |
 
-A partner told *"rejected"* when the truth is *"disputed"* retries something no
-retry fixes. And a disputed record is deliberately not in the ledger: it has not
-been settled, and putting it there would make the dispute look like an
-acceptance.
+A disputed record is deliberately kept out of the ledger: it has not been
+settled.
 
-## The second wire settles a different thing
+## OICP 2.3 via Hubject: the CDR carries no money
 
-OICP is hub-and-spoke where OCPI is peer-to-peer: every partner talks only to
-Hubject, over mutual TLS, and Hubject calls back. That changes the transport and
-almost nothing about the translation — except for one fact, which is large enough
-that the crossing is built around it.
-
-**An OICP charge detail record carries no money.** No `total_cost`, no price, no
-per-dimension breakdown: the members are the session's four timestamps, the
-register readings, `ConsumedEnergy`, the identification, the signed meter values
-and a `PartnerProductID`. The amount is settled out of band, against a pricing
-product the two parties agreed on.
+OICP is hub-and-spoke: every partner talks only to Hubject, over mutual TLS. The
+translation barely changes, except for one fact: **an OICP charge detail record
+has no cost field** — no `total_cost`, no price, no breakdown. It carries the
+session's four timestamps, register readings, `ConsumedEnergy`, identification,
+signed meter values and a `PartnerProductID`; the amount is settled against a
+pricing product agreed out of band.
 
 ```rust
-let crossing = oicp::cdr::to_oicp(&cdr, &partner, &context)?;
+use emob_roam::oicp::cdr::{check_conserves, to_oicp};
 
-// The energy, the evidence and the identity crossed…
+let crossing = to_oicp(&cdr, &partner, &context)?;
 assert_eq!(check_conserves(&crossing.value)?, kwh("18.000"));
-// …and the €8.82 did not, which the account says on every record:
+// the €8.82 did not cross, and the account says so on every record:
 // "/PartnerProductID: this record priced at 8.82 EUR on the issuing side and
 //  OICP carries no cost field of any kind…"
 ```
 
-So the price reaches the partner separately, as a `PricingProductDataRecord` —
-which has **one** base price per reference unit, a short list of named extras, no
-tiers and no tax. An energy price beside a charging-time price has nowhere to put
-the second; a kilowatt-hour tier has no spelling at all. Both are refusals by
-name, because a product that prices a session differently from the tariff that
-rates it is exactly the drift one canonical model exists to prevent.
+The price travels separately as a `PricingProductDataRecord`
+(`emob_roam::oicp::pricing::to_oicp_product`), which has **one** base price per
+reference unit, a few named extras, no tiers and no tax. An energy price beside a
+charging-time price, or a kWh tier, cannot be expressed and is refused by name.
 
-### The same fact, a note on one wire and a refusal on the other
+Differences from OCPI:
 
-A **discharge** is refused on both: `ConsumedEnergy` has no sign, exactly as
-`total_energy` has none.
+- **Discharge** is refused on both: `ConsumedEnergy` has no sign.
+- **AutoCharge** is a note on OCPI (whose `AUTH_REQUEST` names neither it nor
+  Plug & Charge) but a refusal on OICP, whose `PlugAndChargeIdentification`
+  *names* ISO 15118 and would assert a contract certificate that was never
+  presented.
+- OICP has **four timestamps** to OCPI's two, so the minutes a car sits connected
+  before charging begins are stated rather than inferred.
 
-**AutoCharge** differs, and the difference is the interesting one. OCPI collapses
-Plug & Charge and AutoCharge into a single `AUTH_REQUEST` that names neither, so
-the crossing there reports a lost distinction. OICP's
-`PlugAndChargeIdentification` *names* ISO 15118 — so the same value would assert a
-contract certificate that was never presented, and a note attached to a false
-statement is not something a partner can act on. Which of the two it is depends
-on how specific the field is, not on how important the fact is.
+## What is tested end to end
 
-### …and one place a crossing gains
+- One genuinely signed session settles at the **same money** over self-roaming,
+  OCPI 2.3.0 and OCPI 2.2.1, the signed records arriving verbatim and
+  re-verifying against the receiver's registry.
+- The same session goes out over OICP to `oicp-kit`'s `MockHubject` — an
+  in-process broker that validates records like the live one — with energy and
+  evidence intact.
+- The tariff reads identically to the partner, the driver at the charge point and
+  the national access point — see
+  [Tariffs](@/docs/pricing.md#one-tariff-three-audiences-ocpp-ocpi-datex-ii).
 
-OICP has four timestamps where OCPI has two. The five minutes a car sits
-connected before its charge begins — which an OCPI reader attributes to whichever
-measured period precedes it — is a fact on this document rather than an
-inference, and the account says so in the same voice it uses for what was lost.
+## Not yet built 📐
+
+- eMIP (GIREVE legacy).
+- OCPI Sessions and Tokens modules — a service's publishing surface rather than a
+  settlement question.
+- The OICP client in `roamd` (the document is built; the mutual-TLS socket is not).
+
+**Related:** [Sessions and settlement](@/docs/settlement.md) ·
+[Tariffs](@/docs/pricing.md) · [Eichrecht](@/docs/eichrecht.md) ·
+[Glossary](@/docs/glossary.md)
