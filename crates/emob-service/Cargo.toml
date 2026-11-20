@@ -22,6 +22,10 @@ emob-tariff = { workspace = true, optional = true }
 # value should not carry them.
 cedar-policy = { workspace = true, optional = true }
 
+# The estate's JSON Schema (spec 012), off by default: only `emob check` and
+# the schema test need it.
+schemars = { workspace = true, optional = true }
+
 aws-lc-rs          = { workspace = true }
 axum               = { workspace = true }
 base64             = { workspace = true }
@@ -46,6 +50,8 @@ default = ["serde"]
 serde = ["dep:serde", "dep:serde_json", "dep:emob-tariff", "emob-core/serde", "emob-tariff/serde", "time/serde-well-known"]
 ## Operator-authored Cedar policies over the authority model's own entity types.
 policy = ["dep:cedar-policy"]
+## The estate's JSON Schema, derived from the section types.
+schema = ["serde", "dep:schemars"]
 
 [dev-dependencies]
 tokio         = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

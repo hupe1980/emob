@@ -29,7 +29,7 @@ hmac         = { workspace = true }
 sha2         = { workspace = true }
 # The client half of the invoice delivery (SR-119). Already in the graph
 # through csmsd and roamd; `json` only.
-reqwest      = { version = "0.13", default-features = false, features = ["json"] }
+reqwest      = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 anyhow       = { workspace = true }
 axum         = { workspace = true }
 serde_json   = { workspace = true }
@@ -41,6 +41,8 @@ tokio        = { workspace = true, features = ["rt-multi-thread", "macros", "sig
 tracing      = { workspace = true }
 
 [dev-dependencies]
+# The published event schemas, held to what is sent (spec 012).
+jsonschema     = { workspace = true }
 # The consumer side of the invoice files (spec 010): read back and validated.
 en16931        = { workspace = true }
 en16931-formats = { workspace = true }

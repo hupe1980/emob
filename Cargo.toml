@@ -31,7 +31,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.4.0"
+version      = "0.5.0"
 authors      = ["hupe1980"]
 edition      = "2024"
 license      = "MIT OR Apache-2.0"
@@ -59,11 +59,18 @@ time       = { version = "0.3", features = ["std", "macros", "parsing", "formatt
 jiff       = { version = "1", default-features = false, features = ["std", "tzdb-bundle-always"] }
 anyhow     = "1"
 
+# The estate's JSON Schema, derived from the section types so the file an
+# editor checks and the file a daemon reads cannot differ (spec 012). Only
+# `emob-service`'s `schema` feature takes it.
+# Holds the published event schemas to what the daemons send (tests only).
+jsonschema = { version = "0.61", default-features = false }
+schemars   = { version = "1", default-features = false, features = ["std", "derive"] }
+
 # DATEX II v3 for the Mobilithek's AFIR Recharging profile, in `emob-poi`. It
 # spells the profile's JSON and refuses what its schemas would reject; prices
 # stay decimal text, so no float carries money. Its one dependency is
 # `quick-xml`, and it does no I/O of its own.
-datex2     = "0.2"
+datex2     = "0.3"
 
 # Every quantity in this workspace either *is* money or *becomes* money. A
 # binary float cannot represent 0.10, and `10.1 - 0.1` is 10.000000000000002 —
@@ -82,7 +89,7 @@ rust_decimal = { version = "1", features = ["macros", "serde-with-str"] }
 # out of both the 2.x field and the 1.6 `SignedData` string that holds the same
 # object. Every verdict type is `#[must_use]`, which is the compiler reaching
 # across a repository boundary that no guard here can (D306, D327).
-ocpp-kit = { version = "0.5", default-features = false }
+ocpp-kit = { version = "0.6", default-features = false }
 
 # ── The OCPI wire ───────────────────────────────────────────────────────────
 # The wire *model* for `emob-roam`; `roamd` adds `client` on top, because the
@@ -164,7 +171,7 @@ en16931-formats = { version = "0.10", default-features = false, features = ["ubl
 # (D304). `created_at` is the one that stays optional; `emob-billing` passes it,
 # and `just purity` keeps it passing.
 doubleentry = { version = "0.9", default-features = false }
-sepa = { version = "0.9", default-features = false, features = ["time"] }
+sepa = { version = "0.10", default-features = false, features = ["time"] }
 
 # ── Eichrecht: the OCMF format ──────────────────────────────────────────────
 # The format is `ocmf`'s and the law is `emob-eichrecht`'s: that crate keeps only
@@ -201,21 +208,21 @@ hex       = "0.4"
 base64    = "0.23"
 
 # ── Internal (path + version so the domain crates can be published) ─────────
-emob-core      = { path = "crates/emob-core",      version = "0.4" }
-emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.4" }
-emob-session   = { path = "crates/emob-session",   version = "0.4" }
-emob-cdr       = { path = "crates/emob-cdr",       version = "0.4" }
-emob-tariff    = { path = "crates/emob-tariff",    version = "0.4" }
-emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.4" }
-emob-eebus     = { path = "crates/emob-eebus",     version = "0.4" }
-emob-pnc       = { path = "crates/emob-pnc",       version = "0.4" }
-emob-poi       = { path = "crates/emob-poi",       version = "0.4" }
-emob-sim       = { path = "crates/emob-sim",       version = "0.4" }
-emob-smart     = { path = "crates/emob-smart",     version = "0.4" }
-emob-roam      = { path = "crates/emob-roam",      version = "0.4" }
-emob-billing   = { path = "crates/emob-billing",   version = "0.4" }
-emob-thg       = { path = "crates/emob-thg",       version = "0.4" }
-emob-service   = { path = "crates/emob-service",   version = "0.4" }
+emob-core      = { path = "crates/emob-core",      version = "0.5" }
+emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.5" }
+emob-session   = { path = "crates/emob-session",   version = "0.5" }
+emob-cdr       = { path = "crates/emob-cdr",       version = "0.5" }
+emob-tariff    = { path = "crates/emob-tariff",    version = "0.5" }
+emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.5" }
+emob-eebus     = { path = "crates/emob-eebus",     version = "0.5" }
+emob-pnc       = { path = "crates/emob-pnc",       version = "0.5" }
+emob-poi       = { path = "crates/emob-poi",       version = "0.5" }
+emob-sim       = { path = "crates/emob-sim",       version = "0.5" }
+emob-smart     = { path = "crates/emob-smart",     version = "0.5" }
+emob-roam      = { path = "crates/emob-roam",      version = "0.5" }
+emob-billing   = { path = "crates/emob-billing",   version = "0.5" }
+emob-thg       = { path = "crates/emob-thg",       version = "0.5" }
+emob-service   = { path = "crates/emob-service",   version = "0.5" }
 
 # ── The daemon shell ────────────────────────────────────────────────────────
 # Only `emob-service` and the daemons above it see these. Every domain crate

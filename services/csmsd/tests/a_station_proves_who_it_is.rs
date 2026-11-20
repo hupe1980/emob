@@ -93,6 +93,8 @@ impl ocpp_kit::transport::Handler for Quiet {
 enum Presents<'a> {
     Password(&'a str),
     Certificate(&'a str),
+    /// Its identity in the URL and nothing else.
+    Nothing,
 }
 
 fn station(running: &Running, tls: bool, identity: &str, presents: Presents<'_>) -> Handle {
@@ -114,6 +116,7 @@ fn station(running: &Running, tls: bool, identity: &str, presents: Presents<'_>)
                 Wire::BasicAuth
             })
             .password(BasicAuthPassword::hex(key).unwrap()),
+        Presents::Nothing => builder.security_profile(Wire::Unsecured),
         Presents::Certificate(name) => {
             client = client
                 .client_certificate(
@@ -296,5 +299,49 @@ async fn sr_043_a_silent_session_is_closed_and_counted() {
         rises(&running.edge.counters.idle_closed).await,
         "closed after a second of silence"
     );
+    running.kill();
+}
+
+/// CISA ICSA-26-062-08 (2026): a charging backend admitted a WebSocket by the
+/// station identity in its URL alone. Here an identity is never a credential:
+/// the same identity with no password, over TLS, is refused and counted.
+#[tokio::test]
+async fn icsa_26_062_08_an_identity_alone_is_never_a_credential() {
+    // A plain loopback listener, so the bare connection reaches the gate at
+    // all; the kit refuses to send no credential over TLS on its own.
+    let mut estate = demo();
+    estate.csms.tls_cert = None;
+    estate.csms.tls_key = None;
+    estate.csms.client_ca = None;
+    let running = start(estate).await.expect("loopback without TLS starts");
+    let bare = station(&running, false, "CP-1", Presents::Nothing);
+    assert!(!boots(&bare).await, "an identity is not a credential");
+    assert!(rises(&running.edge.counters.refused_credentials).await);
+    running.kill();
+}
+
+/// CVE-2026-44383 (2026): a second connection under a live identity took the
+/// station's place and starved it. A newer connection supersedes only after it
+/// has proven the credential; an impostor without it is refused, and the
+/// station it impersonated keeps speaking.
+#[tokio::test]
+async fn cve_2026_44383_a_second_connection_without_the_credential_cannot_take_the_identity() {
+    let running = start(demo()).await.expect("csmsd starts with TLS");
+    let real = station(&running, true, "CP-1", Presents::Password(DEMO_KEY));
+    assert!(boots(&real).await, "the real station is admitted");
+    let impostor = station(
+        &running,
+        true,
+        "CP-1",
+        Presents::Password("00112233445566778899aabbccddeeff"),
+    );
+    assert!(!boots(&impostor).await, "the impostor is refused");
+    assert!(
+        real.call(ocpp_kit::v1_6::HeartbeatRequest::new())
+            .await
+            .is_ok(),
+        "and the station it impersonated still speaks"
+    );
+    real.shutdown(Duration::from_secs(1)).await;
     running.kill();
 }

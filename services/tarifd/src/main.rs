@@ -102,8 +102,10 @@ fn publish_due(service: &Mutex<Tarifd>, party: &PartyId) {
                 Err(error) => {
                     // A version no audience can be given is not a version to
                     // publish partially. It stays due, and it will be reported
-                    // late the moment it takes effect.
-                    tracing::error!(%error, "a version could not be prepared for any audience");
+                    // late the moment it takes effect — once, not every minute.
+                    if once(format!("unprepared {error}")) {
+                        tracing::error!(%error, "a version could not be prepared for any audience");
+                    }
                     None
                 }
             })
@@ -111,6 +113,10 @@ fn publish_due(service: &Mutex<Tarifd>, party: &PartyId) {
     };
 
     for publication in prepared {
+        let version = publication.fingerprint.short();
+        if !once(format!("prepared {}@{version}", publication.tariff_id)) {
+            continue;
+        }
         for note in &publication.notes {
             tracing::info!(pointer = %note.pointer, reason = %note.reason, "the crossing cost this");
         }
@@ -133,8 +139,20 @@ fn publish_due(service: &Mutex<Tarifd>, party: &PartyId) {
     for late in lock(service).late(now) {
         // Not a backlog item: a price the estate is charging that one of the
         // three audiences has never seen.
-        tracing::error!(breach = %late, "a version in force was never published");
+        if once(format!("late {late}")) {
+            tracing::error!(breach = %late, "a version in force was never published");
+        }
     }
+}
+
+/// Whether `line` is said for the first time in this process: a state is
+/// logged when it starts, not on every pass of the loop (spec 012, FR-001).
+fn once(line: String) -> bool {
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    SAID.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(line)
 }
 
 /// A lock that survives a panic elsewhere.

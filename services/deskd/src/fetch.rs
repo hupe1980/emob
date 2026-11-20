@@ -170,6 +170,96 @@ impl Reader {
             .ok_or(Why::Unreadable)
     }
 
+    /// One station from `csmsd` (spec 012): `None` when the estate does not
+    /// list it. The identity is percent-encoded byte by byte, so nothing a
+    /// browser sent can change the path (SR-095).
+    ///
+    /// # Errors
+    ///
+    /// Why it did not answer.
+    pub async fn station<T: DeserializeOwned>(
+        &self,
+        base: &str,
+        identity: &str,
+    ) -> Result<Option<T>, Why> {
+        let url = format!(
+            "{}/v1/csmsd/stations/{}",
+            base.trim_end_matches('/'),
+            crate::station::href(identity).trim_start_matches("/station/")
+        );
+        match self.fetch(&url).await {
+            Ok(page) => Ok(Some(page)),
+            Err(Why::Status(404)) => Ok(None),
+            Err(why) => Err(why),
+        }
+    }
+
+    /// A write to `csmsd` with the **operator's own** token — never the
+    /// desk's read token (spec 021): `(status, body)`, the body JSON or null.
+    ///
+    /// # Errors
+    ///
+    /// When `csmsd` does not answer.
+    pub async fn write(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        operator: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, serde_json::Value), Why> {
+        let response = self
+            .client
+            .request(method, url)
+            .bearer_auth(operator)
+            .json(body)
+            .send()
+            .await
+            .map_err(|_| Why::NoAnswer)?;
+        let status = response.status().as_u16();
+        let text = response.text().await.map_err(|_| Why::NoAnswer)?;
+        Ok((
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        ))
+    }
+
+    /// One page of `csmsd`'s station search, inside `area` when given.
+    ///
+    /// # Errors
+    ///
+    /// When `csmsd` does not answer or refuses the read.
+    pub async fn stations<T: DeserializeOwned>(
+        &self,
+        base: &str,
+        query: &str,
+        area: Option<&str>,
+        offset: u64,
+        limit: usize,
+    ) -> Result<T, Why> {
+        let mut url = format!(
+            "{}/v1/csmsd/stations?limit={limit}&offset={offset}",
+            base.trim_end_matches('/')
+        );
+        search(&mut url, query, area);
+        self.fetch(&url).await
+    }
+
+    /// The map of the same search (spec 022).
+    ///
+    /// # Errors
+    ///
+    /// When `csmsd` does not answer or refuses the read.
+    pub async fn map<T: DeserializeOwned>(
+        &self,
+        base: &str,
+        query: &str,
+        area: Option<&str>,
+    ) -> Result<T, Why> {
+        let mut url = format!("{}/v1/csmsd/map?", base.trim_end_matches('/'));
+        search(&mut url, query, area);
+        self.fetch(&url).await
+    }
+
     async fn bytes(
         &self,
         url: &str,
@@ -224,6 +314,21 @@ impl Reader {
             }
         }
         serde_json::from_slice(&body).map_err(|_| Why::Unreadable)
+    }
+}
+
+/// `&q=…` and `&area=…`, percent-encoded byte by byte.
+fn search(url: &mut String, query: &str, area: Option<&str>) {
+    for (name, value) in [("q", Some(query)), ("area", area)] {
+        let Some(value) = value else { continue };
+        let _ = write!(url, "&{name}=");
+        for byte in value.bytes() {
+            if byte.is_ascii_alphanumeric() || b".-_~".contains(&byte) {
+                url.push(char::from(byte));
+            } else {
+                let _ = write!(url, "%{byte:02X}");
+            }
+        }
     }
 }
 

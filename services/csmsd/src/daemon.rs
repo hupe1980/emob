@@ -21,7 +21,7 @@ use ocpp_kit::Version;
 use ocpp_kit::transport::Csms;
 
 use crate::authorize::Empd;
-use crate::edge::{Edge, Gate, Guarded, Security};
+use crate::edge::{Edge, Gate, Security};
 use crate::estate::Estate;
 use crate::outbox::Dispatcher;
 use crate::{Csmsd, Shared};
@@ -181,6 +181,7 @@ pub async fn run(options: Options) -> Result<Running> {
         )
         .context("folding csmsd's journal")?
         .with_clock(clock)
+        .pricing(crate::estate::tariffs(&estate)?)
         .delivering_to(issued_to)
         .issuing_receipts(
             crate::receipt::Receipts::open(
@@ -192,6 +193,15 @@ pub async fn run(options: Options) -> Result<Running> {
             .context("opening the receipt key beside csmsd's journal")?,
         ),
     );
+    // Spec 021: the estate seeds the registry; afterwards the registry rules.
+    let seeded = csmsd.seed(&estate.stations).map_err(|error| {
+        anyhow::anyhow!("seeding the station registry from the estate: {error}")
+    })?;
+    tracing::info!(
+        seeded,
+        registered = csmsd.registered_count(),
+        "the station registry"
+    );
     let sites = crate::receipt::sites(&estate.stations);
     tracing::info!(
         settled = csmsd.settled(),
@@ -200,11 +210,6 @@ pub async fn run(options: Options) -> Result<Running> {
         "the ledger is what the journal says it is"
     );
 
-    let stations: Vec<(String, String)> = estate
-        .stations
-        .iter()
-        .map(|station| (station.identity.clone(), station.evse.to_string()))
-        .collect();
     let mut versions: Vec<Version> = Vec::new();
     for station in &estate.stations {
         let version = crate::estate::version(station.ocpp);
@@ -215,14 +220,18 @@ pub async fn run(options: Options) -> Result<Running> {
     // Spec 005: the credential each station's profile requires, TLS or a
     // reason there is none, and the limits — all in `edge`.
     let security = Arc::new(Security::from_estate(&estate.csms, &estate.stations, ocpp)?);
-    let edge = Arc::new(Edge::new(&estate.csms));
-    let mut builder = Csms::builder()
+    let edge = Arc::new(Edge::new(&estate.csms)?);
+    let mut builder = edge
+        .limit(Csms::builder())
         .bind(ocpp)
         .versions(versions)
         .max_connections(estate.csms.max_connections)
         .handshake_timeout(Duration::from_secs(10))
-        .authenticate(Gate::new(provisioning, Arc::clone(&security)))
-        .handler(Guarded::new(Shared(Arc::clone(&csmsd)), Arc::clone(&edge)));
+        .authenticate(Gate::new(
+            Arc::clone(&csmsd) as Arc<dyn crate::edge::Registry>,
+            Arc::clone(&security),
+        ))
+        .handler(Shared(Arc::clone(&csmsd)));
     if let Some(tls) = security.tls() {
         builder = builder.tls(tls);
     }
@@ -241,12 +250,17 @@ pub async fn run(options: Options) -> Result<Running> {
             () = stopping.wait() => {}
         }
     }));
-    let (sweeper, handle, stopping) = (Arc::clone(&edge), csms.handle(), shutdown.clone());
+    // Spec 012: a station silent past its heartbeat becomes `Offline`, once.
+    let (presence, stopping) = (Arc::clone(&csmsd), shutdown.clone());
     tasks.push(tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(sweeper.sweep_every());
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
-                _ = ticker.tick() => sweeper.sweep(&handle).await,
+                _ = ticker.tick() => {
+                    if let Err(error) = presence.sweep(time::OffsetDateTime::now_utc()) {
+                        tracing::error!(%error, "the presence sweep could not record a fact");
+                    }
+                }
                 () = stopping.wait() => return,
             }
         }
@@ -297,7 +311,11 @@ pub async fn run(options: Options) -> Result<Running> {
             head::router("csmsd", latest),
             operators.clone(),
         ))
-        .with(crate::read::router(Arc::clone(&csmsd), operators, stations))
+        .with(crate::read::router(
+            Arc::clone(&csmsd),
+            operators,
+            security.admits_certificates(),
+        ))
         .with(crate::receipt::router(Arc::clone(&csmsd), sites))
         // Long enough for an in-progress `StopTransaction` to land.
         .draining_for(Duration::from_secs(15));

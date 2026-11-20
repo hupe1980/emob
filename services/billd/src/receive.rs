@@ -42,7 +42,7 @@ pub struct Token {
 }
 
 /// The parts of a `de.emob.cdr.issued` event's data `billd` reads
-/// (`specs/001-the-estate-runs/contracts/delivery.md`).
+/// (`specs/archive/001-the-estate-runs/contracts/delivery.md`).
 #[derive(Debug, Deserialize)]
 pub struct Body {
     /// The record.

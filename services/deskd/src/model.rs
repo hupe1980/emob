@@ -43,6 +43,23 @@ pub struct Csmsd {
     pub refused: Page<Refusal>,
     /// The silent stations.
     pub silent: Page<Station>,
+    /// The mobile networks silent stations are on, the most silent first.
+    #[serde(default)]
+    pub networks: Vec<NetworkShare>,
+}
+
+/// One mobile network with a silent station (spec 022).
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkShare {
+    /// MCC-MNC.
+    pub network: String,
+    /// Who runs it.
+    #[serde(default)]
+    pub carrier: Option<String>,
+    /// Its silent stations.
+    pub silent: u64,
+    /// Its stations.
+    pub stations: u64,
 }
 
 /// The two windows.
@@ -97,6 +114,12 @@ pub struct Station {
     /// Since when it has been silent.
     #[serde(with = "time::serde::rfc3339")]
     pub silent_since: time::OffsetDateTime,
+    /// Its mobile network, MCC-MNC.
+    #[serde(default)]
+    pub network: Option<String>,
+    /// Who runs it.
+    #[serde(default)]
+    pub carrier: Option<String>,
 }
 
 /// `GET /v1/billd/today`.

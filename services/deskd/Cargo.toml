@@ -18,7 +18,10 @@ emob-session   = { workspace = true }
 emob-service   = { workspace = true }
 
 anyhow         = { workspace = true }
-axum           = { workspace = true }
+axum           = { workspace = true, features = ["form"] }
+# The operator's own token, from the Basic credentials the browser sends,
+# forwarded on a write (spec 021).
+base64         = { workspace = true }
 # The client half of the three reads. Already in the graph (csmsd, roamd);
 # `json` only, so it adds no crate.
 reqwest        = { version = "0.13", default-features = false, features = ["json"] }

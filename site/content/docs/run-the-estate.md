@@ -133,12 +133,25 @@ signed head at `GET /v1/<daemon>/head`.
 Every daemon reads its own sections of one `estate.toml` (`EMOB_ESTATE`,
 default `./estate.toml`). `deploy/estate.example.toml` is the loopback demo
 estate, `deploy/estate.compose.toml` the compose one. A daemon refuses to start
-on a key it cannot parse or a variable that is unset, naming it.
+on a key it cannot parse or a variable that is unset, naming it — and `emob
+check` finds the same mistakes before any daemon reads the file:
+
+```console
+emob check estate.toml             # every section, then each daemon's own checks
+emob check --secrets estate.toml   # …and every *_env variable is set (named, never printed)
+```
+
+A mistake is reported the way `rustc` reports one — the file, the line, the
+key underlined, and what would be valid (`= help: did you mean `evse`?`). The
+estate's JSON Schema is published at
+[`schemas/estate.schema.json`](https://hupe1980.github.io/emob/schemas/estate.schema.json);
+`#:schema ../schemas/estate.schema.json` on the first line lets Taplo or Tombi
+complete keys, show what each means and flag a typo as you type.
 
 | Section | Read by | Holds |
 |---|---|---|
 | `[parties]` | all | the operator (CPO) and provider (eMSP) party ids |
-| `[[stations]]` | `csmsd`, `poid`, `roamd` | identity, OCPP version, `security_profile`, `password_hash`, EVSE id, power, tariff, location; optional `receipt_display_minutes` |
+| `[[stations]]` | `csmsd`, `poid`, `roamd` | identity, OCPP version, `security_profile`, `password_hash`, EVSE id, power, tariff, location; optional `receipt_display_minutes` and `commissioned` (`YYYY-MM-DD`, the station page shows its age) |
 | `[[meter_keys]]` | `csmsd` | each meter's public key and where it came from — never the key a station sends itself |
 | `[[tariffs]]` | `csmsd`, `tarifd` | the tariff that rates and the one that is published, built by one function |
 | `[[partners]]`, `[billing]` | `billd`, `roamd` | roaming partners, their Token A, billing address, invoice `specification`, `buyer_reference` and `mandate`; the invoice series, seller, `iban`, `creditor_id`, `contact`, `public_url` and `[billing.delivery]` |
@@ -162,6 +175,7 @@ variable:
 | `CSMSD_DATA_KEY`, `ROAMD_DATA_KEY`, `EMPD_DATA_KEY`, `BILLD_DATA_KEY` | 32 random bytes, base64: each daemon's data key |
 | `CSMSD_SIGNING_KEY`, `ROAMD_SIGNING_KEY`, `EMPD_SIGNING_KEY`, `BILLD_SIGNING_KEY`, `POID_SIGNING_KEY` | 32 random bytes, base64: the Ed25519 seed that signs where each journal ends |
 | the variable `[billing.delivery] secret_env` names | `whsec_<base64>`: signs each invoice `billd` hands to the operator system |
+| `POID_NAP_IDENTIFIER` | the identifier the national access point issued; `poid` refuses to start without it |
 | `EMOB_LOG_FORMAT` | `text` for a terminal; JSON lines otherwise |
 
 ### Data keys and sealed journals
@@ -314,6 +328,71 @@ decides nothing, and the only thing it keeps is the witness file.
   is a red row naming both positions; it stays until the witness file is moved
   aside, and while it stands the page does not say that nothing needs you.
 
+### Onboarding stations
+
+Stations live in `csmsd`'s **registry**, a journalled record of who may
+connect and as what. The estate's `[[stations]]` seed it on first start;
+after that the registry rules, and a station is added, changed or retired
+without a restart:
+
+- **Heute → Stationen** searches every station — identity, EVSE id, vendor,
+  model, serial, firmware, state, mobile network — in pages, at ten thousand
+  stations as at three. Above the list, a **map** of what the search found:
+  a dot per station, coloured by state, or — above 300 — circles per area,
+  each opening the search narrowed to that area. It is drawn by `deskd` over a
+  bundled Natural Earth outline: no tiles, no script, nothing fetched from a
+  third party. **+ Station hinzufügen** is one form; its answer is an **installer
+  sheet**: the CSMS address (`[desk] ocpp_url`), the identity, the security
+  profile and the password, minted for this station and shown **only now**
+  (the registry keeps its Argon2id hash). The station can connect at once.
+- On a station's page, **Verwalten** changes its tariff, power or location,
+  mints a new password (a new sheet) or retires the station — its next
+  connection is refused; its history stays. Each asks why, and every change is
+  journalled under the operator's name.
+- The **Standort** card draws where the station is, and says so when the
+  coordinates lie outside the country it is registered in — or when latitude
+  and longitude look swapped — with a link to fix them. Every map a driver
+  uses shows that point.
+- The same through the API, with an operator token:
+
+```console
+curl -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" "http://127.0.0.1:9001/v1/csmsd/stations?q=1.3.1"
+curl -X POST -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" -H 'content-type: application/json' \
+     -d @station.json http://127.0.0.1:9001/v1/csmsd/stations       # → {"identity":…, "password":…} once
+```
+
+`POST /v1/csmsd/stations/{identity}/password` and `…/retire` take
+`{"reason": "…"}`; `PUT /v1/csmsd/stations/{identity}` replaces a record
+(`{"station": …, "reason": …}`). A refusal is `422` naming the field.
+`GET /v1/csmsd/map?q=&area=` answers the map of a search: `points` up to 300,
+else `cells` of a 16 × 16 grid; `area=west,south,east,north` narrows the
+search and the map alike.
+
+### When stations go silent together
+
+Most stations reach the CSMS over a mobile network. `csmsd` keeps the network
+a station reports at boot — the IMSI's country and network code, `262 01`,
+never the IMSI — so Heute's **Stationen ohne Lebenszeichen** opens with the
+silent stations per network: *Telekom Deutschland 12 von 40 still*. When every
+silent station is on one network, it says that is more likely an outage than
+a fault — one call to the carrier, not twelve site visits.
+
+<figure class="shot">
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/station-dark.webp"><img src="../../img/station-light.webp" width="1280" height="800" loading="lazy" alt="The station page for CP-3: online since 10:00, 100 % charging success today and over seven days, one reboot, and the asset card — EVSE, 150 kW, OCPP 2.1 with security profile 2, vendor and model, serial and firmware reported at boot"></picture>
+<figcaption>A station's page from <code>just demo</code>.</figcaption>
+</figure>
+
+Every station name on the page opens **its own page**, `/station/<identity>` —
+an asset card from what `csmsd` journals: online since when or silent since
+when (presence is journalled as transitions, so it survives a restart); what
+the station said at its last boot (vendor, model, serial, firmware); what its
+meter **signs** about itself in the records of its last billed session (vendor,
+model, serial, firmware, gateway version) and whether its key is registered;
+where it stands — address, coordinates, time zone and a small map drawn from a bundled outline (no tile, script or tracker reaches the operator's browser), with links that open it in OpenStreetMap or the phone's maps app; every firmware change, which is the intervention record
+`[MessEG §31(2) Nr. 4]` makes the operator keep; its firmware and security
+reports; its success rate today and over seven days; reboots; its last twenty
+sessions with their receipts.
+
 A daemon that does not answer is named in its section with since when, and the
 rest of the page renders. Sign in with HTTP Basic: any user name, an
 `[[operators]]` token as the password. The page works without JavaScript; a
@@ -438,7 +517,20 @@ any other `4xx` is recorded as refused with the body, and not retried. Who
 answered is a journal fact. An event is owed to the subscribers named when it
 was emitted; a subscriber added later receives what is emitted from then on.
 A pattern that matches no type emob emits refuses the start, so a typo does not
-subscribe to nothing.
+subscribe to nothing. Each type has a published JSON Schema —
+[`de.emob.cdr.issued`](https://hupe1980.github.io/emob/schemas/events/de.emob.cdr.issued.json),
+[`de.emob.invoice.issued`](https://hupe1980.github.io/emob/schemas/events/de.emob.invoice.issued.json)
+— that the daemons' tests hold to what they send. To prove a receiver before the
+first real record reaches it:
+
+```console
+$ emob subscribers test warehouse
+✓ → https://dwh.example.com/emob/events de.emob.cdr.issued … 204 No Content (83 ms)
+```
+
+One signed sample of every type the subscriber takes, sent exactly as the real
+one is; it carries `emobtest: true` and an id starting `test-`, so a receiver
+can tell it apart, and nothing is journalled.
 
 `de.emob.cdr.issued` carries the card UID and the station's location: a
 subscriber receives personal data, and the estate file is where that decision
@@ -470,17 +562,21 @@ syntax = "ubl"
 
 ## Run the daemons yourself
 
-From source, with the example estate:
+From source, with the example estate, in three commands:
 
 ```console
-eval "$(just dev-keys)"                 # the four data keys
-just dev-ca                             # loopback TLS for csmsd
-export EMOB_ESTATE=deploy/estate.example.toml
-export EMOB_WEBHOOK_SECRET=whsec_$(openssl rand -base64 32) EMOB_SERVICE_TOKEN=$(openssl rand -hex 16) \
-       EMOB_OPERATOR_TOKEN=$(openssl rand -hex 16) EMOB_PARTNER_DE_MSP_TOKEN_A=$(openssl rand -hex 16)
-cargo run -p empd & cargo run -p billd & cargo run -p roamd & cargo run -p csmsd &
-just desk                               # Heute on http://127.0.0.1:9587/
+just dev-keys > .env     # every secret the estate names, fresh, for this machine (gitignored)
+just dev-ca              # loopback TLS for csmsd
+just run                 # checks the estate, starts all nine, waits until each is ready
+```
+
+`just run` prints where Heute is (user `demo operator`, password
+`EMOB_OPERATOR_TOKEN` from `.env`), writes each daemon's log to `var/`, and
+stops them all on Ctrl-C. The read models answer the same token:
+
+```console
 curl -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" http://127.0.0.1:9001/v1/csmsd/today
+curl -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" http://127.0.0.1:9001/v1/csmsd/stations/CP-1
 ```
 
 In containers, with a named volume per journal:

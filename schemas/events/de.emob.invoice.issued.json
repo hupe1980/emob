@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hupe1980.github.io/emob/schemas/events/de.emob.invoice.issued.json",
+  "title": "de.emob.invoice.issued",
+  "description": "billd issued an invoice. Structured-mode CloudEvent 1.0, signed per Standard Webhooks; webhook-id equals the invoice number.",
+  "type": "object",
+  "required": ["specversion", "id", "source", "type", "subject", "datacontenttype", "data"],
+  "properties": {
+    "specversion": { "const": "1.0" },
+    "id": { "type": "string", "minLength": 1, "description": "The invoice number." },
+    "source": { "const": "urn:emob:billd" },
+    "type": { "const": "de.emob.invoice.issued" },
+    "subject": { "type": "string", "pattern": "^invoice/.+" },
+    "time": { "type": "string", "format": "date-time" },
+    "datacontenttype": { "const": "application/xml" },
+    "invoiceurl": { "type": "string", "format": "uri", "description": "The invoice page, when billing.public_url is set." },
+    "emobtest": { "type": "boolean", "description": "Present and true only on a sample sent by `emob subscribers test`; never book it." },
+    "data": { "type": "string", "minLength": 1, "description": "The invoice file, EN 16931 in UBL or CII syntax as configured." }
+  }
+}

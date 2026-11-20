@@ -539,6 +539,12 @@ async fn demo(
     };
     let text = estate::text(options.seed, &ports, &hashes, &tls);
     std::fs::write(scratch.0.join("estate.toml"), &text).context("writing the estate")?;
+    // Spec 012: the estate the demo runs is one `emob check` passes — the
+    // demo is the first estate anybody reads.
+    anyhow::ensure!(
+        crate::check::passes(&scratch.0.join("estate.toml")),
+        "the demo's own estate does not pass `emob check`"
+    );
     let env = secrets.env();
     let journal = |name: &str| scratch.0.join(format!("{name}.ndjson"));
     let me = |name: &'static str| Identity::new(name, "demo");
@@ -1065,6 +1071,9 @@ struct Observed {
     /// Each station, what its display showed and what it should have
     /// (spec 011): CP-3's receipt links, nothing on CP-1 and CP-2.
     displayed: Vec<(String, Vec<String>, Vec<String>)>,
+    /// Each station: what it said at boot, and whether a meter signed a
+    /// billed session there (spec 012).
+    known: Vec<(String, Option<String>, bool, Option<String>)>,
 }
 
 /// SC-002: every record of every journal the demo wrote names who caused it.
@@ -1166,6 +1175,19 @@ fn observe(
         witnessed: Vec::new(),
         unattributed: Vec::new(),
         displayed: Vec::new(),
+        known: estate::CHARGE_POINTS
+            .iter()
+            .map(|point| {
+                let known = estate.csmsd.csmsd.known(point.identity).unwrap_or_default();
+                let said = known.identity.map(|(said, _)| said);
+                (
+                    point.identity.to_owned(),
+                    said.as_ref().and_then(|said| said.firmware.clone()),
+                    !known.meters.is_empty(),
+                    said.and_then(|said| said.network),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -1270,6 +1292,22 @@ fn judge(seen: &Observed, billable: usize) -> Vec<String> {
         ),
     );
     expect(
+        seen.known.len() == 3
+            && seen
+                .known
+                .iter()
+                .all(|(_, firmware, _, _)| firmware.is_some())
+            && seen.known.iter().any(|(_, _, metered, _)| *metered)
+            && seen
+                .known
+                .iter()
+                .all(|(_, _, _, network)| network.as_deref().is_some_and(|n| n.len() == 5)),
+        format!(
+            "spec 012 and spec 022: every station said what it runs and on which network (never its IMSI), and a billed session named its meter: {:?}",
+            seen.known
+        ),
+    );
+    expect(
         seen.unattributed.is_empty(),
         format!(
             "SC-002: every journalled fact names an actor: {:?}",
@@ -1328,6 +1366,17 @@ mod tests {
                     vec!["Beleg: http://127.0.0.1:9001/r/x".to_owned()],
                 ),
             ],
+            known: ["CP-1", "CP-2", "CP-3"]
+                .iter()
+                .map(|id| {
+                    (
+                        (*id).to_owned(),
+                        Some("1.0".to_owned()),
+                        true,
+                        Some("26201".to_owned()),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -1338,7 +1387,7 @@ mod tests {
             "the story as told passes"
         );
         type Break = fn(&mut Observed);
-        let wrong: [(&str, Break); 14] = [
+        let wrong: [(&str, Break); 16] = [
             ("billed by csmsd", |o| drop(o.settled.pop())),
             ("billd received", |o| drop(o.received.pop())),
             ("partner holds", |o| o.partner_cdrs = 6),
@@ -1361,6 +1410,10 @@ mod tests {
             }),
             ("spec 011", |o| o.displayed[2].1.clear()),
             ("spec 011", |o| o.displayed[1].1.push("Beleg: x".to_owned())),
+            ("spec 012", |o| o.known[0].1 = None),
+            ("spec 022", |o| {
+                o.known[1].3 = Some("262011234500002".to_owned())
+            }),
         ];
         for (named, break_it) in wrong {
             let mut seen = story_as_told();

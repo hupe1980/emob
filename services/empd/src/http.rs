@@ -54,7 +54,7 @@ pub struct Presented {
     pub contract_id: ContractId,
 }
 
-/// The answer (`specs/001-the-estate-runs/contracts/authorize.md`).
+/// The answer (`specs/archive/001-the-estate-runs/contracts/authorize.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Answer {
     /// The status.

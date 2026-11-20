@@ -43,6 +43,7 @@ p, li { max-width: var(--measure); }
 .muted { color: var(--muted); }
 .num, td.num, time { font-variant-numeric: tabular-nums; }
 .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); padding: 1rem 1.15rem; margin: 1rem 0; }
+.card > h2:first-child, .card > h3:first-child { margin-top: 0; }
 .verdict { border-radius: var(--radius); padding: 1rem 1.15rem; margin: .5rem 0 1.25rem; display: flex; gap: .8rem; align-items: flex-start; }
 .verdict h1 { font-size: 1.15rem; line-height: 1.3; letter-spacing: 0; margin: 0; }
 .tone-good { background: var(--good-fill); color: var(--good); }
@@ -72,11 +73,24 @@ td.num, th.num { text-align: right; }
 footer.foot { color: var(--muted); font-size: .85rem; border-top: 1px solid var(--line); padding: 1rem 1.25rem 2rem; text-align: center; }
 /* A link on a line of its own is a target: 24×24 CSS px at least (WCAG 2.2 2.5.8). */
 footer.foot p > a:only-child { display: inline-block; padding: .3rem .25rem; }
+/* Design rule 2: a page change crossfades where the browser can; elsewhere it is a navigation. */
+@view-transition { navigation: auto; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media print { header.bar, .noprint { display: none; } body { background: #fff; color: #000; } }
 /* ── the operator's queue (deskd's Heute) ───────────────────────────────── */
 .head { display: flex; flex-wrap: wrap; gap: .4rem 1rem; align-items: baseline; justify-content: space-between; }
 .head .when { color: var(--muted); margin: 0; }
+/* A link back up the page hierarchy: a target, not a word (WCAG 2.2 2.5.8). */
+/* Search and forms (spec 021): a field is a full-width target with its label above. */
+form.search { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 0 0 1rem; }
+form.search input { flex: 1 1 16rem; }
+input[type=text], input[type=search], input[type=date], input[type=number], select { font: inherit; padding: .5rem .6rem; min-height: 2.5rem;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); width: 100%; max-width: 32rem; }
+input[aria-invalid=true] { border-color: var(--bad); }
+/* A link that is a table row's name is a target too (WCAG 2.2 2.5.8). */
+td > a:first-child { display: inline-block; padding: .3rem 0; margin: -.3rem 0; }
+.btn.danger { background: var(--bad); border-color: var(--bad); }
+.back a { display: inline-block; padding: .45rem .1rem; }
 .eyebrow { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 .35rem; }
 .rate { display: grid; gap: .8rem 2rem; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
 .rate > h2 { grid-column: 1 / -1; margin: 0; }
@@ -148,3 +162,25 @@ table.totals th { text-transform: none; letter-spacing: 0; font-size: .94rem; co
   .print-url::after { content: " (" attr(href) ")"; font-size: .75rem; overflow-wrap: anywhere; }
   .print-url { color: #000; }
 }
+
+/* Maps drawn on the server (deskd, spec 022): land is the surface, borders
+   the line; a station is status as tint, and the legend says it in words. */
+.map { margin: 0 0 1rem; }
+.map svg { display: block; width: 100%; height: auto; background: var(--info-fill);
+  border: 1px solid var(--line); border-radius: var(--radius); }
+.map .land { fill: var(--bg); stroke: var(--muted); stroke-opacity: .45; stroke-width: 1.2; stroke-linejoin: round; }
+.map .dot { stroke: var(--bg); stroke-width: 2; }
+.map .dot.online { fill: var(--good); }
+.map .dot.offline { fill: var(--warn); }
+.map .dot.unknown { fill: var(--muted); }
+.map .cell { fill: var(--accent); fill-opacity: .28; stroke: var(--accent); stroke-width: 1.5; }
+.map a:hover .dot, .map a:hover .cell { stroke: var(--text); }
+.map .pin { fill: var(--accent); fill-opacity: .2; stroke: var(--accent); stroke-width: 2; }
+.map .pin-core { fill: var(--accent); }
+.map figcaption { font-size: .85rem; color: var(--muted); margin-top: .35rem; display: flex; flex-wrap: wrap; gap: .25rem .9rem; }
+.map .legend.online { color: var(--good); }
+.map .legend.offline { color: var(--warn); }
+.map .credit { margin-left: auto; }
+.callout { padding: .6rem .8rem; border-radius: 8px; background: var(--warn-fill); color: var(--text); }
+.callout.tone-warn { border-left: 4px solid var(--warn); }
+.group .lead { margin: .2rem 0 .6rem; }

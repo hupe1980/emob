@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "schemas/**"
       - ".github/workflows/site.yml"
   workflow_dispatch:
 
@@ -29,6 +30,9 @@ jobs:
       - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: zola
+      # The estate's and the events' JSON Schemas, at the `$id` they name
+      # (spec 012): https://hupe1980.github.io/emob/schemas/…
+      - run: mkdir -p site/static/schemas && cp -R schemas/. site/static/schemas/
       - run: cd site && zola build
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

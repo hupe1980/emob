@@ -108,7 +108,47 @@ pub fn location(
     index: usize,
     station: &Station,
 ) -> Result<ocpi_kit::v2_3_0::cdrs::CdrLocation, EstateError> {
-    let at = |field: &str| format!("stations[{index}].location.{field}");
+    point_location(&format!("stations[{index}]"), &Point::of(station))
+}
+
+/// What a CDR's location is built from: the point and its place — what the
+/// estate holds for a station, and what `de.emob.cdr.issued` carries (spec 021).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Point {
+    /// The EVSE id.
+    pub evse: emob_core::EvseId,
+    /// The connector.
+    pub connector: emob_core::ConnectorType,
+    /// Rated power, kW.
+    pub rated_power_kw: rust_decimal::Decimal,
+    /// The place.
+    pub location: emob_service::estate::Location,
+}
+
+impl Point {
+    /// The point an estate station is.
+    #[must_use]
+    pub fn of(station: &Station) -> Self {
+        Self {
+            evse: station.evse.clone(),
+            connector: station.connector,
+            rated_power_kw: station.rated_power_kw,
+            location: station.location.clone(),
+        }
+    }
+}
+
+/// A point's location as a CDR carries it; `key` prefixes the field names a
+/// refusal gives.
+///
+/// # Errors
+///
+/// [`EstateError::Invalid`] naming `<key>.location.<field>`.
+pub fn point_location(
+    key: &str,
+    station: &Point,
+) -> Result<ocpi_kit::v2_3_0::cdrs::CdrLocation, EstateError> {
+    let at = |field: &str| format!("{key}.location.{field}");
     let place = &station.location;
     let site = Site {
         facility: Facility::new(&place.id),
@@ -139,7 +179,7 @@ pub fn location(
     );
     emob_roam::ocpi::location::cdr_location(&site, &point, &point.connectors[0], 0).map_err(
         |error| EstateError::Invalid {
-            key: format!("stations[{index}].location"),
+            key: format!("{key}.location"),
             reason: error.to_string(),
         },
     )

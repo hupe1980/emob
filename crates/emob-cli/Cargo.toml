@@ -31,16 +31,18 @@ csmsd          = { path = "../../services/csmsd" }
 deskd          = { path = "../../services/deskd" }
 empd           = { path = "../../services/empd" }
 roamd          = { path = "../../services/roamd" }
+poid           = { path = "../../services/poid" }
+tarifd         = { path = "../../services/tarifd" }
 emob-core      = { workspace = true }
 emob-ocpp      = { workspace = true }
-emob-service   = { workspace = true }
+emob-service   = { workspace = true, features = ["schema"] }
 emob-sim       = { workspace = true }
 ocpp-kit       = { workspace = true, features = ["std", "tokio", "station", "rustls", "v1_6", "v2_0_1", "v2_1"] }
 ocpi-kit       = { workspace = true, features = ["client", "server", "testkit"] }
 # `demo --check` reads the invoice files back and validates them (spec 010).
 en16931        = { workspace = true }
 en16931-formats = { workspace = true }
-reqwest        = { version = "0.13", default-features = false }
+reqwest        = { version = "0.13", default-features = false, features = ["rustls"] }
 anyhow         = { workspace = true }
 axum           = { workspace = true }
 base64         = { workspace = true }
@@ -53,6 +55,7 @@ time           = { workspace = true }
 tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 
 [dev-dependencies]
+jsonschema     = { workspace = true }
 emob-eichrecht = { workspace = true }
 hex            = { workspace = true }
 p256           = { workspace = true }

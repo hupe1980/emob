@@ -106,25 +106,29 @@ partner and a seeded morning of sessions — and prints two links worth opening.
 
 ## Where it stands
 
-**✅ Release 0.3 — a journal you can trust, and ready for 2027.** Nine daemons
-start from one `estate.toml`. Stations connect to `csmsd` over OCPP with
-security profiles 1–3 and TLS; `empd` answers every authorisation, failing
-closed; sessions are journalled (sealed under a per-daemon data key), billed by
-`billd` into a monthly EN 16931 invoice and pushed to roaming partners by
-`roamd` over OCPI. The operator works from **Heute**, the driver checks a
-**receipt** in the browser, and releases are signed and attested. Also:
+**✅ Release 0.5 — the way in is short, and the fleet is visible.** Nine
+daemons start from one `estate.toml`, which `emob check` reads the way `rustc`
+reads code — line, key, what would be valid — and editors complete from its
+JSON Schema. Stations connect to `csmsd` over OCPP with security profiles 1–3
+and TLS; `empd` answers every authorisation, failing closed; sessions are
+journalled (sealed under a per-daemon data key), billed by `billd` into a
+monthly EN 16931 invoice and pushed to roaming partners by `roamd` over OCPI.
+The operator works from **Heute**, the driver checks a **receipt** in the
+browser, and releases are signed and attested. Also:
 
-- every journal fact names its **actor**, logs are JSON with request ids, and
-  each journal **signs its head** for a **witness** (`emob witness`, and a
-  section on Heute); a daemon refuses to start from a journal shorter than its
-  signed head;
-- the **MiSpeL month** for bidirectional points, and two calendar entries;
-- **ISO 15118-20** contract chains under named roots;
-- the **invoice page** with its XRechnung / EN 16931 files, delivered to the
-  operator's ERP or Peppol provider as a signed **CloudEvent** — and every
-  record and invoice to any system you name as a **subscriber**;
-- an **accessibility check** on every page in CI, the receipt link on the
-  station's display (opt-in), and a Docker-only `just demo`.
+- a journalled **station registry**: onboard a station in one form with an
+  installer sheet, find one among ten thousand, change or retire it without a
+  restart; each station an **asset card** — what it says it runs, what its
+  meter signs, its firmware history;
+- the fleet on a **map** drawn by the server (no tiles, no third party), a
+  locator that names swapped coordinates, and silent stations grouped by
+  **mobile network**;
+- every journal fact names its **actor**, and each journal **signs its head**
+  for a **witness**;
+- the **MiSpeL month**, **ISO 15118-20** contract chains, the **invoice page**
+  with its XRechnung files, and every record and invoice to any system you name
+  as a **subscriber**, as a signed CloudEvent;
+- an **accessibility check** on every page in CI, and a Docker-only `just demo`.
 
 **✅ Underneath:** fifteen domain crates — Eichrecht verification, sessions and
 the quarter-hour split, CDRs, tariffs, OCPP, OCPI and OICP crossings, AFIR data,

@@ -184,6 +184,12 @@ or XRechnung), `InvoiceSyntax` (UBL or CII), `InvoiceDelivery`,
 `InvoiceContact` and `MandateSeed` — describe what `billd` writes and where it
 hands it.
 
+`estate::Estate` is the whole file — every section, a section no daemon reads
+refused — and with the `schema` feature `estate::json_schema()` derives the
+JSON Schema published as `schemas/estate.schema.json` (a test holds the two
+equal). A refusal is rendered like `rustc`'s (`estate::report`): the file, the
+line, the key underlined, and `= help: did you mean …`.
+
 Secrets are never in the file: a field ending `_env` is an `EnvRef`, the name of
 an environment variable, resolved through an `Env` (the process environment, or
 a map in tests) — an unset variable refuses the start, naming it.
@@ -384,6 +390,7 @@ holds a process's lines so a test (and `emob demo --check`) can search them.
 |---|---|---|
 | `serde` | on | serialisation of persisted/forwarded types; enables `journal`, `estate` and `vault` |
 | `policy` | off | Cedar policies over the authority model's entity types |
+| `schema` | off | `estate::json_schema()`, the estate's JSON Schema derived from its types |
 
 ## Standards and sources
 

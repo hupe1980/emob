@@ -125,20 +125,36 @@ impl Wire {
                 Version::V1_6 => {
                     let boot: v1_6::BootNotificationRequest = typed(json!({
                         "chargePointModel": "Musterlader 150",
-                        "chargePointVendor": "emob-sim"
+                        "chargePointVendor": "emob-sim",
+                        "chargePointSerialNumber": format!("SIM-{}", self.identity),
+                        "firmwareVersion": "1.6.3",
+                        // A SIM on Telekom's network; csmsd keeps only 26201.
+                        "imsi": "262011234500001"
                     }))?;
                     self.handle.call(boot).await?;
                 }
                 Version::V2_0_1 => {
                     let boot: v2_0_1::BootNotificationRequest = typed(json!({
-                        "chargingStation": { "model": "Musterlader 22", "vendorName": "emob-sim" },
+                        "chargingStation": {
+                            "model": "Musterlader 22",
+                            "vendorName": "emob-sim",
+                            "serialNumber": format!("SIM-{}", self.identity),
+                            "firmwareVersion": "2.0.8",
+                            "modem": { "imsi": "262021234500002" }
+                        },
                         "reason": "PowerUp"
                     }))?;
                     self.handle.call(boot).await?;
                 }
                 _ => {
                     let boot: v2_1::BootNotificationRequest = typed(json!({
-                        "chargingStation": { "model": "Musterlader 150", "vendorName": "emob-sim" },
+                        "chargingStation": {
+                            "model": "Musterlader 150",
+                            "vendorName": "emob-sim",
+                            "serialNumber": format!("SIM-{}", self.identity),
+                            "firmwareVersion": "2.1.0",
+                            "modem": { "imsi": "262011234500003" }
+                        },
                         "reason": "PowerUp"
                     }))?;
                     self.handle.call(boot).await?;

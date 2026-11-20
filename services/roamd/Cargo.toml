@@ -10,6 +10,7 @@ repository.workspace   = true
 rust-version.workspace = true
 
 [dependencies]
+rust_decimal = { workspace = true }
 emob-cdr     = { workspace = true }
 emob-core    = { workspace = true }
 emob-poi     = { workspace = true }

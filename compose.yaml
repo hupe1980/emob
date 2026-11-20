@@ -126,6 +126,9 @@ services:
       # The Ed25519 seed poid signs its journal head with after every append
       # (spec 008); a journal shorter than its signed head does not start.
       POID_SIGNING_KEY: ${POID_SIGNING_KEY:?set POID_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
+      # The identifier the Mobilithek issued this operator; poid refuses to
+      # start without one (spec 012).
+      POID_NAP_IDENTIFIER: ${POID_NAP_IDENTIFIER:?set POID_NAP_IDENTIFIER — the national access point identifier; `just dev-keys` prints DE-NAP-DEV}
     ports: ["8084:8080"]
     volumes: [poid:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 

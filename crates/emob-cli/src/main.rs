@@ -1,5 +1,11 @@
 //! `emob` — the command line.
 //!
+//! `emob check <estate.toml>` refuses an estate before a daemon reads it — see
+//! [`check`].
+//!
+//! `emob subscribers test <name>` sends a subscriber one signed sample of
+//! each type it takes — see [`subscribers`].
+//!
 //! `emob demo` runs the whole estate on loopback — see [`demo`].
 //!
 //! `emob witness <url>...` reads each daemon's signed journal head and alarms
@@ -20,10 +26,18 @@ use std::process::ExitCode;
 
 use emob_verify::Verdict;
 
+mod check;
 mod demo;
+mod subscribers;
 mod witness;
 
-const USAGE: &str = "usage: emob verify <transparency-file>\n       emob demo [--check] [--seed N] [--clock RFC3339] [--speed N|max] [--listen IP] [--tls DIR] [--links FILE]\n       emob witness [--file PATH] <url>...\n\n\
+const USAGE: &str = "usage: emob check [--secrets] [--schema] <estate.toml>\n       emob subscribers test <name> [--estate PATH]\n       emob verify <transparency-file>\n       emob demo [--check] [--seed N] [--clock RFC3339] [--speed N|max] [--listen IP] [--tls DIR] [--links FILE]\n       emob witness [--file PATH] <url>...\n\n\
+    check   Checks an estate before a daemon reads it: every section, every\n\
+            daemon's own checks, and with --secrets every *_env is set.\n\
+            Errors point at the file, the line and the key.\n\
+    subscribers test\n\
+            Sends one signed sample of every event type a [[subscribers]]\n\
+            entry takes, marked emobtest, and prints each answer.\n\
     verify  Checks every signed meter value in a S.A.F.E. transparency file against\n\
             the key it carries, offline. Exit 0 = all verified, 1 = one did not\n\
             verify, 2 = one could not be checked here.\n\
@@ -42,6 +56,10 @@ fn main() -> ExitCode {
         [command, rest @ ..] if command == "witness" => {
             drop((out, err));
             return witness::main(rest);
+        }
+        [command, rest @ ..] if command == "check" => check::main(rest, &mut out, &mut err),
+        [command, rest @ ..] if command == "subscribers" => {
+            subscribers::main(rest, &mut out, &mut err)
         }
         [command, rest @ ..] if command == "demo" => {
             drop((out, err));

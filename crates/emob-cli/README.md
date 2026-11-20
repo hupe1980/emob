@@ -1,8 +1,10 @@
 # emob-cli
 
-The `emob` command line: `emob verify` checks a charging receipt's signed meter
-values offline, `emob demo` runs the whole estate on your machine, and
-`emob witness` keeps an independent record of where each daemon's journal ends.
+The `emob` command line: `emob check` refuses an estate before a daemon reads
+it, `emob verify` checks a charging receipt's signed meter values offline,
+`emob demo` runs the whole estate on your machine, `emob witness` keeps an
+independent record of where each daemon's journal ends, and `emob subscribers
+test` proves an event receiver before the first real record reaches it.
 
 ```console
 $ emob verify transparenz-1.xml
@@ -85,8 +87,33 @@ docker run --rm -it --network host --user "$(id -u):$(id -g)" \
 
 Host networking, because the demo binds loopback only and the links it prints
 are the host's (on Docker Desktop, enable host networking under Settings →
-Resources → Network). The image is published from the 0.3 release on; before
-it, the pull is denied.
+Resources → Network).
+
+## `emob check`
+
+```console
+$ emob check deploy/estate.example.toml
+✓ deploy/estate.example.toml: 1 station, 1 tariff, 1 partner, 1 operator — every daemon would start
+```
+
+Every section against the whole estate (one no daemon reads is refused), then
+each daemon's own checks — `csmsd`'s fleet and keys, `roamd`'s locations,
+`poid`'s sites, `tarifd`'s tariffs, subscribers and operators. A mistake is
+reported like `rustc` reports one, with the line and `= help:`. `--secrets`
+also requires every `*_env` variable to be set (names, never values);
+`--schema` prints the estate's JSON Schema. Exit `0` passes, `1` refused, `2`
+unreadable.
+
+## `emob subscribers test`
+
+```console
+$ emob subscribers test warehouse
+✓ → https://dwh.example.com/emob/events de.emob.cdr.issued … 204 No Content (83 ms)
+```
+
+One signed sample of every type the `[[subscribers]]` entry takes, sent as the
+daemons send the real one, marked `emobtest: true` with an id starting `test-`.
+Nothing is journalled. Exit `1` when one answer is not `2xx`.
 
 ## `emob witness`
 

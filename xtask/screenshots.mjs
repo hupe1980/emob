@@ -182,6 +182,13 @@ async function shot(file, { url, metrics, scheme = "light", headers = {}, then }
 const heute = `${links.heute}?lang=de`;
 const receipt = `${links.receipt}?lang=de`;
 const refused = `${links.refused}?lang=de`;
+// Spec 012: one station's page, the asset card — CP-3 runs 2.1 and bills.
+const station = `${links.heute.replace(/\/$/, "")}/station/CP-3?lang=de`;
+// Spec 021: the registry searched, and the onboarding form.
+const stationList = `${links.heute.replace(/\/$/, "")}/stations?lang=de`;
+const stationNew = `${links.heute.replace(/\/$/, "")}/stations/new?lang=de`;
+// Spec 022: changing a station, from its card.
+const stationEdit = `${links.heute.replace(/\/$/, "")}/station/CP-3/edit?lang=de`;
 const SELF_CHECK = `(async () => {
     document.getElementById('self-check-run').click();
     for (let i = 0; i < 50 && !document.querySelector('.check.tone-good, .check.tone-bad'); i++) await new Promise((r) => setTimeout(r, 100));
@@ -256,10 +263,13 @@ const PAGE_CHECKS = `(() => {
   const interactive = "a[href], button, input:not([type=hidden]), select, textarea, summary, [tabindex]:not([tabindex='-1'])";
   for (const el of document.querySelectorAll(interactive)) {
     if (!visible(el) || el.classList.contains("skip")) continue;
+    // A dot on a map is exempt as an "equivalent" (2.5.8): the table under
+    // the map links every station it draws, at full size (spec 022).
+    if (el.closest("figure.map")) continue;
     const box = el.getBoundingClientRect();
     if (box.width >= 24 && box.height >= 24) continue;
     const inline = getComputedStyle(el).display === "inline" && el.parentElement &&
-      el.parentElement.innerText.trim().length > el.innerText.trim().length;
+      (el.parentElement.innerText ?? "").trim().length > (el.innerText ?? "").trim().length;
     if (!inline) found.push("target size: " + name(el) + " is " + Math.round(box.width) + "×" + Math.round(box.height) + " px, needs 24×24");
   }
 
@@ -358,6 +368,10 @@ async function accessible(url, metrics, scheme, headers, then) {
 if (A11Y) {
   const pages = [
     ["Heute", heute, basic],
+    ["station", station, basic],
+    ["stations", stationList, basic],
+    ["new station", stationNew, basic],
+    ["change station", stationEdit, basic],
     ["receipt (billed)", receipt],
     ["receipt (refused)", refused],
     ["receipt (checked)", receipt, {}, SELF_CHECK],
@@ -381,6 +395,7 @@ if (A11Y) {
 
 mkdirSync(dir, { recursive: true });
 await inspect("Heute", heute, basic);
+await inspect("station", station, basic);
 await inspect("receipt", receipt);
 await inspect("refused receipt", refused);
 if (links.inbox) await inspect("partner inbox", links.inbox);
@@ -389,6 +404,11 @@ await shot("heute-light.webp", { url: heute, metrics: DESKTOP, headers: basic })
 await shot("heute-dark.webp", { url: heute, metrics: DESKTOP, scheme: "dark", headers: basic });
 await shot("heute-mobile-light.webp", { url: heute, metrics: PHONE, headers: basic });
 await shot("heute-mobile-dark.webp", { url: heute, metrics: PHONE, scheme: "dark", headers: basic });
+await shot("station-light.webp", { url: station, metrics: DESKTOP, headers: basic });
+await shot("station-dark.webp", { url: station, metrics: DESKTOP, scheme: "dark", headers: basic });
+await shot("stations-light.webp", { url: stationList, metrics: DESKTOP, headers: basic });
+await shot("stations-dark.webp", { url: stationList, metrics: DESKTOP, scheme: "dark", headers: basic });
+await shot("station-new-light.webp", { url: stationNew, metrics: DESKTOP, headers: basic });
 await shot("receipt-light.webp", { url: receipt, metrics: PHONE });
 await shot("receipt-dark.webp", { url: receipt, metrics: PHONE, scheme: "dark" });
 await shot("receipt-refused.webp", { url: refused, metrics: PHONE });

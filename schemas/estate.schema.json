@@ -1,0 +1,991 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "emob estate",
+  "description": "The whole estate: every section any daemon reads (spec 012).\n\nThe daemons keep their own narrower views — a malformed tariff does not\nstop `empd` — and this one is what `emob check` and the published JSON\nSchema describe. A section no daemon reads is refused here, so\n`[[subscriber]]` for `[[subscribers]]` is a refusal and not a silence.",
+  "type": "object",
+  "properties": {
+    "parties": {
+      "description": "Whom the platform acts as.",
+      "$ref": "#/$defs/Parties"
+    },
+    "stations": {
+      "description": "The fleet.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Station"
+      },
+      "default": []
+    },
+    "meter_keys": {
+      "description": "The keys that make energy billable.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MeterKey"
+      }
+    },
+    "tariffs": {
+      "description": "The tariffs stations name.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/TariffSpec"
+      }
+    },
+    "partners": {
+      "description": "The roaming partners.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Partner"
+      }
+    },
+    "billing": {
+      "description": "How invoices are issued (`billd`).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BillingSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "contracts": {
+      "description": "Driver contracts `empd` seeds.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ContractSeed"
+      }
+    },
+    "operators": {
+      "description": "Who may read and act.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Operator"
+      }
+    },
+    "csms": {
+      "description": "The OCPP listener.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Csms"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "desk": {
+      "description": "The operator page.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Desk"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "receipts": {
+      "description": "Where receipt links point.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReceiptSection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "services": {
+      "description": "Where the daemons are.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Services"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "roaming": {
+      "description": "The roaming node.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Roaming"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "witness": {
+      "description": "The keys journal heads are signed under.",
+      "$ref": "#/$defs/Witness"
+    },
+    "subscribers": {
+      "description": "Systems outside the estate that receive events.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Subscriber"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "parties"
+  ],
+  "$defs": {
+    "Parties": {
+      "description": "`[parties]` — whom this estate acts as.",
+      "type": "object",
+      "properties": {
+        "operator": {
+          "description": "The charge point operator: the party the stations, CDRs and invoices are\nissued under.",
+          "type": "string",
+          "pattern": "^[A-Z]{2}\\*?[A-Z0-9]{3}$"
+        },
+        "provider": {
+          "description": "The e-mobility provider `empd` runs: the party its tokens are issued by.",
+          "type": "string",
+          "pattern": "^[A-Z]{2}\\*?[A-Z0-9]{3}$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "operator",
+        "provider"
+      ]
+    },
+    "Station": {
+      "description": "`[[stations]]` — one charging station and the point it is.",
+      "type": "object",
+      "properties": {
+        "identity": {
+          "description": "The OCPP identity it connects under.",
+          "type": "string"
+        },
+        "security_profile": {
+          "description": "The security profile it must connect with\n`[OCPP 2.0.1 Part 2 §A00]`: 1 (Basic over plain WebSocket),\n2 (Basic over TLS) or 3 (TLS client certificate). There is no profile 0.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "password_hash": {
+          "description": "Profiles 1 and 2: its Basic password as an Argon2id PHC string\n(`csmsd hash-password` prints one). A hash is not a credential, so it is\nwritten here rather than named as an environment variable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ocpp": {
+          "description": "The version it speaks.",
+          "$ref": "#/$defs/Ocpp"
+        },
+        "evse": {
+          "description": "The EVSE its sessions are attributed to.",
+          "type": "string",
+          "pattern": "^[A-Z]{2}\\*?[A-Z0-9]{3}\\*?E[A-Z0-9*]{1,30}$"
+        },
+        "rated_power_kw": {
+          "description": "What it can deliver, in kW — the `[AFIR Art. 5(4)]` threshold reads it.",
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        "tariff": {
+          "description": "The id of the `[[tariffs]]` entry that rates its sessions.",
+          "type": "string"
+        },
+        "connector": {
+          "description": "The connector it offers.",
+          "type": "string",
+          "enum": [
+            "iec62196_t2",
+            "iec62196_t2_combo",
+            "iec62196_t1",
+            "iec62196_t1_combo",
+            "chademo",
+            "iec62196_t3_a",
+            "domestic_f",
+            "cee5"
+          ]
+        },
+        "location": {
+          "description": "Where it stands.",
+          "$ref": "#/$defs/Location"
+        },
+        "receipt_display_minutes": {
+          "description": "How many minutes (1–15) the station's display shows the receipt link\nafter a session — `csmsd` sends it as `SetDisplayMessage`\n`[OCPP 2.0.1 Part 2 §O]` (spec 011). Absent is off: a screen is public,\nand the next person at it can read the link.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255,
+          "default": null
+        },
+        "commissioned": {
+          "description": "The day it went into service, `YYYY-MM-DD` — the asset card's age.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "security_profile",
+        "ocpp",
+        "evse",
+        "rated_power_kw",
+        "tariff",
+        "connector",
+        "location"
+      ]
+    },
+    "Ocpp": {
+      "description": "The OCPP version a station speaks.",
+      "oneOf": [
+        {
+          "description": "OCPP 1.6J.",
+          "type": "string",
+          "const": "1.6"
+        },
+        {
+          "description": "OCPP 2.0.1.",
+          "type": "string",
+          "const": "2.0.1"
+        },
+        {
+          "description": "OCPP 2.1.",
+          "type": "string",
+          "const": "2.1"
+        }
+      ]
+    },
+    "Location": {
+      "description": "Where a station stands, as a roaming partner and the national access point\nare told it. Coordinates are exact decimals: they travel as decimal text in\nOCPI and DATEX II and never become a float here.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The location's id, unique per operator.",
+          "type": "string"
+        },
+        "name": {
+          "description": "What a driver sees.",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street.",
+          "type": "string"
+        },
+        "house_number": {
+          "description": "House number.",
+          "type": "string"
+        },
+        "postal_code": {
+          "description": "Postal code.",
+          "type": "string"
+        },
+        "city": {
+          "description": "City.",
+          "type": "string"
+        },
+        "country": {
+          "description": "ISO 3166-1 alpha-2.",
+          "type": "string"
+        },
+        "latitude": {
+          "description": "WGS 84 latitude.",
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        "longitude": {
+          "description": "WGS 84 longitude.",
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        "time_zone": {
+          "description": "The IANA zone the site's local time is read in.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "street",
+        "house_number",
+        "postal_code",
+        "city",
+        "country",
+        "latitude",
+        "longitude",
+        "time_zone"
+      ]
+    },
+    "MeterKey": {
+      "description": "`[[meter_keys]]` — a meter's public key, out of band, with where it came\nfrom `[OCMF §Relation of Serial Numbers]`.",
+      "type": "object",
+      "properties": {
+        "meter": {
+          "description": "The meter serial (`MS`).",
+          "type": "string"
+        },
+        "gateway": {
+          "description": "The gateway serial (`GS`), where the key is bound to the pair.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "curve": {
+          "description": "The curve, as `[OCMF Tab. 22]` names it (`secp256r1`, …).",
+          "type": "string"
+        },
+        "key": {
+          "description": "The public key, hex — SEC1 or `SubjectPublicKeyInfo`.",
+          "type": "string"
+        },
+        "valid_from": {
+          "description": "From when the key is valid (RFC 3339); unbounded when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valid_until": {
+          "description": "Until when (RFC 3339, exclusive); unbounded when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provenance": {
+          "description": "Where the key came from — a type approval, a cabinet reading.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "meter",
+        "curve",
+        "key",
+        "provenance"
+      ]
+    },
+    "TariffSpec": {
+      "description": "`[[tariffs]]` — one flat ad-hoc energy tariff.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Its id.",
+          "type": "string"
+        },
+        "currency": {
+          "description": "ISO 4217.",
+          "type": "string",
+          "pattern": "^[A-Z]{3}$"
+        },
+        "time_zone": {
+          "description": "The IANA zone its times are read in (D175).",
+          "type": "string"
+        },
+        "energy": {
+          "description": "Gross price per kWh, VAT included — the figure a driver is shown\n`[PAngV §3(1)]`; [`TariffSpec::vat`] is the rate inside it.",
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        "vat": {
+          "description": "The VAT rate inside [`TariffSpec::energy`], in percent.",
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "currency",
+        "time_zone",
+        "energy",
+        "vat"
+      ]
+    },
+    "Partner": {
+      "description": "`[[partners]]` — a provider this operator settles with.",
+      "type": "object",
+      "properties": {
+        "party": {
+          "description": "Its party id; a contract whose issuer this is routes here.",
+          "type": "string",
+          "pattern": "^[A-Z]{2}\\*?[A-Z0-9]{3}$"
+        },
+        "token_a_env": {
+          "description": "The variable holding the Token A handed to it out of band\n`[OCPI 2.3.0 §credentials]`.",
+          "$ref": "#/$defs/EnvRef"
+        },
+        "signed_data": {
+          "description": "Whether it requires the signed data on every CDR.",
+          "type": "boolean",
+          "default": false
+        },
+        "settles_within_days": {
+          "description": "The window it settles within, in days.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "billing": {
+          "description": "Whom `billd` invoices.",
+          "$ref": "#/$defs/Billing"
+        },
+        "specification": {
+          "description": "The specification its invoices are written in.",
+          "$ref": "#/$defs/InvoiceSpecification"
+        },
+        "buyer_reference": {
+          "description": "BT-10 — its reference for our invoices (a Leitweg-ID for a public buyer).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "mandate": {
+          "description": "Its direct-debit mandate; without one, it pays by transfer.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MandateSeed"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "party",
+        "token_a_env",
+        "billing"
+      ]
+    },
+    "EnvRef": {
+      "description": "The name of an environment variable that holds a secret.",
+      "type": "string"
+    },
+    "Billing": {
+      "description": "The party details an invoice needs.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Legal name.",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street and number.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "post_code": {
+          "description": "Postal code.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "city": {
+          "description": "City.",
+          "type": "string"
+        },
+        "country": {
+          "description": "ISO 3166-1 alpha-2.",
+          "type": "string"
+        },
+        "vat_id": {
+          "description": "VAT identifier.",
+          "type": "string"
+        },
+        "electronic_address": {
+          "description": "The e-mail address an e-invoice is addressed to (BT-34 / BT-49,\nscheme `EM`), which `XRechnung` requires of both parties.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "city",
+        "country",
+        "vat_id"
+      ]
+    },
+    "InvoiceSpecification": {
+      "description": "The EN 16931 specification a partner's invoices are written in (BT-24).",
+      "oneOf": [
+        {
+          "description": "EN 16931 itself — what `[UStG §14(1)]` names for a business recipient.",
+          "type": "string",
+          "const": "en16931"
+        },
+        {
+          "description": "`XRechnung` 3.0 — a German public buyer, or a partner that asks for it.",
+          "type": "string",
+          "const": "xrechnung"
+        }
+      ]
+    },
+    "MandateSeed": {
+      "description": "A SEPA direct-debit mandate a partner signed (BT-89, BT-91).",
+      "type": "object",
+      "properties": {
+        "reference": {
+          "description": "The mandate reference.",
+          "type": "string"
+        },
+        "iban": {
+          "description": "The account debited.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "iban"
+      ]
+    },
+    "BillingSection": {
+      "description": "`[billing]` — the operator's own invoicing identity.",
+      "type": "object",
+      "properties": {
+        "series": {
+          "description": "The invoice number series prefix.",
+          "type": "string"
+        },
+        "seller": {
+          "description": "The seller on every invoice.",
+          "$ref": "#/$defs/Billing"
+        },
+        "vat_rate": {
+          "description": "The standard VAT rate, in percent, where the energy is supplied.",
+          "type": "string",
+          "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        "iban": {
+          "description": "The operator's account, paid into by transfer (BT-84).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "creditor_id": {
+          "description": "The operator's SEPA creditor identifier (BT-90), for a mandate.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "contact": {
+          "description": "The seller's contact.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InvoiceContact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "public_url": {
+          "description": "The origin `billd`'s invoice pages are reached at: `<public_url>/i/<token>`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "delivery": {
+          "description": "The operator system invoices are handed to.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InvoiceDelivery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "series",
+        "seller",
+        "vat_rate"
+      ]
+    },
+    "InvoiceContact": {
+      "description": "The seller's contact on an invoice (BG-6), which `XRechnung` requires.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "A name or department.",
+          "type": "string"
+        },
+        "phone": {
+          "description": "A telephone number.",
+          "type": "string"
+        },
+        "email": {
+          "description": "An e-mail address.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "phone",
+        "email"
+      ]
+    },
+    "InvoiceDelivery": {
+      "description": "`[billing.delivery]` — the operator system (ERP, Peppol provider) every\nissued invoice is handed to, signed (spec 010).",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Where invoices are posted: `https://`, or `http://` on loopback only.",
+          "type": "string"
+        },
+        "secret_env": {
+          "description": "The variable holding the Standard Webhooks secret (`whsec_…`).",
+          "$ref": "#/$defs/EnvRef"
+        },
+        "syntax": {
+          "description": "The syntax posted.",
+          "$ref": "#/$defs/InvoiceSyntax"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "secret_env"
+      ]
+    },
+    "InvoiceSyntax": {
+      "description": "The syntax a delivered invoice is written in.",
+      "oneOf": [
+        {
+          "description": "OASIS UBL 2.1.",
+          "type": "string",
+          "const": "ubl"
+        },
+        {
+          "description": "UN/CEFACT CII D16B.",
+          "type": "string",
+          "const": "cii"
+        }
+      ]
+    },
+    "ContractSeed": {
+      "description": "`[[contracts]]` — a driver contract `empd` seeds once.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The contract id (eMAID).",
+          "type": "string"
+        },
+        "from": {
+          "description": "The day it starts, `YYYY-MM-DD`.",
+          "type": "string"
+        },
+        "tokens": {
+          "description": "Its tokens.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TokenSeed"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "from"
+      ]
+    },
+    "TokenSeed": {
+      "description": "One token on a seeded contract.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "description": "The uid the card or app presents.",
+          "type": "string"
+        },
+        "type": {
+          "description": "`RFID`, `APP_USER`, `AD_HOC_USER`, `OTHER`.",
+          "type": "string"
+        },
+        "whitelist": {
+          "description": "`ALWAYS`, `ALLOWED`, `ALLOWED_OFFLINE`, `NEVER`.",
+          "type": "string"
+        },
+        "blocked": {
+          "description": "Whether it is blocked.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "uid",
+        "type",
+        "whitelist"
+      ]
+    },
+    "Operator": {
+      "description": "`[[operators]]` — who may read the read models.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Who this is: the name every journal record and log line this operator\ncauses carries (`operator:<name>`), 1 to 64 of `[A-Za-z0-9*._:=+|@ -]`.",
+          "type": "string"
+        },
+        "token_env": {
+          "description": "The variable holding the bearer token.",
+          "$ref": "#/$defs/EnvRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "token_env"
+      ]
+    },
+    "Csms": {
+      "description": "`[csms]` — how `csmsd`'s OCPP listener is exposed.\n\nEvery path is relative to the estate file (see [`Csms::path`]).",
+      "type": "object",
+      "properties": {
+        "tls_cert": {
+          "description": "The server certificate chain, PEM.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_key": {
+          "description": "Its private key, PEM.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client_ca": {
+          "description": "The CA a profile-3 station's certificate must chain to, PEM.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tls_terminated_by_proxy": {
+          "description": "TLS is terminated in front of `csmsd` by a proxy the operator runs.",
+          "type": "boolean",
+          "default": false
+        },
+        "max_connections": {
+          "description": "The most simultaneous station sessions.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 1024
+        },
+        "messages_per_minute": {
+          "description": "The most messages one connection may send per minute.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 120
+        },
+        "idle_timeout_secs": {
+          "description": "How long a session may stay silent before it is closed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 900
+        }
+      },
+      "additionalProperties": false
+    },
+    "Desk": {
+      "description": "`billd` and `roamd` are reached at their `[services]` addresses; `csmsd`'s\nshell is named here because no other daemon calls it.",
+      "type": "object",
+      "properties": {
+        "csmsd": {
+          "description": "`csmsd`'s shell base URL (its read model, not its OCPP socket).",
+          "type": "string"
+        },
+        "token_env": {
+          "description": "The variable holding the operator token `deskd` reads the read models\nwith — one of the `[[operators]]` tokens.",
+          "$ref": "#/$defs/EnvRef"
+        },
+        "time_zone": {
+          "description": "The IANA zone the page tells the time and \"today\" in.",
+          "type": "string"
+        },
+        "ocpp_url": {
+          "description": "Where stations reach the CSMS, as an installer types it\n(`wss://csms.example.com/ocpp`) — printed on the onboarding sheet.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "csmsd",
+        "token_env",
+        "time_zone"
+      ]
+    },
+    "ReceiptSection": {
+      "description": "`[receipts]` — read by `csmsd`.",
+      "type": "object",
+      "properties": {
+        "public_url": {
+          "description": "The origin a driver reaches the shell at; links are\n`<public_url>/r/<token>`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "public_url"
+      ]
+    },
+    "Services": {
+      "description": "`[services]` — where the daemons reach each other, and how.",
+      "type": "object",
+      "properties": {
+        "billd": {
+          "description": "`billd`'s base URL.",
+          "type": "string"
+        },
+        "roamd": {
+          "description": "`roamd`'s base URL.",
+          "type": "string"
+        },
+        "empd": {
+          "description": "`empd`'s base URL.",
+          "type": "string"
+        },
+        "webhook_secret_env": {
+          "description": "The variable holding the Standard Webhooks secret (`whsec_…`).",
+          "$ref": "#/$defs/EnvRef"
+        },
+        "service_token_env": {
+          "description": "The variable holding the token `csmsd` presents to `empd`.",
+          "$ref": "#/$defs/EnvRef"
+        },
+        "authorize_timeout_ms": {
+          "description": "How long `csmsd` waits for `empd` before answering `Invalid`.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 2000
+        },
+        "retry_secs": {
+          "description": "How often an outbox or a roaming queue is retried.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 5
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "billd",
+        "roamd",
+        "empd",
+        "webhook_secret_env",
+        "service_token_env"
+      ]
+    },
+    "Roaming": {
+      "description": "`[roaming]` — `roamd`'s face to its partners.",
+      "type": "object",
+      "properties": {
+        "public_url": {
+          "description": "Where partners reach this node's OCPI root (ending in `/ocpi`).",
+          "type": "string"
+        },
+        "reach_back_allow": {
+          "description": "Hosts the credentials reach-back may contact over `http` or at a\nprivate, loopback or link-local address. Empty in production.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "public_url"
+      ]
+    },
+    "Witness": {
+      "description": "`[desk]` — what the operator page reads, and with which token.\n\n`[witness]` — what the witness trusts (spec 008).\n\n`keys` names a daemon's head-verifier key (`emob/<daemon>+<8 hex>+<base64>`,\nwhat `GET /v1/<daemon>/head` sends in `Emob-Verifier-Key`). A daemon not\nnamed is pinned the first time the witness sees it — trust on first use,\nwhich Heute says.",
+      "type": "object",
+      "properties": {
+        "keys": {
+          "description": "Daemon name → verifier key.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "Subscriber": {
+      "description": "`[[subscribers]]` — a system outside the estate that receives events.\n\nEach event a daemon emits whose type one of `types` admits\n([`crate::events::matches`]) is posted to `url` as a structured-mode\n[`crate::cloudevent::CloudEvent`], signed with this subscriber's own secret,\nand retried until it answers `2xx`. A subscriber added later receives what\nis emitted from then on.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Its name; the journal records an answer as `subscriber:<name>`.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Where events are posted: `https://`, or `http://` on loopback only.",
+          "type": "string"
+        },
+        "secret_env": {
+          "description": "The variable holding its Standard Webhooks secret (`whsec_…`).",
+          "$ref": "#/$defs/EnvRef"
+        },
+        "types": {
+          "description": "The types it takes: concrete types or `*`-terminated prefixes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "url",
+        "secret_env",
+        "types"
+      ]
+    }
+  },
+  "$id": "https://hupe1980.github.io/emob/schemas/estate.schema.json"
+}

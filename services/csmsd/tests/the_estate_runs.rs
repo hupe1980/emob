@@ -639,6 +639,39 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
         assert_eq!(status, 200);
         assert!(!view.contains(GOOD_CARD), "no uid in a read model: {view}");
         assert!(view.contains(r#""billed":1"#), "today's success: {view}");
+        // Spec 012: the station page — behind the operators, an unknown
+        // station an empty 404 that does not echo it (SR-139), and a known
+        // one with what its meter signed (SR-136).
+        let (status, _) = get(
+            &format!("http://{}/v1/csmsd/stations/CP-1", estate.csmsd_http),
+            None,
+        )
+        .await;
+        assert_eq!(status, 401);
+        let (status, body) = get(
+            &format!(
+                "http://{}/v1/csmsd/stations/CP-%3Cscript%3E",
+                estate.csmsd_http
+            ),
+            Some(OPERATOR),
+        )
+        .await;
+        assert_eq!((status, body.as_str()), (404, ""));
+        let (status, view) = get(
+            &format!("http://{}/v1/csmsd/stations/CP-1", estate.csmsd_http),
+            Some(OPERATOR),
+        )
+        .await;
+        assert_eq!(status, 200, "{view}");
+        assert!(view.contains(r#""state":"online""#), "{view}");
+        assert!(
+            view.contains(r#""meters":[{"#),
+            "the meter that signed: {view}"
+        );
+        assert!(
+            !view.contains(GOOD_CARD),
+            "no uid on the station page: {view}"
+        );
         let (status, view) = get(
             &format!("http://{}/v1/roamd/today", estate.roamd),
             Some(OPERATOR),
@@ -905,6 +938,18 @@ async fn a_subscriber_outside_the_estate_receives_the_issued_record_as_a_cloudev
         assert_eq!(event.subject.as_deref(), Some(format!("cdr/{id}").as_str()));
         assert!(event.time.is_some());
         assert!(event.data["cdr"].is_object() && event.data["signed"].is_array());
+        // Spec 012: the published schema describes what was sent.
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/events/de.emob.cdr.issued.json"
+        ))
+        .unwrap();
+        let sent: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&sent)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
         assert!(
             event.data["receipt"].is_string(),
             "the driver's receipt link travels too"
@@ -1110,4 +1155,210 @@ async fn a_roamd_restarted_before_the_partner_registered_pushes_the_record_once_
     roamd.kill();
     billd.kill();
     empd.kill();
+}
+
+/// A station that answers nothing, connecting as `identity` with `password`.
+struct Quiet;
+
+impl ocpp_kit::transport::Handler for Quiet {
+    fn on_request(
+        &self,
+        _ctx: ocpp_kit::transport::Ctx,
+        request: ocpp_kit::engine::IncomingRequest,
+    ) -> ocpp_kit::transport::BoxFuture<'_, Result<Box<ocpp_kit::RawValue>, ocpp_kit::rpc::CallError>>
+    {
+        Box::pin(async move { Err(ocpp_kit::rpc::CallError::not_supported(&request.action)) })
+    }
+}
+
+/// The IMSI every test station's SIM reports: Telekom Deutschland's network.
+const IMSI: &str = "262011234567890";
+
+async fn boots_as(ocpp: SocketAddr, identity: &str, password: &str) -> bool {
+    let Ok(station) = ocpp_kit::transport::Station::builder()
+        .identity(identity)
+        .unwrap()
+        .url(format!("ws://{ocpp}/ocpp"))
+        .versions([ocpp_kit::Version::V1_6])
+        .security_profile(ocpp_kit::transport::SecurityProfile::BasicAuth)
+        .password(ocpp_kit::transport::BasicAuthPassword::hex(password).unwrap())
+        .reconnect(false)
+        .handler(Quiet)
+        .build()
+    else {
+        return false;
+    };
+    let Ok(handle) = station.spawn() else {
+        return false;
+    };
+    let booted = tokio::time::timeout(
+        Duration::from_secs(3),
+        handle.call(
+            v1_6::BootNotificationRequest::new("M".to_owned(), "V".to_owned()).with_imsi(IMSI),
+        ),
+    )
+    .await
+    .is_ok_and(|answer| answer.is_ok());
+    handle.shutdown(Duration::from_secs(1)).await;
+    booted
+}
+
+async fn send(
+    method: reqwest::Method,
+    url: &str,
+    token: Option<&str>,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let mut request = reqwest::Client::new().request(method, url).json(&body);
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.expect("csmsd answers");
+    let status = response.status().as_u16();
+    let body = response.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+fn new_station(identity: &str, evse: &str) -> serde_json::Value {
+    serde_json::json!({
+        "identity": identity,
+        "security_profile": 1,
+        "ocpp": "1.6",
+        "evse": evse,
+        "rated_power_kw": "22",
+        "tariff": "ad-hoc",
+        "connector": "iec62196_t2",
+        "commissioned": "2026-11-20",
+        "location": {
+            "id": "LOC-NEW", "name": "Neuer Standort", "street": "Ringstraße",
+            "house_number": "7", "postal_code": "52062", "city": "Aachen", "country": "DE",
+            "latitude": "50.775346", "longitude": "6.083887", "time_zone": "Europe/Berlin"
+        }
+    })
+}
+
+/// Spec 021: a station registered over the API connects at once, without a
+/// restart, with the password minted for it and shown once; retired, it is
+/// refused at once. SR-144 … SR-147.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sr_144_sr_147_a_station_is_onboarded_and_retired_without_a_restart() {
+    let estate = Estate::new("onboard");
+    let csmsd = estate.csmsd().await;
+    let base = format!("http://{}/v1/csmsd/stations", csmsd.http);
+
+    // SR-147: no token, no station.
+    let (status, _) = send(
+        reqwest::Method::POST,
+        &base,
+        None,
+        new_station("CP-NEW", "DE*ABC*E00099"),
+    )
+    .await;
+    assert_eq!(status, 401);
+
+    // SR-145: a station a tariff nobody defines is refused, naming the field.
+    let mut wrong = new_station("CP-NEW", "DE*ABC*E00099");
+    wrong["tariff"] = "nope".into();
+    let (status, body) = send(reqwest::Method::POST, &base, Some(OPERATOR), wrong).await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (422, Some("tariff")),
+        "{body}"
+    );
+
+    let (status, body) = send(
+        reqwest::Method::POST,
+        &base,
+        Some(OPERATOR),
+        new_station("CP-NEW", "DE*ABC*E00099"),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let password = body["password"]
+        .as_str()
+        .expect("minted, shown once")
+        .to_owned();
+    assert_eq!(password.len(), 40);
+
+    // SR-145: the same identity again is refused.
+    let (status, body) = send(
+        reqwest::Method::POST,
+        &base,
+        Some(OPERATOR),
+        new_station("CP-NEW", "DE*ABC*E00098"),
+    )
+    .await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (422, Some("identity")),
+        "{body}"
+    );
+
+    // SR-146: it connects with that password, now, without a restart.
+    assert!(
+        boots_as(csmsd.ocpp, "CP-NEW", &password).await,
+        "the new station is admitted"
+    );
+    assert!(
+        !boots_as(csmsd.ocpp, "CP-NEW", &"00".repeat(20)).await,
+        "and only with its password"
+    );
+
+    // SR-144: the journal holds the hash and never the password; the facts
+    // name the operator.
+    let journal = std::fs::read_to_string(estate.dir.join("csmsd.ndjson")).unwrap();
+    assert!(
+        !journal.contains(&password),
+        "the password is not journalled"
+    );
+    assert!(journal.contains("operator:"), "the operator is the actor");
+
+    // Spec 022, SR-149: the boot's IMSI is kept as its network and nowhere
+    // whole; the search finds the station by its carrier.
+    // (The journal is sealed, so what it holds is read through the view.)
+    assert!(!journal.contains(IMSI), "the IMSI is not journalled");
+    let (status, view) = get(&format!("{base}/CP-NEW"), Some(OPERATOR)).await;
+    assert_eq!(status, 200);
+    assert!(!view.contains(IMSI), "{view}");
+    assert!(view.contains("26201"), "{view}");
+    let (status, found) = get(&format!("{base}?q=telekom"), Some(OPERATOR)).await;
+    assert_eq!(status, 200);
+    assert!(found.contains("CP-NEW"), "{found}");
+
+    // SR-152, SR-151: the map is behind the operators and refuses a bad area.
+    let map = format!("http://{}/v1/csmsd/map", csmsd.http);
+    assert_eq!(get(&map, None).await.0, 401);
+    let (status, body) = get(&format!("{map}?area=a,b"), Some(OPERATOR)).await;
+    assert_eq!(status, 400, "{body}");
+    let (status, body) = get(&map, Some(OPERATOR)).await;
+    assert_eq!(status, 200);
+    assert!(body.contains(r#""identity":"CP-NEW""#), "{body}");
+
+    // Retired with a reason: refused at once.
+    let retire = format!("{base}/CP-NEW/retire");
+    let (status, body) = send(
+        reqwest::Method::POST,
+        &retire,
+        Some(OPERATOR),
+        serde_json::json!({"reason": "x"}),
+    )
+    .await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (422, Some("reason")),
+        "{body}"
+    );
+    let (status, _) = send(
+        reqwest::Method::POST,
+        &retire,
+        Some(OPERATOR),
+        serde_json::json!({"reason": "dismantled after the lease ended"}),
+    )
+    .await;
+    assert_eq!(status, 204);
+    assert!(
+        !boots_as(csmsd.ocpp, "CP-NEW", &password).await,
+        "a retired station is refused"
+    );
+    csmsd.kill();
 }

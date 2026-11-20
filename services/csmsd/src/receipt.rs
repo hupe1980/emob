@@ -389,7 +389,18 @@ async fn page<J: Journal>(
     );
     let evidence = evidence(&shared.csmsd, &found.issued.receipt);
     let key = registered_key(&shared.csmsd, &found.issued.receipt);
-    let site = shared.sites.get(&found.issued.receipt.evse);
+    // The registry first (spec 021): a station registered after start has a
+    // site too; the start-time map stays for a test that has no registry.
+    let registered = shared.csmsd.with_registry(|registry, _| {
+        registry
+            .values()
+            .find(|station| station.evse == found.issued.receipt.evse)
+            .map(|station| sites(std::slice::from_ref(station)))
+    });
+    let site = registered
+        .as_ref()
+        .and_then(|map| map.get(&found.issued.receipt.evse))
+        .or_else(|| shared.sites.get(&found.issued.receipt.evse));
     let markup = render(&found, &evidence, key.as_ref(), site, lang);
     private(
         axum::response::Html(markup).into_response(),

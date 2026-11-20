@@ -14,7 +14,7 @@ lifts **signed meter values** out of OCPP transaction events for the Eichrecht
 chain, takes the session's *shape* (start, stop, charging or idle) from the
 events, and sends the **tariff** back to the charge point's display through
 OCPP 2.1. It supports OCPP 1.6, 2.0.1 and 2.1 through
-[`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.5.
+[`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.6.
 
 ```mermaid
 flowchart LR

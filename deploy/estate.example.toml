@@ -1,8 +1,12 @@
+#:schema ../schemas/estate.schema.json
+
 # The demonstration estate — one file every emob daemon reads its own sections of.
 #
 # Path: EMOB_ESTATE (default ./estate.toml). A daemon reads only the sections it
 # uses and refuses to start, naming the key, on one it cannot parse. Secrets are
 # never written here: every `*_env` field names an environment variable.
+# `emob check estate.toml` checks it before a daemon does; the line at the top
+# lets Taplo or Tombi complete and check it as you type.
 #
 # Loopback only: `[roaming] reach_back_allow` lets the OCPI handshake reach a
 # partner on 127.0.0.1 over http, which a production estate must not allow.
@@ -127,6 +131,7 @@ idle_timeout_secs = 900
 csmsd = "http://127.0.0.1:9001"
 token_env = "EMOB_OPERATOR_TOKEN"
 time_zone = "Europe/Berlin"   # the page's "today" and its clock
+ocpp_url = "wss://127.0.0.1:9000/ocpp"   # printed on the installer sheet a new station gets
 
 [receipts]
 # Where a driver's phone reaches csmsd's shell: every receipt link

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "agentplane",
  "anyhow",
@@ -31,7 +31,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
- "jsonschema",
+ "jsonschema 0.56.0",
  "rand 0.10.4",
  "redb",
  "regex",
@@ -281,7 +281,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "billd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -299,6 +299,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "hmac",
+ "jsonschema 0.61.2",
  "ocmf",
  "p256",
  "reqwest",
@@ -655,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "csmsd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -677,6 +678,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "hmac",
+ "jsonschema 0.61.2",
  "ocmf",
  "ocpi-kit",
  "ocpp-kit",
@@ -737,9 +739,9 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "datex2"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4d3e2850ba95650061ec1e18e6c2ec5fabe69ebe1e3c3a4f28636d59ed46eb"
+checksum = "b9cc794e4640e1a37652f38c95ede512b2a43923b75712d50f2c1892abcf88b6"
 dependencies = [
  "quick-xml 0.42.0",
 ]
@@ -765,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "deskd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -932,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "emob-billing"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -955,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "emob-cdr"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-core",
  "emob-eichrecht",
@@ -974,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "emob-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -993,23 +995,26 @@ dependencies = [
  "en16931-formats",
  "getrandom 0.4.3",
  "hex",
+ "jsonschema 0.61.2",
  "ocmf",
  "ocpi-kit",
  "ocpp-kit",
  "p256",
+ "poid",
  "reqwest",
  "roamd",
  "rust_decimal",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tarifd",
  "time",
  "tokio",
 ]
 
 [[package]]
 name = "emob-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "iso15118",
  "jiff 1.0.1",
@@ -1022,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "emob-eebus"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "eebus",
  "emob-core",
@@ -1036,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "emob-eichrecht"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-core",
  "hex",
@@ -1052,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "emob-ocpp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1071,7 +1076,7 @@ dependencies = [
 
 [[package]]
 name = "emob-pnc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.1",
  "emob-cdr",
@@ -1094,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "emob-poi"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "datex2",
  "emob-core",
@@ -1108,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "emob-roam"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-billing",
  "emob-cdr",
@@ -1133,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "emob-service"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -1144,6 +1149,7 @@ dependencies = [
  "hex",
  "hmac",
  "rust_decimal",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1160,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "emob-session"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1172,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "emob-sim"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1191,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "emob-smart"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1203,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "emob-tariff"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1216,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "emob-thg"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1236,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "emob-verify"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "emob-eichrecht",
  "ocmf",
@@ -1246,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "empd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1363,6 +1369,17 @@ name = "fancy-regex"
 version = "0.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d301f5bf187b3c295fce6468d3875037a0bccc5f6b151c63cac2f85babf21912"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a2e16b9a584b602f1e0e5e22c30ca0906786088c27500653e432d086def8b53"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -2094,16 +2111,44 @@ dependencies = [
  "bytecount",
  "data-encoding",
  "email_address",
- "fancy-regex",
+ "fancy-regex 0.19.2",
  "fraction",
  "getrandom 0.3.4",
  "itoa",
- "jsonschema-regex",
- "jsonschema-value",
+ "jsonschema-regex 0.56.0",
+ "jsonschema-value 0.56.0",
  "num-cmp",
  "num-traits",
  "percent-encoding",
- "referencing",
+ "referencing 0.56.0",
+ "regex",
+ "serde",
+ "serde_json",
+ "strum",
+ "unicode-general-category",
+ "uuid-simd",
+]
+
+[[package]]
+name = "jsonschema"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e37f27df77c7887edbc5f5a59ecd8e5ec4a669319266ec1b61068667a603183"
+dependencies = [
+ "ahash",
+ "bytecount",
+ "data-encoding",
+ "email_address",
+ "fancy-regex 0.20.2",
+ "fraction",
+ "getrandom 0.3.4",
+ "itoa",
+ "jsonschema-regex 0.61.2",
+ "jsonschema-value 0.61.2",
+ "num-cmp",
+ "num-traits",
+ "percent-encoding",
+ "referencing 0.61.2",
  "regex",
  "serde",
  "serde_json",
@@ -2122,6 +2167,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonschema-regex"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e41151614b6c927e21982be8bef5a26741ae5a0ae6a781eedee2aa930a980e6"
+dependencies = [
+ "regex-syntax",
+]
+
+[[package]]
 name = "jsonschema-value"
 version = "0.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2131,6 +2185,23 @@ dependencies = [
  "bytecount",
  "fraction",
  "getrandom 0.3.4",
+ "num-cmp",
+ "num-traits",
+ "serde_json",
+ "zmij",
+]
+
+[[package]]
+name = "jsonschema-value"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1515b9a91134ef67d7bac95c2d76fbc7e383c4c55ee544204ceec8088f881fef"
+dependencies = [
+ "ahash",
+ "bytecount",
+ "fraction",
+ "getrandom 0.3.4",
+ "memchr",
  "num-cmp",
  "num-traits",
  "serde_json",
@@ -2530,9 +2601,9 @@ dependencies = [
 
 [[package]]
 name = "ocpp-kit"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7cc7eee7fe64b9953baa49a3b228482f3bdab478e4fc93682c24dfa3771900f"
+checksum = "445a1d9a26b8b0b585b4cd330e688c0d1f884ef39c3c9d249a912fc5f26216cb"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2724,7 +2795,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "poid"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3081,6 +3152,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "referencing"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a028057ef852c58a42d75e09da87b5e733f4030f4c7411728955e4f87203a577"
+dependencies = [
+ "ahash",
+ "fluent-uri",
+ "getrandom 0.3.4",
+ "hashbrown 0.17.1",
+ "itoa",
+ "micromap",
+ "parking_lot",
+ "percent-encoding",
+ "serde_json",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3175,7 +3263,7 @@ dependencies = [
 
 [[package]]
 name = "roamd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3457,9 +3545,9 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "sepa"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c930e7f9b54bb9cba3e0b2d01b685e6892fba9b27cdd5ad81b4e41fd45b486c"
+checksum = "ab945438b490db91e96430ca26c3ab5957ba8008d339d27f3bcc2c5f870832bf"
 dependencies = [
  "quick-xml 0.41.0",
  "thiserror",
@@ -3706,7 +3794,7 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "sited"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3876,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "tarifd"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",

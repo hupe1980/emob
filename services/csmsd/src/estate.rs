@@ -67,14 +67,7 @@ pub fn zone(estate: &Estate) -> Result<emob_core::TimeZone, EstateError> {
         .map_err(|e| invalid("desk.time_zone".to_owned(), e))
 }
 
-/// `[receipts]` — read by `csmsd` only.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReceiptSection {
-    /// The origin a driver reaches the shell at; links are
-    /// `<public_url>/r/<token>`.
-    pub public_url: String,
-}
+pub use emob_service::estate::ReceiptSection;
 
 fn invalid(key: String, reason: impl ToString) -> EstateError {
     EstateError::Invalid {
@@ -100,10 +93,7 @@ pub const fn version(ocpp: Ocpp) -> Version {
 /// [`EstateError::Invalid`] for an identity OCPP cannot carry, a tariff no
 /// `[[tariffs]]` entry defines, or a station listed twice.
 pub fn provisioning(estate: &Estate) -> Result<Provisioning, EstateError> {
-    let mut tariffs = BTreeMap::new();
-    for (index, spec) in estate.tariffs.iter().enumerate() {
-        tariffs.insert(spec.id.clone(), spec.to_tariff(index)?);
-    }
+    let tariffs = tariffs(estate)?;
     let mut fleet = Provisioning::new();
     for (index, station) in estate.stations.iter().enumerate() {
         let identity = Identity::new(&station.identity)
@@ -136,6 +126,19 @@ pub fn provisioning(estate: &Estate) -> Result<Provisioning, EstateError> {
         );
     }
     Ok(fleet)
+}
+
+/// The estate's tariffs by id — what a station names and is priced with.
+///
+/// # Errors
+///
+/// [`EstateError::Invalid`] naming `tariffs[index]`.
+pub fn tariffs(estate: &Estate) -> Result<BTreeMap<String, emob_tariff::Tariff>, EstateError> {
+    let mut tariffs = BTreeMap::new();
+    for (index, spec) in estate.tariffs.iter().enumerate() {
+        tariffs.insert(spec.id.clone(), spec.to_tariff(index)?);
+    }
+    Ok(tariffs)
 }
 
 /// The key registry, each key with the provenance the estate states.

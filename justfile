@@ -3,6 +3,7 @@
 # `just` on its own lists every recipe.
 
 set shell := ["bash", "-uc"]
+set dotenv-load
 
 # Keep in sync with rust-toolchain.toml and `rust-version` in Cargo.toml.
 msrv := "1.94"
@@ -177,9 +178,9 @@ images *ARGS:
 up:
     #!/usr/bin/env bash
     set -uo pipefail
-    for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY; do
+    for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY POID_NAP_IDENTIFIER; do
         if [ -z "${!key:-}" ]; then
-            echo "❌ $key is unset — for a local run:  eval \"\$(just dev-keys)\"" >&2
+            echo "❌ $key is unset — for a local run:  just dev-keys > .env" >&2
             exit 1
         fi
     done
@@ -196,16 +197,60 @@ up:
 dev-ca:
     services/csmsd/tests/fixtures/tls/mint.sh target/dev-tls
 
-# One 32-byte data key per daemon that seals what it journals, and one
-# Ed25519 seed per journalled daemon that signs where its journal ends, as
-# `export` lines: `eval "$(just dev-keys)"`. Losing a data key loses what it
-# sealed — for empd that is crypto-erasure on purpose, for csmsd, roamd and
-# billd a daemon that will not start; a daemon with another signing key than
-# the one its `<journal>.head` was signed under will not start either.
+# Every secret the example estate names, for one development machine, as
+# `export` lines a `.env` holds (`just dev-keys > .env`; the justfile loads it):
+# one 32-byte data key per journalled daemon, one Ed25519 seed per signing
+# daemon, and a fresh value for every `*_env` the estate names — read from the
+# file, so a new one is never forgotten. Losing a data key loses what it sealed
+# (for empd that is crypto-erasure, on purpose). `.env` is gitignored.
 #
-# 🔑 Print fresh data and signing keys
-dev-keys:
-    @for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY; do echo "export $key=$(openssl rand -base64 32)"; done
+# 🔑 Print every secret the estate needs, fresh
+dev-keys estate="deploy/estate.example.toml":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "# emob secrets for THIS machine only — never commit, never reuse in production."
+    for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY; do
+        echo "export $key=$(openssl rand -base64 32)"
+    done
+    grep -E '^[a-z_]*_env *= *"[A-Z0-9_]+"' "{{ estate }}" | sed -E 's/.*"([A-Z0-9_]+)".*/\1/' | sort -u | while read -r var; do
+        case "$var" in
+            *WEBHOOK_SECRET|*DELIVERY_SECRET) echo "export $var=whsec_$(openssl rand -base64 32)" ;;
+            *) echo "export $var=$(openssl rand -hex 24)" ;;
+        esac
+    done
+    echo "export POID_NAP_IDENTIFIER=DE-NAP-DEV"
+    echo "export EMOB_ESTATE={{ estate }}"
+
+# The nine daemons from source on loopback, against the example estate (or
+# EMOB_ESTATE), with the secrets in `.env` — written by `just dev-keys` on the
+# first run. Checks the estate first, waits until every daemon is ready, prints
+# where Heute is, and stops them all on Ctrl-C. Journals go to `var/`.
+#
+# ▶️  Run the estate from source
+run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -f .env ] || { just dev-keys > .env; echo "🔑 wrote .env (gitignored) — the secrets for this machine"; }
+    set -a; . ./.env; set +a
+    [ -f target/dev-tls/server.pem ] || just dev-ca
+    cargo build -q --bins
+    target/debug/emob check --secrets "$EMOB_ESTATE"
+    export EMOB_JOURNAL_DIR="${EMOB_JOURNAL_DIR:-var}" EMOB_LOG_FORMAT="${EMOB_LOG_FORMAT:-text}" SITED_FAILSAFE_KW="${SITED_FAILSAFE_KW:-11}"
+    mkdir -p "$EMOB_JOURNAL_DIR"
+    pids=()
+    trap 'kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null' EXIT INT TERM
+    for daemon in empd csmsd billd roamd tarifd poid sited agentd deskd; do
+        target/debug/$daemon > "$EMOB_JOURNAL_DIR/$daemon.log" 2>&1 & pids+=($!)
+    done
+    for port in 9001 9580 9581 9582 9583 9584 9585 9586 9587; do
+        for _ in $(seq 100); do
+            curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 && break
+            sleep 0.1
+        done
+        curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 || echo "⚠️  :$port is not ready — see $EMOB_JOURNAL_DIR/*.log" >&2
+    done
+    echo "🚀 the estate runs — Heute: http://127.0.0.1:9587 (user: demo operator, password: \$EMOB_OPERATOR_TOKEN in .env) · OCPP: wss://127.0.0.1:9000 · logs: $EMOB_JOURNAL_DIR/*.log · Ctrl-C stops"
+    wait
 
 # The whole estate on loopback in one process: the daemons through their own
 # `daemon::run`, three simulated stations on OCPP 1.6 / 2.0.1 / 2.1 over wss://
@@ -347,10 +392,12 @@ down:
 
 # 🌐 Serve the documentation site locally
 site:
+    mkdir -p site/static/schemas && cp -R schemas/. site/static/schemas/
     cd site && zola serve
 
 # 🌐 Build the documentation site
 site-build:
+    mkdir -p site/static/schemas && cp -R schemas/. site/static/schemas/
     cd site && zola build
 
 # One CycloneDX bill of materials for the whole workspace — every crate and

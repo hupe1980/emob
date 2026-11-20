@@ -11,7 +11,7 @@
 use std::str::FromStr;
 
 use datex2::v3::afir_facilities::AmountOfMoney;
-use datex2::{Date, DateTime, LangString, MultilingualString, Time};
+use datex2::{Date, DateTime, MultilingualString, Time};
 use rust_decimal::Decimal;
 
 /// An amount of money, with exactly the digits the tariff states.
@@ -79,12 +79,7 @@ pub(crate) const fn time_of_day(at: time::Time) -> Time {
 
 /// One string, in one language.
 pub(crate) fn text(lang: &str, value: impl Into<String>) -> MultilingualString {
-    MultilingualString {
-        values: vec![LangString {
-            lang: lang.to_owned(),
-            text: value.into(),
-        }],
-    }
+    MultilingualString::new(lang, value.into())
 }
 
 #[cfg(test)]

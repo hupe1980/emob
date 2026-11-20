@@ -61,6 +61,10 @@ pub struct Body {
     pub signed: Vec<String>,
     /// The station that ran it.
     pub station: String,
+    /// The point and its place (spec 021), so a station registered after
+    /// this daemon started still has a location.
+    #[serde(default)]
+    pub point: Option<crate::daemon::Point>,
 }
 
 /// What the routes share.
@@ -164,7 +168,11 @@ async fn deliveries<J: Journal>(
     {
         return Json(serde_json::json!({ "duplicate": true })).into_response();
     }
-    let Some(location) = shared.locations.get(&body.station).cloned() else {
+    let carried = body
+        .point
+        .as_ref()
+        .and_then(|point| crate::daemon::point_location("point", point).ok());
+    let Some(location) = carried.or_else(|| shared.locations.get(&body.station).cloned()) else {
         return refuse(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("{} is not a station in the estate", body.station),

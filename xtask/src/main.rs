@@ -26,6 +26,7 @@ fn main() -> Result<()> {
         Some("check-api") => check_api(&root),
         Some("check-constructors") => check_constructors(&root),
         Some("check-actions") => check_actions(&root),
+        Some("check-docs") => check_docs(&root),
         Some("check-all") => {
             no_floats(&root)?;
             check_actions(&root)?;
@@ -37,6 +38,7 @@ fn main() -> Result<()> {
             check_reach(&root)?;
             check_api(&root)?;
             check_constructors(&root)?;
+            check_docs(&root)?;
             check_graph(&root)
         }
         Some("help" | "--help" | "-h") | None => {
@@ -58,6 +60,10 @@ cargo xtask <task>
   no-floats         no f32/f64 anywhere in the workspace: every quantity here
                     either is money or becomes money, and a binary float
                     cannot represent 0.10
+  check-docs        every /v1/… route a public document names is served by a
+                    daemon's router, and every emob release a document names
+                    has a git tag — the 404 and the release that never existed
+                    were the two findings spec 012 started from
   check-citations   every regulatory citation in the code *and the docs* names a
                     document that concepts/REFERENCES.md actually indexes
   check-manifests   every publishable crate can be packaged *and accepted*: the
@@ -2262,6 +2268,164 @@ fn check_reach(root: &Path) -> Result<()> {
         bail!("{} unreached public function(s)", unreached.len());
     }
     println!("🔗 check-reach: {checked} public functions, every one of them called");
+    Ok(())
+}
+// ── check-docs ──────────────────────────────────────────────────────────────
+
+/// What the public documents promise about the running system (spec 012).
+///
+/// Two claims a reader acts on and nothing type-checks: a route they `curl`,
+/// and a release they install. A route is served when some router declares a
+/// path some code string names — a route, a constant, a `format!` pattern —
+/// where `{param}` matches one segment; a release is real when
+/// `git tag` lists `v<number>`. `concepts/` is internal and not read.
+fn check_docs(root: &Path) -> Result<()> {
+    let mut routes = Vec::new();
+    for file in rust_sources(root)? {
+        // Every string in code that starts a `/v1/` path: a literal route, a
+        // constant a router names, or a `format!` pattern whose `{…}` is one
+        // segment.
+        let text = code_only(&std::fs::read_to_string(&file)?);
+        for piece in text.split("\"/v1/").skip(1) {
+            if let Some(end) = piece.find('"') {
+                routes.push(format!("/v1/{}", &piece[..end]));
+            }
+        }
+    }
+    let served = |path: &str| {
+        let wanted: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+        routes.iter().any(|route| {
+            let pattern: Vec<&str> = route.split('/').collect();
+            pattern.len() == wanted.len()
+                && pattern.iter().zip(&wanted).all(|(p, w)| {
+                    p == w
+                        || (p.starts_with('{') && p.ends_with('}'))
+                        || (w.starts_with('{') || w.starts_with('<'))
+                })
+        })
+    };
+    let tags: BTreeSet<String> = std::process::Command::new("git")
+        .args(["tag", "--list", "v*"])
+        .current_dir(root)
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|t| t.trim_start_matches('v').to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut problems = Vec::new();
+    let (mut paths, mut releases) = (0usize, 0usize);
+    for file in prose_sources(root)? {
+        if file.starts_with(root.join("concepts")) {
+            continue;
+        }
+        let relative = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        let text = std::fs::read_to_string(&file)?;
+        for (n, line) in text.lines().enumerate() {
+            // Routes: every `/v1/…` the line names, up to the first character
+            // a path does not hold.
+            for piece in line.split("/v1/").skip(1) {
+                let tail: String = piece
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || "-_/{}<>*%.".contains(*c))
+                    .collect();
+                let tail = tail.trim_end_matches(['.', '/']);
+                if tail.is_empty() || tail.contains('*') && !tail.contains('{') {
+                    continue;
+                }
+                let path = format!("/v1/{tail}");
+                paths += 1;
+                if !served(&path) {
+                    problems.push(format!(
+                        "{relative}:{}: {path} is served by no router",
+                        n + 1
+                    ));
+                }
+            }
+            // Releases: "emob 0.4", "release 0.4.0", "0.4.0 release".
+            let lower = line.to_ascii_lowercase();
+            for marker in ["emob ", "release ", "released "] {
+                for piece in lower.split(marker).skip(1) {
+                    let number: String = piece
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    let number = number.trim_end_matches('.');
+                    if number.matches('.').count() == 0
+                        || !number.starts_with("0.") && !number.starts_with("1.")
+                    {
+                        continue;
+                    }
+                    releases += 1;
+                    let tagged = tags
+                        .iter()
+                        .any(|t| t == number || t.starts_with(&format!("{number}.")));
+                    if !tagged {
+                        problems.push(format!(
+                            "{relative}:{}: emob {number} was never tagged",
+                            n + 1
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    // Links: a README's repository-relative link names a file that exists.
+    // The site's own `@/` links are zola's to check; absolute URLs are not
+    // fetched here.
+    let mut links = 0usize;
+    let mut readmes = vec![root.join("README.md"), root.join("CONTRIBUTING.md")];
+    for top in ["crates", "services"] {
+        for entry in std::fs::read_dir(root.join(top))? {
+            let readme = entry?.path().join("README.md");
+            if readme.exists() {
+                readmes.push(readme);
+            }
+        }
+    }
+    for readme in &readmes {
+        let text = std::fs::read_to_string(readme)?;
+        let dir = readme.parent().unwrap_or(root);
+        let relative = readme
+            .strip_prefix(root)
+            .unwrap_or(readme)
+            .display()
+            .to_string();
+        for piece in text.split("](").skip(1) {
+            let Some(end) = piece.find(')') else { continue };
+            let target = piece[..end].split('#').next().unwrap_or_default().trim();
+            if target.is_empty()
+                || target.contains("://")
+                || target.starts_with("mailto:")
+                || target.contains(' ')
+            {
+                continue;
+            }
+            links += 1;
+            if !dir.join(target).exists() {
+                problems.push(format!("{relative}: the link {target} names no file"));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        for problem in &problems {
+            eprintln!("   {problem}");
+        }
+        bail!(
+            "{} documented claim(s) the code or the tags do not keep",
+            problems.len()
+        );
+    }
+    println!(
+        "📖 check-docs: {paths} documented route(s), every one served; {releases} release(s) named, every one tagged; {links} README link(s), every one a file"
+    );
     Ok(())
 }
 

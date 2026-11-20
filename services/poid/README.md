@@ -67,7 +67,7 @@ drivers to a fiction.
 | `EMOB_OPERATOR_TOKEN` | **required** | the variable `[[operators]]` names: the read model's bearer |
 | `POID_HTTP_BIND` | `127.0.0.1:9582` | health/readiness shell |
 | `EMOB_HTTP_BIND` | — | estate-wide shell address, used when `POID_HTTP_BIND` is unset; defaults are loopback, unreachable inside a container |
-| `POID_NAP_IDENTIFIER` | `DE-NAP-0000` | the operator's national identifier, carried by every publication |
+| `POID_NAP_IDENTIFIER` | **required** | the identifier the national access point issued this operator, carried by every publication; `poid` refuses to start without it |
 | `EMOB_JOURNAL_DIR` | `var` | journal directory — deliberately not a temp directory |
 | `POID_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head. A `.head` signed under another key refuses the start |
 | `EMOB_LOG_FORMAT` | JSON | `text` for a terminal |

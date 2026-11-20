@@ -1,5 +1,14 @@
 //! The check a driver runs: one signed record, one key, one verdict.
 //!
+//! ```
+//! use emob_verify::{Verdict, check};
+//!
+//! // What is not a record is named as such, never passed or failed.
+//! let result = check("not an OCMF record", "04ab");
+//! assert_eq!(result.verdict, Verdict::UnreadableRecord);
+//! assert!(result.readings.is_empty());
+//! ```
+//!
 //! `[MessEG §33]` asks that the affected party can **check** a measured value.
 //! The receipt page hands the driver the records and the key; this crate is
 //! what checks them, on the driver's own device, with nothing trusted on the

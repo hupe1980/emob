@@ -54,9 +54,13 @@ use emob_service::ui::{self, Lang};
 use emob_service::{Identity, Readiness, Server, Shutdown};
 use serde::Deserialize;
 
+pub mod europe;
 pub mod fetch;
 pub mod heute;
+pub mod map;
 pub mod model;
+pub mod station;
+pub mod stations;
 pub mod why;
 
 /// The refresh script, compiled in.
@@ -75,6 +79,9 @@ pub struct Estate {
     /// Which verifier keys the witness trusts.
     #[serde(default)]
     pub witness: estate::Witness,
+    /// Where receipt links point, for the station page's sessions.
+    #[serde(default)]
+    pub receipts: Option<estate::ReceiptSection>,
 }
 
 /// Where the page reads "now" from: its date, its clock and the 90-day duty
@@ -99,6 +106,9 @@ pub struct Options {
     /// deployment, on a volume the daemons it watches do not share.
     pub witness: std::path::PathBuf,
 }
+
+/// deskd's one readiness probe: it can render the page.
+const PAGE: &str = "page";
 
 /// How often the witness reads the heads.
 pub const WITNESS_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -191,6 +201,8 @@ struct Page {
     roamd: String,
     zone: TimeZone,
     clock: Clock,
+    receipts: String,
+    ocpp_url: Option<String>,
 }
 
 /// What the page reads from its own URL: the language and, per list, the
@@ -210,6 +222,21 @@ struct Params {
 fn router(desk: Arc<Page>, operators: emob_service::Operators) -> axum::Router {
     let page = axum::Router::new()
         .route("/", get(heute_page))
+        .route("/station/{identity}", get(station_page))
+        .route("/stations", get(stations_page).post(create_station))
+        .route("/stations/new", get(new_station_page))
+        .route(
+            "/station/{identity}/edit",
+            get(edit_station_page).post(edit_station),
+        )
+        .route(
+            "/station/{identity}/retire",
+            axum::routing::post(retire_station),
+        )
+        .route(
+            "/station/{identity}/password",
+            axum::routing::post(new_password),
+        )
         .with_state(desk);
     ui::operator_page(page, operators)
         .merge(ui::assets())
@@ -262,6 +289,346 @@ async fn heute_page(
     ui::html(heute::render(&snapshot, lang))
 }
 
+/// The page's language, from `?lang=` or the browser's.
+fn language(lang: Option<&str>, headers: &HeaderMap) -> Lang {
+    Lang::negotiate(
+        lang,
+        headers
+            .get(axum::http::header::ACCEPT_LANGUAGE)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+#[derive(Deserialize)]
+struct SearchParams {
+    q: Option<String>,
+    offset: Option<u64>,
+    area: Option<String>,
+    lang: Option<String>,
+}
+
+/// `GET /stations` — the registry, searched (spec 021).
+async fn stations_page(
+    State(desk): State<Arc<Page>>,
+    params: Result<Query<SearchParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(Query(params)) = params else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let lang = language(params.lang.as_deref(), &headers);
+    let query = params.q.unwrap_or_default();
+    let offset = params.offset.unwrap_or(0);
+    // Only an area of four numbers is passed on; `csmsd` judges the rest.
+    let area = params.area.filter(|area| {
+        let edges: Vec<&str> = area.split(',').collect();
+        edges.len() == 4 && edges.iter().all(|edge| map::hundredths(edge).is_some())
+    });
+    let (found, drawn) = tokio::join!(
+        desk.reader.stations::<stations::Found>(
+            &desk.csmsd,
+            &query,
+            area.as_deref(),
+            offset,
+            heute::ROWS
+        ),
+        desk.reader
+            .map::<stations::Drawn>(&desk.csmsd, &query, area.as_deref()),
+    );
+    match found {
+        Ok(found) => ui::html(stations::render_list(
+            &stations::Listing {
+                found: &found,
+                // A map that did not come is a page without one, not an error.
+                map: drawn
+                    .map(|drawn| drawn.svg(&query, lang))
+                    .unwrap_or_default(),
+                query: &query,
+                area: area.as_deref(),
+                offset,
+                limit: heute::ROWS,
+            },
+            lang,
+        )),
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            lang.pick("csmsd antwortet gerade nicht.", "csmsd is not answering."),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /stations/new` — the onboarding form.
+async fn new_station_page(
+    params: Result<Query<SearchParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let lang = language(params.ok().and_then(|Query(p)| p.lang).as_deref(), &headers);
+    ui::html(stations::render_form(
+        &stations::Form::blank(),
+        stations::Purpose::Register,
+        None,
+        lang,
+    ))
+}
+
+/// The checks every write passes before anything is forwarded: same origin
+/// (SR-148), and the operator's own token to forward (SR-147).
+fn writer(headers: &HeaderMap) -> Result<String, (StatusCode, &'static str)> {
+    if !stations::same_origin(headers) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "a change is accepted only from this page",
+        ));
+    }
+    stations::operator_token(headers).ok_or((StatusCode::UNAUTHORIZED, "sign in first"))
+}
+
+/// `POST /stations` — register, then the installer sheet.
+async fn create_station(
+    State(desk): State<Arc<Page>>,
+    headers: HeaderMap,
+    axum::Form(form): axum::Form<stations::Form>,
+) -> Response {
+    let lang = language(None, &headers);
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let url = format!("{}/v1/csmsd/stations", desk.csmsd.trim_end_matches('/'));
+    match desk
+        .reader
+        .write(reqwest::Method::POST, &url, &token, &form.to_json())
+        .await
+    {
+        Ok((201, body)) => ui::html(stations::render_sheet(
+            form.identity.trim(),
+            body["password"].as_str(),
+            form.security_profile.trim(),
+            form.ocpp.trim(),
+            desk.ocpp_url.as_deref(),
+            lang,
+        )),
+        Ok((422, body)) => {
+            let field = body["field"].as_str().unwrap_or("body");
+            let reason = body["reason"].as_str().unwrap_or("refused");
+            let mut page = ui::html(stations::render_form(
+                &form,
+                stations::Purpose::Register,
+                Some((field, reason)),
+                lang,
+            ));
+            *page.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            page
+        }
+        Ok((status, _)) => {
+            (StatusCode::BAD_GATEWAY, format!("csmsd answered {status}")).into_response()
+        }
+        Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
+    }
+}
+
+/// `GET /station/{identity}/edit` — the change form, filled with what the
+/// station is now.
+async fn edit_station_page(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    params: Result<Query<SearchParams>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let lang = language(params.ok().and_then(|Query(p)| p.lang).as_deref(), &headers);
+    match desk
+        .reader
+        .station::<station::StationPage>(&desk.csmsd, &identity)
+        .await
+    {
+        Ok(Some(page)) => ui::html(stations::render_form(
+            &stations::Form::of(&page),
+            stations::Purpose::Change(&page.identity),
+            None,
+            lang,
+        )),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
+    }
+}
+
+/// `POST /station/{identity}/edit` — forwarded as `PUT` with the operator's
+/// token and reason (spec 021, US3); back to the card when it is accepted.
+async fn edit_station(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Form(mut form): axum::Form<stations::Form>,
+) -> Response {
+    let lang = language(None, &headers);
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    // The path names the station; a form cannot rename it.
+    form.identity.clone_from(&identity);
+    let url = format!(
+        "{}/v1/csmsd/stations/{}",
+        desk.csmsd.trim_end_matches('/'),
+        station::href(&identity).trim_start_matches("/station/")
+    );
+    let body = serde_json::json!({
+        "station": form.to_json(),
+        "reason": form.reason.trim(),
+    });
+    match desk
+        .reader
+        .write(reqwest::Method::PUT, &url, &token, &body)
+        .await
+    {
+        Ok((200, _)) => axum::response::Redirect::to(&station::href(&identity)).into_response(),
+        Ok((404, _)) => StatusCode::NOT_FOUND.into_response(),
+        Ok((422, body)) => {
+            let field = body["field"].as_str().unwrap_or("body");
+            let reason = body["reason"].as_str().unwrap_or("refused");
+            let mut page = ui::html(stations::render_form(
+                &form,
+                stations::Purpose::Change(&identity),
+                Some((field, reason)),
+                lang,
+            ));
+            *page.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            page
+        }
+        Ok((status, _)) => {
+            (StatusCode::BAD_GATEWAY, format!("csmsd answered {status}")).into_response()
+        }
+        Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct Reason {
+    reason: String,
+}
+
+/// `POST /station/{identity}/retire`.
+async fn retire_station(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Form(why): axum::Form<Reason>,
+) -> Response {
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let url = format!(
+        "{}/v1/csmsd/stations/{}/retire",
+        desk.csmsd.trim_end_matches('/'),
+        station::href(&identity).trim_start_matches("/station/")
+    );
+    match desk
+        .reader
+        .write(
+            reqwest::Method::POST,
+            &url,
+            &token,
+            &serde_json::json!({ "reason": why.reason }),
+        )
+        .await
+    {
+        Ok((204, _)) => axum::response::Redirect::to("/stations").into_response(),
+        Ok((_, body)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            body["reason"].as_str().unwrap_or("refused").to_owned(),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
+    }
+}
+
+/// `POST /station/{identity}/password` — a new password, on a new sheet.
+async fn new_password(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Form(why): axum::Form<Reason>,
+) -> Response {
+    let lang = language(None, &headers);
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let url = format!(
+        "{}/v1/csmsd/stations/{}/password",
+        desk.csmsd.trim_end_matches('/'),
+        station::href(&identity).trim_start_matches("/station/")
+    );
+    match desk
+        .reader
+        .write(
+            reqwest::Method::POST,
+            &url,
+            &token,
+            &serde_json::json!({ "reason": why.reason }),
+        )
+        .await
+    {
+        Ok((200, body)) => ui::html(stations::render_sheet(
+            &identity,
+            body["password"].as_str(),
+            "",
+            "",
+            desk.ocpp_url.as_deref(),
+            lang,
+        )),
+        Ok((_, body)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            body["reason"].as_str().unwrap_or("refused").to_owned(),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
+    }
+}
+
+/// One station (spec 012). An identity the estate does not list is the
+/// shell's plain 404; nothing the browser sent is echoed (SR-139).
+async fn station_page(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    params: Result<Query<Params>, QueryRejection>,
+    headers: HeaderMap,
+) -> Response {
+    let lang = Lang::negotiate(
+        params.ok().and_then(|Query(p)| p.lang).as_deref(),
+        headers
+            .get(axum::http::header::ACCEPT_LANGUAGE)
+            .and_then(|value| value.to_str().ok()),
+    );
+    match desk
+        .reader
+        .station::<station::StationPage>(&desk.csmsd, &identity)
+        .await
+    {
+        Ok(Some(page)) => ui::html(station::render(
+            &page,
+            lang,
+            &desk.zone,
+            (desk.clock)(),
+            &desk.receipts,
+        )),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(why) => {
+            tracing::warn!(why = ?why, "csmsd did not answer for a station page");
+            (
+                StatusCode::BAD_GATEWAY,
+                lang.pick(
+                    "csmsd antwortet gerade nicht — die Station lässt sich nicht anzeigen.",
+                    "csmsd is not answering — the station cannot be shown.",
+                ),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Start `deskd`.
 ///
 /// # Errors
@@ -306,9 +673,19 @@ pub async fn run(options: Options) -> Result<Running> {
         roamd: estate.services.roamd.clone(),
         zone,
         clock,
+        receipts: estate
+            .receipts
+            .as_ref()
+            .map(|r| r.public_url.clone())
+            .unwrap_or_default(),
+        ocpp_url: estate.desk.ocpp_url.clone(),
     });
 
-    let readiness = Readiness::new();
+    // deskd keeps no state and reads what it shows when asked: once it can
+    // answer, it is ready. Without a probe it would never be — an empty
+    // readiness is "not ready" by design (found by `just run`, spec 012).
+    let readiness = Readiness::new().expecting(PAGE);
+    readiness.up(PAGE);
     let server = Server::new(identity, readiness, shutdown.clone()).with(router(desk, operators));
     let listener = tokio::net::TcpListener::bind(http)
         .await

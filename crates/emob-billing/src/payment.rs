@@ -32,9 +32,10 @@ use crate::invoice::Invoice;
 /// The creditor's side of a mandate — everything a collection needs that is not
 /// on the invoice.
 ///
-/// `Debug` masks the IBAN (SR-049): a value that reaches a log line or an
-/// error message is the one nobody minimised.
-#[derive(Clone)]
+/// `Debug` masks the IBAN (SR-049) — `sepa`'s own `Iban` does, since 0.10: a
+/// value that reaches a log line or an error message is the one nobody
+/// minimised.
+#[derive(Debug, Clone)]
 pub struct Creditor {
     /// The name the debtor will see on their statement.
     pub name: String,
@@ -61,8 +62,8 @@ pub struct Mandate {
     pub debtor_iban: Iban,
 }
 
-/// An IBAN as a log line may show it: the country and the last four, e.g.
-/// `DE…3000` — enough to tell two accounts apart, not enough to draw on one.
+/// An IBAN held as text — an invoice's — as a log line may show it: the
+/// country and the last four, e.g. `DE…3000`, as `sepa::Iban` itself does.
 #[must_use]
 pub fn mask_iban(iban: &str) -> String {
     let compact: Vec<char> = iban.chars().filter(|c| !c.is_whitespace()).collect();
@@ -74,24 +75,13 @@ pub fn mask_iban(iban: &str) -> String {
     format!("{country}…{last}")
 }
 
-impl core::fmt::Debug for Creditor {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Creditor")
-            .field("name", &self.name)
-            .field("iban", &mask_iban(self.iban.as_ref()))
-            .field("bic", &self.bic)
-            .field("creditor_id", &self.creditor_id)
-            .finish()
-    }
-}
-
 impl core::fmt::Debug for Mandate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Mandate")
             .field("reference", &self.reference)
             .field("signed_on", &self.signed_on)
             .field("debtor_name", &"…")
-            .field("debtor_iban", &mask_iban(self.debtor_iban.as_ref()))
+            .field("debtor_iban", &self.debtor_iban)
             .finish()
     }
 }
@@ -157,7 +147,7 @@ pub fn instruct(
     )));
 
     let mut group = DirectDebitGroup::new(
-        creditor.name.clone(),
+        &creditor.name,
         &creditor.iban,
         &creditor.creditor_id,
         collect_on,
@@ -170,9 +160,12 @@ pub fn instruct(
     // `MsgId` is how a bank de-duplicates a submission, so it has to survive a
     // restart: the invoice number does, because it is the document this
     // collection is for and `emob-billing` never issues that number twice.
-    let builder = Pain008Builder::new(creditor.name.clone(), format!("EMOB-{}", invoice.number))
-        .created_at(created_at)
-        .add_group(group);
+    let builder = Pain008Builder::new(
+        creditor.name.clone(),
+        format!("EMOB-{}", invoice.number),
+        created_at,
+    )
+    .add_group(group);
 
     let xml = builder
         .build()

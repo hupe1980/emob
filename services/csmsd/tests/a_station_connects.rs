@@ -771,3 +771,104 @@ async fn a_station_is_told_the_time_and_not_the_epoch() {
         "the heartbeat answered {told}, which is not now"
     );
 }
+
+/// Spec 012: a station is known — online once, what it said at boot, a firmware
+/// change as one fact naming both versions, its reports, and offline once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr_136_sr_138_sr_140_a_station_is_known_by_its_transitions_and_its_word() {
+    let csmsd = csmsd(registry(), Memory::new());
+    let (addr, _server) = serve(Arc::clone(&csmsd)).await;
+    let handle = connect(&addr, "CP-1");
+
+    let mut first = boot();
+    first.firmware_version = Some("1.2.0".to_owned());
+    first.charge_point_serial_number = Some("SN-0001\u{0007}".to_owned());
+    handle.call(first).await.expect("the CSMS answers a boot");
+    handle.wait_ready().await;
+    for _ in 0..10 {
+        handle
+            .call(v1_6::HeartbeatRequest::new())
+            .await
+            .expect("a heartbeat is answered");
+    }
+    let mut second = boot();
+    second.firmware_version = Some("1.3.1".to_owned());
+    second.charge_point_serial_number = Some("SN-0001\u{0007}".to_owned());
+    handle
+        .call(second)
+        .await
+        .expect("the CSMS answers a second boot");
+    handle
+        .call(v1_6::SecurityEventNotificationRequest::new(
+            "TamperDetectionActivated".to_owned(),
+            DateTime::parse("2026-11-20T08:00:00Z").unwrap(),
+        ))
+        .await
+        .expect("a security event is acknowledged, not refused");
+    handle
+        .call(v1_6::FirmwareStatusNotificationRequest::new(
+            v1_6::FirmwareStatus::Installed,
+        ))
+        .await
+        .expect("a firmware status is acknowledged, not refused");
+
+    let known = csmsd.known("CP-1").expect("the station is known");
+    let (identity, _) = known.identity.clone().expect("it said what it is");
+    assert_eq!(identity.firmware.as_deref(), Some("1.3.1"));
+    assert_eq!(
+        identity.serial.as_deref(),
+        Some("SN-0001"),
+        "control characters removed"
+    );
+    assert_eq!(known.boots.len(), 2);
+    assert_eq!(known.firmware.len(), 1, "{:?}", known.firmware);
+    assert_eq!(known.firmware[0].from.as_deref(), Some("1.2.0"));
+    assert_eq!(known.firmware[0].to, "1.3.1");
+    assert_eq!(known.reports.len(), 2, "{:?}", known.reports);
+
+    // Ten heartbeats and two boots wrote exactly one `online`.
+    let onlines = csmsd.with_journal(|journal| {
+        journal
+            .records()
+            .unwrap()
+            .iter()
+            .filter(|record| record.kind == "online")
+            .count()
+    });
+    assert_eq!(onlines, 1);
+
+    // Silent past the heartbeat: offline once, however often the sweep runs.
+    let later = time::OffsetDateTime::now_utc() + time::Duration::minutes(10);
+    assert_eq!(csmsd.sweep(later).unwrap(), 1);
+    assert_eq!(csmsd.sweep(later + time::Duration::minutes(1)).unwrap(), 0);
+    assert!(matches!(
+        csmsd.known("CP-1").unwrap().presence,
+        Some(csmsd::journal::Presence::Offline { .. })
+    ));
+    handle.shutdown(Duration::from_secs(2)).await;
+}
+
+/// SR-136: the meter's identity comes from the signed records of a session that
+/// billed — the OCA's DZG record names its own meter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr_136_a_billed_session_names_the_meter_that_signed_it() {
+    let csmsd = csmsd(registry(), Memory::new());
+    let (addr, _server) = serve(Arc::clone(&csmsd)).await;
+    let handle = connect(&addr, "CP-1");
+    run_one_session(&handle).await;
+    let known = csmsd.known("CP-1").expect("the station is known");
+    let (_, (meter, _)) = known.meters.iter().next().expect("one point's meter");
+    assert!(meter.serial.is_some(), "{meter:?}");
+}
+
+/// SR-136: a record that does not verify — here, against an empty registry —
+/// bills nothing and names no meter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr_136_an_unverified_record_names_no_meter() {
+    let csmsd = csmsd(KeyRegistry::new(), Memory::new());
+    let (addr, _server) = serve(Arc::clone(&csmsd)).await;
+    let handle = connect(&addr, "CP-1");
+    run_one_session(&handle).await;
+    let known = csmsd.known("CP-1").expect("the station is known");
+    assert!(known.meters.is_empty(), "{:?}", known.meters);
+}

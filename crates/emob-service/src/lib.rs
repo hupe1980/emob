@@ -1,6 +1,16 @@
 //! The shell every emob daemon shares — and the one thing in it that is about
 //! charging.
 //!
+//! ```
+//! use emob_service::Actor;
+//!
+//! // Every journal record names who caused it, in a spelling that round-trips.
+//! let actor: Actor = "station:CP-1".parse()?;
+//! assert_eq!(actor.to_string(), "station:CP-1");
+//! assert!("station:".parse::<Actor>().is_err(), "an empty identity is refused");
+//! # Ok::<(), emob_service::actor::ActorError>(())
+//! ```
+//!
 //! # What a daemon gets, and what it brings
 //!
 //! Nine daemons is nine copies of the same forty lines: read a configuration

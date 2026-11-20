@@ -132,7 +132,7 @@ model behind the operator token. `emob demo` runs the daemons' own
 configured rather than forked — and `deskd` takes its clock as a parameter, so
 the demo can play a morning at 60×. See [Run the estate](@/docs/run-the-estate.md).
 
-**1300 tests** cover the workspace.
+**1341 tests** cover the workspace.
 
 An end-to-end test drives the full chain: OCMF records signed with a real key at
 test time, verified, matched against a session, split into quarter hours, built

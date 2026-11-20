@@ -12,6 +12,7 @@ keeps is the **witness** — its own record of where each daemon's journal ended
 | | |
 |---|---|
 | ✅ page | `GET /` — the success rate (estate, weakest points, failures by cause), then refused sessions with **"Warum?"**, stations silent beyond their heartbeat, records a partner has not taken, invoices awaiting acceptance, the obligation calendar's duties of the next 90 days, and **Journale** (below). German first, `?lang=en`. Works without JavaScript; `/ui/heute.js` (< 2 kB) refreshes it every 15 s while visible |
+| ✅ station page | `GET /station/<identity>` — one station's asset card from `csmsd`'s station view: online or silent since when, what it said at boot, what its meter signs and whether its key is registered, every firmware change (the `[MessEG §31(2) Nr. 4]` intervention record), its reports, success and last sessions. Every station name on the page links here |
 | ✅ access | HTTP Basic whose password is one of the estate's `[[operators]]` tokens; binds `127.0.0.1:9587` unless `DESKD_HTTP_BIND`/`EMOB_HTTP_BIND` says otherwise (compose publishes it on `localhost:8088`) |
 | ✅ witness | every 30 s reads the signed journal head of `csmsd`, `billd`, `roamd` and `empd` and records it in `witness.ndjson` under `EMOB_JOURNAL_DIR` — on deskd's own volume (`deskd:/var/lib/emob` in compose), never one of the daemons' |
 | ✅ tested | render tests (order, escaping, bounds, a down daemon, de/en, a11y basics) and `tests/heute_reads_the_estate.rs`, which starts the real `empd`, `billd`, `roamd` and `csmsd` and holds the rate's numerator to the records `billd` received |
@@ -21,6 +22,8 @@ keeps is the **witness** — its own record of where each daemon's journal ended
 | From | What | Rendered as |
 |---|---|---|
 | `csmsd` `GET /v1/csmsd/today` | the success rate per day (`emob_session::success::Daily`): today and the last 7 days, refused sessions with their typed `findings` (`emob_eichrecht::Finding`), silent stations | "Heute" and "7 Tage", refused sessions and "Warum?", silent stations |
+| `csmsd` `GET /v1/csmsd/stations/<identity>` | one station: presence, identity, meters, firmware history, reports, success, last sessions | the station page |
+| `csmsd` `GET /v1/csmsd/stations`, `GET /v1/csmsd/map` | a page of the search and its map: points, or grid cells | "Stationen": the map (inline SVG over the bundled Natural Earth outline, `src/europe.rs`) and the table |
 | `roamd` `GET /v1/roamd/today` | consignments not `accepted` | records a partner has not taken |
 | `billd` `GET /v1/billd/today` | documents whose `submission` is not accepted | invoices awaiting acceptance |
 | `emob_core::obligation` | `starting_between(today, today + 90 days)` | duties, with "in 44 Tagen" and the exact date on focus |

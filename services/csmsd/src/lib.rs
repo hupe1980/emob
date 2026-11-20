@@ -53,6 +53,7 @@ use ocpp_kit::{RawValue, Version, v1_6, v2_0_1, v2_1};
 use tracing::Instrument as _;
 
 pub mod authorize;
+pub mod carrier;
 pub mod daemon;
 pub mod display;
 pub mod edge;
@@ -62,6 +63,8 @@ pub mod outbox;
 pub mod provisioning;
 pub mod read;
 pub mod receipt;
+pub mod registry;
+pub mod station;
 
 pub use authorize::{Answer, Authorize, Status};
 pub use journal::{Delivery, DeliveryState, Event, Key, Open, Presented, State, Target};
@@ -182,7 +185,7 @@ pub enum Outcome {
 }
 
 /// The `data` of a `de.emob.cdr.issued` event, as `billd`, `roamd` and every
-/// subscriber read it (`specs/001-the-estate-runs/contracts/delivery.md`).
+/// subscriber read it (`specs/archive/001-the-estate-runs/contracts/delivery.md`).
 #[derive(Debug, serde::Serialize)]
 pub struct CdrDelivery<'a> {
     /// The record, whole — the same value both receivers see.
@@ -193,6 +196,22 @@ pub struct CdrDelivery<'a> {
     pub signed: Vec<String>,
     /// The station that ran it.
     pub station: &'a str,
+    /// The point and its place, from the registry (spec 021).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point: Option<CdrPoint>,
+}
+
+/// What a CDR's location is built from (spec 021).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CdrPoint {
+    /// The EVSE id.
+    pub evse: emob_core::EvseId,
+    /// The connector.
+    pub connector: emob_core::ConnectorType,
+    /// Rated power, kW.
+    pub rated_power_kw: rust_decimal::Decimal,
+    /// The place.
+    pub location: emob_service::estate::Location,
 }
 
 /// The heartbeat interval every `BootNotificationResponse` hands a station, in
@@ -209,9 +228,9 @@ pub struct Csmsd<J: Journal> {
     operational: Mutex<Ledger>,
     /// Everything else, folded from the journal.
     folded: Mutex<Folded<State, Event, J>>,
-    /// When each station was last heard from — about the link, like the
-    /// operational ledger, and not journalled: a heartbeat a minute is not a
-    /// fact anybody bills.
+    /// When each station was last heard from — about the link. Only the
+    /// *transitions* are journalled (`Online`, `Offline`, spec 012); a
+    /// heartbeat a minute is not a fact.
     presence: Mutex<std::collections::BTreeMap<String, time::OffsetDateTime>>,
     /// When this process started; nothing heard before it is known.
     started: time::OffsetDateTime,
@@ -226,6 +245,8 @@ pub struct Csmsd<J: Journal> {
     clock: emob_service::Clock,
     /// The `[[subscribers]]` that take `de.emob.cdr.issued`, by name.
     subscribers: Vec<String>,
+    /// The estate's tariffs, which a registered station names (spec 021).
+    tariffs: std::collections::BTreeMap<String, emob_tariff::Tariff>,
 }
 
 impl<J: Journal> core::fmt::Debug for Csmsd<J> {
@@ -265,6 +286,7 @@ impl<J: Journal> Csmsd<J> {
             display: std::sync::OnceLock::new(),
             clock: emob_service::system_clock(),
             subscribers: Vec::new(),
+            tariffs: std::collections::BTreeMap::new(),
         })
     }
 
@@ -345,12 +367,318 @@ impl<J: Journal> Csmsd<J> {
         };
         if display.shows(&key.0) {
             display.send(handle, &key.0, &key.1, receipts.url(key));
+        } else if let Some(station) = self.registered(&key.0) {
+            display::Display::send_registered(handle, &station, &key.1, receipts.url(key));
         }
     }
 
-    /// A station was heard from now.
-    fn heard(&self, identity: &Identity) {
-        lock(&self.presence).insert(identity.to_string(), time::OffsetDateTime::now_utc());
+    /// A station was heard from now — and, when the fold holds it offline or
+    /// has never seen it, that is a fact (spec 012, SR-138).
+    fn heard(&self, by: &Actor, identity: &Identity) -> Result<(), CallError> {
+        let station = identity.to_string();
+        let now = self.now();
+        lock(&self.presence).insert(station.clone(), now);
+        let online = lock(&self.folded)
+            .state()
+            .stations
+            .get(&station)
+            .is_some_and(|known| matches!(known.presence, Some(journal::Presence::Online(_))));
+        if online {
+            return Ok(());
+        }
+        self.record(by, Event::Online { station, at: now })
+    }
+
+    /// Every station heard from and silent past the heartbeat interval becomes
+    /// `Offline` — once, by the transition (spec 012, SR-138). A station the
+    /// fold holds online that this process has not heard from is measured from
+    /// the later of its last fact and this process's start.
+    ///
+    /// # Errors
+    ///
+    /// When the journal refuses the fact.
+    pub fn sweep(&self, now: time::OffsetDateTime) -> Result<usize, CallError> {
+        let threshold = time::Duration::seconds(i64::from(HEARTBEAT_SECS));
+        let heard = lock(&self.presence).clone();
+        let silent: Vec<(String, time::OffsetDateTime)> = lock(&self.folded)
+            .state()
+            .stations
+            .iter()
+            .filter_map(|(station, known)| match known.presence {
+                Some(journal::Presence::Online(since)) => {
+                    let last = heard
+                        .get(station)
+                        .copied()
+                        .unwrap_or_else(|| since.max(self.started));
+                    (now - last > threshold).then(|| (station.clone(), last))
+                }
+                _ => None,
+            })
+            .collect();
+        for (station, last_heard) in &silent {
+            self.record(
+                &Actor::Timer,
+                Event::Offline {
+                    station: station.clone(),
+                    last_heard: *last_heard,
+                    at: now,
+                },
+            )?;
+        }
+        Ok(silent.len())
+    }
+
+    /// Journal a boot (spec 012).
+    fn booted(
+        &self,
+        by: &Actor,
+        identity: &Identity,
+        reason: String,
+        said: station::StationIdentity,
+    ) -> Result<(), CallError> {
+        self.record(
+            by,
+            Event::Booted {
+                station: identity.to_string(),
+                at: self.now(),
+                reason,
+                identity: said,
+            },
+        )
+    }
+
+    /// Journal a station's own report (spec 012, SR-140).
+    fn reported(
+        &self,
+        by: &Actor,
+        identity: &Identity,
+        report: station::Report,
+    ) -> Result<(), CallError> {
+        self.record(
+            by,
+            Event::Reported {
+                station: identity.to_string(),
+                at: self.now(),
+                report,
+            },
+        )
+    }
+
+    /// The tariffs a registered station may name (spec 021).
+    #[must_use]
+    pub fn pricing(
+        mut self,
+        tariffs: std::collections::BTreeMap<String, emob_tariff::Tariff>,
+    ) -> Self {
+        self.tariffs = tariffs;
+        self
+    }
+
+    /// The registered station under `identity`.
+    #[must_use]
+    pub fn registered(&self, identity: &str) -> Option<emob_service::estate::Station> {
+        lock(&self.folded).state().registry.get(identity).cloned()
+    }
+
+    /// How many stations are registered.
+    #[must_use]
+    pub fn registered_count(&self) -> usize {
+        lock(&self.folded).state().registry.len()
+    }
+
+    /// Read the registry under one lock — what a search over ten thousand
+    /// stations does, rather than a lock per row (spec 021).
+    pub fn with_registry<T>(
+        &self,
+        f: impl FnOnce(
+            &std::collections::BTreeMap<String, emob_service::estate::Station>,
+            &journal::State,
+        ) -> T,
+    ) -> T {
+        let folded = lock(&self.folded);
+        let state = folded.state();
+        f(&state.registry, state)
+    }
+
+    /// Register every estate station the registry does not hold, as the
+    /// estate (spec 021). The estate seeds; afterwards the registry rules.
+    ///
+    /// # Errors
+    ///
+    /// When the journal refuses, or a seed fails the registry's own checks.
+    pub fn seed(&self, stations: &[emob_service::estate::Station]) -> Result<usize, String> {
+        let mut seeded = 0;
+        for station in stations {
+            if self.registered(&station.identity).is_some() {
+                continue;
+            }
+            {
+                let folded = lock(&self.folded);
+                registry::check(station, &folded.state().registry, &self.tariffs, None)
+                    .map_err(|e| e.to_string())?;
+            }
+            self.record(
+                &Actor::Estate,
+                Event::StationRegistered {
+                    station: Box::new(station.clone()),
+                    at: self.now(),
+                },
+            )
+            .map_err(|e| format!("{e:?}"))?;
+            seeded += 1;
+        }
+        Ok(seeded)
+    }
+
+    /// Register a new station for `by`, minting its password when its profile
+    /// uses one. The password is returned here and nowhere else (SR-144).
+    ///
+    /// # Errors
+    ///
+    /// The [`registry::Refusal`]; nothing is journalled.
+    pub fn register(
+        &self,
+        by: &Actor,
+        mut station: emob_service::estate::Station,
+    ) -> Result<Option<String>, registry::Refusal> {
+        let password = if matches!(
+            station.security_profile,
+            emob_service::estate::SecurityProfile::TlsClientCertificate
+        ) {
+            station.password_hash = None;
+            None
+        } else {
+            let (password, hash) = registry::mint(&station)?;
+            station.password_hash = Some(hash);
+            Some(password)
+        };
+        {
+            let folded = lock(&self.folded);
+            registry::check(&station, &folded.state().registry, &self.tariffs, None)?;
+        }
+        self.record(
+            by,
+            Event::StationRegistered {
+                station: Box::new(station),
+                at: self.now(),
+            },
+        )
+        .map_err(|_| registry::Refusal {
+            field: "journal".to_owned(),
+            reason: "the journal refused the fact; nothing was registered".to_owned(),
+        })?;
+        Ok(password)
+    }
+
+    /// Replace a registered station's record, keeping its credential unless
+    /// `remint` asks for a new password (returned once).
+    ///
+    /// # Errors
+    ///
+    /// The [`registry::Refusal`]; nothing is journalled.
+    pub fn update(
+        &self,
+        by: &Actor,
+        mut station: emob_service::estate::Station,
+        reason: &str,
+        remint: bool,
+    ) -> Result<Option<String>, registry::Refusal> {
+        let Some(held) = self.registered(&station.identity) else {
+            return Err(registry::Refusal {
+                field: "identity".to_owned(),
+                reason: format!("{} is not registered", station.identity),
+            });
+        };
+        if reason.trim().chars().count() < 10 {
+            return Err(registry::Refusal {
+                field: "reason".to_owned(),
+                reason: "say why, in ten characters or more — it is what Verlauf shows".to_owned(),
+            });
+        }
+        let password = if remint
+            && !matches!(
+                station.security_profile,
+                emob_service::estate::SecurityProfile::TlsClientCertificate
+            ) {
+            let (password, hash) = registry::mint(&station)?;
+            station.password_hash = Some(hash);
+            Some(password)
+        } else {
+            station.password_hash = if matches!(
+                station.security_profile,
+                emob_service::estate::SecurityProfile::TlsClientCertificate
+            ) {
+                None
+            } else {
+                held.password_hash
+            };
+            None
+        };
+        {
+            let folded = lock(&self.folded);
+            registry::check(
+                &station,
+                &folded.state().registry,
+                &self.tariffs,
+                Some(held.identity.as_str()),
+            )?;
+        }
+        self.record(
+            by,
+            Event::StationUpdated {
+                station: Box::new(station),
+                reason: reason.trim().to_owned(),
+                at: self.now(),
+            },
+        )
+        .map_err(|_| registry::Refusal {
+            field: "journal".to_owned(),
+            reason: "the journal refused the fact; nothing changed".to_owned(),
+        })?;
+        Ok(password)
+    }
+
+    /// Retire a station: its next connection is refused (SR-146).
+    ///
+    /// # Errors
+    ///
+    /// The [`registry::Refusal`]; nothing is journalled.
+    pub fn retire(
+        &self,
+        by: &Actor,
+        identity: &str,
+        reason: &str,
+    ) -> Result<(), registry::Refusal> {
+        if self.registered(identity).is_none() {
+            return Err(registry::Refusal {
+                field: "identity".to_owned(),
+                reason: format!("{identity} is not registered"),
+            });
+        }
+        if reason.trim().chars().count() < 10 {
+            return Err(registry::Refusal {
+                field: "reason".to_owned(),
+                reason: "say why, in ten characters or more — it is what Verlauf shows".to_owned(),
+            });
+        }
+        self.record(
+            by,
+            Event::StationRetired {
+                identity: identity.to_owned(),
+                reason: reason.trim().to_owned(),
+                at: self.now(),
+            },
+        )
+        .map_err(|_| registry::Refusal {
+            field: "journal".to_owned(),
+            reason: "the journal refused the fact; the station is still registered".to_owned(),
+        })
+    }
+
+    /// What the facts say about one station (spec 012).
+    #[must_use]
+    pub fn known(&self, identity: &str) -> Option<journal::Known> {
+        lock(&self.folded).state().stations.get(identity).cloned()
     }
 
     /// When `identity` was last heard from, since this process started.
@@ -706,6 +1034,31 @@ impl<J: Journal> Csmsd<J> {
             },
         );
 
+        // What the meter signed about itself, from a record that just
+        // billed — so its signature verified against the registry — and only
+        // when it differs from what the fold holds for this point (SR-136).
+        if matches!(acceptance, Acceptance::Stored)
+            && let Some(meter) = borrowed
+                .first()
+                .and_then(|record| station::MeterIdentity::of(record.payload()))
+        {
+            let evse = point.evse_id.to_string();
+            let known = lock(&self.folded)
+                .state()
+                .stations
+                .get(identity.as_str())
+                .and_then(|known| known.meters.get(&evse))
+                .map(|(held, _)| held.clone());
+            if known.as_ref() != Some(&meter) {
+                facts.push(Event::Metered {
+                    station: identity.to_string(),
+                    evse,
+                    meter,
+                    at,
+                });
+            }
+        }
+
         // Owed to the invoice and to the partner — when somebody pays, and
         // only the first time the record is stored.
         let deliveries = match (&acceptance, self.token_for(&key)) {
@@ -719,6 +1072,12 @@ impl<J: Journal> Csmsd<J> {
                         .map(|record| record.as_str().to_owned())
                         .collect(),
                     station: &key.0,
+                    point: self.registered(&key.0).map(|station| CdrPoint {
+                        evse: station.evse,
+                        connector: station.connector,
+                        rated_power_kw: station.rated_power_kw,
+                        location: station.location,
+                    }),
                 };
                 let event = CloudEvent::new(
                     record_key.clone(),
@@ -993,7 +1352,7 @@ impl<J: Journal> Handler for Shared<J> {
         Box::pin(
             async move {
                 let by = by.map_err(|error| CallError::security(error.to_string()))?;
-                self.0.heard(ctx.identity());
+                self.0.heard(&by, ctx.identity())?;
                 match ctx.version() {
                     Version::V1_6 => self.0.on_v1_6(&by, &ctx, &request).await,
                     Version::V2_0_1 => self.0.on_v2_0_1(&by, &ctx, &request).await,
@@ -1015,6 +1374,41 @@ impl<J: Journal> Csmsd<J> {
         let action = v1_6::Action::from_wire(&request.action)
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v1_6::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
+        match &typed {
+            v1_6::CsRequest::BootNotification(boot) => {
+                self.booted(
+                    by,
+                    ctx.identity(),
+                    "PowerUp".to_owned(),
+                    station::of_v1_6(boot),
+                )?;
+            }
+            v1_6::CsRequest::FirmwareStatusNotification(note) => {
+                self.reported(
+                    by,
+                    ctx.identity(),
+                    station::Report::Firmware {
+                        status: station::word(&note.status),
+                    },
+                )?;
+                return ctx.reply(&v1_6::FirmwareStatusNotificationResponse::new());
+            }
+            v1_6::CsRequest::SecurityEventNotification(note) => {
+                self.reported(
+                    by,
+                    ctx.identity(),
+                    station::security(&note.r#type, note.tech_info.as_ref()),
+                )?;
+                return ctx.reply(&v1_6::SecurityEventNotificationResponse::new());
+            }
+            v1_6::CsRequest::DiagnosticsStatusNotification(_) => {
+                return ctx.reply(&v1_6::DiagnosticsStatusNotificationResponse::new());
+            }
+            v1_6::CsRequest::LogStatusNotification(_) => {
+                return ctx.reply(&v1_6::LogStatusNotificationResponse::new());
+            }
+            _ => {}
+        }
 
         // The provider is asked before anything is billed or allocated an
         // answer: `Authorize`, and again at `StartTransaction`, which carries
@@ -1070,6 +1464,36 @@ impl<J: Journal> Csmsd<J> {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_0_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         match &typed {
+            v2_0_1::CsRequest::BootNotification(boot) => {
+                self.booted(
+                    by,
+                    ctx.identity(),
+                    station::word(&boot.reason),
+                    station::of_v2_0_1(boot),
+                )?;
+                answer_v2_0_1(ctx, &typed, self.now())
+            }
+            v2_0_1::CsRequest::FirmwareStatusNotification(note) => {
+                self.reported(
+                    by,
+                    ctx.identity(),
+                    station::Report::Firmware {
+                        status: station::word(&note.status),
+                    },
+                )?;
+                ctx.reply(&v2_0_1::FirmwareStatusNotificationResponse::new())
+            }
+            v2_0_1::CsRequest::SecurityEventNotification(note) => {
+                self.reported(
+                    by,
+                    ctx.identity(),
+                    station::security(&note.r#type, note.tech_info.as_ref()),
+                )?;
+                ctx.reply(&v2_0_1::SecurityEventNotificationResponse::new())
+            }
+            v2_0_1::CsRequest::LogStatusNotification(_) => {
+                ctx.reply(&v2_0_1::LogStatusNotificationResponse::new())
+            }
             v2_0_1::CsRequest::Authorize(authorize) => {
                 let answer = self
                     .authorize(by, ctx.identity(), None, &authorize.id_token.id_token)
@@ -1117,6 +1541,36 @@ impl<J: Journal> Csmsd<J> {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         match &typed {
+            v2_1::CsRequest::BootNotification(boot) => {
+                self.booted(
+                    by,
+                    ctx.identity(),
+                    station::word(&boot.reason),
+                    station::of_v2_1(boot),
+                )?;
+                answer_v2_1(ctx, &typed, self.now())
+            }
+            v2_1::CsRequest::FirmwareStatusNotification(note) => {
+                self.reported(
+                    by,
+                    ctx.identity(),
+                    station::Report::Firmware {
+                        status: station::word(&note.status),
+                    },
+                )?;
+                ctx.reply(&v2_1::FirmwareStatusNotificationResponse::new())
+            }
+            v2_1::CsRequest::SecurityEventNotification(note) => {
+                self.reported(
+                    by,
+                    ctx.identity(),
+                    station::security(&note.r#type, note.tech_info.as_ref()),
+                )?;
+                ctx.reply(&v2_1::SecurityEventNotificationResponse::new())
+            }
+            v2_1::CsRequest::LogStatusNotification(_) => {
+                ctx.reply(&v2_1::LogStatusNotificationResponse::new())
+            }
             v2_1::CsRequest::Authorize(authorize) => {
                 let answer = self
                     .authorize(by, ctx.identity(), None, &authorize.id_token.id_token)
@@ -1252,6 +1706,14 @@ fn answer_v2_1(
             ctx.reply(&v2_1::StatusNotificationResponse::new())
         }
         other => Err(CallError::not_supported(other.action().as_str())),
+    }
+}
+
+impl<J: Journal> edge::Registry for Csmsd<J> {
+    fn admit(&self, identity: &str) -> Option<(ChargePoint, emob_service::estate::Station)> {
+        let station = self.registered(identity)?;
+        let point = registry::charge_point(&station, &self.tariffs)?;
+        Some((point, station))
     }
 }
 

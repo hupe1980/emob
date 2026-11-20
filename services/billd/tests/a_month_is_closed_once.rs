@@ -1814,6 +1814,18 @@ mod an_invoice_reaches_its_recipient {
         assert_eq!(event.source, "urn:emob:billd");
         assert_eq!(event.id, issued.invoice.number);
         assert_eq!(issued.answered.get("dwh"), Some(&None), "taken");
+        // Spec 012: the published schema describes what was sent.
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/events/de.emob.invoice.issued.json"
+        ))
+        .unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&seen[1].1).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&sent)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
             issued.submission,
             billd::Submission::Issued,

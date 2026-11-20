@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hupe1980.github.io/emob/schemas/events/de.emob.cdr.issued.json",
+  "title": "de.emob.cdr.issued",
+  "description": "A charging session's record was issued by csmsd: its signed evidence verified and the record was stored. Structured-mode CloudEvent 1.0, signed per Standard Webhooks; webhook-id equals id.",
+  "type": "object",
+  "required": [
+    "specversion",
+    "id",
+    "source",
+    "type",
+    "subject",
+    "time",
+    "datacontenttype",
+    "data"
+  ],
+  "properties": {
+    "specversion": {
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The record's key; the receiver's idempotency key."
+    },
+    "source": {
+      "const": "urn:emob:csmsd"
+    },
+    "type": {
+      "const": "de.emob.cdr.issued"
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^cdr/.+"
+    },
+    "time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "datacontenttype": {
+      "const": "application/json"
+    },
+    "emobtest": {
+      "type": "boolean",
+      "description": "Present and true only on a sample sent by `emob subscribers test`; never book it."
+    },
+    "data": {
+      "type": "object",
+      "required": [
+        "cdr",
+        "token",
+        "signed",
+        "station"
+      ],
+      "properties": {
+        "cdr": {
+          "type": "object",
+          "description": "The record as emob-cdr serialises it: key, session, energy, cost, evidence reference."
+        },
+        "token": {
+          "type": "object",
+          "description": "Whom it bills: the token as presented, its contract and issuer. Personal data."
+        },
+        "signed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The signed OCMF records it rests on, verbatim."
+        },
+        "station": {
+          "type": "string",
+          "description": "The OCPP identity of the station that ran it."
+        },
+        "receipt": {
+          "type": "string",
+          "format": "uri",
+          "description": "The driver's receipt page, for every receiver except the roaming node."
+        },
+        "point": {
+          "type": "object",
+          "required": [
+            "evse",
+            "connector",
+            "rated_power_kw",
+            "location"
+          ],
+          "description": "The point and its place, as the station registry holds them: EVSE id, connector, rated power, and the location (id, name, address, coordinates, time zone).",
+          "properties": {
+            "evse": {
+              "type": "string"
+            },
+            "connector": {
+              "type": "string"
+            },
+            "rated_power_kw": {
+              "type": "string"
+            },
+            "location": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  }
+}

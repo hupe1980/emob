@@ -127,6 +127,8 @@ enum Group {
         rows: Vec<Row>,
         /// The cursor of the next page, for a list the daemon pages.
         older: Option<u64>,
+        /// A sentence above the rows that says what they share, if anything.
+        lead: String,
     },
     Down {
         daemon: &'static str,
@@ -242,7 +244,8 @@ fn head(snapshot: &Snapshot, lang: Lang) -> String {
     format!(
         "<div class=\"head\"><h1>{h1}</h1><p class=\"when\">{date} · {stand} \
          <time datetime=\"{iso}\">{clock}</time> · <a href=\"{other}\" lang=\"{other_lang}\" \
-         hreflang=\"{other_lang}\">{other_name}</a></p></div>",
+         hreflang=\"{other_lang}\">{other_name}</a> · <a href=\"/stations\">{stations}</a></p></div>",
+        stations = lang.pick("Stationen", "Stations"),
         h1 = lang.pick("Heute", "Today"),
         date = escape(&format!(
             "{}, {}",
@@ -280,10 +283,15 @@ fn render_group(id: &str, title: &str, group: &Group, lang: Lang, snapshot: &Sna
                 down(daemon, *since, *why, lang, &snapshot.zone)
             );
         }
-        Group::Rows { total, rows, older } => {
+        Group::Rows {
+            total,
+            rows,
+            older,
+            lead,
+        } => {
             let _ = write!(
                 out,
-                " <span class=\"count\">{total}</span></h3><ol class=\"rows\">"
+                " <span class=\"count\">{total}</span></h3>{lead}<ol class=\"rows\">"
             );
             for row in rows {
                 let _ = write!(
@@ -494,8 +502,8 @@ fn window(lang: Lang, id: &str, title: &str, window: &Window, none: &str) -> Str
             for point in &window.worst {
                 let _ = write!(
                     out,
-                    "<li><a href=\"#cp-{anchor}\">{name}</a><span class=\"num\">{percent}&#8239;% · {of}</span></li>",
-                    anchor = escape(&slug(&point.point)),
+                    "<li><a href=\"{href}\">{name}</a><span class=\"num\">{percent}&#8239;% · {of}</span></li>",
+                    href = escape(&crate::station::href(&point.point)),
                     name = escape(&point.point),
                     percent = point
                         .rate
@@ -573,6 +581,7 @@ fn bounded(rows: impl Iterator<Item = Row>, total: usize) -> Group {
         total: total as u64,
         rows: rows.take(ROWS).collect(),
         older: None,
+        lead: String::new(),
     }
 }
 
@@ -582,6 +591,7 @@ fn paged<T>(page: &Page<T>, row: impl Fn(&T) -> Row) -> Group {
         total: page.total,
         rows: page.items.iter().take(ROWS).map(row).collect(),
         older: page.older,
+        lead: String::new(),
     }
 }
 
@@ -609,10 +619,11 @@ fn refused(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
         });
         Row {
             body: format!(
-                "<div><p class=\"what\">{badge} <strong>{identity}</strong> · {tx_word} {transaction}</p>\
+                "<div><p class=\"what\">{badge} <a href=\"{href}\"><strong>{identity}</strong></a> · {tx_word} {transaction}</p>\
                  <p class=\"why\">{headline}{cite}</p></div>{action}{details}",
                 badge = badge(Tone::Bad, "✕", lang.pick("Nicht abgerechnet", "Not billed")),
                 identity = escape(&refusal.identity),
+                href = escape(&crate::station::href(&refusal.identity)),
                 tx_word = lang.pick("Vorgang", "transaction"),
                 transaction = escape(&refusal.transaction),
                 action = link.to(&id),
@@ -637,7 +648,7 @@ fn silent(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
     };
     // The most recently silent first, as the daemon sent them.
     let today = snapshot.zone.local(snapshot.now).date;
-    paged(&csmsd.silent, |station| {
+    let mut group = paged(&csmsd.silent, |station| {
         let since = station.silent_since;
         let id = format!("cp-{}", slug(&station.identity));
         let local = snapshot.zone.local(since);
@@ -648,12 +659,19 @@ fn silent(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
         };
         Row {
             body: format!(
-                "<div><p class=\"what\">{badge} <strong>{identity}</strong> · {evse}</p>\
+                "<div><p class=\"what\">{badge} <a href=\"{href}\"><strong>{identity}</strong></a> · {evse}{network}</p>\
                  <p class=\"why\">{says} <time datetime=\"{iso}\">{at}</time> — {beat}</p></div>{action}",
                 badge = badge(Tone::Warn, "◌", lang.pick("Still", "Silent")),
                 identity = escape(&station.identity),
+                href = escape(&crate::station::href(&station.identity)),
                 evse = escape(&station.evse),
                 says = lang.pick("Kein Lebenszeichen seit", "Nothing heard since"),
+                network = station
+                    .carrier
+                    .as_deref()
+                    .or(station.network.as_deref())
+                    .map(|network| format!(" · {}", escape(network)))
+                    .unwrap_or_default(),
                 iso = escape(&iso(since)),
                 beat = match lang {
                     Lang::De => format!("Herzschlag alle {} s erwartet", station.heartbeat_secs),
@@ -664,7 +682,51 @@ fn silent(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
             id,
             tone: Tone::Warn,
         }
-    })
+    });
+    if let Group::Rows { lead, .. } = &mut group {
+        *lead = by_network(&csmsd.networks, lang);
+    }
+    group
+}
+
+/// Silent stations that share a mobile network, said once above the list
+/// (spec 022): twelve of forty on one carrier is one outage to report, not
+/// twelve stations to visit. A network with a single silent station is noise.
+fn by_network(networks: &[crate::model::NetworkShare], lang: Lang) -> String {
+    let shared: Vec<String> = networks
+        .iter()
+        .filter(|share| share.silent >= 2)
+        .take(3)
+        .map(|share| {
+            let name = share.carrier.as_deref().unwrap_or(&share.network);
+            format!(
+                "<a href=\"/stations?q={network}+offline\"><strong>{name}</strong></a> {count}",
+                network = escape(&share.network),
+                name = escape(name),
+                count = match lang {
+                    Lang::De => format!("{} von {} still", share.silent, share.stations),
+                    Lang::En => format!("{} of {} silent", share.silent, share.stations),
+                },
+            )
+        })
+        .collect();
+    if shared.is_empty() {
+        return String::new();
+    }
+    let outage = networks.len() == 1 && networks[0].silent >= 3;
+    format!(
+        "<p class=\"lead\"><span aria-hidden=\"true\">📶</span> {by}: {list}{hint}</p>",
+        by = lang.pick("Nach Mobilfunknetz", "By mobile network"),
+        list = shared.join(" · "),
+        hint = if outage {
+            lang.pick(
+                " — alle stillen Stationen in einem Netz: eher ein Netzausfall als ein Defekt.",
+                " — every silent station on one network: more likely an outage than a fault.",
+            )
+        } else {
+            ""
+        },
+    )
 }
 
 fn consignments(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
@@ -721,6 +783,7 @@ fn consignments(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
         total: page.total,
         rows: rows.collect(),
         older: page.older,
+        lead: String::new(),
     }
 }
 
@@ -774,6 +837,7 @@ fn invoices(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
         total: page.total,
         rows: rows.collect(),
         older: page.older,
+        lead: String::new(),
     }
 }
 

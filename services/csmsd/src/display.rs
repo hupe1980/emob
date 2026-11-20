@@ -86,6 +86,41 @@ impl Display {
         let Some(&(ocpp, minutes)) = self.stations.get(identity) else {
             return;
         };
+        Self::send_as(handle, identity, ocpp, minutes, transaction, link);
+    }
+
+    /// The same, for a station as the registry holds it (spec 021): nothing
+    /// for 1.6 or a station that did not opt in.
+    pub fn send_registered(
+        handle: &CsmsHandle,
+        station: &emob_service::estate::Station,
+        transaction: &str,
+        link: String,
+    ) {
+        let Some(minutes) = station.receipt_display_minutes else {
+            return;
+        };
+        if station.ocpp == Ocpp::V1_6 || !(1..=MAX_MINUTES).contains(&minutes) {
+            return;
+        }
+        Self::send_as(
+            handle,
+            &station.identity,
+            station.ocpp,
+            minutes,
+            transaction,
+            link,
+        );
+    }
+
+    fn send_as(
+        handle: &CsmsHandle,
+        identity: &str,
+        ocpp: Ocpp,
+        minutes: u8,
+        transaction: &str,
+        link: String,
+    ) {
         let Ok(target) = Identity::new(identity) else {
             return;
         };

@@ -10,6 +10,7 @@ The CSMS (charging station management system) daemon: an OCPP 1.6J / 2.0.1 / 2.1
 | ✅ journal | the CDR ledger, outcomes, in-flight transaction events, the OCPP 1.6 transaction counter, every authorisation answer and the outbox are a fold of `csmsd.ndjson` — a restart loses nothing. Record bodies are sealed under `CSMSD_DATA_KEY`, so the card UIDs they carry are not readable on disk. Every record names its actor (`station:<identity>` for what a station sent); the head is signed under `CSMSD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
 | ✅ authorisation | `Authorize` and every transaction start are asked of `empd` (`POST /v1/authorize`, service token). A timeout, an unreachable `empd` or a non-`200` answers `Invalid` with the reason journalled — fail closed; a refused start opens no transaction |
 | ✅ outbox | each settled session with a provider is a `de.emob.cdr.issued` CloudEvent, delivered to `billd` and `roamd` (`POST /v1/deliveries`) and to every `[[subscribers]]` entry that takes it, signed per Standard Webhooks (a subscriber with its own secret), retried every `retry_secs`, recorded delivered only after a `2xx`; a final `4xx` is recorded as refused |
+| ✅ stations known | presence as transitions (`online`, `offline` after silence past the heartbeat, found by a sweep every minute, `booted`), what each station says at boot (vendor, model, serial, firmware), what its meter signs about itself in a billed session's records, and its `FirmwareStatusNotification` and `SecurityEventNotification` — each journalled once, on change. A firmware change is the intervention record `[MessEG §31(2) Nr. 4]` asks for |
 | ✅ station edge | OCPP security profiles 1–3 with TLS, a connection cap, a per-connection message budget and an idle timeout (below) |
 | ✅ receipt | every settled or refused session has a driver receipt at `<public_url>/r/<token>` (below), optionally shown on the station's own display |
 
@@ -172,7 +173,11 @@ In the example estate `CP-1` is a profile-2 station whose `AuthorizationKey` is
 | Endpoint | Answers |
 |---|---|
 | OCPP WebSocket on `CSMSD_BIND` | OCPP 2.1, 2.0.1 and 1.6J |
-| `GET /v1/csmsd/today?limit=&refused=&silent=` | operator token: registry size, the charging success rate for **today** and the **last 7 days** in `[desk] time_zone` (each with causes and weakest points), refused sessions with typed, cited `findings` and their `receipt_path`, and silent stations — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page. Its size depends on `limit` and the number of stations, never on the history |
+| `GET /v1/csmsd/stations?q=&area=&limit=&offset=` | operator token: the registry searched — every word in a station's identity, EVSE id, OCPP version, state, vendor, model, firmware, network or carrier; `{ total, items }` |
+| `POST /v1/csmsd/stations`, `PUT …/<identity>`, `POST …/<identity>/password`, `POST …/<identity>/retire` | operator token: register (the password in this answer only), change, mint a new password, retire — each with a reason, journalled under the operator; a refusal is `422` with `{ field, reason }` |
+| `GET /v1/csmsd/stations/<identity>` | operator token: one station — estate entry, presence, what it said at boot, meters with key status, firmware history, reports, boots in 7 days, success today and over 7 days, last 20 sessions with receipt paths. An identity the estate does not list is an empty `404` |
+| `GET /v1/csmsd/map?q=&area=` | operator token: the map of a station search — `points` (identity, coordinates, presence) up to 300 matches, else `cells` of a 16 × 16 grid over their extent with station and silent counts; `area=west,south,east,north` in degrees narrows it, anything else is `400` |
+| `GET /v1/csmsd/today?limit=&refused=&silent=` | operator token: registry size, the charging success rate for **today** and the **last 7 days** in `[desk] time_zone` (each with causes and weakest points), refused sessions with typed, cited `findings` and their `receipt_path`, silent stations with their mobile network, and `networks` (silent and total stations per network with a silent one) — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page. Its size depends on `limit` and the number of stations, never on the history |
 | `GET /v1/csmsd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
 | `GET /r/{token}`, `GET /r/{token}/transparenz.xml` | the driver receipt and its transparency file |
 | `GET /r/verify.js`, `GET /r/verify.wasm` | the in-browser verifier |
@@ -183,7 +188,7 @@ In the example estate `CP-1` is a profile-2 station whose `AuthorizationKey` is
 ## Built on
 
 `emob-ocpp`, `emob-eichrecht`, `emob-session`, `emob-tariff`, `emob-cdr`,
-`emob-service`, `emob-verify` (the receipt's verifier), and [`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.5 for
+`emob-service`, `emob-verify` (the receipt's verifier), and [`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.6 for
 transport and the operational ledger. See
 [The OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/) and the
 [workspace README](../../README.md).

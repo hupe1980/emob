@@ -100,7 +100,7 @@ OCMF verifier that checks every signed value on the phone, offline once loaded.
 
 **The journal you can trust, events any system can subscribe to, and ready for
 1 January 2027.** The fifteen
-domain crates are built and tested (**1300 tests** across the workspace). The
+domain crates are built and tested (**1341 tests** across the workspace). The
 nine daemons start from one `estate.toml` and are wired end to end:
 
 - stations connect to `csmsd` over OCPP 1.6J, 2.0.1 and 2.1 with security
@@ -124,6 +124,18 @@ nine daemons start from one `estate.toml` and are wired end to end:
 - every issued invoice has a page at `/i/{token}` with its XRechnung / EN 16931
   files in UBL and CII, and with `[billing.delivery]` `billd` hands it to the
   operator's ERP or Peppol provider as a signed CloudEvent;
+- stations are **onboarded** from Heute — one form, an installer sheet with a
+  password shown once, connected without a restart — into `csmsd`'s journalled
+  registry, searched at ten thousand stations as at three; `csmsd` knows each
+  one — online or silent since when, what it said at boot, what its meter
+  signs, every firmware change as an intervention record — and every station
+  opens its **asset card**;
+- the fleet is a **map** drawn by `deskd` from a bundled outline (no tiles, no
+  third party); a station's locator names coordinates that lie outside its
+  country or look swapped, and Heute groups silent stations by **mobile
+  network** (MCC-MNC, never the IMSI);
+- `emob check estate.toml` names a mistake by line and key, and editors
+  complete the estate from its published JSON Schema;
 - the operator works from **Heute** (`deskd`), the driver checks a **receipt** —
   on a phone, or from the link on the station's display;
 - `emob_session::mispel` nets a bidirectional site's month under the
@@ -225,14 +237,36 @@ flowchart LR
 Every daemon reads its own sections of one `estate.toml` (`EMOB_ESTATE`,
 default `./estate.toml`): `deploy/estate.example.toml` is the loopback estate,
 `deploy/estate.compose.toml` the compose one. Secrets are environment variables
-the estate names (`*_env`); a daemon refuses to start naming the bad key or the
-unset variable.
+the estate names (`*_env`). Three commands take a clone to a running estate
+without the demo:
+
+```console
+just dev-keys > .env        # every secret the estate names, for this machine (gitignored)
+just dev-ca                 # throwaway loopback TLS for csmsd (openssl)
+just run                    # the nine daemons from source; checks the estate, waits until ready
+```
+
+`emob check estate.toml` checks an estate before any daemon reads it — every
+section, then each daemon's own checks, and with `--secrets` every variable —
+and reports a mistake the way `rustc` does:
+
+```console
+error: unknown field `evse_id`
+  --> estate.toml:24:1
+   |
+24 | evse_id = "DE*ABC*E00001"
+   | ^^^^^^^
+   |
+   = help: did you mean `evse`?
+```
+
+The first line of the example, `#:schema ../schemas/estate.schema.json`, lets
+Taplo or Tombi complete and check the file as you type; the schema is published
+at `https://hupe1980.github.io/emob/schemas/estate.schema.json`.
 
 ```console
 just doctor                 # check the tools
 just demo                   # everything, in one process, on loopback
-eval "$(just dev-keys)"     # four data keys and five signing keys, for running the daemons yourself
-just dev-ca                 # throwaway loopback TLS for csmsd (openssl)
 just desk                   # Heute on :9587, against daemons started from the example estate
 just up                     # all nine in containers; shells on :8080…:8088, OCPP on wss://localhost:9000
 just down                   # stop, keeping the journals
@@ -252,7 +286,8 @@ just images                 # build the nine daemon images and `emob` from one D
 | `EMOB_JOURNAL_DIR` | every daemon with a ledger, and `deskd` | Where the journal and its `.head` live (`deskd`: `witness.ndjson`). Not a temp directory: a ledger in `/tmp` comes back empty after a reboot |
 | `EMOB_HTTP_BIND`, `<DAEMON>_HTTP_BIND` | every daemon | The shell's bind address. Each daemon defaults to loopback (`127.0.0.1:9580`–`9587`, `csmsd` `127.0.0.1:9001`); compose sets `0.0.0.0:8080` |
 | `CSMSD_BIND` | `csmsd` | The OCPP WebSocket, default `127.0.0.1:9000`; a non-loopback bind without `[csms] tls_cert` refuses to start |
-| `POID_NAP_IDENTIFIER`, `SITED_FAILSAFE_KW` | `poid`, `sited` | National access point identifier; site power held when the grid operator goes silent |
+| `POID_NAP_IDENTIFIER` | `poid` | The identifier the national access point issued; refused when unset (`just dev-keys` prints `DE-NAP-DEV`) |
+| `SITED_FAILSAFE_KW` | `sited` | Site power held when the grid operator goes silent |
 | `EMOB_LOG_FORMAT` | every daemon | JSON lines by default; `text` for a terminal |
 | `RUST_LOG` | every daemon | Log filter |
 
@@ -265,7 +300,8 @@ Optional estate keys:
 | `[[stations]] receipt_display_minutes` | `csmsd` | 1–15: show `Beleg: <receipt link>` on an OCPP 2.0.1 / 2.1 station's display. Off when absent, because a screen is public |
 | `[billing] iban`, `creditor_id`, `contact`, `public_url` | `billd` | payee account, SEPA creditor id, seller contact, and the origin of `/i/{token}` |
 | `[billing.delivery] url`, `secret_env`, `syntax` | `billd` | where each issued invoice is posted as a signed CloudEvent, in `ubl` or `cii` |
-| `[[subscribers]] name`, `url`, `secret_env`, `types` | `csmsd`, `billd` | a system outside the estate that receives the CloudEvents its `types` take, under its own secret |
+| `[[subscribers]] name`, `url`, `secret_env`, `types` | `csmsd`, `billd` | a system outside the estate that receives the CloudEvents its `types` take, under its own secret; `emob subscribers test <name>` sends it a signed sample |
+| `[[stations]] commissioned` | `csmsd` | `YYYY-MM-DD`; the station page shows the station's age |
 | `[[partners]] specification`, `buyer_reference`, `mandate` | `billd` | `en16931` or `xrechnung`, the buyer's reference (a Leitweg-ID), a SEPA mandate |
 | `electronic_address` on `seller` and a partner's `billing` | `billd` | the e-invoice address both parties need under XRechnung |
 
@@ -419,7 +455,7 @@ just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, deny, docs — what CI runs
 just test       # cargo test --workspace --all-features
 just guards     # no-floats, citations, manifests, wire formats, prose, counts,
-                # reachability, documented APIs, constructors, dependency graph,
+                # reachability, documented APIs and routes, constructors, dependency graph,
                 # Actions pinned by SHA and base images by digest (check-actions)
 just purity     # no clock, no I/O, no unsafe in the domain crates
 just msrv       # the crates that promise 1.94 still build on 1.94
@@ -430,7 +466,8 @@ just pins       # every pinned Action and base image, to move by hand
 just sbom       # the release's CycloneDX bill of materials
 ```
 
-Run `just ci` before opening a pull request. Features are specified with
+Run `just ci` before opening a pull request; [CONTRIBUTING.md](CONTRIBUTING.md)
+has the way in and the rules that are tests. Features are specified with
 [Spec Kit](https://github.com/github/spec-kit) before they are built.
 
 Releases: `just release-check` packages every publishable crate and builds each

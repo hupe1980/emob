@@ -84,7 +84,7 @@ flowchart LR
 | An impostor who knows a station identity connects as that station | critical | **Control** | `services/csmsd/tests/a_station_proves_who_it_is.rs` |
 | OCPP without TLS exposes passwords and card UIDs | high | **Control** | non-loopback bind without TLS refuses to start (same file) |
 | Every card is accepted and `empd` is never asked | high | **Control** | `services/empd/tests/a_token_is_asked_about.rs`; `services/csmsd/tests/the_estate_runs.rs` (blocked card, `empd` down) |
-| A connection or message flood exhausts `csmsd` | medium | **Control** | connection cap, message budget, idle sweeper — `a_station_proves_who_it_is.rs` |
+| A connection or message flood exhausts `csmsd` | medium | **Control** | connection cap, message rate and idle timeout (enforced by `ocpp-kit`, counted by `csmsd`) — `a_station_proves_who_it_is.rs` |
 
 ### The Eichrecht chain and the driver
 

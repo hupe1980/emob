@@ -10,6 +10,92 @@ renames something says so under **Removed** or **Changed** instead.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-20
+
+The way in is short, and the fleet has a registry, a map and a network.
+
+### Added
+
+- **Station onboarding at fleet scale.** `csmsd` owns a journalled **station
+  registry** (`station_registered`, `station_updated`, `station_retired`); the
+  estate's `[[stations]]` seed it, after which it rules. Admission reads it on
+  every connection, so a station connects the moment it is registered and is
+  refused the moment it is retired — no restart. Heute gains **Stationen**
+  (search by identity, EVSE, vendor, model, serial, firmware, in pages),
+  **Station hinzufügen** (one form; an installer sheet with the password minted
+  and shown once) and, on a station's page, a change, a new password or
+  retirement, each with a reason; a refusal is marked at the field it names. API: `GET|POST /v1/csmsd/stations`, `PUT /v1/csmsd/stations/{id}`,
+  `POST …/{id}/password`, `POST …/{id}/retire`. A search over 10 000 stations
+  is one pass under one lock (a test holds it under 50 ms).
+- **Where the fleet is.** Stationen draws the search as a map — a dot per
+  station by state, or above 300 a grid whose circles open the search narrowed
+  to their area (`GET /v1/csmsd/map`, `area=` on the search). Server-rendered
+  SVG over a bundled Natural Earth outline: no tiles, no script, no third
+  party. A station's location card draws its own locator and warns when the
+  coordinates lie outside its country or look swapped. `csmsd` keeps the
+  mobile network a station reports at boot (MCC-MNC, never the IMSI); the
+  search finds stations by network or carrier, and Heute groups silent
+  stations by network — "Telekom Deutschland 12 von 40 still".
+- **`emob check estate.toml`** — every section against the whole estate (a
+  section no daemon reads is refused), then each daemon's own checks; mistakes
+  reported like `rustc` reports them, with the line and `= help: did you mean …`.
+  `--secrets` requires every `*_env` variable (named, never printed); `--schema`
+  prints the estate's JSON Schema, published as `schemas/estate.schema.json` and
+  referenced by `#:schema` in the example so editors complete and check it.
+- **The station page.** `csmsd` journals presence as transitions (`online`,
+  `offline`, `booted`), what a station says at boot, what its meter signs
+  about itself in a billed session, and its firmware and security reports; a
+  firmware change is the intervention record `[MessEG §31(2) Nr. 4]` asks for.
+  `GET /v1/csmsd/stations/{identity}` and `deskd`'s `/station/{identity}` show
+  one station as an asset card; every station on Heute links to it.
+- **Three commands to a running estate:** `just dev-keys > .env` (every secret
+  the estate names), `just dev-ca`, `just run` (checks the estate, starts the
+  nine daemons, waits until each is ready).
+- JSON Schemas for `de.emob.cdr.issued` and `de.emob.invoice.issued`
+  (`schemas/events/`), held to what the daemons send; `emob subscribers test
+  <name>` sends a subscriber one signed, marked sample of each type it takes.
+- `cargo xtask check-docs`: every documented `/v1/…` route is served and every
+  emob release a document names is tagged. `CONTRIBUTING.md` and issue and pull
+  request templates.
+- Pages crossfade between each other where the browser supports view
+  transitions.
+
+### Changed
+
+- `datex2` 0.3: the status publication is wrapped by its own
+  `json::mobilithek::snapshot` and written by the same `to_string` as the
+  table; a refused amount names its type (`… of type AmountOfMoney`).
+- `sepa` 0.10: every pain.008 states the creation time `emob-billing` passes
+  (the crate no longer reads a clock), and `sepa::Iban` masks itself in
+  `Debug`, so `Creditor` derives it.
+- `de.emob.cdr.issued` carries `data.point` (EVSE, connector, power, location);
+  `roamd` builds the CDR location from it, so a station registered after
+  `roamd` started still roams. `[desk]` gains `ocpp_url` for the installer
+  sheet.
+- `csmsd::edge::Gate` takes a `Registry`; `csmsd::read::router` takes whether
+  profile 3 can be admitted instead of the estate's stations.
+- `poid` refuses to start without `POID_NAP_IDENTIFIER` (was `DE-NAP-0000`).
+- `csmsd` acknowledges and journals `FirmwareStatusNotification`,
+  `SecurityEventNotification`, `LogStatusNotification` and (1.6)
+  `DiagnosticsStatusNotification` (was `NotSupported`).
+- `tarifd` logs a version's state once when it starts, not every minute.
+- `just dev-keys` writes `.env` lines (with `export`) and includes every
+  `*_env` the estate names; `eval "$(just dev-keys)"` still works.
+- `ocpp-kit` 0.6: the kit enforces `messages_per_minute` and
+  `idle_timeout_secs` and serves profiles 2 and 3 on one listener;
+  `csmsd`'s own token bucket, idle sweeper and `rustls` server config are gone
+  (`edge::Guarded` removed, `Edge::new` returns a `Result`).
+- `location.country` must be ISO 3166-1 alpha-2 (`DE`), as OCPI's
+  `country_code` is; a registration with anything else is refused.
+
+### Fixed
+
+- `deskd` answered `503` on `/health/ready` forever (it declared no probe).
+- `billd` built on its own (as its image is) had no TLS in its HTTP client, so
+  an `https://` operator system or subscriber could not be reached.
+- Heute's "weakest points" linked to anchors that existed only for silent
+  stations; they open the station page.
+
 ## [0.4.0] - 2026-11-20
 
 Events leave the estate, and the Mobilithek feed is written by `datex2`.
@@ -275,7 +361,8 @@ could not.
 First release: fifteen crates from the signed meter value to the ledger posting,
 and eight daemons.
 
-[Unreleased]: https://github.com/hupe1980/emob/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hupe1980/emob/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/hupe1980/emob/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hupe1980/emob/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/hupe1980/emob/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hupe1980/emob/compare/v0.1.0...v0.3.0

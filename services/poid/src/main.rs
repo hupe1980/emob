@@ -83,8 +83,16 @@ async fn main() -> Result<()> {
     let mut service = Poid::new(
         Publisher {
             country: estate.parties.operator.country_code().to_owned(),
+            // The identifier the national access point issued (spec 012):
+            // refused when absent rather than published as a placeholder
+            // nobody at the Mobilithek ever issued.
             national_identifier: std::env::var("POID_NAP_IDENTIFIER")
-                .unwrap_or_else(|_| "DE-NAP-0000".to_owned()),
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .context(
+                    "POID_NAP_IDENTIFIER is not set: the identifier the national access point \
+                     issued this operator — `just dev-keys` sets DE-NAP-DEV for one machine",
+                )?,
             language: "de".to_owned(),
         },
         Facility::new(format!("{}-TABLE", estate.parties.operator)),

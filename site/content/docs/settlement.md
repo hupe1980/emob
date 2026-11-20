@@ -598,12 +598,11 @@ assert!(books.balances());     // before a single account is named
 - Postings are addressed by **role** (receivable, energy revenue, service revenue,
   VAT payable at a rate); the caller maps roles onto its chart (SKR03, SKR04). An
   unmappable role is refused, not dropped.
-- The journal itself (via `doubleentry` 0.9) lives in `billd`, because
-  `doubleentry` generates UUID v7 ids from the system clock and a pure crate must
-  produce identical output for identical input.
-- `sepa` 0.9 would default a collection date and message timestamp from the
-  system clock; emob passes every one as an argument, and a test asserts the same
-  inputs produce the same bytes.
+- The ledger itself (`doubleentry`) lives in `billd`, which owns the books;
+  `emob-billing` stops at the role-addressed postings.
+- Every collection date and message timestamp in a pain.008 is an argument —
+  `sepa` reads no clock — and a test asserts the same inputs produce the same
+  bytes.
 
 ## Limits
 

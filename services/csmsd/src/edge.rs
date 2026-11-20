@@ -23,41 +23,35 @@
 //!
 //! [`Security::from_estate`] refuses a non-loopback bind without
 //! `[csms] tls_cert` unless `tls_terminated_by_proxy` is declared — a CSMS that
-//! takes Basic passwords in clear on a public address is handing them out. The
-//! rustls server config is built here rather than by the kit: the kit's
-//! mutual-TLS constructor demands a certificate from every peer, and a profile-2
-//! station has none, so client authentication is *offered* and [`Gate`] decides
-//! per station whether it was required.
+//! takes Basic passwords in clear on a public address is handing them out. With
+//! a client CA, a certificate is *offered* — verified when presented, absent
+//! for a profile-2 station — and [`Gate`] decides per station whether it was
+//! required.
 //!
 //! # How much a station may say
 //!
-//! The kit bounds sessions (`max_connections`, answered 503), handshakes (count
-//! and timeout) and dead peers (keepalive). It does not bound a live peer that
-//! talks too much or says nothing at all; [`Guarded`] adds a per-connection
-//! message budget (an excess message is answered `SecurityError` and not
-//! processed) and [`Edge::sweep`] closes sessions silent past
-//! `idle_timeout_secs`.
+//! The kit bounds all of it: sessions (`max_connections`, answered 503),
+//! handshakes (count and timeout), dead peers (keepalive), a live peer that
+//! talks too much (`messages_per_minute`, answered `SecurityError` before the
+//! handler) and one that says nothing at all (`idle_timeout_secs`, measured on
+//! OCPP messages, never pings). [`Edge`] counts each refusal from the kit's
+//! session events.
 
-use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use emob_service::estate::{Csms, EstateError, SecurityProfile, Station};
-use ocpp_kit::RawValue;
 use ocpp_kit::Version;
-use ocpp_kit::engine::IncomingRequest;
-use ocpp_kit::rpc::CallError;
+use ocpp_kit::engine::RateLimit;
 use ocpp_kit::transport::{
-    Auth, AuthOutcome, BoxFuture, Credentials, CsmsHandle, Ctx, Handler, ServerTls, SessionContext,
-    SessionEvent,
+    Auth, AuthOutcome, BoxFuture, Credentials, CsmsHandle, DisconnectReason, ServerTls,
+    SessionContext, SessionEvent,
 };
-use ocpp_kit::types::Identity;
-use tokio::time::Instant;
 
-use crate::Provisioning;
+use crate::ChargePoint;
 
 fn invalid(key: impl Into<String>, reason: impl ToString) -> EstateError {
     EstateError::Invalid {
@@ -85,12 +79,20 @@ enum Credential {
 pub struct Security {
     tls: Option<ServerTls>,
     proxy: bool,
-    credentials: BTreeMap<String, Credential>,
+    /// Whether a profile-3 station can be admitted here at all.
+    certificates: bool,
     /// The limits.
     pub csms: Csms,
 }
 
 impl Security {
+    /// Whether a profile-3 station can be admitted at all: a client CA is
+    /// named and TLS ends here.
+    #[must_use]
+    pub const fn admits_certificates(&self) -> bool {
+        self.certificates
+    }
+
     /// Read `[csms]` and every station's credential, refusing by key.
     ///
     /// `bind` is the OCPP address: a non-loopback one needs TLS or a declared
@@ -139,49 +141,14 @@ impl Security {
             ));
         }
 
-        let mut credentials = BTreeMap::new();
         let mut wants_certificates = false;
         for (index, station) in stations.iter().enumerate() {
             let at = |field: &str| format!("stations[{index}].{field}");
-            let credential = match station.security_profile {
-                SecurityProfile::Basic | SecurityProfile::TlsBasic => {
-                    let hash = station.password_hash.clone().ok_or_else(|| {
-                        invalid(
-                            at("password_hash"),
-                            format!(
-                                "security profile {} authenticates with a password and none is \
-                                 provisioned (`csmsd hash-password` prints one)",
-                                station.security_profile.number()
-                            ),
-                        )
-                    })?;
-                    let parsed = argon2::PasswordHash::new(&hash).map_err(|error| {
-                        invalid(at("password_hash"), format!("not a PHC string: {error}"))
-                    })?;
-                    if parsed.algorithm != argon2::Algorithm::Argon2id.ident() {
-                        return Err(invalid(
-                            at("password_hash"),
-                            format!("{} is not Argon2id", parsed.algorithm),
-                        ));
-                    }
-                    Credential::Password {
-                        encrypted: station.security_profile == SecurityProfile::TlsBasic,
-                        hash,
-                    }
-                }
-                SecurityProfile::TlsClientCertificate => {
-                    if station.password_hash.is_some() {
-                        return Err(invalid(
-                            at("password_hash"),
-                            "security profile 3 authenticates with a certificate; a password \
-                             beside it is a second credential nobody checks",
-                        ));
-                    }
-                    wants_certificates = true;
-                    Credential::Certificate
-                }
-            };
-            credentials.insert(station.identity.clone(), credential);
+            let credential =
+                credential_of(station).map_err(|(field, reason)| invalid(at(field), reason))?;
+            if matches!(credential, Credential::Certificate) {
+                wants_certificates = true;
+            }
         }
         if wants_certificates {
             if proxy {
@@ -211,7 +178,7 @@ impl Security {
         Ok(Self {
             tls,
             proxy,
-            credentials,
+            certificates: csms.client_ca.is_some() && !proxy,
             csms: csms.clone(),
         })
     }
@@ -234,49 +201,15 @@ fn pem_error(path: &Path, error: impl std::fmt::Display) -> EstateError {
     )
 }
 
+/// The listener's TLS: profile 2 alone, or profiles 2 and 3 side by side when
+/// a client CA is configured — a certificate is then verified when presented
+/// and may be absent, and `Gate` decides per station which one it requires.
 fn server_tls(cert: &Path, key: &Path, client_ca: Option<&Path>) -> Result<ServerTls, EstateError> {
-    use rustls::pki_types::pem::PemObject as _;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-
-    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(cert)
-        .map_err(|e| pem_error(cert, e))?
-        .collect::<Result<_, _>>()
-        .map_err(|e| pem_error(cert, e))?;
-    if chain.is_empty() {
-        return Err(pem_error(cert, "no certificate in it"));
+    match client_ca {
+        Some(ca) => ServerTls::with_optional_client_auth(cert, key, ca),
+        None => ServerTls::new(cert, key),
     }
-    let key_der = PrivateKeyDer::from_pem_file(key).map_err(|e| pem_error(key, e))?;
-    // The provider the kit uses, chosen explicitly so a process-wide default
-    // cannot change the cipher suites underneath.
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|e| invalid("csms", e))?;
-    let (builder, mutual) = match client_ca {
-        Some(ca) => {
-            let mut roots = rustls::RootCertStore::empty();
-            for root in CertificateDer::pem_file_iter(ca).map_err(|e| pem_error(ca, e))? {
-                roots
-                    .add(root.map_err(|e| pem_error(ca, e))?)
-                    .map_err(|e| pem_error(ca, e))?;
-            }
-            // Offered, not demanded: a profile-2 station on the same listener
-            // has no certificate, and `Gate` requires one per station.
-            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-                Arc::new(roots),
-                provider,
-            )
-            .allow_unauthenticated()
-            .build()
-            .map_err(|e| pem_error(ca, e))?;
-            (builder.with_client_cert_verifier(verifier), true)
-        }
-        None => (builder.with_no_client_auth(), false),
-    };
-    let config = builder
-        .with_single_cert(chain, key_der)
-        .map_err(|e| pem_error(cert, e))?;
-    Ok(ServerTls::from_config(Arc::new(config), mutual))
+    .map_err(|e| pem_error(cert, e))
 }
 
 /// What the edge refused, counted.
@@ -302,128 +235,37 @@ impl Counters {
     }
 }
 
-/// One connection's message budget.
-#[derive(Debug)]
-struct Budget {
-    tokens: bucket::Tokens,
-    last_seen: Instant,
-}
-
-/// Token-bucket arithmetic in integer milli-tokens — the workspace has no
-/// floats (constitution II), and a budget is no reason to start.
-mod bucket {
-    use tokio::time::Instant;
-
-    #[derive(Debug)]
-    pub struct Tokens {
-        milli: u64,
-        at: Instant,
-    }
-
-    impl Tokens {
-        pub fn full(per_minute: u32, now: Instant) -> Self {
-            Self {
-                milli: u64::from(per_minute) * 1000,
-                at: now,
-            }
-        }
-
-        /// Refill for the time since the last take, then take one if there is one.
-        pub fn take(&mut self, per_minute: u32, now: Instant) -> bool {
-            let capacity = u64::from(per_minute) * 1000;
-            let elapsed_ms =
-                u64::try_from(now.duration_since(self.at).as_millis()).unwrap_or(u64::MAX);
-            // per_minute tokens per 60 000 ms = per_minute milli-tokens per 60 ms.
-            let refill = elapsed_ms.saturating_mul(u64::from(per_minute)) / 60;
-            self.milli = self.milli.saturating_add(refill).min(capacity);
-            self.at = now;
-            if self.milli >= 1000 {
-                self.milli -= 1000;
-                true
-            } else {
-                false
-            }
-        }
-    }
-}
-
-/// The live half of the edge: budgets, idleness and the counters.
+/// The edge's limits, and what it refused.
 #[derive(Debug)]
 pub struct Edge {
-    per_minute: u32,
+    rate: RateLimit,
     idle: Duration,
-    budgets: Mutex<HashMap<Identity, Budget>>,
     /// What was refused.
     pub counters: Counters,
 }
 
 impl Edge {
-    /// An edge with these limits.
-    #[must_use]
-    pub fn new(csms: &Csms) -> Self {
-        Self {
-            per_minute: csms.messages_per_minute.max(1),
+    /// An edge with the estate's limits.
+    ///
+    /// # Errors
+    ///
+    /// When `messages_per_minute` is zero.
+    pub fn new(csms: &Csms) -> Result<Self, EstateError> {
+        Ok(Self {
+            rate: RateLimit::per_minute(csms.messages_per_minute)
+                .map_err(|_| invalid("csms", "messages_per_minute must be at least 1"))?,
             idle: Duration::from_secs(csms.idle_timeout_secs.max(1)),
-            budgets: Mutex::new(HashMap::new()),
             counters: Counters::default(),
-        }
+        })
     }
 
-    fn budgets(&self) -> std::sync::MutexGuard<'_, HashMap<Identity, Budget>> {
-        self.budgets
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// A message arrived: whether it is within the connection's budget.
-    fn admit(&self, identity: &Identity) -> bool {
-        let now = Instant::now();
-        let mut budgets = self.budgets();
-        let budget = budgets.entry(identity.clone()).or_insert_with(|| Budget {
-            tokens: bucket::Tokens::full(self.per_minute, now),
-            last_seen: now,
-        });
-        budget.last_seen = now;
-        budget.tokens.take(self.per_minute, now)
-    }
-
-    /// A session opened: its budget starts full and its silence starts now.
-    fn opened(&self, identity: &Identity) {
-        let now = Instant::now();
-        self.budgets().insert(
-            identity.clone(),
-            Budget {
-                tokens: bucket::Tokens::full(self.per_minute, now),
-                last_seen: now,
-            },
-        );
-    }
-
-    /// Close every session silent for longer than the idle timeout.
-    pub async fn sweep(&self, csms: &CsmsHandle) {
-        let now = Instant::now();
-        for identity in csms.sessions().await {
-            let silent = self
-                .budgets()
-                .get(&identity)
-                .is_none_or(|budget| now.duration_since(budget.last_seen) > self.idle);
-            if !silent {
-                continue;
-            }
-            if let Some(session) = csms.session(&identity).await {
-                tracing::warn!(station = %identity, idle = ?self.idle, "closing a silent session");
-                self.counters.idle_closed.fetch_add(1, Ordering::Relaxed);
-                self.budgets().remove(&identity);
-                session.shutdown(Duration::from_secs(1)).await;
-            }
-        }
-    }
-
-    /// How often [`Self::sweep`] runs: often enough that a session is closed
-    /// within a quarter of the timeout of going silent.
-    #[must_use]
-    pub fn sweep_every(&self) -> Duration {
-        (self.idle / 4).clamp(Duration::from_millis(50), Duration::from_secs(30))
+    /// The kit enforces these: a station over `rate` is answered
+    /// `SecurityError`, one silent past `idle` is closed.
+    pub fn limit(
+        &self,
+        builder: ocpp_kit::transport::CsmsBuilder,
+    ) -> ocpp_kit::transport::CsmsBuilder {
+        builder.message_rate(self.rate).idle_timeout(self.idle)
     }
 
     /// Follow the kit's session events: count its refusals, log the opens.
@@ -434,8 +276,18 @@ impl Edge {
                 Ok(SessionEvent::Opened {
                     identity, version, ..
                 }) => {
-                    self.opened(&identity);
                     tracing::info!(station = %identity, ocpp = %version, "station connected");
+                }
+                Ok(SessionEvent::RateLimited { identity }) => {
+                    self.counters.rate_limited.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(station = %identity, "a station is over its message budget");
+                }
+                Ok(SessionEvent::Closed {
+                    identity,
+                    reason: DisconnectReason::Idle(idle),
+                }) => {
+                    self.counters.idle_closed.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(station = %identity, ?idle, "closed a silent session");
                 }
                 Ok(SessionEvent::Refused {
                     identity,
@@ -463,64 +315,78 @@ impl Edge {
     }
 }
 
-/// The handler behind the budget: an excess message is refused before it
-/// reaches `csmsd`, so it is neither journalled nor answered from state.
-pub struct Guarded<H> {
-    inner: H,
-    edge: Arc<Edge>,
-}
-
-impl<H> Guarded<H> {
-    /// `inner`, behind `edge`'s budget.
-    pub const fn new(inner: H, edge: Arc<Edge>) -> Self {
-        Self { inner, edge }
-    }
-}
-
-impl<H: Handler> Handler for Guarded<H> {
-    fn on_request(
-        &self,
-        ctx: Ctx,
-        request: IncomingRequest,
-    ) -> BoxFuture<'_, Result<Box<RawValue>, CallError>> {
-        if self.edge.admit(ctx.identity()) {
-            return self.inner.on_request(ctx, request);
+/// The credential a station's record requires, from its profile and its hash.
+///
+/// # Errors
+///
+/// The field and why, for a record whose credential does not fit its profile.
+fn credential_of(station: &Station) -> Result<Credential, (&'static str, String)> {
+    match station.security_profile {
+        SecurityProfile::Basic | SecurityProfile::TlsBasic => {
+            let hash = station.password_hash.clone().ok_or_else(|| {
+                (
+                    "password_hash",
+                    format!(
+                        "security profile {} authenticates with a password and none is \
+                         provisioned (`csmsd hash-password` prints one)",
+                        station.security_profile.number()
+                    ),
+                )
+            })?;
+            let parsed = argon2::PasswordHash::new(&hash)
+                .map_err(|error| ("password_hash", format!("not a PHC string: {error}")))?;
+            if parsed.algorithm != argon2::Algorithm::Argon2id.ident() {
+                return Err((
+                    "password_hash",
+                    format!("{} is not Argon2id", parsed.algorithm),
+                ));
+            }
+            Ok(Credential::Password {
+                encrypted: station.security_profile == SecurityProfile::TlsBasic,
+                hash,
+            })
         }
-        self.edge
-            .counters
-            .rate_limited
-            .fetch_add(1, Ordering::Relaxed);
-        tracing::warn!(station = %ctx.identity(), action = %request.action, "a station is over its message budget");
-        Box::pin(async {
-            Err(CallError::security(
-                "this connection is over its message budget; slow down",
-            ))
-        })
+        SecurityProfile::TlsClientCertificate => {
+            if station.password_hash.is_some() {
+                return Err((
+                    "password_hash",
+                    "security profile 3 authenticates with a certificate; a password beside it \
+                     is a second credential nobody checks"
+                        .to_owned(),
+                ));
+            }
+            Ok(Credential::Certificate)
+        }
     }
+}
+
+/// Where admission finds a station (spec 021): the registry, read on every
+/// connection, so a registered station connects and a retired one is refused
+/// without a restart (SR-146).
+pub trait Registry: Send + Sync + 'static {
+    /// The station registered under `identity`, and the point it is.
+    fn admit(&self, identity: &str) -> Option<(ChargePoint, Station)>;
 }
 
 /// Decides whether a station may connect: its provisioning, its version and
 /// the credential its profile requires.
 pub struct Gate {
-    provisioning: Provisioning,
+    registry: Arc<dyn Registry>,
     security: Arc<Security>,
 }
 
 impl Gate {
     /// A gate over the fleet.
     #[must_use]
-    pub fn new(provisioning: Provisioning, security: Arc<Security>) -> Self {
-        Self {
-            provisioning,
-            security,
-        }
+    pub fn new(registry: Arc<dyn Registry>, security: Arc<Security>) -> Self {
+        Self { registry, security }
     }
 
     async fn decide(&self, auth: Auth) -> AuthOutcome {
         // An identity nobody provisioned is answered 404 rather than 401, so
         // an operator can tell a typo from a bad password
         // `[OCPP 2.0.1 Part 4 §3.1.1]` — and before any hash is computed.
-        let Some(point) = self.provisioning.get(&auth.identity).cloned() else {
+        let Some((point, station)) = self.registry.admit(auth.identity.as_str()) else {
             return AuthOutcome::Unknown;
         };
         let refuse = |why: &str| {
@@ -530,9 +396,10 @@ impl Gate {
         if !auth.offered.contains(&point.ocpp) {
             return refuse("the station does not offer the OCPP version it was provisioned for");
         }
-        let Some(credential) = self.security.credentials.get(auth.identity.as_str()) else {
+        let Ok(credential) = credential_of(&station) else {
             return refuse("the station has no credential provisioned");
         };
+        let credential = &credential;
         let encrypted = auth.profile.is_transport_encrypted() || self.security.proxy;
         match (credential, auth.credentials) {
             (
@@ -706,19 +573,6 @@ mod tests {
         assert!(
             hash_password(Version::V2_0_1, "short").is_err(),
             "A00.FR.205"
-        );
-    }
-
-    #[test]
-    fn sr_043_the_budget_refills_and_refuses_past_it() {
-        let start = Instant::now();
-        let mut tokens = bucket::Tokens::full(2, start);
-        assert!(tokens.take(2, start));
-        assert!(tokens.take(2, start));
-        assert!(!tokens.take(2, start), "the third in the same instant");
-        assert!(
-            tokens.take(2, start + Duration::from_secs(30)),
-            "one more after half a minute"
         );
     }
 }

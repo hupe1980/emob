@@ -63,11 +63,12 @@ pub enum EstateError {
         source: std::io::Error,
     },
     /// A section this daemon reads does not parse.
-    #[error("the estate at {path} is not one this daemon can run on: {detail}")]
+    #[error("the estate at {path} is not one this daemon can run on:\n{detail}")]
     Malformed {
         /// Which file.
         path: String,
-        /// What the parser said — line, column and key.
+        /// The refusal as `rustc` would print it: what, where, and what
+        /// would be valid ([`report::render`]).
         detail: String,
     },
     /// A value parsed and is not acceptable.
@@ -114,11 +115,138 @@ pub fn from_str<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, EstateE
     parse(text, "<in memory>")
 }
 
+/// The same, from text read from `path` — so a refusal names the file.
+///
+/// # Errors
+///
+/// [`EstateError::Malformed`].
+pub fn from_str_at<T: serde::de::DeserializeOwned>(
+    text: &str,
+    path: &str,
+) -> Result<T, EstateError> {
+    parse(text, path)
+}
+
 fn parse<T: serde::de::DeserializeOwned>(text: &str, path: &str) -> Result<T, EstateError> {
     toml::from_str(text).map_err(|error: toml::de::Error| EstateError::Malformed {
         path: path.to_owned(),
-        detail: error.to_string().trim().to_owned(),
+        detail: report::render(path, text, error.span(), error.message()),
     })
+}
+
+pub mod report;
+
+/// The whole estate: every section any daemon reads (spec 012).
+///
+/// The daemons keep their own narrower views — a malformed tariff does not
+/// stop `empd` — and this one is what `emob check` and the published JSON
+/// Schema describe. A section no daemon reads is refused here, so
+/// `[[subscriber]]` for `[[subscribers]]` is a refusal and not a silence.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Estate {
+    /// Whom the platform acts as.
+    pub parties: Parties,
+    /// The fleet.
+    #[serde(default)]
+    pub stations: Vec<Station>,
+    /// The keys that make energy billable.
+    #[serde(default)]
+    pub meter_keys: Vec<MeterKey>,
+    /// The tariffs stations name.
+    #[serde(default)]
+    pub tariffs: Vec<TariffSpec>,
+    /// The roaming partners.
+    #[serde(default)]
+    pub partners: Vec<Partner>,
+    /// How invoices are issued (`billd`).
+    #[serde(default)]
+    pub billing: Option<BillingSection>,
+    /// Driver contracts `empd` seeds.
+    #[serde(default)]
+    pub contracts: Vec<ContractSeed>,
+    /// Who may read and act.
+    #[serde(default)]
+    pub operators: Vec<Operator>,
+    /// The OCPP listener.
+    #[serde(default)]
+    pub csms: Option<Csms>,
+    /// The operator page.
+    #[serde(default)]
+    pub desk: Option<Desk>,
+    /// Where receipt links point.
+    #[serde(default)]
+    pub receipts: Option<ReceiptSection>,
+    /// Where the daemons are.
+    #[serde(default)]
+    pub services: Option<Services>,
+    /// The roaming node.
+    #[serde(default)]
+    pub roaming: Option<Roaming>,
+    /// The keys journal heads are signed under.
+    #[serde(default)]
+    pub witness: Witness,
+    /// Systems outside the estate that receive events.
+    #[serde(default)]
+    pub subscribers: Vec<Subscriber>,
+}
+
+/// `[receipts]` — read by `csmsd`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptSection {
+    /// The origin a driver reaches the shell at; links are
+    /// `<public_url>/r/<token>`.
+    pub public_url: String,
+}
+
+/// The JSON Schema of [`Estate`], as `schemas/estate.schema.json` holds it.
+#[cfg(feature = "schema")]
+#[must_use]
+pub fn json_schema() -> serde_json::Value {
+    let mut schema =
+        serde_json::to_value(schemars::schema_for!(Estate)).unwrap_or(serde_json::Value::Null);
+    if let Some(object) = schema.as_object_mut() {
+        object.insert(
+            "$id".to_owned(),
+            "https://hupe1980.github.io/emob/schemas/estate.schema.json".into(),
+        );
+        object.insert("title".to_owned(), "emob estate".into());
+    }
+    schema
+}
+
+#[cfg(feature = "schema")]
+mod schema {
+    //! Schemas for the section fields whose type is not this crate's.
+
+    use schemars::{Schema, SchemaGenerator, json_schema};
+
+    /// `[[stations]] connector`, in the spelling the estate accepts.
+    pub fn connector(_: &mut SchemaGenerator) -> Schema {
+        use emob_core::ConnectorType as C;
+        let names: Vec<serde_json::Value> = [
+            C::Iec62196T2,
+            C::Iec62196T2Combo,
+            C::Iec62196T1,
+            C::Iec62196T1Combo,
+            C::Chademo,
+            C::Iec62196T3A,
+            C::DomesticF,
+            C::Cee5,
+        ]
+        .iter()
+        .filter_map(|c| serde_json::to_value(c).ok())
+        .collect();
+        json_schema!({ "type": "string", "enum": names })
+    }
+
+    /// `[[stations]] security_profile`: OCPP security profile 1, 2 or 3.
+    pub fn security_profile(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({ "type": "integer", "minimum": 1, "maximum": 3 })
+    }
 }
 
 /// Where secrets are looked up: the process environment in a daemon, a map in
@@ -133,6 +261,7 @@ pub fn process_env() -> Env {
 
 /// The name of an environment variable that holds a secret.
 #[derive(Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct EnvRef(String);
 
@@ -198,17 +327,27 @@ impl fmt::Debug for EnvRef {
 
 /// `[parties]` — whom this estate acts as.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Parties {
     /// The charge point operator: the party the stations, CDRs and invoices are
     /// issued under.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^[A-Z]{2}\*?[A-Z0-9]{3}$"))
+    )]
     pub operator: PartyId,
     /// The e-mobility provider `empd` runs: the party its tokens are issued by.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^[A-Z]{2}\*?[A-Z0-9]{3}$"))
+    )]
     pub provider: PartyId,
 }
 
 /// The OCPP version a station speaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum Ocpp {
     /// OCPP 1.6J.
     #[serde(rename = "1.6")]
@@ -224,7 +363,8 @@ pub enum Ocpp {
 /// Where a station stands, as a roaming partner and the national access point
 /// are told it. Coordinates are exact decimals: they travel as decimal text in
 /// OCPI and DATEX II and never become a float here.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Location {
     /// The location's id, unique per operator.
@@ -242,15 +382,24 @@ pub struct Location {
     /// ISO 3166-1 alpha-2.
     pub country: String,
     /// WGS 84 latitude.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
+    )]
     pub latitude: Decimal,
     /// WGS 84 longitude.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
+    )]
     pub longitude: Decimal,
     /// The IANA zone the site's local time is read in.
     pub time_zone: String,
 }
 
 /// `[[stations]]` — one charging station and the point it is.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Station {
     /// The OCPP identity it connects under.
@@ -258,6 +407,7 @@ pub struct Station {
     /// The security profile it must connect with
     /// `[OCPP 2.0.1 Part 2 §A00]`: 1 (Basic over plain WebSocket),
     /// 2 (Basic over TLS) or 3 (TLS client certificate). There is no profile 0.
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema::security_profile"))]
     pub security_profile: SecurityProfile,
     /// Profiles 1 and 2: its Basic password as an Argon2id PHC string
     /// (`csmsd hash-password` prints one). A hash is not a credential, so it is
@@ -266,12 +416,24 @@ pub struct Station {
     /// The version it speaks.
     pub ocpp: Ocpp,
     /// The EVSE its sessions are attributed to.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(
+            with = "String",
+            regex(pattern = r"^[A-Z]{2}\*?[A-Z0-9]{3}\*?E[A-Z0-9*]{1,30}$")
+        )
+    )]
     pub evse: EvseId,
     /// What it can deliver, in kW — the `[AFIR Art. 5(4)]` threshold reads it.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
+    )]
     pub rated_power_kw: Decimal,
     /// The id of the `[[tariffs]]` entry that rates its sessions.
     pub tariff: String,
     /// The connector it offers.
+    #[cfg_attr(feature = "schema", schemars(schema_with = "schema::connector"))]
     pub connector: emob_core::ConnectorType,
     /// Where it stands.
     pub location: Location,
@@ -281,11 +443,14 @@ pub struct Station {
     /// and the next person at it can read the link.
     #[serde(default)]
     pub receipt_display_minutes: Option<u8>,
+    /// The day it went into service, `YYYY-MM-DD` — the asset card's age.
+    #[serde(default)]
+    pub commissioned: Option<String>,
 }
 
 /// The OCPP security profile a station is provisioned for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(try_from = "u8")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(try_from = "u8", into = "u8")]
 pub enum SecurityProfile {
     /// 1 — HTTP Basic over a plain WebSocket: a trusted network only.
     Basic,
@@ -310,6 +475,12 @@ impl TryFrom<u8> for SecurityProfile {
     }
 }
 
+impl From<SecurityProfile> for u8 {
+    fn from(profile: SecurityProfile) -> Self {
+        profile.number()
+    }
+}
+
 impl SecurityProfile {
     /// The profile number.
     #[must_use]
@@ -326,6 +497,7 @@ impl SecurityProfile {
 ///
 /// Every path is relative to the estate file (see [`Csms::path`]).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Csms {
     /// The server certificate chain, PEM.
@@ -396,6 +568,7 @@ const fn default_idle_timeout_secs() -> u64 {
 /// `[[meter_keys]]` — a meter's public key, out of band, with where it came
 /// from `[OCMF §Relation of Serial Numbers]`.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MeterKey {
     /// The meter serial (`MS`).
@@ -416,18 +589,31 @@ pub struct MeterKey {
 
 /// `[[tariffs]]` — one flat ad-hoc energy tariff.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TariffSpec {
     /// Its id.
     pub id: String,
     /// ISO 4217.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^[A-Z]{3}$"))
+    )]
     pub currency: emob_core::Currency,
     /// The IANA zone its times are read in (D175).
     pub time_zone: String,
     /// Gross price per kWh, VAT included — the figure a driver is shown
     /// `[PAngV §3(1)]`; [`TariffSpec::vat`] is the rate inside it.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
+    )]
     pub energy: Decimal,
     /// The VAT rate inside [`TariffSpec::energy`], in percent.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
+    )]
     pub vat: Decimal,
 }
 
@@ -465,6 +651,7 @@ impl TariffSpec {
 
 /// The party details an invoice needs.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Billing {
     /// Legal name.
@@ -487,6 +674,7 @@ pub struct Billing {
 
 /// The EN 16931 specification a partner's invoices are written in (BT-24).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum InvoiceSpecification {
     /// EN 16931 itself — what `[UStG §14(1)]` names for a business recipient.
@@ -498,6 +686,7 @@ pub enum InvoiceSpecification {
 
 /// A SEPA direct-debit mandate a partner signed (BT-89, BT-91).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MandateSeed {
     /// The mandate reference.
@@ -508,6 +697,7 @@ pub struct MandateSeed {
 
 /// The seller's contact on an invoice (BG-6), which `XRechnung` requires.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct InvoiceContact {
     /// A name or department.
@@ -520,6 +710,7 @@ pub struct InvoiceContact {
 
 /// The syntax a delivered invoice is written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum InvoiceSyntax {
     /// OASIS UBL 2.1.
@@ -532,6 +723,7 @@ pub enum InvoiceSyntax {
 /// `[billing.delivery]` — the operator system (ERP, Peppol provider) every
 /// issued invoice is handed to, signed (spec 010).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct InvoiceDelivery {
     /// Where invoices are posted: `https://`, or `http://` on loopback only.
@@ -551,6 +743,7 @@ pub struct InvoiceDelivery {
 /// and retried until it answers `2xx`. A subscriber added later receives what
 /// is emitted from then on.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Subscriber {
     /// Its name; the journal records an answer as `subscriber:<name>`.
@@ -659,9 +852,14 @@ pub fn subscriptions(
 
 /// `[[partners]]` — a provider this operator settles with.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Partner {
     /// Its party id; a contract whose issuer this is routes here.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^[A-Z]{2}\*?[A-Z0-9]{3}$"))
+    )]
     pub party: PartyId,
     /// The variable holding the Token A handed to it out of band
     /// `[OCPI 2.3.0 §credentials]`.
@@ -686,6 +884,7 @@ pub struct Partner {
 
 /// `[billing]` — the operator's own invoicing identity.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct BillingSection {
     /// The invoice number series prefix.
@@ -693,6 +892,10 @@ pub struct BillingSection {
     /// The seller on every invoice.
     pub seller: Billing,
     /// The standard VAT rate, in percent, where the energy is supplied.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
+    )]
     pub vat_rate: Decimal,
     /// The operator's account, paid into by transfer (BT-84).
     #[serde(default)]
@@ -713,6 +916,7 @@ pub struct BillingSection {
 
 /// One token on a seeded contract.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TokenSeed {
     /// The uid the card or app presents.
@@ -729,9 +933,11 @@ pub struct TokenSeed {
 
 /// `[[contracts]]` — a driver contract `empd` seeds once.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContractSeed {
     /// The contract id (eMAID).
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub id: ContractId,
     /// The day it starts, `YYYY-MM-DD`.
     pub from: String,
@@ -742,6 +948,7 @@ pub struct ContractSeed {
 
 /// `[[operators]]` — who may read the read models.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Operator {
     /// Who this is: the name every journal record and log line this operator
@@ -753,6 +960,7 @@ pub struct Operator {
 
 /// `[services]` — where the daemons reach each other, and how.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Services {
     /// `billd`'s base URL.
@@ -790,6 +998,7 @@ const fn default_retry_secs() -> u64 {
 /// named is pinned the first time the witness sees it — trust on first use,
 /// which Heute says.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Witness {
     /// Daemon name → verifier key.
@@ -800,6 +1009,7 @@ pub struct Witness {
 /// `billd` and `roamd` are reached at their `[services]` addresses; `csmsd`'s
 /// shell is named here because no other daemon calls it.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Desk {
     /// `csmsd`'s shell base URL (its read model, not its OCPP socket).
@@ -809,10 +1019,15 @@ pub struct Desk {
     pub token_env: EnvRef,
     /// The IANA zone the page tells the time and "today" in.
     pub time_zone: String,
+    /// Where stations reach the CSMS, as an installer types it
+    /// (`wss://csms.example.com/ocpp`) — printed on the onboarding sheet.
+    #[serde(default)]
+    pub ocpp_url: Option<String>,
 }
 
 /// `[roaming]` — `roamd`'s face to its partners.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Roaming {
     /// Where partners reach this node's OCPI root (ending in `/ocpi`).
@@ -942,7 +1157,10 @@ service_token_env = "EMOB_SERVICE_TOKEN"
         let error = from_str::<Csms>(&broken).expect_err("an EVSE id that is not one");
         let text = error.to_string();
         assert!(text.contains("evse"), "{text}");
-        assert!(text.contains("line"), "the line is named too: {text}");
+        assert!(
+            text.contains(":11:8"),
+            "the line and column are named too: {text}"
+        );
     }
 
     #[test]

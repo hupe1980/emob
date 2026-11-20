@@ -44,3 +44,9 @@ var/
 
 # Zola build output
 /site/public
+
+# Secrets for one development machine, written by `just dev-keys > .env` (SR-142).
+.env
+
+# Copied from schemas/ when the site is built.
+/site/static/schemas/

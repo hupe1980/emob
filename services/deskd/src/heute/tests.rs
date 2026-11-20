@@ -32,6 +32,8 @@ fn station(identity: &str, silent_since: time::OffsetDateTime) -> Station {
         evse: format!("DE*ABC*E{identity}"),
         heartbeat_secs: 300,
         silent_since,
+        network: Some("26201".into()),
+        carrier: Some("Telekom Deutschland".into()),
     }
 }
 
@@ -83,6 +85,7 @@ fn busy() -> Snapshot {
             },
             refused: page(vec![tampered("CP-1", "2")]),
             silent: page(vec![station("CP-2", datetime!(2026-11-18 08:58 UTC))]),
+            networks: Vec::new(),
         }),
         billd: Source::Up(Billd {
             invoices: page(vec![Document {
@@ -201,7 +204,7 @@ fn the_rate_shows_the_figure_the_fraction_and_the_causes() {
         "a cause with none is not listed"
     );
     // The weakest point first.
-    assert!(position(&page, "#cp-CP-2") < position(&page, "#cp-CP-1"));
+    assert!(position(&page, "/station/CP-2") < position(&page, "/station/CP-1"));
     assert!(render(&busy(), Lang::En).contains("33.3&#8239;%"));
 }
 
@@ -438,6 +441,7 @@ fn sc_001_heute_renders_from_bounded_inputs_in_time() {
                     .collect(),
                 older: Some(200),
             },
+            networks: Vec::new(),
         }),
         ..busy()
     };
@@ -517,4 +521,36 @@ fn sr_098_a_head_that_went_backwards_is_red_on_heute_and_breaks_the_calm() {
 fn an_estate_not_witnessed_yet_says_so() {
     let page = render(&quiet(), Lang::De);
     assert!(page.contains("Noch nicht bezeugt"), "{page}");
+}
+
+#[test]
+fn silent_stations_on_one_network_are_said_once_as_a_likely_outage() {
+    use crate::model::NetworkShare;
+    let mut snapshot = busy();
+    if let Source::Up(csmsd) = &mut snapshot.csmsd {
+        csmsd.silent = page(vec![
+            station("CP-2", NOW),
+            station("CP-3", NOW),
+            station("CP-4", NOW),
+        ]);
+        csmsd.networks = vec![NetworkShare {
+            network: "26201".into(),
+            carrier: Some("Telekom Deutschland".into()),
+            silent: 3,
+            stations: 4,
+        }];
+    }
+    let page = render(&snapshot, Lang::De);
+    assert!(
+        page.contains("Telekom Deutschland</strong></a> 3 von 4 still"),
+        "{page}"
+    );
+    assert!(page.contains("/stations?q=26201+offline"), "{page}");
+    assert!(page.contains("eher ein Netzausfall"), "{page}");
+
+    // One silent station per network is not a pattern, and is not said.
+    if let Source::Up(csmsd) = &mut snapshot.csmsd {
+        csmsd.networks[0].silent = 1;
+    }
+    assert!(!render(&snapshot, Lang::De).contains("Nach Mobilfunknetz"));
 }

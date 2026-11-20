@@ -1,5 +1,13 @@
 //! Charge detail records: the claim two companies settle against.
 //!
+//! ```
+//! use emob_cdr::CdrLedger;
+//!
+//! // A ledger accepts each record exactly once; an empty one holds nothing.
+//! let ledger = CdrLedger::new();
+//! assert_eq!(ledger.iter().count(), 0);
+//! ```
+//!
 //! A session is what happened; a CDR is a claim about it, sent to somebody who
 //! was not there and who will pay against it. This crate builds those claims so
 //! they cannot be internally inconsistent, accepts incoming ones exactly once,

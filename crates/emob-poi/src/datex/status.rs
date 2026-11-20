@@ -20,9 +20,6 @@ use datex2::v3::afir_energy_infrastructure::{
     EnergyInfrastructureStationStatus, EnergyInfrastructureStatusPublication,
 };
 use datex2::v3::common::{Reference, VersionedReference};
-use datex2::v3::exchange_information::{
-    DynamicInformation, ExchangeContext, ExchangeInformation, ExchangeStatusEnum, ProtocolTypeEnum,
-};
 use datex2::v3::message_container::MessageContainer;
 use datex2::v3::{Publication, json};
 
@@ -62,8 +59,9 @@ pub struct PriceUpdate {
     pub value: rust_decimal::Decimal,
 }
 
-/// The dynamic publication: a status publication in a message container
-/// marked as a complete snapshot (`snapshotPush`).
+/// The dynamic publication: a status publication in the message container the
+/// Mobilithek expects, marked as a complete snapshot (`snapshotPush`) by
+/// `datex2`'s own `snapshot`.
 #[derive(Debug, Clone)]
 pub struct StatusPublication {
     container: MessageContainer,
@@ -166,26 +164,10 @@ pub fn publication(
         ..EnergyInfrastructureStatusPublication::default()
     };
     StatusPublication {
-        container: MessageContainer {
-            payload: vec![Publication::AfirEnergyInfrastructureStatus(Box::new(
-                publication,
-            ))],
-            exchange_information: Some(Box::new(ExchangeInformation {
-                exchange_context: Some(Box::new(ExchangeContext {
-                    coded_exchange_protocol: Some(ProtocolTypeEnum::SnapshotPush),
-                    exchange_specification_version: Some("3.0".to_owned()),
-                    supplier_or_cis_requester: Some(Box::default()),
-                    ..ExchangeContext::default()
-                })),
-                dynamic_information: Some(Box::new(DynamicInformation {
-                    exchange_status: Some(ExchangeStatusEnum::Online),
-                    message_generation_timestamp: Some(now),
-                    ..DynamicInformation::default()
-                })),
-                ..ExchangeInformation::default()
-            })),
-            ..MessageContainer::default()
-        },
+        container: json::mobilithek::snapshot(
+            Publication::AfirEnergyInfrastructureStatus(Box::new(publication)),
+            now,
+        ),
     }
 }
 
@@ -197,9 +179,6 @@ impl StatusPublication {
     /// [`datex2::Error`], naming the member and the rule, for anything the
     /// profile's schemas would reject.
     pub fn to_json(&self) -> Result<String, datex2::Error> {
-        let mut bytes = Vec::new();
-        json::mobilithek::write_container(&mut bytes, &self.container)?;
-        // The writer writes UTF-8; this is never lossy.
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        json::mobilithek::to_string(&self.container)
     }
 }

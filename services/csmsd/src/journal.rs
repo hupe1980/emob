@@ -25,6 +25,7 @@ use emob_session::success::{Cause, Daily, Ending, cause_of_refusal};
 
 use crate::Outcome;
 use crate::authorize::Answer;
+use crate::station::{MeterIdentity, Report, StationIdentity};
 
 /// A transaction, by the station that runs it and the id it carries.
 pub type Key = (String, String);
@@ -138,6 +139,90 @@ pub enum Event {
         #[serde(with = "time::serde::rfc3339")]
         at: time::OffsetDateTime,
     },
+    /// A station was heard while the fold held it offline or unknown
+    /// (spec 012) — a transition, never a heartbeat (SR-138).
+    Online {
+        /// Which station.
+        station: String,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A station was silent past the heartbeat interval, found by the sweep.
+    Offline {
+        /// Which station.
+        station: String,
+        /// When it was last heard from.
+        #[serde(with = "time::serde::rfc3339")]
+        last_heard: time::OffsetDateTime,
+        /// When the sweep found it.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A station booted and said what it is.
+    Booted {
+        /// Which station.
+        station: String,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+        /// Why, in the station's word (`PowerUp`, `RemoteReset`, …).
+        reason: String,
+        /// What it says it is.
+        identity: StationIdentity,
+    },
+    /// A billed session's signed records name a meter other than the one the
+    /// fold holds for that point (SR-136).
+    Metered {
+        /// Which station.
+        station: String,
+        /// The point.
+        evse: String,
+        /// What the meter signed about itself.
+        meter: MeterIdentity,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A station joined the registry (spec 021) — from the estate at start,
+    /// or from an operator. Only the password's hash is ever in it (SR-144).
+    StationRegistered {
+        /// The record, as the estate spells a station.
+        station: Box<emob_service::estate::Station>,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A registered station's record was replaced.
+    StationUpdated {
+        /// The new record.
+        station: Box<emob_service::estate::Station>,
+        /// Why, in the operator's words.
+        reason: String,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A station left the registry; its next connection is refused.
+    StationRetired {
+        /// Which.
+        identity: String,
+        /// Why.
+        reason: String,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A station's firmware or security report (SR-140).
+    Reported {
+        /// Which station.
+        station: String,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+        /// What it reported.
+        report: Report,
+    },
 }
 
 impl Kinded for Event {
@@ -152,6 +237,14 @@ impl Kinded for Event {
             Self::Noted { .. } => "noted",
             Self::Delivered { .. } => "delivered",
             Self::Refused { .. } => "refused",
+            Self::Online { .. } => "online",
+            Self::Offline { .. } => "offline",
+            Self::Booted { .. } => "booted",
+            Self::Metered { .. } => "metered",
+            Self::Reported { .. } => "reported",
+            Self::StationRegistered { .. } => "station_registered",
+            Self::StationUpdated { .. } => "station_updated",
+            Self::StationRetired { .. } => "station_retired",
         }
     }
 }
@@ -318,6 +411,101 @@ pub struct State {
     pub receipts: BTreeMap<String, Issued>,
     /// The digest each transaction's receipt is filed under.
     pub receipt_of: BTreeMap<Key, String>,
+    /// What the platform knows of each station it has heard from (spec 012).
+    pub stations: BTreeMap<String, Known>,
+    /// Who may connect, and as what (spec 021): the registered stations, by
+    /// identity. A retired one is not here.
+    pub registry: BTreeMap<String, emob_service::estate::Station>,
+}
+
+/// One station, as the facts describe it. Every list is bounded
+/// ([`crate::station::KEPT`]).
+#[derive(Debug, Clone, Default)]
+pub struct Known {
+    /// Online since, or offline since and last heard.
+    pub presence: Option<Presence>,
+    /// What it said at its last boot, and when.
+    pub identity: Option<(StationIdentity, time::OffsetDateTime)>,
+    /// The meter each point's records named last, and since when.
+    pub meters: BTreeMap<String, (MeterIdentity, time::OffsetDateTime)>,
+    /// Firmware changes, newest last — the intervention record.
+    pub firmware: Vec<FirmwareChange>,
+    /// Firmware and security reports, newest last.
+    pub reports: Vec<(time::OffsetDateTime, Report)>,
+    /// Its last boots, newest last.
+    pub boots: Vec<time::OffsetDateTime>,
+    /// Its last sessions, newest last ([`RECENT`]).
+    pub recent: Vec<Recent>,
+}
+
+/// How many sessions a station's page lists.
+pub const RECENT: usize = 20;
+
+/// One session, as a station's page lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Recent {
+    /// The transaction.
+    pub transaction: String,
+    /// When it was decided.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
+    /// Whether it billed.
+    pub billed: bool,
+}
+
+impl State {
+    fn remember(
+        &mut self,
+        station: &str,
+        transaction: &str,
+        at: time::OffsetDateTime,
+        billed: bool,
+    ) {
+        let recent = &mut self.stations.entry(station.to_owned()).or_default().recent;
+        recent.push(Recent {
+            transaction: transaction.to_owned(),
+            at,
+            billed,
+        });
+        if recent.len() > RECENT {
+            recent.remove(0);
+        }
+    }
+}
+
+/// Whether a station is reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Heard from since the instant.
+    Online(time::OffsetDateTime),
+    /// Silent since `since`, last heard at `last_heard`.
+    Offline {
+        /// When the sweep found it.
+        since: time::OffsetDateTime,
+        /// When it was last heard from.
+        last_heard: time::OffsetDateTime,
+    },
+}
+
+/// One firmware change `[MessEG §31(2) Nr. 4]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FirmwareChange {
+    /// When it was first seen.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
+    /// `station` (its boot) or the point whose meter signed it.
+    pub component: String,
+    /// The version before, when one was known.
+    pub from: Option<String>,
+    /// The version after.
+    pub to: String,
+}
+
+fn keep_last<T>(list: &mut Vec<T>, item: T) {
+    list.push(item);
+    if list.len() > crate::station::KEPT {
+        list.remove(0);
+    }
 }
 
 impl State {
@@ -340,6 +528,8 @@ impl State {
             receipts: BTreeMap::new(),
             receipt_of: BTreeMap::new(),
             receipt_for: BTreeMap::new(),
+            stations: BTreeMap::new(),
+            registry: BTreeMap::new(),
         }
     }
 
@@ -369,6 +559,89 @@ impl State {
 /// Fold one fact.
 pub fn apply(state: &mut State, event: Event) {
     match event {
+        Event::StationRegistered { station, .. } | Event::StationUpdated { station, .. } => {
+            state.registry.insert(station.identity.clone(), *station);
+        }
+        Event::StationRetired { identity, .. } => {
+            state.registry.remove(&identity);
+        }
+        Event::Online { station, at } => {
+            state.stations.entry(station).or_default().presence = Some(Presence::Online(at));
+        }
+        Event::Offline {
+            station,
+            last_heard,
+            at,
+        } => {
+            state.stations.entry(station).or_default().presence = Some(Presence::Offline {
+                since: at,
+                last_heard,
+            });
+        }
+        Event::Booted {
+            station,
+            at,
+            identity,
+            ..
+        } => {
+            let known = state.stations.entry(station).or_default();
+            let before = known
+                .identity
+                .as_ref()
+                .and_then(|(i, _)| i.firmware.clone());
+            if let Some(to) = identity.firmware.clone()
+                && known.identity.is_some()
+                && before.as_deref() != Some(to.as_str())
+            {
+                keep_last(
+                    &mut known.firmware,
+                    FirmwareChange {
+                        at,
+                        component: "station".to_owned(),
+                        from: before,
+                        to,
+                    },
+                );
+            }
+            known.identity = Some((identity, at));
+            known.presence = Some(Presence::Online(at));
+            keep_last(&mut known.boots, at);
+        }
+        Event::Metered {
+            station,
+            evse,
+            meter,
+            at,
+        } => {
+            let known = state.stations.entry(station).or_default();
+            let before = known
+                .meters
+                .get(&evse)
+                .and_then(|(m, _)| m.firmware_label().map(ToOwned::to_owned));
+            if let Some(to) = meter.firmware_label()
+                && known.meters.contains_key(&evse)
+                && before.as_deref() != Some(to)
+            {
+                keep_last(
+                    &mut known.firmware,
+                    FirmwareChange {
+                        at,
+                        component: evse.clone(),
+                        from: before,
+                        to: to.to_owned(),
+                    },
+                );
+            }
+            known.meters.insert(evse, (meter, at));
+        }
+        Event::Reported {
+            station,
+            at,
+            report,
+        } => keep_last(
+            &mut state.stations.entry(station).or_default().reports,
+            (at, report),
+        ),
         Event::Allocated { id } => state.next_1_6 = id.saturating_add(1),
         Event::Authorized {
             station,
@@ -464,15 +737,19 @@ pub fn apply(state: &mut State, event: Event) {
                 .and_then(|digest| state.receipts.get_mut(digest))
             {
                 issued.verdict = Some(Verdict::Billed(cdr.key.clone()));
-                state.receipt_for.insert(cdr.key.to_string(), key);
+                state.receipt_for.insert(cdr.key.to_string(), key.clone());
             }
             state.inflight.remove(&(station.clone(), transaction));
             // A record stored is a success; a retry the ledger already held is
             // not a second attempt; a conflict is a record nobody may bill.
             match &outcome {
-                Outcome::Settled { .. } => state.attempt(at, &station, Ending::Billed),
+                Outcome::Settled { .. } => {
+                    state.attempt(at, &station, Ending::Billed);
+                    state.remember(&station, &key.1, at, true);
+                }
                 Outcome::Refused { .. } => {
                     state.attempt(at, &station, Ending::Failed(Cause::Evidence));
+                    state.remember(&station, &key.1, at, false);
                 }
                 _ => {}
             }
@@ -520,6 +797,7 @@ pub fn apply(state: &mut State, event: Event) {
                                 .all(|f| f.kind == emob_eichrecht::FindingKind::NoEnergy));
                     let cause = cause_of_refusal(stopped, nothing_measured);
                     state.attempt(at, &key.0, Ending::Failed(cause));
+                    state.remember(&key.0, &key.1, at, false);
                 }
             }
             state.keep(outcome);
