@@ -1,9 +1,12 @@
-//! Handing a settled record to `billd` and `roamd`, until each has it.
+//! Handing each `de.emob.cdr.issued` event to `billd`, `roamd` and every
+//! subscriber that takes it, until each has it.
 //!
-//! The outbox is part of `csmsd`'s journal: a record settles and the two
+//! The outbox is part of `csmsd`'s journal: a record settles and the
 //! deliveries it owes are one fact, so no restart can leave a session billed
-//! here and owed nowhere. This module only **dispatches**: a signed `POST` per
-//! pending delivery, and a fact for each answer that ends one (SR-031).
+//! here and owed nowhere. This module only **dispatches**: a signed `POST` of
+//! the `CloudEvent` per pending delivery — with the estate's secret inside it,
+//! a subscriber's own outside it — and a fact for each answer that ends one
+//! (SR-031).
 //!
 //! # What an answer means
 //!
@@ -18,18 +21,21 @@
 //! byte for byte would be refused as the replay it looks like.
 
 use emob_service::Actor;
+use emob_service::cloudevent;
+use emob_service::estate::Subscription;
 use emob_service::journal::Journal;
 use emob_service::webhook::{self, ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
 
 use crate::Csmsd;
 use crate::journal::{Delivery, Event, Target};
 
-/// Where deliveries go, and the secret they are signed with.
+/// Where deliveries go, and the secrets they are signed with.
 pub struct Dispatcher {
     client: reqwest::Client,
     secret: webhook::Secret,
     billd: String,
     roamd: String,
+    subscribers: Vec<Subscription>,
 }
 
 impl core::fmt::Debug for Dispatcher {
@@ -69,30 +75,51 @@ impl Dispatcher {
             secret,
             billd: billd.trim_end_matches('/').to_owned(),
             roamd: roamd.trim_end_matches('/').to_owned(),
+            subscribers: Vec::new(),
         })
     }
 
-    fn url(&self, to: Target) -> String {
-        let base = match to {
-            Target::Billd => &self.billd,
-            Target::Roamd => &self.roamd,
-        };
-        format!("{base}/v1/deliveries")
+    /// Deliver to these subscribers as well.
+    #[must_use]
+    pub fn with_subscribers(mut self, subscribers: Vec<Subscription>) -> Self {
+        self.subscribers = subscribers;
+        self
+    }
+
+    /// Where a delivery goes and what it is signed with; `None` for a
+    /// subscriber the estate no longer names — it stays owed, and is sent if
+    /// the subscriber comes back.
+    fn route(&self, to: &Target) -> Option<(String, &webhook::Secret)> {
+        match to {
+            Target::Billd => Some((format!("{}/v1/deliveries", self.billd), &self.secret)),
+            Target::Roamd => Some((format!("{}/v1/deliveries", self.roamd), &self.secret)),
+            Target::Subscriber(name) => self
+                .subscribers
+                .iter()
+                .find(|s| &s.name == name)
+                .map(|s| (s.url.clone(), &s.secret)),
+        }
     }
 
     /// Send one delivery once.
     pub async fn attempt(&self, delivery: &Delivery, at: time::OffsetDateTime) -> Attempt {
+        let Some((url, secret)) = self.route(&delivery.to) else {
+            return Attempt::Again(format!(
+                "the estate names no subscriber {}",
+                delivery.to.name()
+            ));
+        };
         let signature = webhook::sign(
             &webhook::Delivery::new(&delivery.id, at, delivery.body.as_bytes()),
-            &self.secret,
+            secret,
         );
         let sent = self
             .client
-            .post(self.url(delivery.to))
+            .post(url)
             .header(ID_HEADER, &delivery.id)
             .header(TIMESTAMP_HEADER, at.unix_timestamp().to_string())
             .header(SIGNATURE_HEADER, signature)
-            .header("content-type", "application/json")
+            .header("content-type", cloudevent::CONTENT_TYPE)
             .body(delivery.body.clone())
             .send()
             .await;
@@ -121,7 +148,7 @@ impl Dispatcher {
             let fact = match self.attempt(&sent, at).await {
                 Attempt::Delivered => Event::Delivered {
                     id: delivery.id.clone(),
-                    to: delivery.to,
+                    to: delivery.to.clone(),
                     at,
                 },
                 Attempt::Refused(reason) => {
@@ -133,7 +160,7 @@ impl Dispatcher {
                     );
                     Event::Refused {
                         id: delivery.id.clone(),
-                        to: delivery.to,
+                        to: delivery.to.clone(),
                         reason,
                         at,
                     }
@@ -144,9 +171,16 @@ impl Dispatcher {
                 }
             };
             // The receiver whose answer decided it is who caused the fact.
-            let by = match delivery.to {
+            let by = match &delivery.to {
                 Target::Billd => Actor::service("billd"),
                 Target::Roamd => Actor::service("roamd"),
+                Target::Subscriber(name) => match Actor::subscriber(name) {
+                    Ok(actor) => actor,
+                    Err(error) => {
+                        tracing::error!(%error, "a subscriber's name is not an actor");
+                        continue;
+                    }
+                },
             };
             if let Err(error) = csmsd.record(&by, fact) {
                 tracing::error!(?error, id = %delivery.id, "the answer could not be recorded");
@@ -155,7 +189,7 @@ impl Dispatcher {
     }
 }
 
-/// The delivery as it is **sent**: a `billd` delivery gains `"receipt"`, the
+/// The delivery as it is **sent**: every delivery but `roamd`'s gains `data.receipt`, the
 /// absolute link to the driver's receipt, which the invoice line carries
 /// (spec 003).
 ///
@@ -164,18 +198,24 @@ impl Dispatcher {
 /// key, so every attempt still sends the same bytes.
 #[must_use]
 pub fn with_receipt<J: Journal>(csmsd: &Csmsd<J>, delivery: &Delivery) -> Delivery {
-    if delivery.to != Target::Billd {
+    if delivery.to == Target::Roamd {
         return delivery.clone();
     }
     let Some(url) = csmsd.receipt_url_for_record(&delivery.id) else {
         return delivery.clone();
     };
-    let Ok(serde_json::Value::Object(mut body)) = serde_json::from_str(&delivery.body) else {
+    let Ok(mut event) = serde_json::from_str::<serde_json::Value>(&delivery.body) else {
         return delivery.clone();
     };
-    body.insert("receipt".to_owned(), serde_json::Value::String(url));
+    let Some(data) = event
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return delivery.clone();
+    };
+    data.insert("receipt".to_owned(), serde_json::Value::String(url));
     Delivery {
-        body: serde_json::Value::Object(body).to_string(),
+        body: event.to_string(),
         ..delivery.clone()
     }
 }

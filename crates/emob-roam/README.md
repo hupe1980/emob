@@ -211,7 +211,7 @@ opened and a duplicate submission.
 
 ✅ OCPI 2.3.0 and 2.2.1 in both directions (CDRs, tariffs, locations) and OICP 2.3
 outbound, at the library level. ✅ Transport, the OCPI receiver and the push queue
-are [`roamd`](../../services/roamd)'s (OCPI); ⏳ its OICP client. 📐 eMIP (GIREVE).
+are [`roamd`](../../services/roamd)'s (OCPI); ⏳ its OICP client. eMIP (GIREVE) is not supported.
 
 ## Part of emob
 

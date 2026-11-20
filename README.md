@@ -81,7 +81,7 @@ ordered headings, named controls, alt text, landmarks, a visible focus on every
 Tab stop, 4.5:1 contrast, 24×24 px targets and no sideways scroll — with zero
 violations, through Chrome's accessibility tree and no npm packages.
 
-No Rust toolchain? From the 0.3 release on, `just demo` runs the published
+No Rust toolchain? `just demo` runs the published
 `ghcr.io/hupe1980/emob` image with Docker instead (host networking; on Docker
 Desktop enable it under Settings → Resources → Network).
 
@@ -98,8 +98,9 @@ OCMF verifier that checks every signed value on the phone, offline once loaded.
 
 ## Status
 
-**0.3 — the journal you can trust, and ready for 1 January 2027.** The fifteen
-domain crates are built and tested (**1291 tests** across the workspace). The
+**The journal you can trust, events any system can subscribe to, and ready for
+1 January 2027.** The fifteen
+domain crates are built and tested (**1300 tests** across the workspace). The
 nine daemons start from one `estate.toml` and are wired end to end:
 
 - stations connect to `csmsd` over OCPP 1.6J, 2.0.1 and 2.1 with security
@@ -118,11 +119,11 @@ nine daemons start from one `estate.toml` and are wired end to end:
 - daemons log JSON with a request id and the actor on every request, and no
   secret;
 - `csmsd` delivers each settled session to `billd` (one EN 16931 invoice per
-  partner and month) and `roamd` (OCPI to the partner) through a signed,
-  journalled outbox;
+  partner and month), `roamd` (OCPI to the partner) and any `[[subscribers]]`
+  as signed CloudEvents through a journalled outbox;
 - every issued invoice has a page at `/i/{token}` with its XRechnung / EN 16931
   files in UBL and CII, and with `[billing.delivery]` `billd` hands it to the
-  operator's ERP or Peppol provider through a signed webhook;
+  operator's ERP or Peppol provider as a signed CloudEvent;
 - the operator works from **Heute** (`deskd`), the driver checks a **receipt** —
   on a phone, or from the link on the station's display;
 - `emob_session::mispel` nets a bidirectional site's month under the
@@ -130,9 +131,9 @@ nine daemons start from one `estate.toml` and are wired end to end:
   contract chains under named roots;
 - releases are signed and attested, with an SBOM.
 
-Not yet wired: the OICP and national-access-point push clients, SEPA runs from
-`billd`, the SHIP/EEBUS session for § 14a, and MiSpeL on Heute (no grid-meter
-series reaches a daemon yet). emob has had no external security review and no
+Not wired into a daemon: the OICP and national-access-point push clients, SEPA
+runs from `billd`, the SHIP/EEBUS session for § 14a, and MiSpeL on Heute (no
+grid-meter series reaches a daemon). emob has had no external security review and no
 production deployment; see [THREAT_MODEL.md](THREAT_MODEL.md) for what holds and
 what is open.
 
@@ -243,7 +244,7 @@ just images                 # build the nine daemon images and `emob` from one D
 | `EMOB_ESTATE` | every daemon | Path of the estate file |
 | `EMOB_WEBHOOK_SECRET` | `csmsd`, `billd`, `roamd` | `whsec_<base64>`: signs the deliveries between daemons |
 | `EMOB_SERVICE_TOKEN` | `csmsd`, `empd` | The bearer `csmsd` presents to `empd` |
-| `EMOB_OPERATOR_TOKEN` | every daemon | The operators' bearer for `GET /v1/<daemon>`, and Heute's password |
+| `EMOB_OPERATOR_TOKEN` | every daemon | The operators' bearer for the read models (`GET /v1/<daemon>/today`), and Heute's password |
 | `EMOB_PARTNER_DE_MSP_TOKEN_A` | `roamd` | The Token A the example partner registers with |
 | `CSMSD_DATA_KEY`, `ROAMD_DATA_KEY`, `EMPD_DATA_KEY`, `BILLD_DATA_KEY` | that daemon | 32 bytes, base64, sealing its journal. Losing `EMPD_DATA_KEY` erases every card UID `empd` journalled (intended crypto-erasure); losing another stops that daemon from starting, naming the key id |
 | `CSMSD_SIGNING_KEY`, `ROAMD_SIGNING_KEY`, `EMPD_SIGNING_KEY`, `BILLD_SIGNING_KEY`, `POID_SIGNING_KEY` | that daemon | 32 random bytes, base64 — an Ed25519 seed that signs where its journal ends. Never defaulted: `just up` and compose refuse without them, and a `.head` signed under another key refuses the start |
@@ -255,24 +256,24 @@ just images                 # build the nine daemon images and `emob` from one D
 | `EMOB_LOG_FORMAT` | every daemon | JSON lines by default; `text` for a terminal |
 | `RUST_LOG` | every daemon | Log filter |
 
-The estate keys added in 0.3, all optional:
+Optional estate keys:
 
 | Key | Read by | Meaning |
 |---|---|---|
 | `[witness] keys = { <daemon> = "<verifier key>" }` | `deskd` | the key each head must be signed under; a daemon not named is pinned at first sight |
-| `[[operators]] name` | every daemon | now the actor on what that operator causes (`operator:<name>`): 1–64 of `[A-Za-z0-9*._:=+\|@ -]`, refused at start otherwise |
+| `[[operators]] name` | every daemon | the actor on what that operator causes (`operator:<name>`): 1–64 of `[A-Za-z0-9*._:=+\|@ -]`, refused at start otherwise |
 | `[[stations]] receipt_display_minutes` | `csmsd` | 1–15: show `Beleg: <receipt link>` on an OCPP 2.0.1 / 2.1 station's display. Off when absent, because a screen is public |
 | `[billing] iban`, `creditor_id`, `contact`, `public_url` | `billd` | payee account, SEPA creditor id, seller contact, and the origin of `/i/{token}` |
-| `[billing.delivery] url`, `secret_env`, `syntax` | `billd` | where each issued invoice is posted, signed, in `ubl` or `cii` |
+| `[billing.delivery] url`, `secret_env`, `syntax` | `billd` | where each issued invoice is posted as a signed CloudEvent, in `ubl` or `cii` |
+| `[[subscribers]] name`, `url`, `secret_env`, `types` | `csmsd`, `billd` | a system outside the estate that receives the CloudEvents its `types` take, under its own secret |
 | `[[partners]] specification`, `buyer_reference`, `mandate` | `billd` | `en16931` or `xrechnung`, the buyer's reference (a Leitweg-ID), a SEPA mandate |
 | `electronic_address` on `seller` and a partner's `billing` | `billd` | the e-invoice address both parties need under XRechnung |
 
 Stations connect to `wss://…:9000/<identity>`. In the example estate `CP-1` is
 profile 2 with the `AuthorizationKey` `6d6f636b2d73746174696f6e2d736563726574`
 (hex of `mock-station-secret`); `csmsd hash-password <1.6|2.0.1|2.1>` reads a
-station's password on stdin and prints its `password_hash`. Journals written
-before 0.3 carry no actor and do not replay: start from empty ones. After an
-intended reset, move the `<journal>.head` file aside too.
+station's password on stdin and prints its `password_hash`. After an intended
+journal reset, move the `<journal>.head` file aside too.
 [Run the estate](https://hupe1980.github.io/emob/docs/run-the-estate/) has the
 whole walkthrough.
 
@@ -371,7 +372,6 @@ Nine daemons, one image each, all started from the one estate file.
 | [`poid`](services/poid) | The inventory and snapshots for the national access point `[AFIR Art. 20(2)]` | ✅ inventory · ⏳ push |
 | [`sited`](services/sited) | The site controller for § 14a setpoints, with a failsafe when the grid operator goes silent | ⏳ SHIP session, OCPP leg |
 | [`agentd`](services/agentd) | Advisory agents on `agentplane` (evidence triage, tariff and compliance sweeps), run under the read-only advisory principal, that cannot move money | ✅ runtime · ⏳ event feed |
-| `pncd`, `opsd`, `thgd` | Plug & Charge pool client, availability reporting, THG filing | 📐 |
 
 ## Documentation
 

@@ -605,12 +605,11 @@ assert!(books.balances());     // before a single account is named
   system clock; emob passes every one as an argument, and a test asserts the same
   inputs produce the same bytes.
 
-## Not yet built 📐
+## Limits
 
-- Submitting invoices and running SEPA collections from `billd`, and fees from
-  `empd` (libraries built; the daemons do not call them yet).
-- ZUGFeRD (a PDF carrying a CII payload) — `en16931-formats` reads it but does not
-  yet write it; emob produces the payload, not the PDF envelope.
+- ⏳ SEPA collections from `billd` and fees from `empd`: the libraries build
+  them, the daemons do not call them.
+- No ZUGFeRD: emob writes the CII payload, not the PDF envelope around it.
 
 **Related:** [Tariffs and price transparency](@/docs/pricing.md) ·
 [Eichrecht](@/docs/eichrecht.md) · [Roaming](@/docs/roaming.md) ·

@@ -1663,6 +1663,13 @@ const CITATION_SOURCES: &[(&str, &str, &str)] = &[
     ("[38k", "38. BImSchV", "bimschv-38"),
     ("[UStG ", "UStG", "ustg.pdf"),
     ("[PAngV", "PAngV", "pangv.pdf"),
+    // The statute above the Verordnung: since 01.01.2027 its § 3 is where a
+    // breach of AFIR Article 5's price duties becomes a fine.
+    (
+        "[PAngG ",
+        "Preisangabengesetz",
+        "pangg-aenderung-bgbl-2026-i-314",
+    ),
     ("[OCMF ", "OCMF", "ocmf-master.zip"),
     (
         "[OCA SMV",

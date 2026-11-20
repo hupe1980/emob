@@ -6,9 +6,9 @@ The advisory daemon: deterministic specialists, run on [`agentplane`](https://gi
 
 | | |
 |---|---|
-| ✅ library | three specialists (`compliance-sweep`, `evidence-triage`, `tariff-review`), the `Advice` output type, the read-only `advisory` principal and the subscription table — runs and replays tested in the crate |
+| ✅ library | three specialists (`compliance-sweep`, `evidence-triage`, `tariff-review`), the `Advice` output type, the read-only `advisory` principal — runs and replays tested in the crate |
 | ✅ daemon | builds the `agentplane` runtime with the three specialists over an **in-memory** store, acting as the advisory principal's delegation chain for the estate's operator party (`agentd::runtime(store, &agent)`). `GET /v1/agentd` lists the specialists and their capabilities |
-| ⏳ not yet | an event feed: no events reach it, so no specialist runs |
+| ⏳ not wired | nothing in the estate triggers a run |
 | — | it runs **no language model** and exposes **no MCP surface**. Every specialist is plain Rust |
 
 ## What it owns
@@ -29,11 +29,11 @@ is this tariff lawful at this power. An operator's morning question is about a
 
 ### The specialists
 
-| Specialist | Wakes on | Answers |
-|---|---|---|
-| `compliance-sweep` | `de.emob.compliance.duty-commenced`, `…breach-detected`, `…notice-window-opened` | which duties the estate fails — and which it **will** fail on the day they commence |
-| `evidence-triage` | `de.emob.evidence.refused`, `…key-unresolved` | which single fault caused most of today's unbillable energy |
-| `tariff-review` | `de.emob.tariff.version-published`, `…conformance-failed` | which points offer a tariff `[AFIR Art. 5(4)]` forbids at their power |
+| Specialist | Answers |
+|---|---|
+| `compliance-sweep` | which duties the estate fails — and which it **will** fail on the day they commence |
+| `evidence-triage` | which single fault caused most of today's unbillable energy |
+| `tariff-review` | which points offer a tariff `[AFIR Art. 5(4)]` forbids at their power |
 
 **`compliance-sweep`** calls `emob_core::obligation::assess` once per point — no
 second implementation of any rule — and adds two things one assessment cannot:
@@ -109,12 +109,11 @@ The daemon's store is in memory on purpose: it holds specialist runs, not
 decisions, so persisting it is a deployment choice. `emob_service::journal` is
 not used.
 
-### The subscription table is checked
+### What triggers a run
 
-`subscriptions::TABLE` is one `const`. Tests assert every pattern matches at
-least one catalogued event type and every named specialist is registered. Event
-types with no subscriber (for example `de.emob.billing.invoice-issued`, meant
-for webhooks) are allowed.
+Nothing in the estate does. `agentd` subscribes to no event: neither type emob
+emits (`de.emob.cdr.issued`, `de.emob.invoice.issued`) is what a specialist
+reads.
 
 ## Configuration
 

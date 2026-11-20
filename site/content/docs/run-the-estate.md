@@ -109,8 +109,9 @@ fails it.
 flowchart LR
     ST["charge points"] -->|"OCPP over wss://"| CSMS["csmsd"]
     CSMS -->|"authorise · service token"| EMP["empd"]
-    CSMS -->|"signed webhook outbox"| BILL["billd"]
-    CSMS -->|"signed webhook outbox"| ROAM["roamd"]
+    CSMS -->|"CloudEvents outbox"| BILL["billd"]
+    CSMS -->|"CloudEvents outbox"| ROAM["roamd"]
+    CSMS & BILL -.->|"CloudEvents"| SUB["your subscribers"]
     ROAM <-->|"OCPI 2.3.0"| P["roaming partner"]
     DESK["deskd · Heute"] -.->|"read models"| CSMS & BILL & ROAM
     DRV["driver's phone"] -->|"/r/token"| CSMS
@@ -119,9 +120,11 @@ flowchart LR
 `csmsd` asks `empd` about every `Authorize` and every transaction start; a
 timeout or an unreachable `empd` answers `Invalid` — it fails closed. Each
 settled session with a provider is delivered to `billd` and `roamd` as a
-Standard-Webhooks-signed request, retried until acknowledged and recorded in
-`csmsd`'s journal, so a restart loses nothing. Every daemon also serves its
-operator read model at `GET /v1/<daemon>` behind an operator bearer token; the
+`de.emob.cdr.issued` CloudEvent signed per Standard Webhooks, retried until
+acknowledged and recorded in `csmsd`'s journal, so a restart loses nothing. Every daemon also serves an
+operator read model behind an operator bearer token — `csmsd`, `billd` and
+`roamd` as a bounded view at `GET /v1/<daemon>/today`, the others at
+`GET /v1/<daemon>`; the
 journalled ones (`csmsd`, `billd`, `roamd`, `empd`, `poid`) also serve their
 signed head at `GET /v1/<daemon>/head`.
 
@@ -173,8 +176,7 @@ bytes, so it verifies without the key.
 `eval "$(just dev-keys)"` prints a fresh set of data and signing keys; `just
 up` and compose refuse to start without them. Losing `EMPD_DATA_KEY` erases every
 card UID `empd` journalled — crypto-erasure, on purpose. Losing any other data
-key stops that daemon from starting, naming the key id. Journals written by 0.2
-do not replay in 0.3: start from empty ones.
+key stops that daemon from starting, naming the key id.
 
 ### Every fact names its actor
 
@@ -409,13 +411,49 @@ does **not** link back to its invoice: the invoice is the partner's whole
 month, every driver on it, and a back-link would widen one driver's
 one-session link to all of them.
 
+### Subscribing to events
+
+Any system — a data warehouse, an ERP, a field-service adapter — can receive
+emob's events. Each `[[subscribers]]` entry names a URL, the variable holding
+its own `whsec_` secret, and the types it takes:
+
+```toml
+[[subscribers]]
+name = "warehouse"                          # recorded as subscriber:warehouse
+url = "https://dwh.example.com/emob/events" # https, or http on loopback only
+secret_env = "WAREHOUSE_WEBHOOK_SECRET"
+types = ["de.emob.cdr.issued", "de.emob.invoice.*"]
+```
+
+| Type | From | Subject | `data` |
+|---|---|---|---|
+| `de.emob.cdr.issued` | `csmsd` | `cdr/<key>` | the record, the token it bills, the signed meter values, the station, the receipt link (JSON) |
+| `de.emob.invoice.issued` | `billd` | `invoice/<number>` | the invoice file (`application/xml`); the page link as `invoiceurl` |
+
+Every event is one structured-mode CloudEvent 1.0 (`application/cloudevents+json`,
+`source` `urn:emob:<daemon>`), signed per [Standard Webhooks](https://www.standardwebhooks.com)
+with `webhook-id` equal to the event `id` — the idempotency key. A `2xx` is
+taken; `401`, `408`, `429`, `5xx` or no answer is retried every `retry_secs`;
+any other `4xx` is recorded as refused with the body, and not retried. Who
+answered is a journal fact. An event is owed to the subscribers named when it
+was emitted; a subscriber added later receives what is emitted from then on.
+A pattern that matches no type emob emits refuses the start, so a typo does not
+subscribe to nothing.
+
+`de.emob.cdr.issued` carries the card UID and the station's location: a
+subscriber receives personal data, and the estate file is where that decision
+is reviewed.
+
 ### Handing the invoice to the operator system
 
 `billd` writes the invoice and does not transmit it — no SMTP, no Peppol access
 point. With `[billing.delivery]` set, it posts every issued invoice to the
-operator's ERP or Peppol provider as a Standard Webhooks request, signed with
-the secret `secret_env` names, in the `syntax` chosen (`ubl` or `cii`), with
-`webhook-id` set to the invoice number — the receiver's idempotency key:
+operator's ERP or Peppol provider as a `de.emob.invoice.issued` CloudEvent
+(`application/cloudevents+json`): `data` is the file in the `syntax` chosen
+(`ubl` or `cii`, `datacontenttype: application/xml`), `subject` is
+`invoice/<number>`, the page link is the `invoiceurl` attribute. It is signed
+per Standard Webhooks with the secret `secret_env` names, `webhook-id` set to
+the invoice number — the receiver's idempotency key:
 
 ```toml
 [billing.delivery]
@@ -442,7 +480,7 @@ export EMOB_WEBHOOK_SECRET=whsec_$(openssl rand -base64 32) EMOB_SERVICE_TOKEN=$
        EMOB_OPERATOR_TOKEN=$(openssl rand -hex 16) EMOB_PARTNER_DE_MSP_TOKEN_A=$(openssl rand -hex 16)
 cargo run -p empd & cargo run -p billd & cargo run -p roamd & cargo run -p csmsd &
 just desk                               # Heute on http://127.0.0.1:9587/
-curl -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" http://127.0.0.1:9001/v1/csmsd
+curl -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" http://127.0.0.1:9001/v1/csmsd/today
 ```
 
 In containers, with a named volume per journal:
@@ -460,11 +498,11 @@ certificates when they are missing; compose refuses without the shared secrets.
 `emob` command line, for the Docker-only demo), for `linux/amd64` only, with
 build provenance.
 
-## What is not wired yet
+## What the daemons do not do
 
 ⏳ The OICP (Hubject) and national-access-point push clients, SEPA runs from
 `billd`, the OCPI tokens endpoint, and the SHIP/EEBUS session for § 14a. The
-libraries do each of these and are tested; the daemons do not call them yet.
+libraries do each of these and are tested; no daemon calls them.
 
 **Related:** [Getting started](@/docs/getting-started.md) ·
 [The Eichrecht chain](@/docs/eichrecht.md) · [OCPP](@/docs/ocpp.md) ·

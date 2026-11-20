@@ -1483,6 +1483,10 @@ mod an_invoice_reaches_its_recipient {
 
     /// June delivered with receipt links, and closed on 1 July.
     fn closed(estate: &Estate) -> Arc<Mutex<Books<Memory>>> {
+        closed_for(estate, &[])
+    }
+
+    fn closed_for(estate: &Estate, subscribers: &[&str]) -> Arc<Mutex<Books<Memory>>> {
         let books = Arc::new(Mutex::new(
             Books::open(
                 "emob",
@@ -1490,7 +1494,8 @@ mod an_invoice_reaches_its_recipient {
                 billd::ChartOfAccounts::new(),
                 Memory::new(),
             )
-            .unwrap(),
+            .unwrap()
+            .delivering_to(subscribers.iter().map(|s| (*s).to_owned()).collect()),
         ));
         let partner = estate.partners[0].party.clone();
         for (n, cdr) in super::month("0.49").iter().enumerate() {
@@ -1742,12 +1747,106 @@ mod an_invoice_reaches_its_recipient {
         let state = books.lock().unwrap();
         let issued = state.state().documents().next().unwrap();
         assert_eq!(seen[1].0, issued.invoice.number, "webhook-id is the number");
-        assert_eq!(seen[1].1, invoice_page::file(issued, Syntax::Ubl).unwrap());
+        let event: emob_service::cloudevent::CloudEvent<String> = emob_service::cloudevent::open(
+            seen[1].1.as_bytes(),
+            emob_service::events::invoice::ISSUED,
+        )
+        .expect("a de.emob.invoice.issued CloudEvent");
+        assert_eq!(
+            event.data,
+            invoice_page::file(issued, Syntax::Ubl).unwrap(),
+            "the file is the data"
+        );
+        assert_eq!(event.datacontenttype, "application/xml");
+        assert_eq!(
+            event.subject.as_deref(),
+            Some(format!("invoice/{}", issued.invoice.number).as_str())
+        );
         assert!(matches!(
             &issued.submission,
             billd::Submission::Accepted { reference: Some(r), .. } if r == "PEPPOL-1"
         ));
         assert!(issued.booked, "accepted, then booked");
+    }
+
+    fn subscribers(url: &str) -> billd::deliver::Subscribers {
+        billd::deliver::Subscribers::new(
+            vec![emob_service::estate::Subscription {
+                name: "dwh".to_owned(),
+                url: url.to_owned(),
+                secret: webhook::Secret::standard(SECRET).unwrap(),
+                types: vec!["de.emob.invoice.*".to_owned()],
+            }],
+            InvoiceSyntax::Ubl,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_subscriber_receives_each_invoice_event_once_and_decides_nothing() {
+        let books = closed_for(&estate(true), &["dwh"]);
+        let invoices = Invoices::ephemeral(None).unwrap();
+        let (url, held) = receiver(vec![(503, "starting"), (200, "")]).await;
+        let subscribers = subscribers(&url);
+
+        assert_eq!(
+            subscribers.drain(&books, &invoices).await,
+            0,
+            "a 503 records nothing"
+        );
+        assert_eq!(subscribers.drain(&books, &invoices).await, 1);
+        assert_eq!(
+            subscribers.drain(&books, &invoices).await,
+            0,
+            "nothing is owed"
+        );
+        let seen = held.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+
+        let state = books.lock().unwrap();
+        let issued = state.state().documents().next().unwrap();
+        let event: emob_service::cloudevent::CloudEvent<String> = emob_service::cloudevent::open(
+            seen[1].1.as_bytes(),
+            emob_service::events::invoice::ISSUED,
+        )
+        .unwrap();
+        assert_eq!(event.source, "urn:emob:billd");
+        assert_eq!(event.id, issued.invoice.number);
+        assert_eq!(issued.answered.get("dwh"), Some(&None), "taken");
+        assert_eq!(
+            issued.submission,
+            billd::Submission::Issued,
+            "only the operator system accepts"
+        );
+        assert!(!issued.booked);
+    }
+
+    #[tokio::test]
+    async fn a_subscribers_refusal_is_recorded_once_and_not_retried() {
+        let books = closed_for(&estate(true), &["dwh"]);
+        let invoices = Invoices::ephemeral(None).unwrap();
+        let (url, held) = receiver(vec![(422, "unknown schema")]).await;
+        let subscribers = subscribers(&url);
+        assert_eq!(subscribers.drain(&books, &invoices).await, 1);
+        assert_eq!(subscribers.drain(&books, &invoices).await, 0);
+        assert_eq!(held.seen.lock().unwrap().len(), 1);
+        let state = books.lock().unwrap();
+        let issued = state.state().documents().next().unwrap();
+        assert!(
+            matches!(issued.answered.get("dwh"), Some(Some(reason)) if reason.contains("unknown schema")),
+            "{:?}",
+            issued.answered
+        );
+    }
+
+    #[tokio::test]
+    async fn a_document_issued_before_a_subscriber_existed_is_not_owed_to_it() {
+        let books = closed(&estate(true));
+        let invoices = Invoices::ephemeral(None).unwrap();
+        let (url, held) = receiver(vec![]).await;
+        assert_eq!(subscribers(&url).drain(&books, &invoices).await, 0);
+        assert!(held.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

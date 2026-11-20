@@ -416,7 +416,7 @@ fn outbox(csmsd: &csmsd::daemon::Running) -> Vec<(Target, DeliveryState)> {
         state
             .outbox
             .values()
-            .map(|(delivery, state)| (delivery.to, state.clone()))
+            .map(|(delivery, state)| (delivery.to.clone(), state.clone()))
             .collect()
     })
 }
@@ -803,7 +803,7 @@ async fn sr_029_a_delivery_signed_with_another_secret_is_refused_and_counted() {
         Duration::from_secs(5),
     )
     .unwrap();
-    for to in Target::ALL {
+    for to in Target::ESTATE {
         let attempt = forger
             .attempt(
                 &csmsd::Delivery {
@@ -835,6 +835,83 @@ async fn sr_029_a_delivery_signed_with_another_secret_is_refused_and_counted() {
     }
     billd.kill();
     roamd.kill();
+}
+
+/// What an outside subscriber was posted: `webhook-id` and body.
+type Seen = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+/// A system outside the estate: keeps every signed body it is posted.
+async fn outside_subscriber() -> (SocketAddr, Seen) {
+    let seen: Seen = Arc::default();
+    let held = Arc::clone(&seen);
+    let router = axum::Router::new().route(
+        "/events",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let held = Arc::clone(&held);
+                async move {
+                    let secret = emob_service::webhook::Secret::standard(SECRET).unwrap();
+                    let id = emob_service::webhook::receive(
+                        &headers,
+                        &body,
+                        &[secret],
+                        time::OffsetDateTime::now_utc(),
+                        time::Duration::minutes(5),
+                    )
+                    .expect("signed with the subscriber's secret");
+                    assert_eq!(
+                        headers.get("content-type").unwrap(),
+                        emob_service::cloudevent::CONTENT_TYPE
+                    );
+                    held.lock().unwrap().push((id, body.to_vec()));
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (addr, seen)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscriber_outside_the_estate_receives_the_issued_record_as_a_cloudevent() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let mut estate = Estate::new("subscriber");
+        let (outside, seen) = outside_subscriber().await;
+        estate.text.push_str(&format!(
+            "\n[[subscribers]]\nname = \"warehouse\"\nurl = \"http://{outside}/events\"\n\
+             secret_env = \"EMOB_WEBHOOK_SECRET\"\ntypes = [\"de.emob.cdr.*\"]\n"
+        ));
+        let _empd = estate.empd().await;
+        let _billd = estate.billd().await;
+        let _roamd = estate.roamd().await;
+        let csmsd = estate.csmsd().await;
+        let station = station(csmsd.ocpp).await;
+        charge(&station, GOOD_CARD, &[]).await;
+
+        until("the subscriber's delivery", || {
+            delivered(&csmsd, Target::Subscriber("warehouse".to_owned()))
+        })
+        .await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "once");
+        let (id, body) = &seen[0];
+        let event: emob_service::cloudevent::CloudEvent<serde_json::Value> =
+            emob_service::cloudevent::open(body, emob_service::events::cdr::ISSUED).unwrap();
+        assert_eq!(&event.id, id, "the event id is the webhook id");
+        assert_eq!(event.source, "urn:emob:csmsd");
+        assert_eq!(event.subject.as_deref(), Some(format!("cdr/{id}").as_str()));
+        assert!(event.time.is_some());
+        assert!(event.data["cdr"].is_object() && event.data["signed"].is_array());
+        assert!(
+            event.data["receipt"].is_string(),
+            "the driver's receipt link travels too"
+        );
+    })
+    .await
+    .expect("within thirty seconds");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -12,18 +12,18 @@ license.workspace      = true
 repository.workspace   = true
 rust-version.workspace = true
 
-# `serde` and `serde_json` are **not** optional here, unlike everywhere else in
-# this workspace. The other crates model a domain and can serialise it or not;
-# this one exists to emit one specific JSON document, and a build of it without
-# a serialiser would have nothing to do.
+# `serde` is **not** optional here, unlike everywhere else in this workspace:
+# `Published` is what a service journals about an accepted table. The documents
+# themselves are `datex2`'s to write.
 [dependencies]
+datex2       = { workspace = true }
 emob-core    = { workspace = true }
 emob-tariff  = { workspace = true }
 rust_decimal = { workspace = true }
 serde        = { workspace = true }
-serde_json   = { workspace = true }
 thiserror    = { workspace = true }
 time         = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 time = { workspace = true, features = ["macros"] }

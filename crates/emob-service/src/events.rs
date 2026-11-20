@@ -1,189 +1,53 @@
-//! The compile-time catalogue of every `CloudEvents` `type` this workspace emits.
+//! The catalogue of every `CloudEvents` `type` emob emits — and only those.
 //!
-//! One `pub const` per event type. Emitters and subscribers reference these
-//! rather than inline string literals, so a rename is a one-line change and
-//! drift between a producer and a consumer is a compile error rather than a
-//! subscription that silently matches nothing.
+//! One `pub const` per type, and a type is here only because a daemon emits it:
+//! the test `every_type_is_emitted` holds each constant to being named in a
+//! daemon's source. A new type is added with its emitter, in one change.
+//!
+//! Every event leaves as a [`crate::cloudevent::CloudEvent`] through a daemon's
+//! journalled outbox, signed per Standard Webhooks, to the receivers inside the
+//! estate and to every `[[subscribers]]` entry whose `types` admit it
+//! ([`crate::estate::Subscriber`]).
 //!
 //! # Conventions
 //!
-//! - Every type starts with `de.emob.` and is entirely lowercase — `CloudEvents`
-//!   §3.1 recommends lowercase reverse-DNS types.
-//! - Segments are separated by `.`; a multi-word segment joins its words with
-//!   `-`, never `_`. [`segments_are_well_formed`] enforces both.
-//! - The last segment is a **past participle**. An event is a fact that has
-//!   happened; a type in the imperative is a command wearing an event's
-//!   clothes, and a subscriber cannot tell the difference at runtime.
+//! - `de.emob.<entity>.<fact>`, entirely lowercase; a multi-word segment joins
+//!   its words with `-`, never `_`. [`segments_are_well_formed`] enforces it.
+//! - A namespace belongs to its owner. emob emits only `de.emob.*` and reads no
+//!   other system's type; where two systems meet, an adapter renames.
+//! - The last segment is a **past participle**: an event is a fact, not a
+//!   command.
+//! - The `subject` is `<entity>/<id>`: `cdr/<key>`, `invoice/<number>`.
 //!
-//! # Why this is here and not in a crate of its own
-//!
-//! `mako-events` is a separate crate because every crate in that workspace
-//! might emit, and a shared module would make the service framework a
-//! dependency magnet. Here the emitters are **daemons only** — the domain
-//! crates emit nothing, by the same purity rule that keeps them free of a
-//! clock — and every daemon already depends on this crate. A second crate
-//! would buy nothing and cost a manifest.
+//! | Type | Emitted by | When | `data` |
+//! |---|---|---|---|
+//! | `de.emob.cdr.issued` | `csmsd` | a session's evidence verified and its record was stored | the record, whom it bills, the signed values, the station (JSON) |
+//! | `de.emob.invoice.issued` | `billd` | an invoice was issued | the invoice file, UBL or CII (`application/xml`) |
 //!
 //! # What a subscription may say
 //!
-//! A pattern is a concrete type or a `*`-terminated prefix, and [`fn@matches`] is
-//! the one matcher every subscription mechanism uses. Glob patterns are not in
-//! the catalogue — only concrete types are — because a pattern is a *reader's*
-//! choice and a type is a *writer's* promise.
+//! A pattern is a concrete type or a `*`-terminated prefix; [`fn@matches`] is
+//! the one matcher every subscription uses.
 
 /// The prefix every type in this workspace shares.
 pub const PREFIX: &str = "de.emob.";
 
-/// The charging session, as the CSMS sees it.
-pub mod session {
-    /// A station opened a transaction.
-    pub const STARTED: &str = "de.emob.session.started";
-    /// …and closed it.
-    pub const ENDED: &str = "de.emob.session.ended";
-    /// The vehicle stopped drawing while remaining connected — the interval
-    /// `[AFIR Art. 5(4)]` prices per minute.
-    pub const SUSPENDED: &str = "de.emob.session.suspended";
-    /// An authorisation was asked for and refused.
-    pub const AUTHORIZATION_REFUSED: &str = "de.emob.session.authorization-refused";
-}
-
-/// The evidence chain.
-pub mod evidence {
-    /// A set of signed records verified end to end.
-    pub const VERIFIED: &str = "de.emob.evidence.verified";
-    /// …or did not, with the findings that stopped it.
-    ///
-    /// The event an operator queue is built on: a session whose energy cannot
-    /// be billed is one somebody has to act on the same day.
-    pub const REFUSED: &str = "de.emob.evidence.refused";
-    /// A record named a signing component the registry could not resolve a
-    /// key for.
-    pub const KEY_UNRESOLVED: &str = "de.emob.evidence.key-unresolved";
-    /// A transparency file was produced for a customer's own verifier
-    /// `[MessEG §33]`.
-    pub const TRANSPARENCY_EXPORTED: &str = "de.emob.evidence.transparency-exported";
-}
-
-/// The charge detail record.
+/// Charge detail records.
 pub mod cdr {
-    /// A record was built, priced and accepted.
+    /// A record was issued: the session's signed values verified, the record
+    /// was stored, and it is owed to the invoice and the partner.
     pub const ISSUED: &str = "de.emob.cdr.issued";
-    /// A record arrived from a partner and passed its pre-flight.
-    pub const RECEIVED: &str = "de.emob.cdr.received";
-    /// …or did not.
-    pub const REJECTED: &str = "de.emob.cdr.rejected";
-    /// A record supersedes an earlier one.
-    pub const CORRECTED: &str = "de.emob.cdr.corrected";
-    /// A partner restated a settled number under an id already held.
-    ///
-    /// Never an upsert. This is the event a human answers.
-    pub const CONFLICTED: &str = "de.emob.cdr.conflicted";
 }
 
-/// Tariffs and the price the driver is shown.
-pub mod tariff {
-    /// A new version took effect.
-    pub const VERSION_PUBLISHED: &str = "de.emob.tariff.version-published";
-    /// A version was installed on a charge point over OCPP 2.1.
-    pub const INSTALLED: &str = "de.emob.tariff.installed";
-    /// A tariff failed its `[AFIR Art. 5(4)]` shape check at the power it is
-    /// offered at.
-    pub const CONFORMANCE_FAILED: &str = "de.emob.tariff.conformance-failed";
+/// Invoices.
+pub mod invoice {
+    /// An invoice was issued; the data is the structured file
+    /// `[UStG §14(1)]`.
+    pub const ISSUED: &str = "de.emob.invoice.issued";
 }
 
-/// Locations and the national access point.
-pub mod location {
-    /// The inventory changed.
-    pub const UPDATED: &str = "de.emob.location.updated";
-    /// A point's availability changed.
-    pub const STATUS_CHANGED: &str = "de.emob.location.status-changed";
-    /// A snapshot reached the national access point `[AFIR Art. 20(2)]`.
-    pub const FEED_PUBLISHED: &str = "de.emob.location.feed-published";
-}
-
-/// Roaming.
-pub mod roaming {
-    /// A record left for a partner.
-    pub const CDR_PUSHED: &str = "de.emob.roaming.cdr-pushed";
-    /// A crossing could not carry something exactly, and said what.
-    pub const CROSSING_NOTED: &str = "de.emob.roaming.crossing-noted";
-    /// A partner's credentials were exchanged.
-    pub const PARTNER_REGISTERED: &str = "de.emob.roaming.partner-registered";
-}
-
-/// Invoicing and settlement.
-pub mod billing {
-    /// An invoice was issued.
-    pub const INVOICE_ISSUED: &str = "de.emob.billing.invoice-issued";
-    /// …and a collection instruction was written for it.
-    pub const COLLECTION_INSTRUCTED: &str = "de.emob.billing.collection-instructed";
-    /// A collection came back unpaid.
-    pub const COLLECTION_RETURNED: &str = "de.emob.billing.collection-returned";
-    /// A document did not satisfy the profile it was addressed to.
-    pub const DOCUMENT_REJECTED: &str = "de.emob.billing.document-rejected";
-}
-
-/// The obligation calendar.
-pub mod compliance {
-    /// A duty came into force for a subject the operator holds.
-    pub const DUTY_COMMENCED: &str = "de.emob.compliance.duty-commenced";
-    /// An assessment found a subject in breach.
-    pub const BREACH_DETECTED: &str = "de.emob.compliance.breach-detected";
-    /// A notification window under `[LSV26 §4]` opened, and closes on a
-    /// deadline.
-    pub const NOTICE_WINDOW_OPENED: &str = "de.emob.compliance.notice-window-opened";
-}
-
-/// The station, as an operational object.
-pub mod station {
-    /// A station connected and completed its boot notification.
-    pub const BOOTED: &str = "de.emob.station.booted";
-    /// A station stopped answering.
-    pub const DISCONNECTED: &str = "de.emob.station.disconnected";
-    /// A station sent a security notification
-    /// `[OCPP 2.0.1 Part 2, SecurityEventNotification]`.
-    pub const SECURITY_NOTIFIED: &str = "de.emob.station.security-notified";
-}
-
-/// Every type in the catalogue, for the tests and for an operator listing what
-/// a deployment can emit.
-///
-/// A `const` array rather than a function, so a subscription table can be
-/// checked against it at compile time.
-pub const ALL: &[&str] = &[
-    session::STARTED,
-    session::ENDED,
-    session::SUSPENDED,
-    session::AUTHORIZATION_REFUSED,
-    evidence::VERIFIED,
-    evidence::REFUSED,
-    evidence::KEY_UNRESOLVED,
-    evidence::TRANSPARENCY_EXPORTED,
-    cdr::ISSUED,
-    cdr::RECEIVED,
-    cdr::REJECTED,
-    cdr::CORRECTED,
-    cdr::CONFLICTED,
-    tariff::VERSION_PUBLISHED,
-    tariff::INSTALLED,
-    tariff::CONFORMANCE_FAILED,
-    location::UPDATED,
-    location::STATUS_CHANGED,
-    location::FEED_PUBLISHED,
-    roaming::CDR_PUSHED,
-    roaming::CROSSING_NOTED,
-    roaming::PARTNER_REGISTERED,
-    billing::INVOICE_ISSUED,
-    billing::COLLECTION_INSTRUCTED,
-    billing::COLLECTION_RETURNED,
-    billing::DOCUMENT_REJECTED,
-    compliance::DUTY_COMMENCED,
-    compliance::BREACH_DETECTED,
-    compliance::NOTICE_WINDOW_OPENED,
-    station::BOOTED,
-    station::DISCONNECTED,
-    station::SECURITY_NOTIFIED,
-];
+/// Every type in the catalogue.
+pub const ALL: &[&str] = &[cdr::ISSUED, invoice::ISSUED];
 
 /// Whether a subscription pattern admits an event type.
 ///
@@ -201,7 +65,7 @@ pub const ALL: &[&str] = &[
 ///
 /// assert!(matches("de.emob.cdr.*", events::cdr::ISSUED));
 /// assert!(matches("*", events::cdr::ISSUED));
-/// assert!(!matches("de.emob.cdr.*", events::tariff::VERSION_PUBLISHED));
+/// assert!(!matches("de.emob.cdr.*", events::invoice::ISSUED));
 /// ```
 #[must_use]
 pub fn matches(pattern: &str, event_type: &str) -> bool {
@@ -262,7 +126,7 @@ mod tests {
         assert!(matches("de.emob.*", cdr::ISSUED));
         assert!(matches("*", cdr::ISSUED));
 
-        assert!(!matches("de.emob.cdr.*", tariff::VERSION_PUBLISHED));
+        assert!(!matches("de.emob.cdr.*", invoice::ISSUED));
         assert!(!matches("de.emob.cdrs.*", cdr::ISSUED));
         // A grant of the children is not a grant of the parent.
         assert!(!matches("de.emob.cdr.issued.*", cdr::ISSUED));
@@ -301,5 +165,41 @@ mod tests {
                  thing or a state rather than something that happened"
             );
         }
+    }
+
+    /// Every constant is named in a daemon's source, outside this file — the
+    /// rule the module documentation states. A type nothing emits is removed,
+    /// not kept "for later".
+    #[test]
+    fn every_type_is_emitted() {
+        let services = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services");
+        let mut source = String::new();
+        let mut stack = vec![services];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("services/ is readable") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    if !path.ends_with("target") {
+                        stack.push(path);
+                    }
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    source.push_str(&std::fs::read_to_string(&path).expect("a source file"));
+                }
+            }
+        }
+        for (name, value) in [
+            ("cdr::ISSUED", cdr::ISSUED),
+            ("invoice::ISSUED", invoice::ISSUED),
+        ] {
+            assert!(
+                source.contains(&format!("events::{name}")),
+                "{value} is in the catalogue and no daemon emits it"
+            );
+        }
+        assert_eq!(
+            ALL.len(),
+            2,
+            "a type added to ALL is added to this test with its emitter"
+        );
     }
 }

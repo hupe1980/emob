@@ -8,7 +8,7 @@ The tariff publication daemon: decides when a tariff version must reach the driv
 |---|---|
 | ✅ library | `tarifd::Tarifd` schedules versions by lead time, builds all three payloads at once or none, records confirmed deliveries, and names late versions with the article they breach — tested in `tests/a_version_takes_effect.rs` |
 | ✅ estate | publishes the estate's `[[tariffs]]`, built by the same `TariffSpec::to_tariff` `csmsd` rates with, so the published price and the charged price cannot diverge; the party is the estate's operator |
-| ⏳ not yet | the three push clients: every 60 seconds it asks what is due within a one-hour lead and logs what it would publish — nothing is sent to stations, partners or the access point, and nothing is confirmed. It has no journal |
+| ⏳ not wired | the three push clients: every 60 seconds it asks what is due within a one-hour lead and logs what it would publish — nothing is sent to stations, partners or the access point, and nothing is confirmed. It has no journal |
 
 ## What it owns
 

@@ -442,7 +442,7 @@ async fn sr_060_sr_062_the_journal_holds_the_digest_and_never_the_token() {
     let sent = csmsd::outbox::with_receipt(&csmsd, &delivery);
     let body: serde_json::Value = serde_json::from_str(&sent.body).unwrap();
     assert_eq!(
-        body["receipt"],
+        body["data"]["receipt"],
         format!("https://csms.example/r/{token}"),
         "billd gets the absolute link"
     );

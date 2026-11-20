@@ -77,14 +77,25 @@ seller = { name = "ABC Charging GmbH", street = "Invalidenstrasse 1", post_code 
 # public_url = "http://127.0.0.1:9584"
 
 # Optional. Hand every issued invoice to the operator's ERP or Peppol provider:
-# posted, signed under Standard Webhooks with the secret `secret_env` names
-# (whsec_<base64>), `webhook-id` = the invoice number, until it answers. A 2xx
+# a de.emob.invoice.issued CloudEvent whose data is the UBL or CII file, signed
+# under Standard Webhooks with the secret `secret_env` names (whsec_<base64>),
+# `webhook-id` = the invoice number, posted until it answers. A 2xx
 # accepts it (then it is booked), 401/408/429/5xx or no answer is retried, any
 # other 4xx rejects it. https only, or http on loopback.
 # [billing.delivery]
 # url = "https://erp.example.org/einvoices"
 # secret_env = "EMOB_INVOICE_DELIVERY_SECRET"
 # syntax = "ubl"   # or "cii"
+
+# Optional, any number. A system outside the estate that receives emob's
+# events as signed CloudEvents: de.emob.cdr.issued (csmsd) and
+# de.emob.invoice.issued (billd). Its own secret; https, or http on loopback.
+# A pattern that admits no emitted type refuses the start.
+# [[subscribers]]
+# name = "warehouse"
+# url = "https://dwh.example.org/emob/events"
+# secret_env = "EMOB_WAREHOUSE_SECRET"
+# types = ["de.emob.*"]
 
 [[contracts]]
 id = "DE-MSP-C00000001-W"

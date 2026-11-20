@@ -60,11 +60,9 @@ impl Facility {
 
 /// A point on the earth, in WGS 84.
 ///
-/// Exact decimal rather than binary floating point, for the reason everything
-/// else in this workspace is: the profile transports coordinates as JSON
-/// numbers, and a value that arrives as `50.779599` should leave as
-/// `50.779599`. Six decimals is about 0.1 m at this latitude, which is the
-/// difference between two bays of the same car park.
+/// Exact decimals, as OCPI carries them. The DATEX II profile types a
+/// coordinate as `Float`, which keeps about seven significant digits:
+/// `50.779599` leaves the feed as `50.7796`, 0.1 m away.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coordinates {
     /// Degrees north.
@@ -291,6 +289,13 @@ pub struct Station {
     pub total_max_power_kw: Decimal,
     /// The points, in the order they should be published.
     pub points: Vec<ChargingPoint>,
+    /// Whether somebody is on site to help.
+    ///
+    /// `serviceType` is required on every station `[DATEX-II-Profil]`, and the
+    /// profile has two answers: `unattended` and `physicalAttendance`. A public
+    /// charge point is the first unless the operator says otherwise — a
+    /// charging hub with a lounge, a fuel station's forecourt.
+    pub staffed: bool,
 }
 
 impl Station {
@@ -306,6 +311,7 @@ impl Station {
             operator,
             total_max_power_kw,
             points,
+            staffed: false,
         }
     }
 

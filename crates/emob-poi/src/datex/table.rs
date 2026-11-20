@@ -7,29 +7,30 @@
 //! is how a working status feed stops being delivered. [`crate::feed`] is where
 //! the two are checked against each other.
 
-#![allow(
-    clippy::struct_field_names,
-    reason = "the fields are named for the profile's own attributes, and a Rust \
-              name that differs from the JSON key it writes is the one mistake \
-              these structs exist to prevent"
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use datex2::v3::afir_energy_infrastructure::{
+    self as aegi, AnyEnergyProduct, DeliveryUnitEnum, EnergyInfrastructureSite,
+    EnergyInfrastructureStation, EnergyInfrastructureTable, EnergyInfrastructureTablePublication,
+    RefillPoint,
+};
+use datex2::v3::afir_facilities::{self as afac, AfirFacilityLocation, TypeOfIdentifierEnum};
+use datex2::v3::common::{
+    self as com, ConfidentialityValueEnum, HeaderInformation, InformationStatusEnum,
+    InternationalIdentifier,
+};
+use datex2::v3::location_extension::{Address, AddressLine, AddressLineTypeEnum};
+use datex2::v3::location_referencing::{
+    AreaLocation, LocationExtensionType, LocationReference, PointCoordinates,
+};
+use datex2::v3::{Publication, json};
 
-use emob_core::CurrentType;
-
-use super::wire::{Enumerated, Exact, Extended, Multilingual, time_of_day, timestamp, watts};
+use super::wire::{date_time, float, money, text, time_of_day, watts};
 use crate::rate::{Period, Price, Rate};
 use crate::site::{ChargingPoint, Connector, Site, Station};
 
-/// The DATEX II model version the profile extends.
-const MODEL_BASE_VERSION: &str = "3";
-/// The profile's own name, as it appears in every published example.
-const PROFILE_NAME: &str = "AFIR Energy Infrastructure";
 /// The profile version this module writes `[DATEX-II-Profil]`.
-pub const PROFILE_VERSION: &str = "01-00-00";
+pub const PROFILE_VERSION: &str = json::mobilithek::PROFILE_VERSION;
 
 /// Who is publishing, and under what national identifier.
 ///
@@ -59,27 +60,46 @@ pub enum InformationStatus {
 }
 
 impl InformationStatus {
-    pub(crate) const fn as_profile_str(self) -> &'static str {
+    const fn profile(self) -> InformationStatusEnum {
         match self {
-            Self::Real => "real",
-            Self::Test => "test",
+            Self::Real => InformationStatusEnum::Real,
+            Self::Test => InformationStatusEnum::Test,
         }
     }
 }
 
+impl Publisher {
+    /// `publicationCreator`.
+    pub(super) fn creator(&self) -> InternationalIdentifier {
+        InternationalIdentifier {
+            country: Some(self.country.clone()),
+            national_identifier: Some(self.national_identifier.clone()),
+            ..InternationalIdentifier::default()
+        }
+    }
+}
+
+/// `headerInformation`: unrestricted, and real or a test.
+pub(super) fn header(status: InformationStatus) -> HeaderInformation {
+    HeaderInformation {
+        confidentiality: Some(ConfidentialityValueEnum::NoRestriction),
+        information_status: Some(status.profile()),
+        ..HeaderInformation::default()
+    }
+}
+
 /// The static publication.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TablePublication {
-    payload: Payload,
+    publication: Publication,
     /// What this document says it published, read back off the document.
     ///
-    /// Not serialised — it is the table's own contents, not a field of the
+    /// Not written — it is the table's own contents, not a field of the
     /// profile. It is here because a status publication addresses a facility
     /// **at the version the table published it at**, and the only party that
     /// can answer *which* version that was is the document that carried it. A
     /// service holding its own second copy of the inventory answers a different
     /// question: what it runs now (D308).
-    #[serde(skip)]
     published: Published,
     /// The instant this document was written for.
     ///
@@ -87,7 +107,6 @@ pub struct TablePublication {
     /// the access point accepted was passing this in beside the publication,
     /// which is a fact the document already states and a caller could state
     /// differently.
-    #[serde(skip)]
     published_at: time::OffsetDateTime,
 }
 
@@ -122,329 +141,37 @@ impl Published {
     ///
     /// Off the built document rather than off the inventory it was built from,
     /// so there is no second walk to disagree with the first.
-    fn of(table: &Table) -> Self {
+    fn of(table: &EnergyInfrastructureTable) -> Self {
         let mut published = Self::default();
-        published
-            .facilities
-            .insert(table.id.clone(), table.version.clone());
-        for site in &table.sites {
-            published
-                .facilities
-                .insert(site.id.clone(), site.version.clone());
-            for station in &site.stations {
-                published
-                    .facilities
-                    .insert(station.id.clone(), station.version.clone());
-                for refill in &station.refill_points {
-                    let point = &refill.point;
-                    published
-                        .facilities
-                        .insert(point.id.clone(), point.version.clone());
-                    for energy in &point.electric_energy {
-                        for rate in &energy.energy_rate {
-                            published.rates.insert(rate.id.clone());
-                        }
+        published.facility(table.id.as_ref(), table.version.as_ref());
+        for site in &table.energy_infrastructure_site {
+            published.facility(site.id.as_ref(), site.version.as_ref());
+            for station in &site.energy_infrastructure_station {
+                published.facility(station.id.as_ref(), station.version.as_ref());
+                for refill in &station.refill_point {
+                    let RefillPoint::ElectricChargingPoint(point) = refill else {
+                        continue;
+                    };
+                    published.facility(point.id.as_ref(), point.version.as_ref());
+                    for product in &point.energy_product {
+                        let AnyEnergyProduct::ElectricEnergy(energy) = product else {
+                            continue;
+                        };
+                        published
+                            .rates
+                            .extend(energy.energy_rate.iter().filter_map(|rate| rate.id.clone()));
                     }
                 }
             }
         }
         published
     }
-}
 
-#[derive(Debug, Clone, Serialize)]
-struct Payload {
-    #[serde(rename = "modelBaseVersionG")]
-    model_base_version: &'static str,
-    #[serde(rename = "profileNameG")]
-    profile_name: &'static str,
-    #[serde(rename = "profileVersionG")]
-    profile_version: &'static str,
-    #[serde(rename = "aegiEnergyInfrastructureTablePublication")]
-    publication: Publication,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Publication {
-    lang: String,
-    #[serde(rename = "publicationTime")]
-    publication_time: String,
-    #[serde(rename = "publicationCreator")]
-    publication_creator: Creator,
-    #[serde(rename = "headerInformation")]
-    header_information: Header,
-    #[serde(rename = "energyInfrastructureTable")]
-    tables: Vec<Table>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Creator {
-    country: String,
-    #[serde(rename = "nationalIdentifier")]
-    national_identifier: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Header {
-    confidentiality: Enumerated,
-    #[serde(rename = "informationStatus")]
-    information_status: Enumerated,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Table {
-    #[serde(rename = "idG")]
-    id: String,
-    #[serde(rename = "versionG")]
-    version: String,
-    #[serde(rename = "tableName", skip_serializing_if = "Option::is_none")]
-    table_name: Option<String>,
-    #[serde(rename = "energyInfrastructureSite")]
-    sites: Vec<SiteOut>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SiteOut {
-    #[serde(rename = "idG")]
-    id: String,
-    #[serde(rename = "versionG")]
-    version: String,
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    name: Multilingual,
-    #[serde(rename = "locationReference")]
-    location_reference: LocationReference,
-    #[serde(rename = "energyInfrastructureStation")]
-    stations: Vec<StationOut>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LocationReference {
-    #[serde(rename = "locAreaLocation")]
-    area: AreaLocation,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AreaLocation {
-    #[serde(rename = "coordinatesForDisplay")]
-    coordinates: Coordinates,
-    #[serde(rename = "locLocationExtensionG")]
-    extension: LocationExtension,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Coordinates {
-    latitude: Exact,
-    longitude: Exact,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct LocationExtension {
-    #[serde(rename = "FacilityLocation")]
-    facility_location: FacilityLocation,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct FacilityLocation {
-    #[serde(rename = "timeZone")]
-    time_zone: String,
-    address: Address,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Address {
-    postcode: String,
-    city: Multilingual,
-    #[serde(rename = "countryCode")]
-    country_code: String,
-    #[serde(rename = "addressLine")]
-    address_line: Vec<AddressLine>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AddressLine {
-    order: u32,
-    #[serde(rename = "type")]
-    kind: Enumerated,
-    text: Multilingual,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct StationOut {
-    #[serde(rename = "idG")]
-    id: String,
-    #[serde(rename = "versionG")]
-    version: String,
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    operator: OperatorOut,
-    #[serde(rename = "authenticationAndIdentificationMethods")]
-    authentication: Vec<Enumerated>,
-    #[serde(rename = "numberOfRefillPoints")]
-    number_of_refill_points: usize,
-    #[serde(rename = "totalMaximumPower")]
-    total_maximum_power: Exact,
-    #[serde(rename = "refillPoint")]
-    refill_points: Vec<RefillPointOut>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OperatorOut {
-    #[serde(rename = "afacAnOrganisation")]
-    organisation: Organisation,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Organisation {
-    name: Multilingual,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RefillPointOut {
-    #[serde(rename = "aegiElectricChargingPoint")]
-    point: ElectricChargingPoint,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ElectricChargingPoint {
-    #[serde(rename = "idG")]
-    id: String,
-    #[serde(rename = "versionG")]
-    version: String,
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    #[serde(rename = "externalIdentifier")]
-    external_identifier: Vec<ExternalIdentifier>,
-    #[serde(rename = "deliveryUnit")]
-    delivery_unit: Enumerated,
-    #[serde(rename = "currentType")]
-    current_type: Enumerated,
-    #[serde(rename = "vehicleToGridCommunicationType")]
-    v2g: Vec<Enumerated>,
-    #[serde(rename = "numberOfConnectors")]
-    number_of_connectors: usize,
-    #[serde(rename = "availableChargingPower")]
-    available_charging_power: Vec<Exact>,
-    connector: Vec<ConnectorOut>,
-    #[serde(rename = "electricEnergy", skip_serializing_if = "Vec::is_empty")]
-    electric_energy: Vec<ElectricEnergy>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ExternalIdentifier {
-    identifier: String,
-    #[serde(rename = "typeOfIdentifier")]
-    type_of_identifier: Extended,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ConnectorOut {
-    #[serde(rename = "connectorType")]
-    connector_type: Enumerated,
-    #[serde(rename = "maxPowerAtSocket")]
-    max_power_at_socket: Exact,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ElectricEnergy {
-    #[serde(rename = "energyRate")]
-    energy_rate: Vec<EnergyRate>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EnergyRate {
-    #[serde(rename = "idG")]
-    id: String,
-    #[serde(rename = "ratePolicy")]
-    rate_policy: Enumerated,
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    #[serde(rename = "applicableCurrency")]
-    applicable_currency: Vec<String>,
-    #[serde(rename = "rateName", skip_serializing_if = "Option::is_none")]
-    rate_name: Option<Multilingual>,
-    #[serde(
-        rename = "combinationWithParkingFee",
-        skip_serializing_if = "Option::is_none"
-    )]
-    combination_with_parking_fee: Option<bool>,
-    #[serde(rename = "minimumDeliveryFee", skip_serializing_if = "Option::is_none")]
-    minimum_delivery_fee: Option<Exact>,
-    #[serde(rename = "maximumDeliveryFee", skip_serializing_if = "Option::is_none")]
-    maximum_delivery_fee: Option<Exact>,
-    #[serde(rename = "energyPrice")]
-    energy_price: Vec<EnergyPrice>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EnergyPrice {
-    #[serde(rename = "priceType")]
-    price_type: Enumerated,
-    value: Exact,
-    #[serde(rename = "taxIncluded", skip_serializing_if = "Option::is_none")]
-    tax_included: Option<bool>,
-    #[serde(rename = "taxRate", skip_serializing_if = "Option::is_none")]
-    tax_rate: Option<Exact>,
-    #[serde(
-        rename = "additionalInformation",
-        skip_serializing_if = "Option::is_none"
-    )]
-    additional_information: Option<Multilingual>,
-    #[serde(rename = "overallPeriod", skip_serializing_if = "Option::is_none")]
-    overall_period: Option<OverallPeriod>,
-    #[serde(
-        rename = "energyBasedApplicability",
-        skip_serializing_if = "Option::is_none"
-    )]
-    energy_based_applicability: Option<EnergyBasedApplicability>,
-    #[serde(
-        rename = "timeBasedApplicability",
-        skip_serializing_if = "Option::is_none"
-    )]
-    time_based_applicability: Option<TimeBasedApplicability>,
-}
-
-/// The delivered-energy band a price applies in — the profile's own answer to
-/// a tiered tariff, in whole kilowatt-hours.
-#[derive(Debug, Clone, Serialize)]
-struct EnergyBasedApplicability {
-    #[serde(rename = "fromKWh", skip_serializing_if = "Option::is_none")]
-    from_kwh: Option<u32>,
-    #[serde(rename = "toKWh", skip_serializing_if = "Option::is_none")]
-    to_kwh: Option<u32>,
-}
-
-/// The elapsed-time band, in whole minutes.
-#[derive(Debug, Clone, Serialize)]
-struct TimeBasedApplicability {
-    #[serde(rename = "fromMinute", skip_serializing_if = "Option::is_none")]
-    from_minute: Option<u32>,
-    #[serde(rename = "toMinute", skip_serializing_if = "Option::is_none")]
-    to_minute: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct OverallPeriod {
-    #[serde(rename = "overallStartTime", skip_serializing_if = "Option::is_none")]
-    start: Option<String>,
-    #[serde(rename = "overallEndTime", skip_serializing_if = "Option::is_none")]
-    end: Option<String>,
-    #[serde(rename = "validPeriod", skip_serializing_if = "Vec::is_empty")]
-    valid_period: Vec<ValidPeriod>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ValidPeriod {
-    #[serde(rename = "recurringTimePeriodOfDay")]
-    recurring: Vec<TimePeriodOfDay>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct TimePeriodOfDay {
-    #[serde(rename = "startTimeOfPeriod")]
-    start: String,
-    #[serde(rename = "endTimeOfPeriod")]
-    end: String,
+    fn facility(&mut self, id: Option<&String>, version: Option<&String>) {
+        if let (Some(id), Some(version)) = (id, version) {
+            self.facilities.insert(id.clone(), version.clone());
+        }
+    }
 }
 
 /// Build the static publication for one table of sites.
@@ -468,38 +195,31 @@ pub fn publication(
     published_at: time::OffsetDateTime,
     rate_for: &dyn Fn(&ChargingPoint) -> Option<Rate>,
 ) -> TablePublication {
-    let now = timestamp(published_at);
-    let built = Table {
-        id: table.id.clone(),
-        version: table.version.to_string(),
+    let now = date_time(published_at);
+    let built = EnergyInfrastructureTable {
+        id: Some(table.id.clone()),
+        version: Some(table.version.to_string()),
         table_name: table_name.map(ToOwned::to_owned),
-        sites: sites
+        energy_infrastructure_site: sites
             .iter()
-            .map(|site| site_of(site, &publisher.language, &now, published_at, rate_for))
+            .map(|site| site_of(site, &publisher.language, now, published_at, rate_for))
             .collect(),
+        ..EnergyInfrastructureTable::default()
     };
     // Read off the table that was just built, not off the inventory it was
     // built from. See `Published`.
     let manifest = Published::of(&built);
     TablePublication {
-        payload: Payload {
-            model_base_version: MODEL_BASE_VERSION,
-            profile_name: PROFILE_NAME,
-            profile_version: PROFILE_VERSION,
-            publication: Publication {
-                lang: publisher.language.clone(),
-                publication_time: now,
-                publication_creator: Creator {
-                    country: publisher.country.clone(),
-                    national_identifier: publisher.national_identifier.clone(),
-                },
-                header_information: Header {
-                    confidentiality: Enumerated::new("noRestriction"),
-                    information_status: Enumerated::new(status.as_profile_str()),
-                },
-                tables: vec![built],
+        publication: Publication::AfirEnergyInfrastructureTable(Box::new(
+            EnergyInfrastructureTablePublication {
+                lang: Some(publisher.language.clone()),
+                publication_time: Some(now),
+                publication_creator: Some(Box::new(publisher.creator())),
+                header_information: Some(Box::new(header(status))),
+                energy_infrastructure_table: vec![built],
+                ..EnergyInfrastructureTablePublication::default()
             },
-        },
+        )),
         published: manifest,
         published_at,
     }
@@ -523,10 +243,11 @@ impl TablePublication {
     ///
     /// # Errors
     ///
-    /// [`serde_json::Error`] only if a value cannot be represented, which the
-    /// types here prevent.
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
+    /// [`datex2::Error`], naming the member and the rule, for anything the
+    /// profile's schemas would reject — an amount with a tenth of a cent in
+    /// it, for one, which [`crate::feed::Feed::check`] refuses first.
+    pub fn to_json(&self) -> Result<String, datex2::Error> {
+        json::mobilithek::to_string(&self.publication)
     }
 }
 
@@ -562,158 +283,185 @@ fn profile_time_zone(site: &Site, published_at: time::OffsetDateTime) -> String 
 fn site_of(
     site: &Site,
     lang: &str,
-    now: &str,
+    now: datex2::DateTime,
     published_at: time::OffsetDateTime,
     rate_for: &dyn Fn(&ChargingPoint) -> Option<Rate>,
-) -> SiteOut {
-    SiteOut {
-        id: site.facility.id.clone(),
-        version: site.facility.version.to_string(),
-        last_updated: now.to_owned(),
-        name: Multilingual::new(lang, &site.name),
-        location_reference: LocationReference {
-            area: AreaLocation {
-                coordinates: Coordinates {
-                    latitude: Exact(site.coordinates.latitude),
-                    longitude: Exact(site.coordinates.longitude),
-                },
-                extension: LocationExtension {
-                    facility_location: FacilityLocation {
-                        time_zone: profile_time_zone(site, published_at),
-                        address: Address {
-                            postcode: site.address.postcode.clone(),
-                            city: Multilingual::new(lang, &site.address.city),
-                            country_code: site.address.country_code.clone(),
-                            address_line: vec![
-                                AddressLine {
-                                    order: 0,
-                                    kind: Enumerated::new("street"),
-                                    text: Multilingual::new(lang, &site.address.street),
-                                },
-                                AddressLine {
-                                    order: 1,
-                                    kind: Enumerated::new("houseNumber"),
-                                    text: Multilingual::new(lang, &site.address.house_number),
-                                },
-                            ],
-                        },
-                    },
-                },
-            },
-        },
-        stations: site
+) -> EnergyInfrastructureSite {
+    let line = |order: u64, kind: AddressLineTypeEnum, value: &str| AddressLine {
+        order: Some(order),
+        r#type: Some(kind),
+        text: Some(text(lang, value)),
+        ..AddressLine::default()
+    };
+    let location = AreaLocation {
+        coordinates_for_display: Some(Box::new(PointCoordinates {
+            latitude: float(site.coordinates.latitude),
+            longitude: float(site.coordinates.longitude),
+            ..PointCoordinates::default()
+        })),
+        location_extension: Some(Box::new(LocationExtensionType {
+            afir_facility_location: Some(Box::new(AfirFacilityLocation {
+                time_zone: Some(profile_time_zone(site, published_at)),
+                address: Some(Box::new(Address {
+                    postcode: Some(site.address.postcode.clone()),
+                    city: Some(text(lang, &site.address.city)),
+                    country_code: Some(site.address.country_code.clone()),
+                    address_line: vec![
+                        line(0, AddressLineTypeEnum::Street, &site.address.street),
+                        line(
+                            1,
+                            AddressLineTypeEnum::HouseNumber,
+                            &site.address.house_number,
+                        ),
+                    ],
+                    ..Address::default()
+                })),
+                ..AfirFacilityLocation::default()
+            })),
+            ..LocationExtensionType::default()
+        })),
+        ..AreaLocation::default()
+    };
+    EnergyInfrastructureSite {
+        id: Some(site.facility.id.clone()),
+        version: Some(site.facility.version.to_string()),
+        last_updated: Some(now),
+        name: Some(text(lang, &site.name)),
+        location_reference: Some(LocationReference::AreaLocation(Box::new(location))),
+        energy_infrastructure_station: site
             .stations
             .iter()
             .map(|station| station_of(station, lang, now, rate_for))
             .collect(),
+        ..EnergyInfrastructureSite::default()
     }
 }
 
 fn station_of(
     station: &Station,
     lang: &str,
-    now: &str,
+    now: datex2::DateTime,
     rate_for: &dyn Fn(&ChargingPoint) -> Option<Rate>,
-) -> StationOut {
-    StationOut {
-        id: station.facility.id.clone(),
-        version: station.facility.version.to_string(),
-        last_updated: now.to_owned(),
-        operator: OperatorOut {
-            organisation: Organisation {
-                name: Multilingual::new(
+) -> EnergyInfrastructureStation {
+    let mut authentication: Vec<_> = Vec::new();
+    for method in station
+        .points
+        .iter()
+        .flat_map(|point| super::authentication_methods(point.ad_hoc_payment))
+    {
+        if !authentication.contains(&method) {
+            authentication.push(method);
+        }
+    }
+    authentication.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    EnergyInfrastructureStation {
+        id: Some(station.facility.id.clone()),
+        version: Some(station.facility.version.to_string()),
+        last_updated: Some(now),
+        operator: Some(afac::Organisation::AnOrganisation(Box::new(
+            afac::AnOrganisation {
+                name: Some(text(
                     lang,
                     format!(
                         "{}*{}",
                         station.operator.country_code(),
                         station.operator.party_id()
                     ),
-                ),
+                )),
+                ..afac::AnOrganisation::default()
             },
-        },
-        authentication: station
-            .points
-            .iter()
-            .flat_map(|point| super::authentication_methods(point.ad_hoc_payment))
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .map(Enumerated::new)
-            .collect(),
+        ))),
+        authentication_and_identification_methods: authentication,
         // Derived, never stored: `numberOfRefillPoints` is `1..1` in the
         // profile, and a count that disagrees with the list beside it is a
         // document two readers read differently.
-        number_of_refill_points: station.points.len(),
+        number_of_refill_points: Some(station.points.len() as u64),
+        service_type: vec![aegi::ServiceType {
+            service_type: Some(if station.staffed {
+                aegi::ServiceTypeEnum::PhysicalAttendance
+            } else {
+                aegi::ServiceTypeEnum::Unattended
+            }),
+            ..aegi::ServiceType::default()
+        }],
         total_maximum_power: watts(station.total_max_power_kw),
-        refill_points: station
+        refill_point: station
             .points
             .iter()
-            .map(|point| RefillPointOut {
-                point: point_of(point, lang, now, rate_for),
+            .map(|point| {
+                RefillPoint::ElectricChargingPoint(Box::new(point_of(point, lang, now, rate_for)))
             })
             .collect(),
+        ..EnergyInfrastructureStation::default()
     }
 }
 
 fn point_of(
     point: &ChargingPoint,
     lang: &str,
-    now: &str,
+    now: datex2::DateTime,
     rate_for: &dyn Fn(&ChargingPoint) -> Option<Rate>,
-) -> ElectricChargingPoint {
-    ElectricChargingPoint {
-        id: point.facility.id.clone(),
-        version: point.facility.version.to_string(),
-        last_updated: now.to_owned(),
-        external_identifier: vec![ExternalIdentifier {
-            identifier: point.evse_id.to_string(),
-            type_of_identifier: Extended::new("evseId"),
+) -> aegi::ElectricChargingPoint {
+    aegi::ElectricChargingPoint {
+        id: Some(point.facility.id.clone()),
+        version: Some(point.facility.version.to_string()),
+        last_updated: Some(now),
+        // `typeOfIdentifier` has no `evseId` literal, so it is the profile's
+        // extension value — written `extendedG` with `evseId` beside it.
+        external_identifier: vec![afac::ExternalIdentifier {
+            identifier: Some(point.evse_id.to_string()),
+            type_of_identifier: Some(TypeOfIdentifierEnum::Extended("evseId".to_owned())),
+            ..afac::ExternalIdentifier::default()
         }],
-        delivery_unit: Enumerated::new("kWh"),
-        current_type: Enumerated::new(match point.current_type {
-            CurrentType::Ac => "ac",
-            CurrentType::Dc => "dc",
-        }),
-        v2g: vec![Enumerated::new(super::v2g_literal(point.v2g))],
-        number_of_connectors: point.connectors.len(),
-        available_charging_power: vec![watts(point.max_power_kw)],
+        delivery_unit: Some(DeliveryUnitEnum::KWh),
+        current_type: Some(super::current_type(point.current_type)),
+        vehicle_to_grid_communication_type: vec![super::v2g_type(point.v2g)],
+        number_of_connectors: Some(point.connectors.len() as u64),
+        available_charging_power: watts(point.max_power_kw).into_iter().collect(),
         connector: point.connectors.iter().map(connector_of).collect(),
-        electric_energy: rate_for(point)
+        energy_product: rate_for(point)
             .map(|rate| {
-                vec![ElectricEnergy {
-                    energy_rate: vec![rate_of(&rate, lang, now)],
-                }]
+                vec![AnyEnergyProduct::ElectricEnergy(Box::new(
+                    aegi::ElectricEnergy {
+                        energy_rate: vec![rate_of(&rate, lang, now)],
+                        ..aegi::ElectricEnergy::default()
+                    },
+                ))]
             })
             .unwrap_or_default(),
+        ..aegi::ElectricChargingPoint::default()
     }
 }
 
-fn connector_of(connector: &Connector) -> ConnectorOut {
-    ConnectorOut {
-        connector_type: Enumerated::new(connector.kind.as_profile_str()),
+fn connector_of(connector: &Connector) -> aegi::Connector {
+    aegi::Connector {
+        connector_type: Some(super::connector_type(connector.kind)),
         max_power_at_socket: watts(connector.max_power_kw),
+        ..aegi::Connector::default()
     }
 }
 
-fn rate_of(rate: &Rate, lang: &str, now: &str) -> EnergyRate {
-    EnergyRate {
-        id: rate.id.clone(),
-        rate_policy: Enumerated::new(rate.policy.as_profile_str()),
-        last_updated: now.to_owned(),
+fn rate_of(rate: &Rate, lang: &str, now: datex2::DateTime) -> aegi::EnergyRate {
+    aegi::EnergyRate {
+        id: Some(rate.id.clone()),
+        rate_policy: Some(super::rate_policy(rate.policy)),
+        last_updated: Some(now),
         applicable_currency: vec![rate.currency.to_string()],
-        rate_name: rate.name.as_ref().map(|name| Multilingual::new(lang, name)),
+        rate_name: rate.name.as_ref().map(|name| text(lang, name)),
         combination_with_parking_fee: rate.combination_with_parking_fee,
-        minimum_delivery_fee: rate.minimum_delivery_fee.map(Exact),
-        maximum_delivery_fee: rate.maximum_delivery_fee.map(Exact),
+        minimum_delivery_fee: rate.minimum_delivery_fee.and_then(money),
+        maximum_delivery_fee: rate.maximum_delivery_fee.and_then(money),
         energy_price: rate.prices.iter().map(price_of).collect(),
+        ..aegi::EnergyRate::default()
     }
 }
 
-fn price_of(price: &Price) -> EnergyPrice {
-    EnergyPrice {
-        price_type: Enumerated::new(price.price_type.as_profile_str()),
-        value: Exact(price.value),
+pub(super) fn price_of(price: &Price) -> aegi::EnergyPrice {
+    aegi::EnergyPrice {
+        price_type: Some(super::price_type(price.price_type)),
+        value: money(price.value),
         tax_included: price.tax_included,
-        tax_rate: price.tax_rate.map(Exact),
+        tax_rate: price.tax_rate.and_then(float),
         // `en`, not the publication's language: the sentence is generated by
         // this crate and is English, and a `MultilingualString` labelled `de`
         // carrying English is a document that lies about a field whose only
@@ -721,37 +469,48 @@ fn price_of(price: &Price) -> EnergyPrice {
         additional_information: price
             .additional_information
             .as_ref()
-            .map(|text| Multilingual::new("en", text)),
-        overall_period: price.period.as_ref().map(period_of),
+            .map(|sentence| text("en", sentence)),
+        overall_period: price
+            .period
+            .as_ref()
+            .map(|period| Box::new(period_of(period))),
         // A tiered price published without the band it applies in reads as
         // unconditional, which is a feed that under-states its own prices.
         energy_based_applicability: price.energy_applicability.map(|band| {
-            EnergyBasedApplicability {
-                from_kwh: band.from_kwh,
-                to_kwh: band.to_kwh,
-            }
+            Box::new(aegi::EnergyBasedApplicability {
+                from_k_wh: band.from_kwh.map(u64::from),
+                to_k_wh: band.to_kwh.map(u64::from),
+                ..aegi::EnergyBasedApplicability::default()
+            })
         }),
-        time_based_applicability: price.time_applicability.map(|band| TimeBasedApplicability {
-            from_minute: band.from_minute,
-            to_minute: band.to_minute,
+        time_based_applicability: price.time_applicability.map(|band| {
+            Box::new(aegi::TimeBasedApplicability {
+                from_minute: band.from_minute.map(u64::from),
+                to_minute: band.to_minute.map(u64::from),
+                ..aegi::TimeBasedApplicability::default()
+            })
         }),
+        ..aegi::EnergyPrice::default()
     }
 }
 
-fn period_of(period: &Period) -> OverallPeriod {
-    OverallPeriod {
-        start: period.from.map(timestamp),
-        end: period.until.map(timestamp),
+fn period_of(period: &Period) -> com::OverallPeriod {
+    com::OverallPeriod {
+        overall_start_time: period.from.map(date_time),
+        overall_end_time: period.until.map(date_time),
         valid_period: period
             .daily
             .map(|(start, end)| {
-                vec![ValidPeriod {
-                    recurring: vec![TimePeriodOfDay {
-                        start: time_of_day(start),
-                        end: time_of_day(end),
+                vec![com::Period {
+                    recurring_time_period_of_day: vec![com::TimePeriodOfDay {
+                        start_time_of_period: Some(time_of_day(start)),
+                        end_time_of_period: Some(time_of_day(end)),
+                        ..com::TimePeriodOfDay::default()
                     }],
+                    ..com::Period::default()
                 }]
             })
             .unwrap_or_default(),
+        ..com::OverallPeriod::default()
     }
 }

@@ -13,12 +13,13 @@
 //! So [`config`], [`telemetry`], [`health`], [`serve`] and [`shutdown`] are
 //! here, and they know nothing about electricity.
 //!
-//! # …and three modules that do
+//! # …and four modules that do
 //!
 //! | Module | Why it is emob's rather than a copy |
 //! |---|---|
 //! | [`authority`] | a principal is an **OCPI party**, and the worst thing a roaming node can do is serve one party's records to another |
-//! | [`events`] | the `CloudEvents` catalogue this workspace emits, as constants a subscription is checked against at compile time |
+//! | [`events`] | the `CloudEvents` catalogue: every type a daemon emits, and nothing it does not |
+//! | [`cloudevent`] | the one envelope every event is sent in, inside the estate and out of it |
 //! | [`webhook`] | one signer, so a receiver implements one verifier |
 //!
 //! # Why this is not `mako-service`
@@ -58,6 +59,8 @@
 
 pub mod actor;
 pub mod authority;
+#[cfg(feature = "serde")]
+pub mod cloudevent;
 pub mod config;
 #[cfg(feature = "serde")]
 pub mod estate;

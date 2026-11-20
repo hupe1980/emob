@@ -33,7 +33,6 @@ flowchart LR
     CDR --> X22["OCPI 2.2.1"]
     CDR --> SELF["self-roaming<br/>own EMP"]
     CDR --> OICP["OICP 2.3 · Hubject"]
-    CDR -.-> EMIP["eMIP · GIREVE"]
 
     X23 --> ACC["Crossing&lt;T&gt;<br/>the value and the account,<br/>by JSON Pointer"]
     X22 --> ACC
@@ -42,12 +41,10 @@ flowchart LR
     X23 -->|"a partner's record,<br/>read back unpriced"| CDR
 
     classDef built fill:#0a7d3322,stroke:#0a7d33
-    classDef planned fill:#88888818,stroke:#888,stroke-dasharray:4 3
     class X23,X22,SELF,ACC,OICP built
-    class EMIP planned
 ```
 
-Solid is built; dashed is designed. A session between an operator's own CPO and
+A session between an operator's own CPO and
 its own EMP (self-roaming) takes the same path as a stranger's, so adding a
 partner changes only the transport.
 
@@ -217,7 +214,7 @@ then pushed. During registration a partner names a URL `roamd` will call back;
 a **reach-back guard** admits only `https`, and `http` or private, loopback and
 link-local addresses only for hosts the estate allows, so a registering partner
 cannot aim the node at an internal service. ⏳ OICP transport to Hubject is not
-wired yet. See [Run the estate](@/docs/run-the-estate.md).
+wired. See [Run the estate](@/docs/run-the-estate.md).
 
 The testing rule for inbound formats: a document you **receive** needs a test
 that starts from a string, not from a Rust value — otherwise a serialisation
@@ -337,13 +334,6 @@ Differences from OCPI:
 - The tariff reads identically to the partner, the driver at the charge point and
   the national access point — see
   [Tariffs](@/docs/pricing.md#one-tariff-three-audiences-ocpp-ocpi-datex-ii).
-
-## Not yet built 📐
-
-- eMIP (GIREVE legacy).
-- OCPI Sessions and Tokens modules — a service's publishing surface rather than a
-  settlement question.
-- The OICP client in `roamd` (the document is built; the mutual-TLS socket is not).
 
 **Related:** [Sessions and settlement](@/docs/settlement.md) ·
 [Tariffs](@/docs/pricing.md) · [Eichrecht](@/docs/eichrecht.md) ·

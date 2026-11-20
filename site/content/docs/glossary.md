@@ -153,12 +153,18 @@ a field ending in `_env` names the environment variable that holds one.
 
 ### Outbox
 `csmsd`'s journalled list of deliveries: each settled session is sent to
-`billd` and `roamd` as a signed webhook and retried until acknowledged, so a
-restart loses none.
+`billd`, `roamd` and every subscriber that takes it as a signed CloudEvent and
+retried until acknowledged, so a restart loses none.
+
+### Subscriber
+A system outside the estate that receives emob's CloudEvents, named in
+`[[subscribers]]` with its URL, its own signing secret and the types it takes.
 
 ### Read model
-A daemon's operator view of its state, `GET /v1/<daemon>`, readable only with
-an operator token. The operator page is built from them.
+A daemon's operator view of its state, readable only with an operator token.
+`csmsd`, `billd` and `roamd` serve a bounded view at `GET /v1/<daemon>/today`
+— counts and the newest items that need a person — so its size does not grow
+with history. The operator page is built from them.
 
 ### Actor
 Who caused a journal fact or a logged request: `station:<identity>`,

@@ -10,7 +10,7 @@ The e-mobility service provider (eMSP) daemon: the keyed token store, real-time 
 | ✅ journal | on start the daemon folds its hash-chained journal (`empd` under `EMOB_JOURNAL_DIR`) before reporting ready; card UIDs in it are sealed under `EMPD_DATA_KEY`, and it refuses to start without that key. Every record names its actor; the head is signed under `EMPD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
 | ✅ estate | contracts and tokens are seeded once from the estate's `[[contracts]]`; the provider party is the estate's `[parties] provider` |
 | ✅ authorisation | `POST /v1/authorize`, behind the service token `csmsd` holds, answers `Accepted` (with the token's keyed reference), `Blocked`, `Expired` or `Invalid` with a reason |
-| ⏳ not yet | an OCPI tokens endpoint for partners, and the fee hand-off to `billd` |
+| ⏳ not wired | an OCPI tokens endpoint for partners, and the fee hand-off to `billd` |
 
 ## What it owns
 

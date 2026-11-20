@@ -8,7 +8,7 @@ The site controller for § 14a EnWG: receives a grid operator's power limit over
 |---|---|
 | ✅ library | `sited::Sited` reads an EEBUS limit write, tracks the LPC state with a watchdog, allocates power, produces OCPP charging profiles, and keeps the log of instructions and answers — tested in `tests/a_setpoint_arrives_over_the_wire.rs` |
 | ✅ daemon | starts with an **empty** site (0 kW connection, no devices) and logs the LPC state; `GET /v1/sited` shows that state to the estate's operators |
-| ⏳ not yet | the site register, the SHIP/EEBUS session (`eebus` with its `runtime` feature) and the OCPP leg. It has no journal, so the instruction log is in memory only |
+| ⏳ not wired | the site register, the SHIP/EEBUS session (`eebus` with its `runtime` feature) and the OCPP leg. It has no journal, so the instruction log is in memory only |
 
 ## What it owns
 

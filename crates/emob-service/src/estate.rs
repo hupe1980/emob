@@ -543,6 +543,120 @@ pub struct InvoiceDelivery {
     pub syntax: InvoiceSyntax,
 }
 
+/// `[[subscribers]]` — a system outside the estate that receives events.
+///
+/// Each event a daemon emits whose type one of `types` admits
+/// ([`crate::events::matches`]) is posted to `url` as a structured-mode
+/// [`crate::cloudevent::CloudEvent`], signed with this subscriber's own secret,
+/// and retried until it answers `2xx`. A subscriber added later receives what
+/// is emitted from then on.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Subscriber {
+    /// Its name; the journal records an answer as `subscriber:<name>`.
+    pub name: String,
+    /// Where events are posted: `https://`, or `http://` on loopback only.
+    pub url: String,
+    /// The variable holding its Standard Webhooks secret (`whsec_…`).
+    pub secret_env: EnvRef,
+    /// The types it takes: concrete types or `*`-terminated prefixes.
+    pub types: Vec<String>,
+}
+
+/// A subscriber, checked and with its secret.
+#[derive(Debug, Clone)]
+pub struct Subscription {
+    /// Its name.
+    pub name: String,
+    /// Where events go.
+    pub url: String,
+    /// What they are signed with.
+    pub secret: crate::webhook::Secret,
+    /// What it takes.
+    pub types: Vec<String>,
+}
+
+impl Subscription {
+    /// Whether it takes this type.
+    #[must_use]
+    pub fn takes(&self, event_type: &str) -> bool {
+        self.types
+            .iter()
+            .any(|pattern| crate::events::matches(pattern, event_type))
+    }
+}
+
+/// Check every subscriber and resolve its secret.
+///
+/// # Errors
+///
+/// [`EstateError::Invalid`] for a name outside the actor alphabet, a name
+/// used twice, a target that is not `https` (or `http` on loopback), no
+/// types, or a pattern that admits no type in the catalogue — a typo would
+/// otherwise subscribe to nothing and say nothing; [`EstateError::Unset`] for
+/// a missing secret.
+pub fn subscriptions(
+    subscribers: &[Subscriber],
+    env: &Env,
+) -> Result<Vec<Subscription>, EstateError> {
+    let mut out: Vec<Subscription> = Vec::with_capacity(subscribers.len());
+    for (index, subscriber) in subscribers.iter().enumerate() {
+        let invalid = |field: &str, reason: String| EstateError::Invalid {
+            key: format!("subscribers[{index}].{field}"),
+            reason,
+        };
+        crate::Actor::subscriber(&subscriber.name)
+            .map_err(|error| invalid("name", error.to_string()))?;
+        if out.iter().any(|seen| seen.name == subscriber.name) {
+            return Err(invalid(
+                "name",
+                format!("{} is named twice", subscriber.name),
+            ));
+        }
+        if !crate::webhook::secure_target(&subscriber.url) {
+            return Err(invalid(
+                "url",
+                format!(
+                    "{} must be https, or http on a loopback host",
+                    subscriber.url
+                ),
+            ));
+        }
+        if subscriber.types.is_empty() {
+            return Err(invalid("types", "names no type".to_owned()));
+        }
+        for pattern in &subscriber.types {
+            if !crate::events::ALL
+                .iter()
+                .any(|event_type| crate::events::matches(pattern, event_type))
+            {
+                return Err(invalid(
+                    "types",
+                    format!(
+                        "{pattern} admits no type emob emits ({})",
+                        crate::events::ALL.join(", ")
+                    ),
+                ));
+            }
+        }
+        let key = format!("subscribers[{index}].secret_env");
+        let secret = subscriber.secret_env.resolve_in(&key, env)?;
+        let secret = crate::webhook::Secret::standard(secret.expose()).map_err(|error| {
+            EstateError::Invalid {
+                key: key.clone(),
+                reason: format!("{} holds {error}", subscriber.secret_env.variable()),
+            }
+        })?;
+        out.push(Subscription {
+            name: subscriber.name.clone(),
+            url: subscriber.url.clone(),
+            secret,
+            types: subscriber.types.clone(),
+        });
+    }
+    Ok(out)
+}
+
 /// `[[partners]]` — a provider this operator settles with.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -911,5 +1025,54 @@ service_token_env = "EMOB_SERVICE_TOKEN"
         let zero = ESTATE.replace("security_profile = 1", "security_profile = 0");
         let text = from_str::<Csms>(&zero).expect_err("profile 0").to_string();
         assert!(text.contains("not 1, 2 or 3"), "{text}");
+    }
+
+    #[test]
+    fn a_subscriber_is_checked_before_anything_is_sent_to_it() {
+        let env: Env = std::sync::Arc::new(|name| {
+            (name == "SUB_SECRET").then(|| "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw".to_owned())
+        });
+        let subscriber = |name: &str, url: &str, types: &[&str]| Subscriber {
+            name: name.to_owned(),
+            url: url.to_owned(),
+            secret_env: EnvRef("SUB_SECRET".to_owned()),
+            types: types.iter().map(|t| (*t).to_owned()).collect(),
+        };
+        let fine = subscriptions(
+            &[subscriber(
+                "warehouse",
+                "https://dwh.example/in",
+                &["de.emob.*"],
+            )],
+            &env,
+        )
+        .unwrap();
+        assert!(fine[0].takes(crate::events::cdr::ISSUED));
+        assert!(fine[0].takes(crate::events::invoice::ISSUED));
+
+        let refused = |s: Subscriber| subscriptions(&[s], &env).unwrap_err().to_string();
+        assert!(
+            refused(subscriber(
+                "dwh",
+                "https://dwh.example",
+                &["de.emob.cdr.isued"]
+            ))
+            .contains("admits no type")
+        );
+        assert!(refused(subscriber("dwh", "http://dwh.example", &["de.emob.*"])).contains("https"));
+        assert!(refused(subscriber("dwh", "https://dwh.example", &[])).contains("no type"));
+        assert!(refused(subscriber("d\nwh", "https://dwh.example", &["*"])).contains("name"));
+        assert!(
+            subscriptions(
+                &[
+                    subscriber("a", "https://a.example", &["*"]),
+                    subscriber("a", "https://b.example", &["*"])
+                ],
+                &env
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("named twice")
+        );
     }
 }

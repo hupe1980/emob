@@ -10,6 +10,66 @@ renames something says so under **Removed** or **Changed** instead.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-20
+
+Events leave the estate, and the Mobilithek feed is written by `datex2`.
+
+### Added
+
+- **CloudEvents everywhere.** Every event emob sends is one structured-mode
+  CloudEvent 1.0 (`emob_service::cloudevent`, `source` `urn:emob:<daemon>`),
+  signed per Standard Webhooks over the whole envelope.
+- **Subscribers.** `[[subscribers]]` (name, `https` URL, `secret_env`, `types`)
+  in `csmsd` and `billd` sends `de.emob.cdr.issued` and
+  `de.emob.invoice.issued` to systems outside the estate. Checked at start (a
+  pattern that admits no emitted type refuses the start), owed at emission,
+  retried until a `2xx`, every answer journalled as `subscriber:<name>`; an
+  answer accepts or books nothing.
+- `emob-poi`: `Station::staffed`, published as the profile's required
+  `serviceType`; `PoiError::AmountNotInCents`.
+
+### Changed
+
+- `csmsd` delivers each record to `billd` and `roamd` as a
+  `de.emob.cdr.issued` CloudEvent; both refuse any other body (`422`).
+- **The invoice to the ERP is a `de.emob.invoice.issued` CloudEvent**: the
+  UBL or CII file is `data` (`application/xml`), the subject
+  `invoice/<number>`, the page link the `invoiceurl` attribute (was the
+  `emob-invoice-url` header). Receivers read the file from `data`.
+- `emob-poi` builds both publications from `datex2` 0.2 and writes them with
+  its Mobilithek writer, which refuses what the profile's schemas reject.
+  Output is compact JSON; `to_json` returns `datex2::Error`;
+  `PriceUpdate::price_type` is `rate::PriceType`; `authentication_methods`
+  returns `datex2` values; `v2g_literal` is `v2g_type`.
+- `emob-poi` publishes amounts in whole cents only: a per-minute price only
+  where sixty divides the hourly one into cents (otherwise the hourly figure as
+  `other`), and any other amount with a fraction of a cent, such as `0.589`
+  per kWh, refuses the feed instead of being rounded.
+- Coordinates in the DATEX II feed carry the profile's `Float` precision,
+  about seven significant digits (`50.779599` → `50.7796`).
+
+### Removed
+
+- The 30 event types nothing emitted; `emob_service::events` holds the two a
+  daemon emits, and a test holds every constant to an emitter.
+- `agentd`'s subscription table (`agentd::subscriptions`).
+- `PriceType::as_profile_str`, `RatePolicy::as_profile_str` and
+  `emob_poi::datex::wire::{Exact, Enumerated, Extended, Multilingual}`;
+  `serde_json`'s `raw_value` feature.
+
+### Fixed
+
+- `csmsd` answers `BootNotification` and `Heartbeat` with its own clock, not
+  the Unix epoch, so a real station no longer sets its clock to 1970.
+- Every DATEX II station carries the `serviceType` the profile requires; the
+  Mobilithek's schema rejected the table without it.
+
+### Upgrading
+
+- Let `csmsd`'s outbox drain before upgrading: a delivery still pending from
+  0.3 is sent in the old shape and refused by the new `billd` and `roamd`.
+- Journals from 0.3 replay.
+
 ## [0.3.1] - 2026-11-18
 
 The first release published through crates.io trusted publishing. The crates'
@@ -215,7 +275,8 @@ could not.
 First release: fifteen crates from the signed meter value to the ledger posting,
 and eight daemons.
 
-[Unreleased]: https://github.com/hupe1980/emob/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/hupe1980/emob/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/hupe1980/emob/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/hupe1980/emob/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hupe1980/emob/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/hupe1980/emob/releases/tag/v0.1.0

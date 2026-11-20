@@ -332,7 +332,7 @@ and 2025 and postpones nothing. It is a capability of the platform, not a
 charge-point duty, so it has no calendar entry: `billd` issues each partner's
 monthly invoice in EN 16931 or XRechnung, serves it on an invoice page with its
 UBL and CII files, and hands it to the operator's ERP or Peppol provider through
-a signed webhook — see [Run the estate](@/docs/run-the-estate.md#the-invoice-page).
+a signed CloudEvent — see [Run the estate](@/docs/run-the-estate.md#the-invoice-page).
 
 ## MiSpeL: levy relief for bidirectional points
 
@@ -477,10 +477,9 @@ upcoming duty judged at its own start date against the estate as it stands. A
 point due for renovation in March 2027 that speaks only ISO 15118-2 is compliant
 today and is flagged now as a breach from the day it is renovated. The date is an argument, so a run
 replays to the same answer. The specialist runs in the `agentd` daemon under
-the read-only advisory principal; ⏳ the event feed that triggers it is not
-wired yet.
+the read-only advisory principal; ⏳ nothing in the estate triggers a run.
 
-## Not yet covered 📐
+## Limits
 
 - A stated support period and update channel for operators: the calendar
   carries the duty that requires them.

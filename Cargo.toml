@@ -31,7 +31,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.3.1"
+version      = "0.4.0"
 authors      = ["hupe1980"]
 edition      = "2024"
 license      = "MIT OR Apache-2.0"
@@ -42,14 +42,11 @@ rust-version = "1.94"
 # ── External ────────────────────────────────────────────────────────────────
 thiserror  = "2"
 serde      = { version = "1", features = ["derive"] }
-# `raw_value`, not `arbitrary_precision`. Both carry a decimal's own digits into
-# a JSON number slot, which `emob_poi::datex::Exact` needs; `arbitrary_precision`
-# does it **globally** — it changes how `serde_json` presents every number to
-# every deserialiser in the build, so a type with a numeric visitor sees a map
-# and a partner's OCPI document stops parsing from bytes (D331). `raw_value` is
-# one type. `preserve_order` so a re-emitted document does not reorder what a
-# peer sent.
-serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+# `preserve_order` so a re-emitted document does not reorder what a peer sent.
+# Never `arbitrary_precision`: it changes how `serde_json` presents every number
+# to every deserialiser in the build, so a type with a numeric visitor sees a
+# map and a partner's OCPI document stops parsing from bytes (D331).
+serde_json = { version = "1", features = ["preserve_order"] }
 time       = { version = "0.3", features = ["std", "macros", "parsing", "formatting"] }
 
 # A tariff's "0.30 from 22:00" is local civil time at the charge point, and an
@@ -61,6 +58,12 @@ time       = { version = "0.3", features = ["std", "macros", "parsing", "formatt
 # replays against.
 jiff       = { version = "1", default-features = false, features = ["std", "tzdb-bundle-always"] }
 anyhow     = "1"
+
+# DATEX II v3 for the Mobilithek's AFIR Recharging profile, in `emob-poi`. It
+# spells the profile's JSON and refuses what its schemas would reject; prices
+# stay decimal text, so no float carries money. Its one dependency is
+# `quick-xml`, and it does no I/O of its own.
+datex2     = "0.2"
 
 # Every quantity in this workspace either *is* money or *becomes* money. A
 # binary float cannot represent 0.10, and `10.1 - 0.1` is 10.000000000000002 —
@@ -198,21 +201,21 @@ hex       = "0.4"
 base64    = "0.23"
 
 # ── Internal (path + version so the domain crates can be published) ─────────
-emob-core      = { path = "crates/emob-core",      version = "0.3" }
-emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.3" }
-emob-session   = { path = "crates/emob-session",   version = "0.3" }
-emob-cdr       = { path = "crates/emob-cdr",       version = "0.3" }
-emob-tariff    = { path = "crates/emob-tariff",    version = "0.3" }
-emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.3" }
-emob-eebus     = { path = "crates/emob-eebus",     version = "0.3" }
-emob-pnc       = { path = "crates/emob-pnc",       version = "0.3" }
-emob-poi       = { path = "crates/emob-poi",       version = "0.3" }
-emob-sim       = { path = "crates/emob-sim",       version = "0.3" }
-emob-smart     = { path = "crates/emob-smart",     version = "0.3" }
-emob-roam      = { path = "crates/emob-roam",      version = "0.3" }
-emob-billing   = { path = "crates/emob-billing",   version = "0.3" }
-emob-thg       = { path = "crates/emob-thg",       version = "0.3" }
-emob-service   = { path = "crates/emob-service",   version = "0.3" }
+emob-core      = { path = "crates/emob-core",      version = "0.4" }
+emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.4" }
+emob-session   = { path = "crates/emob-session",   version = "0.4" }
+emob-cdr       = { path = "crates/emob-cdr",       version = "0.4" }
+emob-tariff    = { path = "crates/emob-tariff",    version = "0.4" }
+emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.4" }
+emob-eebus     = { path = "crates/emob-eebus",     version = "0.4" }
+emob-pnc       = { path = "crates/emob-pnc",       version = "0.4" }
+emob-poi       = { path = "crates/emob-poi",       version = "0.4" }
+emob-sim       = { path = "crates/emob-sim",       version = "0.4" }
+emob-smart     = { path = "crates/emob-smart",     version = "0.4" }
+emob-roam      = { path = "crates/emob-roam",      version = "0.4" }
+emob-billing   = { path = "crates/emob-billing",   version = "0.4" }
+emob-thg       = { path = "crates/emob-thg",       version = "0.4" }
+emob-service   = { path = "crates/emob-service",   version = "0.4" }
 
 # ── The daemon shell ────────────────────────────────────────────────────────
 # Only `emob-service` and the daemons above it see these. Every domain crate

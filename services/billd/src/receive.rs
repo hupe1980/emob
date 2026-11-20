@@ -1,4 +1,4 @@
-//! `POST /v1/deliveries` — a rated record arriving from `csmsd`.
+//! `POST /v1/deliveries` — a `de.emob.cdr.issued` `CloudEvent` from `csmsd`.
 //!
 //! The order is the point: the body is capped before it is read (SR-038), the
 //! signature and its freshness are checked before the body is parsed (SR-029,
@@ -41,7 +41,7 @@ pub struct Token {
     pub issuer: PartyId,
 }
 
-/// The parts of a delivery `billd` reads
+/// The parts of a `de.emob.cdr.issued` event's data `billd` reads
 /// (`specs/001-the-estate-runs/contracts/delivery.md`).
 #[derive(Debug, Deserialize)]
 pub struct Body {
@@ -121,10 +121,12 @@ async fn deliveries<J: Journal>(
             return refuse(StatusCode::UNAUTHORIZED, refusal.to_string());
         }
     };
-    let body: Body = match serde_json::from_slice(&body) {
-        Ok(body) => body,
-        Err(error) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
-    };
+    // A `de.emob.cdr.issued` CloudEvent and nothing else; the record is its data.
+    let body: Body =
+        match emob_service::cloudevent::open::<Body>(&body, emob_service::events::cdr::ISSUED) {
+            Ok(event) => event.data,
+            Err(refusal) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()),
+        };
     if body.cdr.key.to_string() != id {
         return refuse(
             StatusCode::UNPROCESSABLE_ENTITY,

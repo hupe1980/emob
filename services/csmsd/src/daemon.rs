@@ -122,6 +122,12 @@ pub async fn run(options: Options) -> Result<Running> {
     let zone = crate::estate::zone(&estate)?;
     let operators = estate::operator_tokens(&estate.operators, &env)?;
     let secret = estate::webhook_secret(&estate.services, &env)?;
+    let subscriptions = estate::subscriptions(&estate.subscribers, &env)?;
+    let issued_to: Vec<String> = subscriptions
+        .iter()
+        .filter(|s| s.takes(emob_service::events::cdr::ISSUED))
+        .map(|s| s.name.clone())
+        .collect();
     let service_token = estate
         .services
         .service_token_env
@@ -175,6 +181,7 @@ pub async fn run(options: Options) -> Result<Running> {
         )
         .context("folding csmsd's journal")?
         .with_clock(clock)
+        .delivering_to(issued_to)
         .issuing_receipts(
             crate::receipt::Receipts::open(
                 journal
@@ -266,7 +273,8 @@ pub async fn run(options: Options) -> Result<Running> {
         &estate.services.roamd,
         secret,
         Duration::from_secs(10),
-    )?;
+    )?
+    .with_subscribers(subscriptions);
     let retry = Duration::from_secs(estate.services.retry_secs.max(1));
     let outbox = Arc::clone(&csmsd);
     let stopping = shutdown.clone();

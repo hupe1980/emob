@@ -206,14 +206,14 @@ described above. ✅
 See [Run the estate](@/docs/run-the-estate.md) and
 [Architecture](@/docs/architecture.md) for how daemons stay thin.
 
-## Not yet built 📐
+## Limits
 
-- Smart-charging profiles from a § 14a allocation are in `emob_ocpp::to_charging_profiles`
-  — see [§ 14a and the grid](@/docs/smart-charging.md). OCPP 2.1 DER control is not
-  built.
-- Deciding *when* a tariff version takes effect is `tarifd`'s. The OCPP 2.1
-  tariff object has no expiry field, so a version's expiry is reported in the
-  crossing's notes and retiring a version is a separate `ClearTariffs` call.
+- OCPP 2.1 DER control is not supported. § 14a allocations become charging
+  profiles (`emob_ocpp::to_charging_profiles`, see
+  [§ 14a and the grid](@/docs/smart-charging.md)).
+- The OCPP 2.1 tariff object has no expiry field, so a version's expiry is
+  reported in the crossing's notes and retiring a version is a separate
+  `ClearTariffs` call. When a version takes effect is `tarifd`'s decision.
 
 **Related:** [Eichrecht](@/docs/eichrecht.md) ·
 [Tariffs and price transparency](@/docs/pricing.md) ·

@@ -14,7 +14,9 @@ availability, ad-hoc price — free of charge through the **national access
 point**. In Germany that is the **Mobilithek**, in the DATEX II *Recharging*
 profile, from **14 April 2026**. `emob-poi` builds that feed from one inventory
 (site · station · point · connector) and one tariff, so the access point, roaming
-partners and the charge point display all say the same thing.
+partners and the charge point display all say the same thing. The documents are
+written by [`datex2`](https://crates.io/crates/datex2), whose Mobilithek writer
+refuses anything the profile's schemas would reject.
 
 ```mermaid
 flowchart LR
@@ -45,7 +47,7 @@ itself, exact from the object to the JSON number:
 
 ```rust
 let (rate, notes) = emob_poi::rate::publish(&tariff, "rate-1");
-// reaches the feed as `"value": 0.49`, not 0.49000000000000000222
+// reaches the feed as `"value":0.49`, not 0.49000000000000000222
 ```
 
 `notes` is a list of `RateNote`s: everything the profile could not say exactly,
@@ -79,16 +81,18 @@ and stay for the caller to state.
 ## DATEX II profile gaps: what the feed cannot say exactly
 
 The profile offers six price types: `basePrice`, `flatRate`, `free`, `other`,
-`pricePerKWh` and `pricePerMinute`. Five mismatches with real tariffs follow, and
-each is published as accurately as the profile allows and reported as a
-`RateNote`:
+`pricePerKWh` and `pricePerMinute`, and an amount of money with two places after
+the point. Six mismatches with real tariffs follow. Five are published as
+accurately as the profile allows and reported as a `RateNote`; one cannot be
+published at all:
 
 | Gap | What emob publishes |
 |---|---|
 | **No per-hour price type.** Tariffs are written per hour; the profile counts minutes. | The hourly price ÷ 60 under `pricePerMinute` — where that terminates (see below). |
-| **Per-minute price does not terminate.** €2.50/h is €0.041666…/min; rounding to cents is a price the operator does not charge `[PAngV]`. | The hourly figure under `other`, with the unit in `additionalInformation`. OCPP 2.1 [refuses this tariff](@/docs/ocpp.md); a feed cannot refuse, because publishing is the duty. |
+| **Per-minute price is not whole cents.** €2.50/h is €0.041666…/min and €0.30/h is €0.005/min; rounding to cents is a price the operator does not charge `[PAngV]`. | The hourly figure under `other`, with the unit in `additionalInformation`. OCPP 2.1 [refuses this tariff](@/docs/ocpp.md); a feed cannot refuse, because publishing is the duty. |
 | **No occupancy price type.** AFIR permits a per-minute fee for time connected and not charging at 50 kW and above; the profile only has a boolean saying whether charging and parking share one fee. | `other` with a sentence. |
 | **Delivery fee has no tax flag.** `minimumDeliveryFee`/`maximumDeliveryFee` are a bare `AmountOfMoney`, without `taxIncluded`/`taxRate`. | The fee in the basis the tariff states, and a note naming it. |
+| **A price with a fraction of a cent.** `AmountOfMoney` holds two places after the point, so €0.589/kWh has no spelling. | Nothing. The feed is refused with `PoiError::AmountNotInCents` naming the rate and the figure; rounding either way publishes a price the operator does not charge. |
 | **Tier bands are integers.** Energy and elapsed-time bands are non-negative integers; tariff thresholds need not be. | Lower bounds round **up**, upper bounds round **down**, so the published band is a subset of the real one and every published statement stays true. |
 
 ### Time zone: the profile types it as a fixed offset
@@ -174,15 +178,8 @@ the same bytes.
 with coordinates as exact decimals; `GET /v1/poid` shows it to operators. Its
 library decides **when** a snapshot goes out: it records the table the access
 point accepted, refuses updates no consumer could resolve, and reports when the
-feed has gone stale (`Poid::stale`). ⏳ The push to the Mobilithek is not wired
-yet. See [Run the estate](@/docs/run-the-estate.md).
-
-## Not yet built 📐
-
-- Deciding *which* points changed since the last publication, which needs a live
-  estate.
-- The rest of OCPI's Locations module beyond what a CDR needs (the location a
-  partner's record names) — that is a roaming service's publishing surface.
+feed has gone stale (`Poid::stale`). ⏳ The push to the Mobilithek is not
+wired. See [Run the estate](@/docs/run-the-estate.md).
 
 **Related:** [Tariffs and price transparency](@/docs/pricing.md) ·
 [Roaming](@/docs/roaming.md) · [Compliance](@/docs/compliance.md) ·

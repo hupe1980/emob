@@ -430,7 +430,7 @@ about the operation, not the records, so they live in the
   billing on someone else's meter, as in roaming, to obtain confirmation that the
   meter's operator meets its duties — a clause in the roaming agreement.
 
-## Not yet covered 📐
+## Limits
 
 Retention periods per artefact: MessEV and PTB give them but the reading is not
 settled, so nothing here expires an artefact.

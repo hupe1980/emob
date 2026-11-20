@@ -162,6 +162,25 @@ pub enum PoiError {
         /// The zone the site runs on.
         site_zone: String,
     },
+
+    /// An amount has a fraction of a cent, which `AmountOfMoney` cannot hold
+    /// (two places after the point `[DATEX-II-Profil]`). Rounding `0.589`
+    /// would publish a price the operator does not charge `[PAngV]`, so the
+    /// feed is refused.
+    #[error(
+        "rate '{rate}' states {field} as {amount}, which has a fraction of a cent: the profile's \
+         AmountOfMoney holds two places after the point and a rounded price is one the operator \
+         does not charge [PAngV]"
+    )]
+    AmountNotInCents {
+        /// The rate, by its published id.
+        rate: String,
+        /// Which figure — `energyPrice`, `minimumDeliveryFee` or
+        /// `maximumDeliveryFee`.
+        field: &'static str,
+        /// The amount as the tariff states it.
+        amount: rust_decimal::Decimal,
+    },
 }
 
 /// A convenience alias.

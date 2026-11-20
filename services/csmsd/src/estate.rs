@@ -42,6 +42,9 @@ pub struct Estate {
     pub receipts: ReceiptSection,
     /// The one key of the operator page's section `csmsd` reads.
     pub desk: DeskZone,
+    /// Systems outside the estate that receive events.
+    #[serde(default)]
+    pub subscribers: Vec<emob_service::estate::Subscriber>,
 }
 
 /// `[desk] time_zone` — the zone the operator page tells "today" in, which is

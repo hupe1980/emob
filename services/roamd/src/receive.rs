@@ -1,4 +1,4 @@
-//! `POST /v1/deliveries` — a rated record from `csmsd`, consigned to the
+//! `POST /v1/deliveries` — a `de.emob.cdr.issued` `CloudEvent` from `csmsd`,
 //! partner whose contract it was charged under.
 //!
 //! The same order as `billd`'s receiver: capped before read (SR-038), signed
@@ -50,7 +50,7 @@ pub struct Token {
     pub contract_id: ContractId,
 }
 
-/// The parts of a delivery `roamd` reads.
+/// The parts of a `de.emob.cdr.issued` event's data `roamd` reads.
 #[derive(Debug, Deserialize)]
 pub struct Body {
     /// The record.
@@ -142,10 +142,12 @@ async fn deliveries<J: Journal>(
             return refuse(StatusCode::UNAUTHORIZED, refusal.to_string());
         }
     };
-    let body: Body = match serde_json::from_slice(&body) {
-        Ok(body) => body,
-        Err(error) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
-    };
+    // A `de.emob.cdr.issued` CloudEvent and nothing else; the record is its data.
+    let body: Body =
+        match emob_service::cloudevent::open::<Body>(&body, emob_service::events::cdr::ISSUED) {
+            Ok(event) => event.data,
+            Err(refusal) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()),
+        };
     if body.cdr.key.to_string() != id {
         return refuse(
             StatusCode::UNPROCESSABLE_ENTITY,

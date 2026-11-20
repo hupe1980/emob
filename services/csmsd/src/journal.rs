@@ -197,26 +197,29 @@ pub struct Issued {
     pub verdict: Option<Verdict>,
 }
 
-/// Which daemon a delivery is owed to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// Whom a delivery is owed to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Target {
     /// The invoice.
     Billd,
     /// The partner.
     Roamd,
+    /// A system outside the estate, by its `[[subscribers]] name`.
+    Subscriber(String),
 }
 
 impl Target {
-    /// Both, in the order they are queued.
-    pub const ALL: [Self; 2] = [Self::Billd, Self::Roamd];
+    /// The two receivers inside the estate, in the order they are queued.
+    pub const ESTATE: [Self; 2] = [Self::Billd, Self::Roamd];
 
-    /// The daemon's name.
+    /// Its name.
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
             Self::Billd => "billd",
             Self::Roamd => "roamd",
+            Self::Subscriber(name) => name,
         }
     }
 }
@@ -224,11 +227,12 @@ impl Target {
 /// One record owed to one daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delivery {
-    /// The CDR key — the `webhook-id` and the receiver's idempotency key.
+    /// The CDR key — the event's `id`, the `webhook-id` and the receiver's
+    /// idempotency key.
     pub id: String,
     /// To whom.
     pub to: Target,
-    /// The body, already encoded, so every attempt sends the same bytes.
+    /// The `CloudEvent`, already encoded, so every attempt sends the same bytes.
     pub body: String,
 }
 
@@ -476,7 +480,7 @@ pub fn apply(state: &mut State, event: Event) {
             state.keep(outcome);
             for delivery in deliveries {
                 state.outbox.insert(
-                    (delivery.id.clone(), delivery.to),
+                    (delivery.id.clone(), delivery.to.clone()),
                     (delivery, DeliveryState::Pending),
                 );
             }

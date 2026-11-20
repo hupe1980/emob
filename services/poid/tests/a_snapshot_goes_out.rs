@@ -356,7 +356,7 @@ fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
                 .expect("an operating point may report `available`"),
             price: Some(emob_poi::datex::PriceUpdate {
                 rate_id: rate_id.to_owned(),
-                price_type: "pricePerKWh",
+                price_type: emob_poi::rate::PriceType::PricePerKwh,
                 value: dec("0.37"),
             }),
         }]

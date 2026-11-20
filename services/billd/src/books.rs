@@ -60,6 +60,9 @@ pub enum Event {
         /// before 0.3 holds none and reads as the EN 16931 core.
         #[serde(default = "core")]
         specification: emob_billing::Specification,
+        /// The subscribers its `de.emob.invoice.issued` event is owed to.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        owed_to: Vec<String>,
     },
     /// The recipient's platform answered.
     Submitted {
@@ -67,6 +70,16 @@ pub enum Event {
         number: String,
         /// What the platform said.
         submission: Submission,
+    },
+    /// A subscriber answered a document's `de.emob.invoice.issued` event.
+    Announced {
+        /// Which document.
+        number: String,
+        /// Which subscriber.
+        to: String,
+        /// Why it refused; `None` when it took it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refused: Option<String>,
     },
     /// A document was posted into the books.
     Booked {
@@ -92,6 +105,7 @@ impl Kinded for Event {
         match self {
             Self::Issued { .. } => "issued",
             Self::Submitted { .. } => "submitted",
+            Self::Announced { .. } => "announced",
             Self::Booked { .. } => "booked",
             Self::Received { .. } => "received",
         }
@@ -154,6 +168,7 @@ impl From<ClosingError> for BooksError {
 pub struct Books<J: Journal> {
     folded: Folded<Billd, Event, J>,
     halted: Option<String>,
+    subscribers: Vec<String>,
 }
 
 impl<J: Journal> core::fmt::Debug for Books<J> {
@@ -191,6 +206,7 @@ impl<J: Journal> Books<J> {
         Ok(Self {
             folded: Folded::open(empty, journal, Billd::apply)?,
             halted: None,
+            subscribers: Vec::new(),
         })
     }
 
@@ -268,13 +284,16 @@ impl<J: Journal> Books<J> {
             .state_mut()
             .issue_as(period, specification, invoice)?;
         let number = issued.invoice.number.clone();
+        let invoice = Box::new(issued.invoice.clone());
+        self.folded.state_mut().owe(&number, &self.subscribers);
         let event = Event::Issued {
             period: Some(period.to_owned()),
             number: number.clone(),
-            invoice: Box::new(issued.invoice.clone()),
+            invoice,
             cancels: None,
             replaces: None,
             specification,
+            owed_to: self.subscribers.clone(),
         };
         self.commit(by, &event, &number)?;
         Ok(number)
@@ -316,6 +335,8 @@ impl<J: Journal> Books<J> {
                     .map(|d| (d.invoice.clone(), d.specification)),
             )
         };
+        self.folded.state_mut().owe(&credit, &self.subscribers);
+        self.folded.state_mut().owe(&replaced, &self.subscribers);
         if let Some((invoice, specification)) = credit_doc {
             self.commit(
                 by,
@@ -326,6 +347,7 @@ impl<J: Journal> Books<J> {
                     cancels: Some(number.to_owned()),
                     replaces: None,
                     specification,
+                    owed_to: self.subscribers.clone(),
                 },
                 &credit,
             )?;
@@ -340,11 +362,44 @@ impl<J: Journal> Books<J> {
                     cancels: None,
                     replaces: Some(number.to_owned()),
                     specification,
+                    owed_to: self.subscribers.clone(),
                 },
                 &replaced,
             )?;
         }
         Ok((credit, replaced))
+    }
+
+    /// Owe every document issued from now on to these subscribers as well.
+    #[must_use]
+    pub fn delivering_to(mut self, subscribers: Vec<String>) -> Self {
+        self.subscribers = subscribers;
+        self
+    }
+
+    /// Record a subscriber's answer to a document's event.
+    ///
+    /// # Errors
+    ///
+    /// [`BooksError::Journal`] where the fact could not be recorded.
+    pub fn announced(
+        &mut self,
+        by: &Actor,
+        number: &str,
+        to: &str,
+        refused: Option<String>,
+    ) -> Result<(), BooksError> {
+        self.guard()?;
+        self.folded.state_mut().answer(number, to, refused.clone());
+        self.commit(
+            by,
+            &Event::Announced {
+                number: number.to_owned(),
+                to: to.to_owned(),
+                refused,
+            },
+            number,
+        )
     }
 
     /// Record that the recipient's platform took a document.
@@ -557,6 +612,7 @@ impl Billd {
                 cancels,
                 replaces,
                 specification,
+                owed_to,
             } => {
                 self.numbering.resume_past(&number);
                 if let Some(period) = period {
@@ -574,9 +630,16 @@ impl Billd {
                         replaces,
                         booked: false,
                         specification,
+                        owed_to,
+                        answered: std::collections::BTreeMap::new(),
                     },
                 );
             }
+            Event::Announced {
+                number,
+                to,
+                refused,
+            } => self.answer(&number, &to, refused),
             Event::Submitted { number, submission } => {
                 if let Some(document) = self.issued.get_mut(&number) {
                     document.submission = submission;

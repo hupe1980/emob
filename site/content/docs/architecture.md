@@ -1,7 +1,7 @@
 +++
 title = "Architecture"
 weight = 13
-description = "emob architecture: sans-I/O Rust crates for Eichrecht, OCPP, OCPI and billing, nine journalled daemons wired by signed webhooks, and the protocol kits."
+description = "emob architecture: sans-I/O Rust crates for Eichrecht, OCPP, OCPI and billing; nine journalled daemons wired by APIs and signed CloudEvents."
 
 [extra]
 nav = "Architecture"
@@ -9,11 +9,11 @@ nav = "Architecture"
 
 emob is a Rust workspace of **15 library crates** that hold every rule about
 charging, metering, pricing and settlement, plus **nine daemons** that run
-those rules as services from one estate file. Since release 0.2 the daemons are
-wired: stations connect to `csmsd`, `empd` authorises, `billd` invoices and
-`roamd` roams, each with a journal it rebuilds its state from, and the operator
-page `deskd` reads them all. Since 0.3 every journal fact names its actor, and
-each journal signs where it ends for a witness to check. emob does not implement the charging protocols
+those rules as services from one estate file: stations connect to `csmsd`,
+`empd` authorises, `billd` invoices and `roamd` roams, each with a journal it
+rebuilds its state from, and the operator page `deskd` reads them all. Every
+journal fact names its actor, and each journal signs where it ends for a
+witness to check. emob does not implement the charging protocols
 itself: it builds on separate protocol libraries (OCPP, OCPI, OICP, ISO 15118,
 EEBUS, OCMF) and adds the business rules on top.
 
@@ -46,7 +46,6 @@ flowchart TB
     subgraph emp["EMP — holding the driver contract"]
         TOK["empd<br/>contracts · tokens · quotes"]
         INV["billd<br/>invoices · books"]
-        PNC["pncd<br/>contract certificates"]
     end
 
     CDR --> P2P & HUB
@@ -54,16 +53,13 @@ flowchart TB
     P2P & HUB --> TOK
     TOK --> INV
     CSMS <-->|authorize| TOK
-    PNC -.-> TOK
 
     classDef built fill:#0a7d3322,stroke:#0a7d33
-    classDef planned fill:#88888818,stroke:#888,stroke-dasharray:4 3
     class CS,CSMS,SES,EICH,CDR,POI,P2P,HUB,TOK,INV built
-    class PNC planned
 ```
 
-Solid boxes have their rules built in a library; dashed is designed only. The
-arrows between daemons describe the target wiring, not what runs today.
+Every box has its rules built in a library. Two arrows are not wired: `roamd`
+sends no OICP to Hubject, and `poid` pushes nothing to the access point.
 
 When an operator's own EMP charges at its own stations, the session goes through
 the same model as a roaming session — same validation, pricing and evidence — so
@@ -109,8 +105,7 @@ adding partners changes the transport, never the arithmetic.
 | `tarifd` | Publishing the estate's tariff versions | ✅ read model · ⏳ push clients |
 | `poid` | The inventory for the national access point | ✅ inventory from the estate · ⏳ push |
 | `sited` | The § 14a site controller, run **at** the site | ⏳ SHIP session, OCPP leg |
-| `agentd` | Advisory specialists over many records, run under the read-only advisory principal | ✅ runtime · ⏳ event feed |
-| `pncd`, `opsd`, `thgd` | Plug & Charge, operations, THG filing | 📐 designed |
+| `agentd` | Advisory specialists over many records, run under the read-only advisory principal | ✅ runtime · ⏳ nothing triggers a run |
 
 The edges between them:
 
@@ -118,11 +113,18 @@ The edges between them:
 |---|---|
 | station → `csmsd` | OCPP over `wss://`; Basic against an Argon2id hash, or a client certificate |
 | `csmsd` → `empd` | `POST /v1/authorize` with the service token; a timeout answers `Invalid` (fail closed) |
-| `csmsd` → `billd`, `roamd` | the outbox: each settled session as a Standard-Webhooks-signed `POST /v1/deliveries`, retried until a `2xx`, journalled |
+| `csmsd` → `billd`, `roamd` | the outbox: each settled session as a `de.emob.cdr.issued` CloudEvent, signed per Standard Webhooks, `POST /v1/deliveries`, retried until a `2xx`, journalled |
 | `roamd` ↔ partner | OCPI 2.3.0 credentials, CDRs |
-| `deskd` → `csmsd`, `billd`, `roamd` | the operator read models, `GET /v1/<daemon>` |
+| `deskd` → `csmsd`, `billd`, `roamd` | the bounded operator read models, `GET /v1/<daemon>/today` |
 | `deskd` → `csmsd`, `billd`, `roamd`, `empd` | the signed journal heads, `GET /v1/<daemon>/head`, every 30 s |
-| `billd` → operator system | each issued invoice as a Standard-Webhooks-signed UBL or CII file, retried until answered |
+| `billd` → operator system | each issued invoice as a `de.emob.invoice.issued` CloudEvent carrying the UBL or CII file, signed, retried until answered |
+| `csmsd`, `billd` → subscribers | the same events to every `[[subscribers]]` entry whose `types` take them, each signed with its own secret, retried until a `2xx`, journalled |
+
+Between emob and anything else there are two ways in or out: an HTTP API or a
+CloudEvent. emob emits two event types, both
+in its own namespace — `de.emob.cdr.issued` (subject `cdr/<key>`) and
+`de.emob.invoice.issued` (subject `invoice/<number>`) — and reads no other
+system's types; where two systems meet, an adapter renames.
 
 Every daemon serves `/health/live`, `/health/ready` and `/about`, and its read
 model behind the operator token. `emob demo` runs the daemons' own
@@ -130,7 +132,7 @@ model behind the operator token. `emob demo` runs the daemons' own
 configured rather than forked — and `deskd` takes its clock as a parameter, so
 the demo can play a morning at 60×. See [Run the estate](@/docs/run-the-estate.md).
 
-**1291 tests** cover the workspace.
+**1300 tests** cover the workspace.
 
 An end-to-end test drives the full chain: OCMF records signed with a real key at
 test time, verified, matched against a session, split into quarter hours, built
@@ -400,8 +402,8 @@ does.
 |---|---|---|---|
 | OCPI 2.3.0 (2.2.1 translated at the edge) | peers, most hubs | `ocpi-kit` | ✅ library and `roamd` |
 | OICP 2.3 | Hubject | `oicp-kit` | ✅ library (outbound documents) · ⏳ `roamd` transport |
-| eMIP | GIREVE legacy | — | 📐 only if a partner requires it; GIREVE speaks OCPI |
-| OCHP | e-clearing.net | — | not planned; the specification froze in 2016 |
+| eMIP | GIREVE legacy | — | not supported; GIREVE speaks OCPI |
+| OCHP | e-clearing.net | — | not supported; the specification froze in 2016 |
 
 The rules that hold across every wire:
 
@@ -441,17 +443,6 @@ minimum power the operator is owed. See [§ 14a and the grid](@/docs/smart-charg
 | `check-wire` | a date serialised in a format partners cannot read instead of RFC 3339 |
 | `check-concepts` | a count stated in documentation that does not match its source, and malformed Markdown tables |
 | `check-actions` | a GitHub Action not pinned by commit SHA, a base image not pinned by digest, a workflow without declared `permissions:` |
-
-## Not yet built 📐
-
-- `tarifd` pushing `SetDefaultTariff` to stations, `poid`'s access-point
-  subscription, `sited`'s SHIP session, and the OICP transport — the documents
-  are built; the sockets and credentials are not.
-- `pncd`, `opsd` and `thgd`.
-- In `emob-smart`: direct device control (`Ziff. 4.4.a`), DER control over OCPP
-  2.1, and V2G flows. (The MiSpeL levy arithmetic for bidirectional points is
-  built in `emob-session`; see [Bidirectional charging](@/docs/bidirectional.md).)
-- In `emob-sim`: a mock Hubject and an in-process OCPI peer.
 
 Related: [Getting started](@/docs/getting-started.md) ·
 [The Eichrecht chain](@/docs/eichrecht.md) · [Roaming](@/docs/roaming.md) ·

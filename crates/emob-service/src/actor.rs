@@ -14,7 +14,7 @@ use core::fmt;
 /// own loop.
 ///
 /// A closed set, written `kind:id` (`station:CP-1`, `partner:DE*MSP`,
-/// `operator:leitstelle`, `service:csmsd`, `timer`, `estate`). The id is 1 to
+/// `operator:leitstelle`, `service:csmsd`, `subscriber:erp`, `timer`, `estate`). The id is 1 to
 /// 64 characters of `[A-Za-z0-9*._:=+|@ -]` — enough for an OCPP identity, an
 /// OCPI party and an operator's name, and nothing that can carry a token, a
 /// card UID in free text, a newline into a log, or a quote into a page. A
@@ -30,6 +30,9 @@ pub enum Actor {
     /// Another daemon of the estate, by name: a signed delivery or the
     /// service token.
     Service(String),
+    /// A system outside the estate that receives events, by the estate's
+    /// `[[subscribers]] name` — what answered a delivery.
+    Subscriber(String),
     /// The daemon's own loop: a calendar, a drain, a retry.
     Timer,
     /// The estate file, read at start.
@@ -39,7 +42,7 @@ pub enum Actor {
 /// Why a text is not an [`Actor`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "{0:?} is not an actor: `station:`, `partner:`, `operator:` or `service:` and 1 to 64 of [A-Za-z0-9*._:=+|@ -], or `timer`, or `estate`"
+    "{0:?} is not an actor: `station:`, `partner:`, `operator:`, `service:` or `subscriber:` and 1 to 64 of [A-Za-z0-9*._:=+|@ -], or `timer`, or `estate`"
 )]
 pub struct ActorError(String);
 
@@ -81,6 +84,15 @@ impl Actor {
         actor_id(name).map(Self::Operator)
     }
 
+    /// A subscriber by its estate name.
+    ///
+    /// # Errors
+    ///
+    /// A name outside the actor alphabet.
+    pub fn subscriber(name: &str) -> Result<Self, ActorError> {
+        actor_id(name).map(Self::Subscriber)
+    }
+
     /// Another daemon of the estate.
     #[must_use]
     pub fn service(daemon: &'static str) -> Self {
@@ -96,6 +108,7 @@ impl fmt::Display for Actor {
             Self::Partner(id) => write!(f, "partner:{id}"),
             Self::Operator(id) => write!(f, "operator:{id}"),
             Self::Service(id) => write!(f, "service:{id}"),
+            Self::Subscriber(id) => write!(f, "subscriber:{id}"),
             Self::Timer => f.write_str("timer"),
             Self::Estate => f.write_str("estate"),
         }
@@ -124,6 +137,7 @@ impl core::str::FromStr for Actor {
             "partner" => Ok(Self::Partner(id)),
             "operator" => Ok(Self::Operator(id)),
             "service" => Ok(Self::Service(id)),
+            "subscriber" => Ok(Self::Subscriber(id)),
             _ => Err(refused()),
         }
     }

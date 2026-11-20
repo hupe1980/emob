@@ -8,11 +8,11 @@ The billing daemon: decides when a month is closed, which invoice number it gets
 |---|---|
 | ✅ library | `billd::Billd` and `billd::Books` implement numbering, closing once, cancellation and re-billing, submission state, and double-entry posting into [`doubleentry`](https://crates.io/crates/doubleentry) 0.9 — tested in `tests/a_month_is_closed_once.rs` |
 | ✅ journal | on start the daemon folds its hash-chained journal (`billd` under `EMOB_JOURNAL_DIR`) and resumes the number series from it before reporting ready. Record bodies — received CDRs carry a card UID, invoices an IBAN — are sealed under `BILLD_DATA_KEY`; every record names its actor; the head is signed under `BILLD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
-| ✅ deliveries | `POST /v1/deliveries` takes the CDRs `csmsd` settles: 1 MiB cap, Standard-Webhooks signature and 300 s freshness, id = CDR key, issuer must be an estate partner; journalled as `received`, then answered. A duplicate is answered `200 duplicate` |
+| ✅ deliveries | `POST /v1/deliveries` takes the `de.emob.cdr.issued` CloudEvents `csmsd` emits (any other type is refused): 1 MiB cap, Standard-Webhooks signature and 300 s freshness, id = CDR key, issuer must be an estate partner; journalled as `received`, then answered. A duplicate is answered `200 duplicate` |
 | ✅ month close | an hourly calendar closes each partner's previous month once: one EN 16931 invoice per partner and calendar month from the records received, seller from `[billing]`, buyer from the partner, in the partner's `specification` (EN 16931 or XRechnung). A document that specification rejects is refused at the close, while it is only a spent number. Each line carries the driver's receipt link |
 | ✅ invoice page | every issued invoice has a page at `/i/{token}` with its UBL and CII files |
 | ✅ delivery | with `[billing.delivery]`, each issued invoice is posted, signed, to the operator's ERP or Peppol provider until it answers; an accepted one is booked |
-| ⏳ not yet | SEPA collection runs; the library builds them |
+| ⏳ not wired | SEPA collection runs; the library builds them |
 
 What a document **says** — rounding, VAT, EN 16931, SEPA, role-addressed
 postings — is `emob-billing`'s and tested there. `billd` holds the four facts no
@@ -154,11 +154,17 @@ it as `Invoice`).
 
 `billd` writes the e-invoice and does not transmit it — no SMTP, no Peppol access
 point. With `[billing.delivery]` set, every document still `Issued` is posted to
-the operator's ERP or Peppol provider as a Standard Webhooks delivery: the
-file in the configured `syntax` (`ubl` or `cii`), signed under the secret
-`secret_env` names, `webhook-id` = the invoice number (the receiver's idempotency
-key), and the page link in `emob-invoice-url` when `public_url` is set. The URL
-must be `https://`, or `http://` on loopback.
+the operator's ERP or Peppol provider as a `de.emob.invoice.issued` CloudEvent:
+`data` is the file in the configured `syntax` (`ubl` or `cii`,
+`application/xml`), `subject` is `invoice/<number>`, the page link is the
+`invoiceurl` attribute when `public_url` is set. Signed under the secret
+`secret_env` names, `webhook-id` = the invoice number (the receiver's
+idempotency key). The URL must be `https://`, or `http://` on loopback.
+
+Every `[[subscribers]]` entry that takes `de.emob.invoice.issued` receives the
+same event under its own secret. Whom a document is owed to is fixed at issue;
+each answer is an `announced` fact; only the operator system's answer accepts
+and books.
 
 | Answer | Recorded | Why |
 |---|---|---|
@@ -207,7 +213,7 @@ shell on `localhost:8082`, journal on a named volume).
 
 | Path | Answers |
 |---|---|
-| `POST /v1/deliveries` | a CDR from `csmsd`, signed and fresh |
+| `POST /v1/deliveries` | a `de.emob.cdr.issued` CloudEvent from `csmsd`, signed and fresh |
 | `GET /i/{token}`, `/i/{token}/ubl.xml`, `/i/{token}/cii.xml` | unauthenticated, behind the token: the invoice page and its two files |
 | `GET /v1/billd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
 | `GET /v1/billd/today?limit=&invoices=` | operator token: counts of records received and refused deliveries, and the documents waiting on the recipient (`submission` issued or rejected with the reason) — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page |

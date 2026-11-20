@@ -67,9 +67,10 @@ impl Feed<'_> {
     ///
     /// # Errors
     ///
-    /// Whatever [`crate::site::Station::check`] objects to, and
+    /// Whatever [`crate::site::Station::check`] objects to,
     /// [`PoiError::RateZoneIsNotTheSites`] for a price published on the wrong
-    /// clock.
+    /// clock, and [`PoiError::AmountNotInCents`] for a price the profile cannot
+    /// state.
     pub fn check(&self) -> Result<()> {
         self.sites.iter().try_for_each(Site::check)?;
         for site in &self.sites {
@@ -85,6 +86,7 @@ impl Feed<'_> {
                         site_zone: site.time_zone.to_string(),
                     });
                 }
+                in_cents(&rate)?;
             }
         }
         Ok(())
@@ -136,7 +138,8 @@ impl Feed<'_> {
     /// when an update addresses something this feed's own inventory does not
     /// carry at that version; [`PoiError::NotInAcceptedTable`] or
     /// [`PoiError::RateNotInAcceptedTable`] when it addresses something the
-    /// accepted table does not — the failure that is otherwise silent.
+    /// accepted table does not — the failure that is otherwise silent; and
+    /// [`PoiError::AmountNotInCents`] for a new price the profile cannot state.
     pub fn status(
         &self,
         accepted: &Published,
@@ -145,6 +148,9 @@ impl Feed<'_> {
     ) -> Result<StatusPublication> {
         check(&self.sites, updates)?;
         resolves(accepted, updates)?;
+        for price in updates.iter().filter_map(|update| update.price.as_ref()) {
+            cents(&price.rate_id, "energyPrice", price.value)?;
+        }
         Ok(status::publication(
             &self.publisher,
             self.information_status,
@@ -153,6 +159,31 @@ impl Feed<'_> {
             published_at,
         ))
     }
+}
+
+/// Every amount on a rate, in whole cents.
+fn in_cents(rate: &Rate) -> Result<()> {
+    for price in &rate.prices {
+        cents(&rate.id, "energyPrice", price.value)?;
+    }
+    if let Some(fee) = rate.minimum_delivery_fee {
+        cents(&rate.id, "minimumDeliveryFee", fee)?;
+    }
+    if let Some(fee) = rate.maximum_delivery_fee {
+        cents(&rate.id, "maximumDeliveryFee", fee)?;
+    }
+    Ok(())
+}
+
+fn cents(rate: &str, field: &'static str, amount: rust_decimal::Decimal) -> Result<()> {
+    if crate::datex::wire::in_cents(amount) {
+        return Ok(());
+    }
+    Err(PoiError::AmountNotInCents {
+        rate: rate.to_owned(),
+        field,
+        amount,
+    })
 }
 
 /// Check that every status update resolves against the table the access point
@@ -378,5 +409,49 @@ mod tests {
         );
         assert!(refused.to_string().contains("Europe/Lisbon"));
         assert!(refused.to_string().contains("Europe/Berlin"));
+    }
+
+    #[test]
+    fn a_price_with_a_fraction_of_a_cent_is_not_published_rounded() {
+        use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
+
+        // `0.589` a kWh is a lawful tariff. The profile's `AmountOfMoney` has
+        // two places after the point, so the feed can state `0.58` or `0.59`
+        // and the operator charges neither.
+        let tariff = Tariff::simple(
+            "t".parse().unwrap(),
+            emob_core::Currency::EUR,
+            TariffKind::AdHoc,
+            emob_core::TimeZone::new("Europe/Berlin").unwrap(),
+            vec![PriceComponent::new(
+                Dimension::Energy,
+                Decimal::from_str_exact("0.589").unwrap(),
+            )],
+        );
+        let (rate, _) = crate::rate::publish(&tariff, "r-1");
+        let feed = Feed {
+            publisher: Publisher {
+                country: "DE".to_owned(),
+                national_identifier: "DE-NAP".to_owned(),
+                language: "de".to_owned(),
+            },
+            information_status: InformationStatus::Real,
+            table: Facility::new("table"),
+            table_name: None,
+            sites: inventory(),
+            rate_for: &|_| Some(rate.clone()),
+        };
+
+        let refused = feed
+            .table(time::macros::datetime!(2026-04-14 12:00 UTC))
+            .unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                PoiError::AmountNotInCents { rate, field: "energyPrice", .. } if rate == "r-1"
+            ),
+            "{refused}"
+        );
+        assert!(refused.to_string().contains("0.589"), "{refused}");
     }
 }

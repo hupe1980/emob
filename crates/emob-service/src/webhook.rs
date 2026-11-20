@@ -310,6 +310,27 @@ pub fn receive(
     Ok(id.to_owned())
 }
 
+/// Whether a delivery target may be posted to.
+///
+/// `https://`, or `http://` on a loopback host only — a signed body over plain
+/// HTTP to another host is readable on the way, and its replay window is the
+/// tolerance.
+#[must_use]
+pub fn secure_target(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let host = authority
+        .rsplit_once(':')
+        .filter(|(host, port)| !host.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(authority, |(host, _)| host);
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

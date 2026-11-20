@@ -131,16 +131,26 @@ gate.verdict(&peer, caps::CDR_READ, &record, at);   // the instant is an argumen
 - An evaluation error is a denial, never a skipped `forbid`.
 - `Gate::reload` refuses an invalid set and keeps the old one deciding.
 
-### The CloudEvents catalogue
+### CloudEvents: the catalogue and the envelope
 
-One `pub const` per event type, so a misspelt type is a compile error and a
-rename is one line. Every type ends in a past participle, enforced by a test — an
-imperative type is a command posing as an event.
+One `pub const` per event type, and only types a daemon emits — a test holds
+every constant to being named in a daemon's source. `de.emob.cdr.issued` and
+`de.emob.invoice.issued`. Every type ends in a past participle, enforced
+by a test — an imperative type is a command posing as an event.
 
 ```rust
 events::cdr::ISSUED;                                   // "de.emob.cdr.issued"
 events::matches("de.emob.cdr.*", events::cdr::ISSUED)  // true
+
+let event = cloudevent::CloudEvent::new(key, "csmsd", events::cdr::ISSUED, data)
+    .about(format!("cdr/{key}"))
+    .at(now);                                          // structured mode, signed as a whole
+let read = cloudevent::open::<Data>(&body, events::cdr::ISSUED)?; // any other type is refused
 ```
+
+`estate::subscriptions` checks `[[subscribers]]`: a name that is an actor, an
+`https` (or loopback `http`) URL, its own `whsec_` secret, and type patterns
+that each admit a type in the catalogue.
 
 ### Webhook signatures
 

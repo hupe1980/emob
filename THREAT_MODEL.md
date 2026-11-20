@@ -51,6 +51,7 @@ flowchart LR
     CSMS -- "authorise<br/>service token" --> EMP
     CSMS -- "signed deliveries<br/>(outbox)" --> BILL
     CSMS -- "signed deliveries<br/>(outbox)" --> ROAM
+    CSMS & BILL -- "signed CloudEvents" --> SUBS["Subscribers<br/>(estate-named)"]
     ROAM -- "HTTPS · Token C" --> PEER
     PEER -- "handshake · CDRs" --> ROAM
     DRV -- "/r/{token}" --> CSMS
@@ -67,6 +68,7 @@ flowchart LR
 | Station → `csmsd` | Boot, authorisation, transactions, OCMF signed meter values | Security profile per station: a password checked against an Argon2id hash (1–2) or a client certificate that chains to the configured CA and names the identity (3); TLS on any non-loopback bind; connection, message-rate and idle limits; every billable value verified against a key the station did not supply |
 | `csmsd` → `empd` | Is this token allowed to charge now? | A service token compared in constant time; `csmsd` fails closed when `empd` does not answer |
 | Daemon → daemon | Closed sessions to `billd` and `roamd` | A journalled outbox; Standard Webhooks signatures with a freshness window; a body cap before the signature is checked; the CDR id as idempotency key, so a replay or retry settles once. Plain HTTP on one host is an accepted risk |
+| `csmsd`, `billd` → subscribers | `de.emob.cdr.issued` (card UID, station) and `de.emob.invoice.issued` | Named only in the estate file; `https`, or `http` on loopback; a `whsec_` secret per subscriber; type patterns checked against the catalogue at start; every answer journalled and none of them accepts, books or consigns |
 | Partner ↔ `roamd` | Credentials handshake, CDR push and receipt | Tokens held as keyed digests or sealed; a pushed record authorised as the credential's party; the handshake reach-back allowed only to `https` hosts outside private ranges |
 | Driver → receipt | `/r/{token}`, the transparency file, the verifier | A 128-bit token stored only as its hash; the same 404 for any unknown path; no name, card or contract on the page; a strict content security policy; verification runs on the driver's device |
 | Operator → `deskd` | The estate's refused sessions, stations, invoices, consignments | Operator token over HTTP Basic, loopback by default; read-only; no card UID or contract id on the page; bounded lists; a daemon that is down is named rather than shown as calm |
@@ -129,6 +131,7 @@ flowchart LR
 |---|---|---|---|
 | An invoice page token is guessed, leaks, or shows more than the invoice | medium | **Control** | the receipt's token rules; masked IBAN; `noindex`, `no-store`, `no-referrer`; tests in `services/billd` |
 | A delivered invoice is forged, altered or its answer misread | high | **Control** | Standard Webhooks signature per attempt; only a 2xx books; tests in `services/billd` |
+| An event reaches a system nobody meant, or is read or forged on the way | medium | **Control** | `crates/emob-service/src/estate.rs::a_subscriber_is_checked_before_anything_is_sent_to_it`; `the_estate_runs.rs::a_subscriber_outside_the_estate_receives_the_issued_record_as_a_cloudevent`; `a_month_is_closed_once.rs::a_subscriber_receives_each_invoice_event_once_and_decides_nothing` (SR-029) |
 | A receipt reveals other drivers' sessions through the invoice | medium | **Control** | a receipt never links to the monthly invoice; the invoice links each receipt |
 | An ISO 15118-20 chain is judged under the wrong rules or root | high | **Control** | the generation is named per call, never inferred; Ed448 refused by name; tests in `crates/emob-pnc` |
 | A MiSpeL month overstates the relieved share | high | **Control** | the formulas' equalities and bounds hold over 500 seeded months; the published worked examples reproduce |

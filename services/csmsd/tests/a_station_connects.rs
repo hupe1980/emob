@@ -742,3 +742,32 @@ async fn sr_096_a_journal_cut_by_one_record_does_not_start() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A station sets its own clock from the `currentTime` it is answered, and
+/// every timestamp on a transaction follows from it.
+#[tokio::test]
+async fn a_station_is_told_the_time_and_not_the_epoch() {
+    let csmsd = csmsd(registry(), Memory::new());
+    let (addr, _server) = serve(Arc::clone(&csmsd)).await;
+    let handle = connect(&addr, "CP-1");
+
+    let before = time::OffsetDateTime::now_utc().unix_timestamp();
+    let booted = handle.call(boot()).await.expect("the CSMS answers a boot");
+    let after = time::OffsetDateTime::now_utc().unix_timestamp();
+    let told = booted.current_time.timestamp().as_second();
+    assert!(
+        (before - 1..=after + 1).contains(&told),
+        "the boot answered {told}, which is not now ({before}..={after})"
+    );
+
+    handle.wait_ready().await;
+    let beat = handle
+        .call(v1_6::HeartbeatRequest::new())
+        .await
+        .expect("the CSMS answers a heartbeat");
+    let told = beat.current_time.timestamp().as_second();
+    assert!(
+        (before - 1..=time::OffsetDateTime::now_utc().unix_timestamp() + 1).contains(&told),
+        "the heartbeat answered {told}, which is not now"
+    );
+}

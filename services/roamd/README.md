@@ -9,8 +9,8 @@ The roaming node: decides who a charge detail record (CDR) goes to, whether it m
 | ✅ library | `roamd::Roamd` and `roamd::Node` implement routing, the OCPI CDR seal and correction order, per-partner settlement windows, Cedar-gated inbound verdicts, settlement against a retail tariff, the OCPI push client (`roamd::Dispatcher`) and the OCPI `versions`/`credentials`/CDRs receiver (`roamd::inbound::router`) — tested in `tests/a_record_reaches_its_partner.rs` and `tests/the_ledger_holds_under_any_order.rs` |
 | ✅ journal | on start the daemon folds its hash-chained journal (`roamd.ndjson` under `EMOB_JOURNAL_DIR`): consignments, deliveries, received records and registrations. Record bodies are sealed under `ROAMD_DATA_KEY`, because consignments carry the CDR's token UID; a journal sealed under another key refuses to start. Every record names its actor; the head is signed under `ROAMD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
 | ✅ OCPI | the inbound OCPI router is mounted at `/ocpi` (versions, credentials, CDRs) behind the reach-back guard. Partners and their Token A come from the estate's `[[partners]]`; Token A and Token C are held as keyed digests, Token B sealed; registration tokens are 32 random bytes |
-| ✅ deliveries | `POST /v1/deliveries` takes the CDRs `csmsd` settles (signed, fresh, from an estate partner) and consigns each to the contract's issuer with the estate station's location and the verbatim OCMF records; a drain loop pushes them |
-| ⏳ not yet | the OICP client (Hubject) — the library builds OICP documents, the daemon does not send them |
+| ✅ deliveries | `POST /v1/deliveries` takes the `de.emob.cdr.issued` CloudEvents `csmsd` emits (signed, fresh, from an estate partner) and consigns each to the contract's issuer with the estate station's location and the verbatim OCMF records; a drain loop pushes them |
+| ⏳ not wired | the OICP client (Hubject) — the library builds OICP documents, the daemon does not send them |
 
 Every document is `emob-roam`'s (`for_partner`, `to_oicp`, `from_ocpi`); `roamd`
 keeps the ledger of what was sent to whom and what came back, the operator's
@@ -183,7 +183,7 @@ Or `just up` for the whole estate (`roamd`'s shell on `localhost:8081`).
 | Path | Answers |
 |---|---|
 | `/ocpi/…` | OCPI `versions`, `credentials` and `cdrs` for registered partners |
-| `POST /v1/deliveries` | a CDR from `csmsd`: Standard-Webhooks signature, 300 s freshness, size cap |
+| `POST /v1/deliveries` | a `de.emob.cdr.issued` CloudEvent from `csmsd`: Standard-Webhooks signature, 300 s freshness, size cap |
 | `GET /v1/roamd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
 | `GET /v1/roamd/today?limit=&consignments=` | operator token: partners (registered or not), counts, and the consignments no partner has accepted yet — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page |
 | `GET /health/live` | `200` while the process runs |

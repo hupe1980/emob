@@ -9,7 +9,7 @@ The point-of-interest daemon: publishes a charge point operator's static and dyn
 | ✅ library | `poid::Poid` builds checked snapshot and status publications from `emob-poi`'s DATEX II documents and reports a stale feed; `poid::Ledger` records which snapshot the access point accepted — tested in `tests/a_snapshot_goes_out.rs` |
 | ✅ journal | on start the daemon folds its journal (`poid` under `EMOB_JOURNAL_DIR`) and restores the last accepted snapshot, or warns that none was ever accepted. Every record names its actor; the head is signed under `POID_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
 | ✅ estate | the inventory is the estate's `[[stations]]`, one site per `location.id`, with exact decimal coordinates; the publisher country is the operator party's |
-| ⏳ not yet | the push client: it logs whether the feed is stale and pushes nothing to the Mobilithek; prices from `tarifd` |
+| ⏳ not wired | the push client: it logs whether the feed is stale and pushes nothing to the Mobilithek; prices from `tarifd` |
 
 ## What it owns
 

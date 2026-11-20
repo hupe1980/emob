@@ -139,6 +139,21 @@ pub struct Issued {
     /// (spec 010). A decision made once, at issue: a partner whose
     /// configuration changes later does not change a document already issued.
     pub specification: Specification,
+    /// The `[[subscribers]]` its `de.emob.invoice.issued` event is owed to,
+    /// fixed at issue.
+    pub owed_to: Vec<String>,
+    /// What each of them answered: `None` taken, `Some(reason)` refused.
+    pub answered: std::collections::BTreeMap<String, Option<String>>,
+}
+
+impl Issued {
+    /// The subscribers still owed its event.
+    pub fn unannounced(&self) -> impl Iterator<Item = &str> {
+        self.owed_to
+            .iter()
+            .filter(|name| !self.answered.contains_key(name.as_str()))
+            .map(String::as_str)
+    }
 }
 
 /// Why a closing could not be made.
@@ -624,6 +639,20 @@ impl Billd {
         self.issued.values()
     }
 
+    /// Owe a document's event to these subscribers.
+    pub(crate) fn owe(&mut self, number: &str, to: &[String]) {
+        if let Some(document) = self.issued.get_mut(number) {
+            document.owed_to = to.to_vec();
+        }
+    }
+
+    /// Record a subscriber's answer to a document's event.
+    pub(crate) fn answer(&mut self, number: &str, to: &str, refused: Option<String>) {
+        if let Some(document) = self.issued.get_mut(number) {
+            document.answered.insert(to.to_owned(), refused);
+        }
+    }
+
     /// The *Stornorechnung* that cancels a document, where one does.
     #[must_use]
     pub fn cancelled_by(&self, number: &str) -> Option<&str> {
@@ -692,6 +721,8 @@ impl Billd {
             replaces: None,
             booked: false,
             specification,
+            owed_to: Vec::new(),
+            answered: std::collections::BTreeMap::new(),
         }))
     }
 
@@ -761,6 +792,8 @@ impl Billd {
                 replaces: None,
                 booked: false,
                 specification,
+                owed_to: Vec::new(),
+                answered: std::collections::BTreeMap::new(),
             },
         );
         self.cancelled_by
@@ -780,6 +813,8 @@ impl Billd {
                 replaces: Some(number.to_owned()),
                 booked: false,
                 specification,
+                owed_to: Vec::new(),
+                answered: std::collections::BTreeMap::new(),
             },
         );
 

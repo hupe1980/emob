@@ -54,6 +54,9 @@ pub struct Estate {
     pub operators: Vec<Operator>,
     /// The webhook secret.
     pub services: Services,
+    /// Systems outside the estate that receive events.
+    #[serde(default)]
+    pub subscribers: Vec<emob_service::estate::Subscriber>,
 }
 
 /// The party on an invoice.
@@ -255,6 +258,72 @@ fn dispatching(
     })
 }
 
+/// The subscribers that take invoices, checked at start.
+fn subscribers(estate: &Estate, env: &Env) -> Result<crate::deliver::Subscribers> {
+    let syntax = estate
+        .billing
+        .delivery
+        .as_ref()
+        .map(|d| d.syntax)
+        .unwrap_or_default();
+    Ok(crate::deliver::Subscribers::new(
+        emob_service::estate::subscriptions(&estate.subscribers, env)?,
+        syntax,
+        std::time::Duration::from_secs(10),
+    )?)
+}
+
+/// The loops that hand issued invoices on: to the operator system, where
+/// one is configured, and to the subscribers that take them.
+fn deliveries(
+    dispatcher: Option<crate::deliver::Dispatcher>,
+    subscribers: crate::deliver::Subscribers,
+    books: &Arc<Mutex<Books<Journal>>>,
+    invoices: &Arc<crate::invoice_page::Invoices>,
+    shutdown: &Shutdown,
+    every: std::time::Duration,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut tasks = Vec::new();
+    if !subscribers.names().is_empty() {
+        tasks.push(announcing(
+            subscribers,
+            Arc::clone(books),
+            Arc::clone(invoices),
+            shutdown.clone(),
+            every,
+        ));
+    }
+    if let Some(dispatcher) = dispatcher {
+        tasks.push(dispatching(
+            dispatcher,
+            Arc::clone(books),
+            Arc::clone(invoices),
+            shutdown.clone(),
+            every,
+        ));
+    }
+    tasks
+}
+
+/// Drain the subscribers every `every` until shutdown.
+fn announcing(
+    subscribers: crate::deliver::Subscribers,
+    books: Arc<Mutex<Books<Journal>>>,
+    invoices: Arc<crate::invoice_page::Invoices>,
+    stopping: Shutdown,
+    every: std::time::Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(every);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => { subscribers.drain(&books, &invoices).await; }
+                () = stopping.wait() => return,
+            }
+        }
+    })
+}
+
 /// billd's journal, sealed and signed, folded into its books.
 fn open_books(journal: &std::path::Path, estate: &Estate, env: &Env) -> Result<Books<Journal>> {
     let year = time::OffsetDateTime::now_utc().year();
@@ -299,8 +368,9 @@ pub async fn run(options: Options) -> Result<Running> {
     let operators = emob_service::estate::operator_tokens(&estate.operators, &env)?;
 
     let dispatcher = dispatcher(&estate, &env)?;
+    let subscribers = subscribers(&estate, &env)?;
     let readiness = Readiness::new().expecting(NUMBERING);
-    let books = open_books(&journal, &estate, &env)?;
+    let books = open_books(&journal, &estate, &env)?.delivering_to(subscribers.names());
     tracing::info!(
         documents = books.state().documents().count(),
         received = books.state().received().count(),
@@ -357,16 +427,14 @@ pub async fn run(options: Options) -> Result<Running> {
             }
         }
     }));
-    if let Some(dispatcher) = dispatcher {
-        let every = std::time::Duration::from_secs(estate.services.retry_secs.max(1));
-        tasks.push(dispatching(
-            dispatcher,
-            Arc::clone(&books),
-            Arc::clone(&invoices),
-            shutdown.clone(),
-            every,
-        ));
-    }
+    tasks.extend(deliveries(
+        dispatcher,
+        subscribers,
+        &books,
+        &invoices,
+        &shutdown,
+        std::time::Duration::from_secs(estate.services.retry_secs.max(1)),
+    ));
     let server = Server::new(identity, readiness, shutdown.clone())
         .with(routes)
         .draining_for(std::time::Duration::from_secs(3));

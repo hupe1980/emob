@@ -16,14 +16,13 @@
 //! | AFIR | Art. 20(2)(a)–(b) | Art. 20(2)(c) |
 //! | Wrapper | a bare `payload` | a `messageContainer` with exchange metadata |
 //!
-//! # Why the types are typed
+//! # Whose types these are
 //!
-//! The profile has several hundred optional attributes and this module writes
-//! the subset AFIR actually obliges. It would have been shorter to build a
-//! `serde_json::Value` — and a mistyped key would then be a runtime bug found
-//! by whoever consumed the feed. Named structs make the key names a compile
-//! error instead, which is worth the lines given how few consumers ever report
-//! a malformed feed rather than quietly skipping it.
+//! The documents are built from [`datex2`]'s model of DATEX II version 3 and
+//! written by its Mobilithek writer, which spells the profile's dialect and
+//! refuses what the profile's schemas would reject, naming the member and the
+//! rule. This module decides what the documents *say* — which facility, which
+//! price, which literal — and nothing about how they are spelled.
 
 pub mod status;
 pub mod table;
@@ -32,7 +31,15 @@ pub mod wire;
 pub use status::{PointUpdate, PriceUpdate, StatusPublication};
 pub use table::{InformationStatus, Published, Publisher, TablePublication};
 
-use emob_core::{AdHocPayment, V2gCommunication};
+use datex2::v3::afir_energy_infrastructure::{
+    AuthenticationAndIdentificationEnum as Authentication, ConnectorTypeEnum, CurrentTypeEnum,
+    PriceTypeEnum, RatePolicyEnum, RefillPointStatusEnum,
+    VehicleToGridCommunicationTypeEnum as V2gType,
+};
+use emob_core::{AdHocPayment, ConnectorType, CurrentType, V2gCommunication};
+
+use crate::rate::{PriceType, RatePolicy};
+use crate::status::PointStatus;
 
 /// How `[AFIR Art. 5(1)]`'s payment instruments are spelled in the profile.
 ///
@@ -48,15 +55,19 @@ use emob_core::{AdHocPayment, V2gCommunication};
 ///   publishing `apps` for a QR code claims the opposite of the duty it is
 ///   meant to satisfy.
 #[must_use]
-pub fn authentication_methods(payment: AdHocPayment) -> Vec<&'static str> {
+pub fn authentication_methods(payment: AdHocPayment) -> Vec<Authentication> {
     match payment {
         AdHocPayment::None => Vec::new(),
-        AdHocPayment::QrCode => vec!["website"],
-        AdHocPayment::CardReader => vec!["creditCard", "debitCard", "nfc"],
+        AdHocPayment::QrCode => vec![Authentication::Website],
+        AdHocPayment::CardReader => vec![
+            Authentication::CreditCard,
+            Authentication::DebitCard,
+            Authentication::Nfc,
+        ],
     }
 }
 
-/// The `VehicleToGridCommunicationTypeEnum` literal for a point's generations.
+/// The `VehicleToGridCommunicationTypeEnum` value for a point's generations.
 ///
 /// The trap this function exists for: the profile defines its `iso15118`
 /// literal as "Communication according to **ISO15118-20**"
@@ -69,20 +80,85 @@ pub fn authentication_methods(payment: AdHocPayment) -> Vec<&'static str> {
 /// So `iso15118` is written only for a point that really does -20. A -2-only
 /// point is `other`, which is the truth: the enumeration has no literal for it.
 #[must_use]
-pub fn v2g_literal(v2g: V2gCommunication) -> &'static str {
+pub const fn v2g_type(v2g: V2gCommunication) -> V2gType {
     if v2g.iso15118_20 {
-        "iso15118"
+        V2gType::Iso15118
     } else if v2g.iso15118_2 || v2g.din70121 {
         // Neither has a literal. DIN SPEC 70121 is high-level communication
         // over PLC and most of the pre-2020 European DC fleet speaks it, so
         // `none` would be false about it in exactly the way `iso15118` would be
         // false about a -2 point.
-        "other"
+        V2gType::Other
     } else {
         // PWM is signalling, not a vehicle-to-grid exchange. The enumeration's
         // own definition of `none` — "No communication between vehicle and the
         // grid" — is what a basic-signalling point does.
-        "none"
+        V2gType::None
+    }
+}
+
+/// A connector, as `[DATEX-II-Profil Tab. A.88]` names it.
+///
+/// `datex2` holds the CEN model's `domesticFType` and writes the profile's
+/// `domesticF`.
+pub(crate) fn connector_type(kind: ConnectorType) -> ConnectorTypeEnum {
+    match kind {
+        ConnectorType::Iec62196T2 => ConnectorTypeEnum::Iec62196T2,
+        ConnectorType::Iec62196T2Combo => ConnectorTypeEnum::Iec62196T2COMBO,
+        ConnectorType::Iec62196T1 => ConnectorTypeEnum::Iec62196T1,
+        ConnectorType::Iec62196T1Combo => ConnectorTypeEnum::Iec62196T1COMBO,
+        ConnectorType::Chademo => ConnectorTypeEnum::Chademo,
+        ConnectorType::Iec62196T3A => ConnectorTypeEnum::Iec62196T3A,
+        ConnectorType::DomesticF => ConnectorTypeEnum::DomesticFType,
+        ConnectorType::Cee5 => ConnectorTypeEnum::Cee5,
+        // `ConnectorType` is non-exhaustive; a variant added upstream without a
+        // line here is published as the profile's own escape, not guessed at.
+        _ => ConnectorTypeEnum::Other,
+    }
+}
+
+pub(crate) const fn current_type(current: CurrentType) -> CurrentTypeEnum {
+    match current {
+        CurrentType::Ac => CurrentTypeEnum::Ac,
+        CurrentType::Dc => CurrentTypeEnum::Dc,
+    }
+}
+
+/// `[DATEX-II-Profil Tab. A.116]`.
+pub(crate) const fn price_type(price: PriceType) -> PriceTypeEnum {
+    match price {
+        PriceType::BasePrice => PriceTypeEnum::BasePrice,
+        PriceType::FlatRate => PriceTypeEnum::FlatRate,
+        PriceType::Free => PriceTypeEnum::Free,
+        PriceType::Other => PriceTypeEnum::Other,
+        PriceType::PricePerKwh => PriceTypeEnum::PricePerKWh,
+        PriceType::PricePerMinute => PriceTypeEnum::PricePerMinute,
+    }
+}
+
+/// `[DATEX-II-Profil Tab. A.118]`.
+pub(crate) const fn rate_policy(policy: RatePolicy) -> RatePolicyEnum {
+    match policy {
+        RatePolicy::AdHoc => RatePolicyEnum::AdHoc,
+        RatePolicy::Contract => RatePolicyEnum::Contract,
+    }
+}
+
+/// `[DATEX-II-Profil Tab. B.45]`.
+pub(crate) const fn point_status(status: PointStatus) -> RefillPointStatusEnum {
+    match status {
+        PointStatus::Available => RefillPointStatusEnum::Available,
+        PointStatus::Blocked => RefillPointStatusEnum::Blocked,
+        PointStatus::Charging => RefillPointStatusEnum::Charging,
+        PointStatus::Faulted => RefillPointStatusEnum::Faulted,
+        PointStatus::Inoperative => RefillPointStatusEnum::Inoperative,
+        PointStatus::Occupied => RefillPointStatusEnum::Occupied,
+        PointStatus::OutOfOrder => RefillPointStatusEnum::OutOfOrder,
+        PointStatus::OutOfStock => RefillPointStatusEnum::OutOfStock,
+        PointStatus::Planned => RefillPointStatusEnum::Planned,
+        PointStatus::Removed => RefillPointStatusEnum::Removed,
+        PointStatus::Reserved => RefillPointStatusEnum::Reserved,
+        PointStatus::Unavailable => RefillPointStatusEnum::Unavailable,
     }
 }
 
@@ -100,17 +176,17 @@ mod tests {
             iso15118_2: true,
             iso15118_20: false,
         };
-        assert_eq!(v2g_literal(old), "other");
+        assert_eq!(v2g_type(old), V2gType::Other);
         assert_eq!(
-            v2g_literal(V2gCommunication::both_generations()),
-            "iso15118"
+            v2g_type(V2gCommunication::both_generations()),
+            V2gType::Iso15118
         );
-        assert_eq!(v2g_literal(V2gCommunication::pwm_only()), "none");
+        assert_eq!(v2g_type(V2gCommunication::pwm_only()), V2gType::None);
 
         // …and `none` says "No communication between vehicle and the grid",
         // which is false about a DIN SPEC 70121 charger: it talks to the car
         // over PLC, it just does not do it in a document AFIR names.
-        assert_eq!(v2g_literal(V2gCommunication::din_only()), "other");
+        assert_eq!(v2g_type(V2gCommunication::din_only()), V2gType::Other);
     }
 
     #[test]
@@ -118,10 +194,13 @@ mod tests {
         // `[AFIR Art. 5(1)(c)]` is satisfied by a device allowing secure
         // payment *without* an app. Publishing `apps` would advertise the one
         // thing the paragraph rules out.
-        assert_eq!(authentication_methods(AdHocPayment::QrCode), ["website"]);
+        assert_eq!(
+            authentication_methods(AdHocPayment::QrCode),
+            [Authentication::Website]
+        );
         assert!(authentication_methods(AdHocPayment::None).is_empty());
         assert!(
-            authentication_methods(AdHocPayment::CardReader).contains(&"nfc"),
+            authentication_methods(AdHocPayment::CardReader).contains(&Authentication::Nfc),
             "a contactless reader is a contactless reader"
         );
     }

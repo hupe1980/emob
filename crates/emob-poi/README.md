@@ -71,15 +71,21 @@ let feed = Feed {
 };
 
 let json = feed.table(time::macros::datetime!(2026-04-14 00:00 UTC))?.to_json()?;
-assert!(json.contains(r#""value": 0.49"#));              // the tariff's own decimal
-assert!(json.contains(r#""maxPowerAtSocket": 150000"#)); // watts, as the profile asks
+assert!(json.contains(r#""value":0.49"#));              // the tariff's own decimal
+assert!(json.contains(r#""maxPowerAtSocket":150000"#)); // watts, as the profile asks
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ## What it guarantees
 
 - **The published price is the billed price**, carried as an exact decimal into
-  the JSON number (`0.49`, not `0.49000000000000000222`).
+  the JSON number (`0.49`, not `0.49000000000000000222`). A price the profile
+  cannot state — a fraction of a cent, such as `0.589` per kWh — stops the feed
+  with `PoiError::AmountNotInCents` instead of being rounded.
+- **The Mobilithek's schemas accept what is written.** The documents are built
+  from [`datex2`](https://crates.io/crates/datex2)'s DATEX II v3 model and written
+  by its Mobilithek writer, which refuses anything the profile's schemas would
+  reject and names the member and the rule.
 - **A status the register contradicts cannot be built.** A decommissioned point
   cannot be reported `available`.
 - **Status references resolve.** A status update that points at a table version
@@ -99,7 +105,8 @@ truthfully as the profile allows and reported with a `RateNote`:
 
 | Gap | What is published | `RateNote` |
 |---|---|---|
-| No per-hour type; €2.50/h has no exact per-minute decimal | hourly figure under `other`, unit in `additionalInformation` (rounding would be a price not charged `[PAngV]`) | `HourlyPriceHasNoExactMinute` |
+| No per-hour type; €2.50/h has no per-minute price in whole cents (nor has €0.30/h: `0.005`) | hourly figure under `other`, unit in `additionalInformation` (rounding would be a price not charged `[PAngV]`) | `HourlyPriceHasNoExactMinute` |
+| `AmountOfMoney` has two places after the point | nothing: a tariff of `0.589` per kWh is not published | — (`PoiError::AmountNotInCents`) |
 | No occupancy-fee type, though `[AFIR Art. 5(4)]` permits one at 50 kW and above | `other` with a sentence; `combinationWithParkingFee` is only a boolean | `OccupancyFeeHasNoPriceType` |
 | `minimumDeliveryFee` / `maximumDeliveryFee` carry no tax flag | the fee in the tariff's own basis | `DeliveryFeeHasNoTaxBasis` |
 | `FacilityLocation.timeZone` is a fixed UTC offset, wrong half the year for German sites | the offset in force at publication | `DailyWindowHasOnlyAnOffset` |

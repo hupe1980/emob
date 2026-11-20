@@ -85,21 +85,6 @@ pub enum PriceType {
     PricePerMinute,
 }
 
-impl PriceType {
-    /// The spelling `[DATEX-II-Profil Tab. A.116]` uses.
-    #[must_use]
-    pub const fn as_profile_str(self) -> &'static str {
-        match self {
-            Self::BasePrice => "basePrice",
-            Self::FlatRate => "flatRate",
-            Self::Free => "free",
-            Self::Other => "other",
-            Self::PricePerKwh => "pricePerKWh",
-            Self::PricePerMinute => "pricePerMinute",
-        }
-    }
-}
-
 /// Ad hoc, or under a contract `[DATEX-II-Profil Tab. A.118]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RatePolicy {
@@ -107,17 +92,6 @@ pub enum RatePolicy {
     AdHoc,
     /// The price under a contract.
     Contract,
-}
-
-impl RatePolicy {
-    /// The spelling the profile uses.
-    #[must_use]
-    pub const fn as_profile_str(self) -> &'static str {
-        match self {
-            Self::AdHoc => "adHoc",
-            Self::Contract => "contract",
-        }
-    }
 }
 
 /// One published price.
@@ -266,7 +240,9 @@ pub enum RateNote {
     ///
     /// `[AFIR Art. 5(4)]` asks for a price per minute and the profile's only
     /// time literal is `pricePerMinute`, so an hourly rate is divided by sixty
-    /// — where sixty divides it. Where it does not, the quotient is not a price:
+    /// — where sixty divides it into whole cents, the only amounts the
+    /// profile's `AmountOfMoney` holds. Where it does not, the quotient is not
+    /// a price:
     /// `2.50` an hour is `0.041666…`, `Decimal` states twenty-eight places of
     /// it, and that is the figure a route planner would render as the cost of a
     /// minute. Rounding it to the currency's own two places is worse, because
@@ -411,7 +387,7 @@ impl core::fmt::Display for RateNote {
             ),
             Self::HourlyPriceHasNoExactMinute { dimension, hourly } => write!(
                 f,
-                "{dimension} is priced at {hourly} per hour, which has no exact price per minute: the feed states the hourly figure as `other` rather than twenty-eight decimal places of a minute, or a rounded price the operator does not charge [PAngV]"
+                "{dimension} is priced at {hourly} per hour, which has no price per minute in whole cents: the feed states the hourly figure as `other` rather than a fraction of a cent the profile cannot carry, or a rounded price the operator does not charge [PAngV]"
             ),
             Self::BoundNarrowedToWholeUnits {
                 field,
@@ -570,7 +546,8 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
     (rate, notes)
 }
 
-/// An hourly price as a price per minute, when sixty divides it exactly.
+/// An hourly price as a price per minute, when sixty divides it into whole
+/// cents.
 ///
 /// `None` is an answer rather than a failure: it says the profile's only time
 /// literal cannot state this price, and the caller publishes the hourly figure
@@ -578,12 +555,18 @@ pub fn publish(tariff: &Tariff, id: impl Into<String>) -> (Rate, Vec<RateNote>) 
 /// twenty-eight places of `0.041666…` is not an amount of money, and rounding to
 /// the currency's own two is a price the operator does not charge `[PAngV]`.
 ///
+/// Exact is not enough: `0.30` an hour is exactly `0.005` a minute, and the
+/// profile's `AmountOfMoney` has two places after the point. A quotient with a
+/// tenth of a cent in it is as unpublishable as a recurring one, so it takes
+/// the same way out.
+///
 /// The same factor of three that makes `[AFIR Art. 5(4)]`'s per-minute display
 /// duty bite, met once more: `60 = 2² · 3 · 5`, so a price divides exactly
 /// exactly when three divides it in the currency's minor unit.
 fn exact_per_minute(hourly: Decimal) -> Option<Decimal> {
     let per_minute = hourly / MINUTES_PER_HOUR;
-    (per_minute * MINUTES_PER_HOUR == hourly).then_some(per_minute)
+    (per_minute * MINUTES_PER_HOUR == hourly && crate::datex::wire::in_cents(per_minute))
+        .then_some(per_minute)
 }
 
 /// A time price, in the terms `[DATEX-II-Profil Tab. A.116]` has for one.
@@ -913,6 +896,8 @@ mod tests {
         assert_eq!(exact_per_minute(dec("0.60")), Some(dec("0.01")));
         assert_eq!(exact_per_minute(dec("2.50")), None, "0.041666…");
         assert_eq!(exact_per_minute(dec("0.25")), None);
+        // Exact, and still not an amount of money the profile can state.
+        assert_eq!(exact_per_minute(dec("0.30")), None, "0.005");
     }
 
     #[test]

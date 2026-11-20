@@ -128,8 +128,8 @@ without them breaks no law but pays the levies on all of its grid draw.
 ✅ The month and the year are built in `emob-session` and tested against
 Anlage 1's Beispielrechnungen 1 and 2 to the digit, Anlage 2's Rumpfjahr
 example, every refusal, and a property over 500 seeded months. ⏳ No daemon
-nets a month yet and Heute shows no MiSpeL figures: that needs a grid-meter
-series, which no daemon receives today.
+nets a month and Heute shows no MiSpeL figures: that needs a grid-meter series,
+which no daemon receives.
 
 **Related:** [Sessions and settlement](@/docs/settlement.md) ·
 [The obligation calendar](@/docs/compliance.md) ·

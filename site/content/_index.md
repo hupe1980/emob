@@ -83,7 +83,7 @@ exactly when it matters. [Read the Eichrecht guide →](@/docs/eichrecht.md)
 | 1 Jan 2027 | ISO 15118-20 on new public points (Delegated Regulation 2025/656) | ✅ duty modelled · -2 and -20 contract chains validated under named roots |
 | 1 Jan 2027 | AFIR card payment at existing ≥ 50 kW TEN-T points | ✅ duty modelled |
 | 1 Jan 2027 | German B2B e-invoices issued for turnover above €800k | ✅ EN 16931 / XRechnung in UBL and CII · invoice page · signed handover |
-| 10 Oct 2028 | EU measuring-instruments rules cover charging equipment | 📐 tracked |
+| 10 Oct 2028 | EU measuring-instruments rules cover charging equipment | ✅ tracked |
 
 [How compliance is modelled →](@/docs/compliance.md)
 
@@ -112,7 +112,7 @@ security profiles 1–3 and TLS; `empd` answers every authorisation, failing
 closed; sessions are journalled (sealed under a per-daemon data key), billed by
 `billd` into a monthly EN 16931 invoice and pushed to roaming partners by
 `roamd` over OCPI. The operator works from **Heute**, the driver checks a
-**receipt** in the browser, and releases are signed and attested. New in 0.3:
+**receipt** in the browser, and releases are signed and attested. Also:
 
 - every journal fact names its **actor**, logs are JSON with request ids, and
   each journal **signs its head** for a **witness** (`emob witness`, and a
@@ -120,8 +120,9 @@ closed; sessions are journalled (sealed under a per-daemon data key), billed by
   signed head;
 - the **MiSpeL month** for bidirectional points, and two calendar entries;
 - **ISO 15118-20** contract chains under named roots;
-- the **invoice page** with its XRechnung / EN 16931 files and signed delivery
-  to the operator's ERP or Peppol provider;
+- the **invoice page** with its XRechnung / EN 16931 files, delivered to the
+  operator's ERP or Peppol provider as a signed **CloudEvent** — and every
+  record and invoice to any system you name as a **subscriber**;
 - an **accessibility check** on every page in CI, the receipt link on the
   station's display (opt-in), and a Docker-only `just demo`.
 
@@ -130,9 +131,9 @@ the quarter-hour split, CDRs, tariffs, OCPP, OCPI and OICP crossings, AFIR data,
 EN 16931 invoices and SEPA, THG-Quote, § 14a, Plug & Charge — each with no I/O,
 no clock and no binary floats.
 
-**⏳ Next:** the OICP and national-access-point push clients, SEPA runs from
-`billd`, the SHIP/EEBUS session for § 14a, and MiSpeL on Heute once a
-grid-meter series reaches the estate.
+**⏳ In a library, not in a daemon:** the OICP and national-access-point push
+clients, SEPA runs from `billd`, the SHIP/EEBUS session for § 14a, and MiSpeL
+on Heute.
 
-Every page in these docs marks what is ✅ built, ⏳ next and 📐 designed, and
+Every page in these docs marks what ✅ runs and what ⏳ only a library does, and
 never blurs the difference. [Run the estate →](@/docs/run-the-estate.md)

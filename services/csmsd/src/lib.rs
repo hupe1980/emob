@@ -34,6 +34,7 @@
 //! carries it back. 2.x has the station allocate it instead. That asymmetry has
 //! to live somewhere with state, which is here.
 
+use emob_service::cloudevent::CloudEvent;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use emob_cdr::{Acceptance, Cdr, CdrBuilder, CdrLedger, EvidenceRef};
@@ -180,12 +181,10 @@ pub enum Outcome {
     },
 }
 
-/// The body of one delivery, as `billd` and `roamd` read it
-/// (`specs/001-the-estate-runs/contracts/delivery.md`).
+/// The `data` of a `de.emob.cdr.issued` event, as `billd`, `roamd` and every
+/// subscriber read it (`specs/001-the-estate-runs/contracts/delivery.md`).
 #[derive(Debug, serde::Serialize)]
 pub struct CdrDelivery<'a> {
-    /// The event type, from the catalogue.
-    pub kind: &'static str,
     /// The record, whole — the same value both receivers see.
     pub cdr: &'a Cdr,
     /// Whom it bills.
@@ -225,6 +224,8 @@ pub struct Csmsd<J: Journal> {
     display: std::sync::OnceLock<(display::Display, ocpp_kit::transport::CsmsHandle)>,
     /// Where `at` on the facts that end an attempt comes from (spec 007).
     clock: emob_service::Clock,
+    /// The `[[subscribers]]` that take `de.emob.cdr.issued`, by name.
+    subscribers: Vec<String>,
 }
 
 impl<J: Journal> core::fmt::Debug for Csmsd<J> {
@@ -263,7 +264,15 @@ impl<J: Journal> Csmsd<J> {
             receipts: None,
             display: std::sync::OnceLock::new(),
             clock: emob_service::system_clock(),
+            subscribers: Vec::new(),
         })
+    }
+
+    /// Owe every record issued from now on to these subscribers as well.
+    #[must_use]
+    pub fn delivering_to(mut self, subscribers: Vec<String>) -> Self {
+        self.subscribers = subscribers;
+        self
     }
 
     /// Date the facts it decides by `clock` rather than the wall clock — a
@@ -701,8 +710,7 @@ impl<J: Journal> Csmsd<J> {
         // only the first time the record is stored.
         let deliveries = match (&acceptance, self.token_for(&key)) {
             (Acceptance::Stored, Some(token)) => {
-                let body = CdrDelivery {
-                    kind: emob_service::events::cdr::ISSUED,
+                let data = CdrDelivery {
                     cdr: &cdr,
                     token: &token,
                     signed: assembled
@@ -712,12 +720,21 @@ impl<J: Journal> Csmsd<J> {
                         .collect(),
                     station: &key.0,
                 };
-                match serde_json::to_string(&body) {
-                    Ok(body) => Target::ALL
-                        .iter()
+                let event = CloudEvent::new(
+                    record_key.clone(),
+                    "csmsd",
+                    emob_service::events::cdr::ISSUED,
+                    data,
+                )
+                .about(format!("cdr/{record_key}"))
+                .at(self.now());
+                match serde_json::to_string(&event) {
+                    Ok(body) => Target::ESTATE
+                        .into_iter()
+                        .chain(self.subscribers.iter().cloned().map(Target::Subscriber))
                         .map(|to| Delivery {
                             id: record_key.clone(),
-                            to: *to,
+                            to,
                             body: body.clone(),
                         })
                         .collect(),
@@ -1040,7 +1057,7 @@ impl<J: Journal> Csmsd<J> {
         if let Some(id) = transaction_id {
             self.bill(by, ctx, &id.to_string(), &observed, ingested)?;
         }
-        answer_v1_6(ctx, &typed)
+        answer_v1_6(ctx, &typed, self.now())
     }
 
     async fn on_v2_0_1(
@@ -1086,7 +1103,7 @@ impl<J: Journal> Csmsd<J> {
                 }
                 ctx.reply(&response)
             }
-            other => answer_v2_0_1(ctx, other),
+            other => answer_v2_0_1(ctx, other, self.now()),
         }
     }
 
@@ -1132,7 +1149,7 @@ impl<J: Journal> Csmsd<J> {
                 }
                 ctx.reply(&response)
             }
-            other => answer_v2_1(ctx, other),
+            other => answer_v2_1(ctx, other, self.now()),
         }
     }
 
@@ -1149,16 +1166,39 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
+/// The instant a station is told in `BootNotification` and `Heartbeat`.
+///
+/// A station sets its own clock from this field, and every timestamp it then
+/// puts on a transaction and a meter value follows from it — so it is this
+/// CSMS's clock, never a constant: a simulated station ignores a wrong one and
+/// a real one obeys it.
+fn current_time(now: time::OffsetDateTime) -> DateTime {
+    now.to_offset(time::UtcOffset::UTC)
+        .replace_nanosecond(0)
+        .ok()
+        .and_then(|instant| {
+            instant
+                .format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .and_then(|text| DateTime::parse(&text).ok())
+        .unwrap_or(DateTime::UNIX_EPOCH)
+}
+
 /// The 1.6 replies that need no decision.
-fn answer_v1_6(ctx: &Ctx, request: &v1_6::CsRequest) -> Result<Box<RawValue>, CallError> {
+fn answer_v1_6(
+    ctx: &Ctx,
+    request: &v1_6::CsRequest,
+    now: time::OffsetDateTime,
+) -> Result<Box<RawValue>, CallError> {
     match request {
         v1_6::CsRequest::BootNotification(_) => ctx.reply(&v1_6::BootNotificationResponse::new(
             v1_6::RegistrationStatus::Accepted,
-            DateTime::UNIX_EPOCH,
+            current_time(now),
             HEARTBEAT_SECS,
         )),
         v1_6::CsRequest::Heartbeat(_) => {
-            ctx.reply(&v1_6::HeartbeatResponse::new(DateTime::UNIX_EPOCH))
+            ctx.reply(&v1_6::HeartbeatResponse::new(current_time(now)))
         }
         v1_6::CsRequest::StatusNotification(_) => {
             ctx.reply(&v1_6::StatusNotificationResponse::new())
@@ -1170,17 +1210,21 @@ fn answer_v1_6(ctx: &Ctx, request: &v1_6::CsRequest) -> Result<Box<RawValue>, Ca
 }
 
 /// The 2.0.1 replies that need no decision.
-fn answer_v2_0_1(ctx: &Ctx, request: &v2_0_1::CsRequest) -> Result<Box<RawValue>, CallError> {
+fn answer_v2_0_1(
+    ctx: &Ctx,
+    request: &v2_0_1::CsRequest,
+    now: time::OffsetDateTime,
+) -> Result<Box<RawValue>, CallError> {
     match request {
         v2_0_1::CsRequest::BootNotification(_) => {
             ctx.reply(&v2_0_1::BootNotificationResponse::new(
-                DateTime::UNIX_EPOCH,
+                current_time(now),
                 HEARTBEAT_SECS,
                 v2_0_1::RegistrationStatus::Accepted,
             ))
         }
         v2_0_1::CsRequest::Heartbeat(_) => {
-            ctx.reply(&v2_0_1::HeartbeatResponse::new(DateTime::UNIX_EPOCH))
+            ctx.reply(&v2_0_1::HeartbeatResponse::new(current_time(now)))
         }
         v2_0_1::CsRequest::StatusNotification(_) => {
             ctx.reply(&v2_0_1::StatusNotificationResponse::new())
@@ -1190,15 +1234,19 @@ fn answer_v2_0_1(ctx: &Ctx, request: &v2_0_1::CsRequest) -> Result<Box<RawValue>
 }
 
 /// The 2.1 replies that need no decision.
-fn answer_v2_1(ctx: &Ctx, request: &v2_1::CsRequest) -> Result<Box<RawValue>, CallError> {
+fn answer_v2_1(
+    ctx: &Ctx,
+    request: &v2_1::CsRequest,
+    now: time::OffsetDateTime,
+) -> Result<Box<RawValue>, CallError> {
     match request {
         v2_1::CsRequest::BootNotification(_) => ctx.reply(&v2_1::BootNotificationResponse::new(
-            DateTime::UNIX_EPOCH,
+            current_time(now),
             HEARTBEAT_SECS,
             v2_1::RegistrationStatus::Accepted,
         )),
         v2_1::CsRequest::Heartbeat(_) => {
-            ctx.reply(&v2_1::HeartbeatResponse::new(DateTime::UNIX_EPOCH))
+            ctx.reply(&v2_1::HeartbeatResponse::new(current_time(now)))
         }
         v2_1::CsRequest::StatusNotification(_) => {
             ctx.reply(&v2_1::StatusNotificationResponse::new())

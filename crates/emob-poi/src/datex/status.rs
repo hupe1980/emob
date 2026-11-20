@@ -15,17 +15,20 @@
 //! Neither failure appears in a schema validation, in an HTTP status code or in
 //! a log. [`crate::feed`] is where they are made to appear.
 
-#![allow(
-    clippy::struct_field_names,
-    reason = "the fields are named for the profile's own attributes, and a Rust \
-              name that differs from the JSON key it writes is the one mistake \
-              these structs exist to prevent"
-)]
+use datex2::v3::afir_energy_infrastructure::{
+    self as aegi, AnyRefillPointStatus, EnergyInfrastructureSiteStatus,
+    EnergyInfrastructureStationStatus, EnergyInfrastructureStatusPublication,
+};
+use datex2::v3::common::{Reference, VersionedReference};
+use datex2::v3::exchange_information::{
+    DynamicInformation, ExchangeContext, ExchangeInformation, ExchangeStatusEnum, ProtocolTypeEnum,
+};
+use datex2::v3::message_container::MessageContainer;
+use datex2::v3::{Publication, json};
 
-use serde::Serialize;
-
-use super::table::{InformationStatus, PROFILE_VERSION, Publisher};
-use super::wire::{Enumerated, Exact, timestamp};
+use super::table::{InformationStatus, Publisher, header};
+use super::wire::{date_time, money};
+use crate::rate::PriceType;
 use crate::site::Facility;
 use crate::status::Report;
 
@@ -53,174 +56,30 @@ pub struct PointUpdate {
 pub struct PriceUpdate {
     /// The `idG` of the rate in the table publication.
     pub rate_id: String,
-    /// The new price type, in the profile's spelling.
-    pub price_type: &'static str,
+    /// The new price type.
+    pub price_type: PriceType,
     /// The new amount.
     pub value: rust_decimal::Decimal,
 }
 
-/// The dynamic publication.
-#[derive(Debug, Clone, Serialize)]
+/// The dynamic publication: a status publication in a message container
+/// marked as a complete snapshot (`snapshotPush`).
+#[derive(Debug, Clone)]
 pub struct StatusPublication {
-    #[serde(rename = "messageContainer")]
-    message_container: MessageContainer,
+    container: MessageContainer,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct MessageContainer {
-    payload: Vec<Payload>,
-    #[serde(rename = "exchangeInformation")]
-    exchange_information: ExchangeInformation,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Payload {
-    #[serde(rename = "modelBaseVersionG")]
-    model_base_version: &'static str,
-    #[serde(rename = "profileNameG")]
-    profile_name: &'static str,
-    #[serde(rename = "profileVersionG")]
-    profile_version: &'static str,
-    #[serde(rename = "aegiEnergyInfrastructureStatusPublication")]
-    publication: Publication,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Publication {
-    lang: String,
-    #[serde(rename = "publicationTime")]
-    publication_time: String,
-    #[serde(rename = "publicationCreator")]
-    publication_creator: Creator,
-    #[serde(rename = "headerInformation")]
-    header_information: Header,
-    #[serde(rename = "tableReference")]
-    table_reference: Vec<Reference>,
-    #[serde(rename = "energyInfrastructureSiteStatus")]
-    sites: Vec<SiteStatus>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Creator {
-    country: String,
-    #[serde(rename = "nationalIdentifier")]
-    national_identifier: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Header {
-    confidentiality: Enumerated,
-    #[serde(rename = "informationStatus")]
-    information_status: Enumerated,
-}
-
-/// A versioned reference into the table publication.
-#[derive(Debug, Clone, Serialize)]
-struct Reference {
-    #[serde(rename = "targetClass")]
-    target_class: &'static str,
-    #[serde(rename = "idG")]
-    id: String,
-    #[serde(rename = "versionG")]
-    version: String,
-}
-
-impl Reference {
-    fn facility(facility: &Facility) -> Self {
-        Self {
-            target_class: "FacilityObject",
-            id: facility.id.clone(),
-            version: facility.version.to_string(),
-        }
+/// A versioned reference into the table publication. `datex2` writes the
+/// `targetClass` the profile asks for beside it.
+fn reference(facility: &Facility) -> VersionedReference {
+    VersionedReference {
+        id: Some(facility.id.clone()),
+        version: Some(facility.version.to_string()),
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct SiteStatus {
-    reference: Reference,
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    #[serde(rename = "energyInfrastructureStationStatus")]
-    stations: Vec<StationStatus>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct StationStatus {
-    reference: Reference,
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    #[serde(rename = "refillPointStatus")]
-    points: Vec<RefillPointStatus>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RefillPointStatus {
-    #[serde(rename = "aegiElectricChargingPointStatus")]
-    point: ElectricChargingPointStatus,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ElectricChargingPointStatus {
-    reference: Reference,
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    status: Enumerated,
-    #[serde(rename = "energyRateUpdate", skip_serializing_if = "Vec::is_empty")]
-    energy_rate_update: Vec<EnergyRateUpdate>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct EnergyRateUpdate {
-    #[serde(rename = "lastUpdated")]
-    last_updated: String,
-    #[serde(rename = "energyRateReference")]
-    energy_rate_reference: RateReference,
-    #[serde(rename = "energyPrice")]
-    energy_price: Vec<PriceOut>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RateReference {
-    #[serde(rename = "targetClass")]
-    target_class: &'static str,
-    #[serde(rename = "idG")]
-    id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct PriceOut {
-    #[serde(rename = "priceType")]
-    price_type: Enumerated,
-    value: Exact,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ExchangeInformation {
-    #[serde(rename = "exchangeContext")]
-    exchange_context: ExchangeContext,
-    #[serde(rename = "dynamicInformation")]
-    dynamic_information: DynamicInformation,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ExchangeContext {
-    #[serde(rename = "codedExchangeProtocol")]
-    coded_exchange_protocol: Enumerated,
-    #[serde(rename = "exchangeSpecificationVersion")]
-    exchange_specification_version: &'static str,
-    #[serde(rename = "supplierOrCisRequester")]
-    supplier: Empty,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Empty {}
-
-#[derive(Debug, Clone, Serialize)]
-struct DynamicInformation {
-    #[serde(rename = "exchangeStatus")]
-    exchange_status: Enumerated,
-    #[serde(rename = "messageGenerationTimestamp")]
-    message_generation_timestamp: String,
+fn id_of(reference: Option<&VersionedReference>) -> Option<&str> {
+    reference.and_then(|reference| reference.id.as_deref())
 }
 
 /// Build the dynamic publication for a set of point updates.
@@ -237,98 +96,95 @@ pub fn publication(
     updates: &[PointUpdate],
     published_at: time::OffsetDateTime,
 ) -> StatusPublication {
-    let now = timestamp(published_at);
+    let now = date_time(published_at);
 
     // Group without reordering: a status feed is read in order, and a producer
     // that sorts its own points makes every diff against the previous message
     // look like a change.
-    let mut sites: Vec<SiteStatus> = Vec::new();
+    let mut sites: Vec<EnergyInfrastructureSiteStatus> = Vec::new();
     for update in updates {
         let at_site = sites
             .iter()
-            .position(|existing| existing.reference.id == update.site.id)
+            .position(|existing| id_of(existing.reference.as_deref()) == Some(&update.site.id))
             .unwrap_or_else(|| {
-                sites.push(SiteStatus {
-                    reference: Reference::facility(&update.site),
-                    last_updated: now.clone(),
-                    stations: Vec::new(),
+                sites.push(EnergyInfrastructureSiteStatus {
+                    reference: Some(Box::new(reference(&update.site))),
+                    last_updated: Some(now),
+                    ..EnergyInfrastructureSiteStatus::default()
                 });
                 sites.len() - 1
             });
-        let stations = &mut sites[at_site].stations;
+        let stations = &mut sites[at_site].energy_infrastructure_station_status;
 
         let at_station = stations
             .iter()
-            .position(|existing| existing.reference.id == update.station.id)
+            .position(|existing| id_of(existing.reference.as_deref()) == Some(&update.station.id))
             .unwrap_or_else(|| {
-                stations.push(StationStatus {
-                    reference: Reference::facility(&update.station),
-                    last_updated: now.clone(),
-                    points: Vec::new(),
+                stations.push(EnergyInfrastructureStationStatus {
+                    reference: Some(Box::new(reference(&update.station))),
+                    last_updated: Some(now),
+                    ..EnergyInfrastructureStationStatus::default()
                 });
                 stations.len() - 1
             });
 
-        stations[at_station].points.push(RefillPointStatus {
-            point: ElectricChargingPointStatus {
-                reference: Reference::facility(&update.point),
-                last_updated: now.clone(),
-                status: Enumerated::new(update.report.status().as_profile_str()),
-                energy_rate_update: update
-                    .price
-                    .iter()
-                    .map(|price| EnergyRateUpdate {
-                        last_updated: now.clone(),
-                        energy_rate_reference: RateReference {
-                            target_class: "EnergyRate",
-                            id: price.rate_id.clone(),
-                        },
-                        energy_price: vec![PriceOut {
-                            price_type: Enumerated::new(price.price_type),
-                            value: Exact(price.value),
-                        }],
-                    })
-                    .collect(),
-            },
-        });
+        stations[at_station].refill_point_status.push(
+            AnyRefillPointStatus::ElectricChargingPointStatus(Box::new(
+                aegi::ElectricChargingPointStatus {
+                    reference: Some(Box::new(reference(&update.point))),
+                    last_updated: Some(now),
+                    status: Some(super::point_status(update.report.status())),
+                    energy_rate_update: update
+                        .price
+                        .iter()
+                        .map(|price| aegi::EnergyRateUpdate {
+                            last_updated: Some(now),
+                            energy_rate_reference: Some(Box::new(Reference {
+                                id: Some(price.rate_id.clone()),
+                            })),
+                            energy_price: vec![aegi::EnergyPrice {
+                                price_type: Some(super::price_type(price.price_type)),
+                                value: money(price.value),
+                                ..aegi::EnergyPrice::default()
+                            }],
+                            ..aegi::EnergyRateUpdate::default()
+                        })
+                        .collect(),
+                    ..aegi::ElectricChargingPointStatus::default()
+                },
+            )),
+        );
     }
 
+    let publication = EnergyInfrastructureStatusPublication {
+        lang: Some(publisher.language.clone()),
+        publication_time: Some(now),
+        publication_creator: Some(Box::new(publisher.creator())),
+        header_information: Some(Box::new(header(status))),
+        table_reference: vec![reference(table)],
+        energy_infrastructure_site_status: sites,
+        ..EnergyInfrastructureStatusPublication::default()
+    };
     StatusPublication {
-        message_container: MessageContainer {
-            payload: vec![Payload {
-                model_base_version: "3",
-                profile_name: "AFIR Energy Infrastructure",
-                profile_version: PROFILE_VERSION,
-                publication: Publication {
-                    lang: publisher.language.clone(),
-                    publication_time: now.clone(),
-                    publication_creator: Creator {
-                        country: publisher.country.clone(),
-                        national_identifier: publisher.national_identifier.clone(),
-                    },
-                    header_information: Header {
-                        confidentiality: Enumerated::new("noRestriction"),
-                        information_status: Enumerated::new(status.as_profile_str()),
-                    },
-                    table_reference: vec![Reference {
-                        target_class: "EnergyInfrastructureTable",
-                        id: table.id.clone(),
-                        version: table.version.to_string(),
-                    }],
-                    sites,
-                },
-            }],
-            exchange_information: ExchangeInformation {
-                exchange_context: ExchangeContext {
-                    coded_exchange_protocol: Enumerated::new("snapshotPush"),
-                    exchange_specification_version: "3.0",
-                    supplier: Empty {},
-                },
-                dynamic_information: DynamicInformation {
-                    exchange_status: Enumerated::new("online"),
-                    message_generation_timestamp: now,
-                },
-            },
+        container: MessageContainer {
+            payload: vec![Publication::AfirEnergyInfrastructureStatus(Box::new(
+                publication,
+            ))],
+            exchange_information: Some(Box::new(ExchangeInformation {
+                exchange_context: Some(Box::new(ExchangeContext {
+                    coded_exchange_protocol: Some(ProtocolTypeEnum::SnapshotPush),
+                    exchange_specification_version: Some("3.0".to_owned()),
+                    supplier_or_cis_requester: Some(Box::default()),
+                    ..ExchangeContext::default()
+                })),
+                dynamic_information: Some(Box::new(DynamicInformation {
+                    exchange_status: Some(ExchangeStatusEnum::Online),
+                    message_generation_timestamp: Some(now),
+                    ..DynamicInformation::default()
+                })),
+                ..ExchangeInformation::default()
+            })),
+            ..MessageContainer::default()
         },
     }
 }
@@ -338,9 +194,12 @@ impl StatusPublication {
     ///
     /// # Errors
     ///
-    /// [`serde_json::Error`] only if a value cannot be represented, which the
-    /// types here prevent.
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string_pretty(self)
+    /// [`datex2::Error`], naming the member and the rule, for anything the
+    /// profile's schemas would reject.
+    pub fn to_json(&self) -> Result<String, datex2::Error> {
+        let mut bytes = Vec::new();
+        json::mobilithek::write_container(&mut bytes, &self.container)?;
+        // The writer writes UTF-8; this is never lossy.
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 }

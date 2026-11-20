@@ -146,17 +146,7 @@ in the crates and the daemon holds none of them, so the whole exchange —
 including the commissioning `[LPC §3.3]` prescribes — runs as an ordinary test
 with two engines, real datagrams and time as a variable. The `sited` daemon
 starts with an empty site and shows its LPC state to operators (`GET /v1/sited`);
-⏳ the SHIP session and the OCPP leg are not wired yet.
-
-## Not yet built 📐
-
-- `Ziff. 4.4.a` *Direktansteuerung*, where a grid operator addresses a single
-  **device** rather than a site.
-- OCPP 2.1 DER control, behind a capability flag until certification catches up.
-- The other § 14a device families — heat pumps, space cooling, storage — which
-  belong to a household energy manager; emob meets their formula at `Ziff. 4.5.2`
-  (`minimum_for`) rather than at a socket.
-- A V2G flow model, which waits on a regulator's decision.
+⏳ the SHIP session and the OCPP leg are not wired.
 
 **Related:** [The OCPP seam](@/docs/ocpp.md) ·
 [Compliance](@/docs/compliance.md) ·

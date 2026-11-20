@@ -582,10 +582,10 @@ charge. A delivery is recorded only after the answer comes back.
 
 The tariff that rates a session in `csmsd` and the one `tarifd` publishes are
 built from the estate's `[[tariffs]]` by one function, so they cannot drift
-apart. ⏳ `tarifd`'s three push clients are not wired yet: it logs what it would
-publish. See [Run the estate](@/docs/run-the-estate.md).
+apart. ⏳ `tarifd` logs what it would publish; its three push clients are not
+wired. See [Run the estate](@/docs/run-the-estate.md).
 
-## Not in emob-tariff 📐
+## Not in emob-tariff
 
 The invoice belongs to `emob-billing` — see
 [Sessions and settlement](@/docs/settlement.md). OCPI booking is carried

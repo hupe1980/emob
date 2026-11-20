@@ -368,7 +368,7 @@ fn every_path_the_status_publication_emits_is_one_the_reference_instance_contain
                 .expect("an operating point may report `charging`"),
             price: Some(emob_poi::datex::PriceUpdate {
                 rate_id: "74034E3E-RATE".to_owned(),
-                price_type: "pricePerKWh",
+                price_type: emob_poi::rate::PriceType::PricePerKwh,
                 value: dec("0.37"),
             }),
         },
@@ -427,10 +427,10 @@ fn the_price_in_the_feed_is_the_tariffs_own_decimal_and_not_a_second_computation
         .to_json()
         .expect("serialisable");
 
-    assert!(json.contains(r#""value": 0.49"#), "{json}");
-    assert!(json.contains(r#""taxRate": 19"#), "{json}");
-    assert!(json.contains(r#""taxIncluded": true"#), "{json}");
-    assert!(json.contains(r#""maximumDeliveryFee": 100"#), "{json}");
+    assert!(json.contains(r#""value":0.49"#), "{json}");
+    assert!(json.contains(r#""taxRate":19"#), "{json}");
+    assert!(json.contains(r#""taxIncluded":true"#), "{json}");
+    assert!(json.contains(r#""maximumDeliveryFee":100"#), "{json}");
 
     // …and the two things the profile could not carry are said rather than
     // swallowed: it has no price type for an occupancy fee, and no tax flag on
@@ -466,8 +466,8 @@ fn kilowatts_reach_the_feed_as_the_watts_the_profile_asks_for() {
         .to_json()
         .expect("serialisable");
 
-    assert!(json.contains(r#""maxPowerAtSocket": 150000"#), "{json}");
-    assert!(json.contains(r#""totalMaximumPower": 172000"#), "{json}");
+    assert!(json.contains(r#""maxPowerAtSocket":150000"#), "{json}");
+    assert!(json.contains(r#""totalMaximumPower":172000"#), "{json}");
 }
 
 #[test]
@@ -485,8 +485,8 @@ fn the_evse_id_travels_as_the_extension_the_profile_reserves_for_it() {
         .to_json()
         .expect("serialisable");
 
-    assert!(json.contains(r#""identifier": "DE*ABC*E00001""#), "{json}");
-    assert!(json.contains(r#""extendedValueG": "evseId""#), "{json}");
+    assert!(json.contains(r#""identifier":"DE*ABC*E00001""#), "{json}");
+    assert!(json.contains(r#""extendedValueG":"evseId""#), "{json}");
 }
 
 #[test]
@@ -503,4 +503,37 @@ fn a_feed_whose_station_total_contradicts_its_points_is_not_published_at_all() {
         feed.table(time::macros::datetime!(2026-04-14 12:00 UTC)),
         Err(emob_poi::PoiError::TotalPowerBelowPoint { .. })
     ));
+}
+
+#[test]
+fn both_publications_read_back_as_the_profile_without_a_warning() {
+    // The writer refuses what the Mobilithek's schemas would reject. Reading
+    // the documents back is the other half: a member written where the profile
+    // has none is not an error to a tolerant reader, only a warning — and a
+    // consumer that skips it is a consumer that never sees it.
+    let (published_rate, _) = rate::publish(&tariff(), "74034E3E-RATE");
+    let (feed, _) = feed_of(vec![site()], published_rate);
+    let at = time::macros::datetime!(2026-04-14 12:00 UTC);
+
+    let table = feed.table(at).expect("a consistent feed");
+    let read = datex2::v3::json::read(table.to_json().expect("written").as_bytes())
+        .expect("the table reads back");
+    assert!(read.warnings.is_empty(), "{:#?}", read.warnings);
+    assert_eq!(read.publications.len(), 1);
+
+    let point = site().points().next().expect("a point").clone();
+    let update = PointUpdate {
+        site: Facility::new("21F02723-SITE"),
+        station: Facility::new("21F02723-STATION"),
+        point: point.facility.clone(),
+        report: point.report(PointStatus::Available).expect("operating"),
+        price: None,
+    };
+    let status = feed
+        .status(table.published(), &[update], at)
+        .expect("references that resolve");
+    let read = datex2::v3::json::read(status.to_json().expect("written").as_bytes())
+        .expect("the status reads back");
+    assert!(read.warnings.is_empty(), "{:#?}", read.warnings);
+    assert!(read.exchange_information.is_some(), "a message container");
 }

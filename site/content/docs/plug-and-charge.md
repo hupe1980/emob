@@ -179,8 +179,7 @@ about today.
 The four `[OPCP]` services — root pool, provisioning pool, signing service and
 contract pool — are behind sockets. A revocation status is a value the caller
 supplies together with the instant it was compiled; a validation takes the
-instant to judge against. `pncd`, the daemon that will make those HTTP calls, is
-📐 designed.
+instant to judge against. No daemon makes those HTTP calls.
 
 ## What emob-pnc does not do
 

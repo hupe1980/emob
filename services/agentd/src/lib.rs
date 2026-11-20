@@ -41,7 +41,6 @@
 //! |---|---|
 //! | [`advice`] | what a specialist may say, and the reason it cannot say anything else |
 //! | [`skills`] | the specialists, whose work is computation |
-//! | [`subscriptions`] | which `CloudEvent` type reaches which specialist |
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
@@ -52,16 +51,12 @@ use agentplane::prelude::*;
 
 pub mod advice;
 pub mod skills;
-pub mod subscriptions;
 
 pub use advice::{Advice, AtRisk, Proposal, advisory};
-pub use subscriptions::{Subscription, specialists_for};
 
 /// Every specialist this daemon registers, by name.
 ///
-/// One list, read by the runtime builder and by the subscription table's own
-/// test — so a specialist that is subscribed and not wired is a build failure
-/// rather than a row that dispatches into nothing.
+/// One list, read by the runtime builder and by the read view.
 #[must_use]
 pub fn registered_specialists() -> Vec<&'static str> {
     vec![

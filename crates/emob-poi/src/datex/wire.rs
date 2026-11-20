@@ -1,238 +1,140 @@
-//! The four spellings the profile uses everywhere, in one place.
+//! emob's exact values in the scalar types `datex2` writes.
 //!
-//! DATEX II version 3 has a small number of structural conventions that recur
-//! in every class, and getting one of them subtly wrong produces a document
-//! that validates and means something else. They are written once here so the
-//! publication modules can be about charging infrastructure.
+//! `datex2` owns the profile's spelling — the `aegi`/`afac`/`loc` prefixes,
+//! the `G` suffixes, `{"value": …}` around every enumeration, `extendedG` for a
+//! literal the enumeration lacks — and refuses to write what the Mobilithek's
+//! schemas would reject. What is left here is the crossing from this
+//! workspace's types into the model's: an amount of money stays a decimal with
+//! its own digits, and the profile's `Float` members are filled from decimal
+//! text so a float exists only where the profile puts one.
 
-use std::fmt;
+use std::str::FromStr;
 
+use datex2::v3::afir_facilities::AmountOfMoney;
+use datex2::{Date, DateTime, LangString, MultilingualString, Time};
 use rust_decimal::Decimal;
-use serde::{Serialize, Serializer};
 
-/// An enumerated value: `{"value": "iec62196T2"}`.
+/// An amount of money, with exactly the digits the tariff states.
 ///
-/// Never a bare string. Every enumeration in the profile is a class with a
-/// `value` attribute, so that a later revision can add attributes beside it
-/// without breaking a reader — and a producer that writes the bare string
-/// produces a document no consumer can read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct Enumerated {
-    /// The literal.
-    pub value: &'static str,
+/// `AmountOfMoney` holds decimal text rather than a binary float, so `0.59`
+/// leaves as `0.59`. The profile allows two places after the point; an amount
+/// with more is refused by [`crate::feed::Feed::check`] before it gets here,
+/// and by `datex2`'s writer if it is built outside a feed.
+pub(crate) fn money(amount: Decimal) -> Option<AmountOfMoney> {
+    amount.normalize().to_string().parse().ok()
 }
 
-impl Enumerated {
-    /// A literal from one of the profile's enumerations.
-    #[must_use]
-    pub const fn new(value: &'static str) -> Self {
-        Self { value }
-    }
+/// Whether the profile can state this amount: two places after the point at
+/// most `[DATEX-II-Profil]` (`AmountOfMoney`, "a monetary value expressed to
+/// two decimal places").
+#[must_use]
+pub fn in_cents(amount: Decimal) -> bool {
+    amount.normalize().scale() <= 2
 }
 
-/// An extended enumerated value: `{"value": "extendedG", "extendedValueG": …}`.
+/// A member the profile types as `Float`, from a decimal's own text.
 ///
-/// The profile's escape hatch for a value its enumeration does not contain. It
-/// is how an EVSE id is published — `typeOfIdentifier` has no `evseId` literal,
-/// so the identifier type is `extendedG` and the real answer sits beside it
-/// `[DATEX-II-Profil]`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Extended {
-    /// Always `extendedG`.
-    pub value: &'static str,
-    /// The value the enumeration does not contain.
-    #[serde(rename = "extendedValueG")]
-    pub extended_value: String,
+/// Power, coordinates and the tax rate. Parsing the text picks the nearest
+/// value the profile's type holds, and `datex2` writes that back as the
+/// shortest text that reads as it again — `22000` stays `22000`. A coordinate
+/// keeps about seven significant digits, which is the profile's precision and
+/// well under a metre.
+pub(crate) fn float<T: FromStr>(value: Decimal) -> Option<T> {
+    value.normalize().to_string().parse().ok()
 }
 
-impl Extended {
-    /// An extension value.
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self {
-            value: "extendedG",
-            extended_value: value.into(),
-        }
-    }
-}
-
-/// A string with a language tag: `{"values": [{"lang": "de", "value": …}]}`.
-///
-/// Every human-readable string in the profile is one of these, including the
-/// ones that plainly are not translated. Publishing a bare string where the
-/// profile expects a `MultilingualString` is the second commonest structural
-/// mistake after the bare enumeration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Multilingual {
-    /// One entry per language.
-    pub values: Vec<LocalisedText>,
-}
-
-impl Multilingual {
-    /// One string, in one language.
-    #[must_use]
-    pub fn new(lang: &str, value: impl Into<String>) -> Self {
-        Self {
-            values: vec![LocalisedText {
-                lang: lang.to_owned(),
-                value: value.into(),
-            }],
-        }
-    }
-}
-
-/// One language's text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct LocalisedText {
-    /// The IETF language tag.
-    pub lang: String,
-    /// The text.
-    pub value: String,
-}
-
-/// An exact decimal, written as a JSON **number**.
-///
-/// The reason this type exists rather than a plain `Decimal`: the profile
-/// carries prices and coordinates as JSON numbers, and the ordinary route from
-/// a decimal to a JSON number goes through `f64`. `0.35` survives that; `0.1 +
-/// 0.2` does not, and neither does a coordinate's sixth decimal place at some
-/// latitudes.
-///
-/// `serde_json`'s `raw_value` carries a value into the output verbatim, so this
-/// writes the decimal's own digits into the number slot and the value in the
-/// national access point feed is the value the rating engine charges with,
-/// digit for digit.
-///
-/// # Why not `arbitrary_precision`
-///
-/// It would do the same job and it is **global**: it changes how `serde_json`
-/// presents every number to every deserialiser in the build, so a type with a
-/// numeric visitor sees a map and refuses — and a partner's OCPI document stops
-/// parsing from bytes anywhere in the workspace (D331). `RawValue` is one type
-/// used in one place.
-///
-/// Serializing to a format other than JSON falls back to the decimal's string
-/// form, which is lossless but is a string. The profile is JSON.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Exact(pub Decimal);
-
-impl Serialize for Exact {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let literal = self.0.normalize().to_string();
-        // `from_string` validates that the text is JSON, so a decimal whose
-        // `Display` is not a JSON number cannot reach the wire as one.
-        match serde_json::value::RawValue::from_string(literal.clone()) {
-            Ok(raw) => raw.serialize(serializer),
-            Err(_) => serializer.serialize_str(&literal),
-        }
-    }
-}
-
-impl From<Decimal> for Exact {
-    fn from(value: Decimal) -> Self {
-        Self(value)
-    }
-}
-
-impl fmt::Display for Exact {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// Kilowatts as the whole watts the profile carries.
+/// Kilowatts as the watts the profile carries.
 ///
 /// `maxPowerAtSocket`, `totalMaximumPower` and `availableChargingPower` are all
 /// watts `[DATEX-II-Profil Tab. 7]`; a datasheet, a tariff and `[AFIR
-/// Art. 5(4)]`'s threshold are all kilowatts. The multiplication is exact and
-/// happens once, here, so no other module has to remember which unit it is in.
-#[must_use]
-pub fn watts(kw: Decimal) -> Exact {
-    Exact(kw * Decimal::from(1000))
+/// Art. 5(4)]`'s threshold are all kilowatts. A 150 kW charger published as
+/// `150` is a 150-watt charger.
+pub(crate) fn watts<T: FromStr>(kw: Decimal) -> Option<T> {
+    float(kw * Decimal::from(1000))
 }
 
-/// An instant, in the RFC 3339 spelling the profile's examples use.
-///
-/// A formatting failure is impossible — the description is a constant — so the
-/// fallback is a Unix timestamp rather than a panic: a publication that names
-/// the wrong instant is a bug somebody can see, and a publication job that
-/// aborts at three in the morning is one nobody does.
-#[must_use]
-pub fn timestamp(at: time::OffsetDateTime) -> String {
-    at.format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| at.unix_timestamp().to_string())
+/// An instant, with its offset.
+pub(crate) fn date_time(at: time::OffsetDateTime) -> DateTime {
+    DateTime {
+        date: Date {
+            year: at.year(),
+            month: u8::from(at.month()),
+            day: at.day(),
+        },
+        time: time_of_day(at.time()),
+        offset_minutes: Some(at.offset().whole_minutes()),
+    }
 }
 
-/// A time of day, as `HH:MM:SSZ`.
-#[must_use]
-pub fn time_of_day(at: time::Time) -> String {
-    format!("{:02}:{:02}:{:02}Z", at.hour(), at.minute(), at.second())
+/// A time of day, to the second.
+pub(crate) const fn time_of_day(at: time::Time) -> Time {
+    Time {
+        hour: at.hour(),
+        minute: at.minute(),
+        second: at.second(),
+        nanosecond: 0,
+        fraction_digits: 0,
+    }
+}
+
+/// One string, in one language.
+pub(crate) fn text(lang: &str, value: impl Into<String>) -> MultilingualString {
+    MultilingualString {
+        values: vec![LangString {
+            lang: lang.to_owned(),
+            text: value.into(),
+        }],
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
-    /// The half of the `serde_json` decision this crate is the reason for.
-    ///
-    /// €2.50 an hour is `0.041666…` a minute and `Decimal` states twenty-eight
-    /// places of it. The feed carries what the tariff charges with, digit for
-    /// digit — and as a **number**, because a feed that quoted its prices would
-    /// fail every consumer's schema (D331).
+    fn dec(text: &str) -> Decimal {
+        Decimal::from_str_exact(text).unwrap()
+    }
+
     #[test]
-    fn an_exact_price_reaches_the_feed_digit_for_digit_and_as_a_number() {
-        let awkward: Decimal = "0.0416666666666666666666666667".parse().expect("a decimal");
-        let written = serde_json::to_string(&Exact(awkward)).expect("the profile is JSON");
-        assert_eq!(written, "0.0416666666666666666666666667");
-        assert!(
-            !written.contains('"'),
-            "a JSON number, not a string: {written}"
+    fn an_amount_keeps_the_digits_somebody_wrote() {
+        // Through `f64` this is 0.35000000000000003 or 0.34999999999999998
+        // depending on the route.
+        assert_eq!(money(dec("0.35")).unwrap().as_str(), "0.35");
+        assert_eq!(money(dec("0.350")).unwrap().as_str(), "0.35");
+    }
+
+    #[test]
+    fn a_tenth_of_a_cent_is_not_an_amount_the_profile_can_state() {
+        assert!(in_cents(dec("0.59")));
+        assert!(in_cents(dec("0.5900")));
+        assert!(!in_cents(dec("0.589")));
+        assert!(!in_cents(dec("0.0416666666666666666666666667")));
+    }
+
+    use datex2::v3::common::Float;
+
+    #[test]
+    fn kilowatts_become_watts() {
+        assert_eq!(watts::<Float>(dec("22.5")).unwrap().to_string(), "22500");
+    }
+
+    #[test]
+    fn a_coordinate_keeps_the_precision_the_profile_holds() {
+        // `Float` keeps about seven significant digits: 50.779599 is written
+        // 50.7796, 0.1 m away. 6.104507 survives whole.
+        assert_eq!(
+            float::<Float>(dec("50.779599")).unwrap().to_string(),
+            "50.7796"
+        );
+        assert_eq!(
+            float::<Float>(dec("6.104507")).unwrap().to_string(),
+            "6.104507"
         );
     }
 
-    /// …and a decimal whose text is not a JSON number does not reach the wire
-    /// as one.
     #[test]
-    fn a_value_that_is_not_a_json_number_is_written_as_text_rather_than_smuggled() {
-        // `Decimal`'s `Display` is always a JSON number, so this asserts the
-        // fallback exists rather than that it fires — the branch is there
-        // because `from_string` is what decides, not this crate.
-        let plain = serde_json::to_string(&Exact(Decimal::ONE)).expect("serialises");
-        assert_eq!(plain, "1");
-    }
-    use super::*;
-
-    #[test]
-    fn an_exact_price_reaches_the_feed_as_the_digits_somebody_wrote() {
-        // The whole reason this type exists. Through `f64` this is
-        // 0.35000000000000003 or 0.34999999999999998 depending on the route.
-        let json = serde_json::to_string(&Exact(Decimal::from_str_exact("0.35").unwrap())).unwrap();
-        assert_eq!(json, "0.35");
-    }
-
-    #[test]
-    fn a_coordinate_keeps_its_sixth_decimal() {
-        let json =
-            serde_json::to_string(&Exact(Decimal::from_str_exact("50.779599").unwrap())).unwrap();
-        assert_eq!(json, "50.779599");
-    }
-
-    #[test]
-    fn kilowatts_become_whole_watts() {
-        // 22 kW is 22000 W, and the profile wants the second number. A feed
-        // that publishes 22 is publishing a 22-watt charger.
-        let json = serde_json::to_string(&watts(Decimal::from_str_exact("22.5").unwrap())).unwrap();
-        assert_eq!(json, "22500");
-    }
-
-    #[test]
-    fn an_enumerated_value_is_an_object_and_never_a_bare_string() {
-        let json = serde_json::to_string(&Enumerated::new("iec62196T2")).unwrap();
-        assert_eq!(json, r#"{"value":"iec62196T2"}"#);
-    }
-
-    #[test]
-    fn an_evse_id_travels_as_an_extension_because_the_enumeration_has_no_literal() {
-        let json = serde_json::to_string(&Extended::new("evseId")).unwrap();
-        assert_eq!(json, r#"{"value":"extendedG","extendedValueG":"evseId"}"#);
+    fn an_instant_keeps_its_offset() {
+        let at = date_time(time::macros::datetime!(2026-04-14 14:00 +02:00));
+        assert_eq!(at.to_string(), "2026-04-14T14:00:00+02:00");
     }
 }

@@ -50,9 +50,8 @@ flowchart LR
 
 ## Conventions on these pages
 
-- **Status markers.** ✅ built and tested · ⏳ next · 📐 designed, not yet
-  written. Each page says where a feature exists in a library but is not yet
-  called by a running daemon.
+- **Status markers.** ✅ built, tested and run by a daemon · ⏳ built in a
+  library that no daemon calls.
 - **Citations.** Every regulatory claim names its source in brackets, for
   example `[AFIR Art. 5(4)]` (Regulation (EU) 2023/1804), `[MessEG §33]` (the
   German Measurement and Calibration Act) or `[OCMF Tab. 7]` (a table of the

@@ -110,9 +110,9 @@
 //!     .to_json()?;
 //!
 //! // The price in the national access point feed is the tariff's own decimal.
-//! assert!(json.contains(r#""value": 0.49"#));
+//! assert!(json.contains(r#""value":0.49"#));
 //! // …and 150 kW is published as the watts the profile asks for.
-//! assert!(json.contains(r#""maxPowerAtSocket": 150000"#));
+//! assert!(json.contains(r#""maxPowerAtSocket":150000"#));
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
