@@ -2304,17 +2304,16 @@ fn check_docs(root: &Path) -> Result<()> {
                 })
         })
     };
-    let tags: BTreeSet<String> = std::process::Command::new("git")
-        .args(["tag", "--list", "v*"])
-        .current_dir(root)
-        .output()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(|t| t.trim_start_matches('v').to_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    // The releases are the changelog's dated headings (`## [0.4.0] - …`), not
+    // `git tag`: a CI checkout is shallow and has no tags, and a guard that
+    // passes only on a laptop is the failure this one exists to catch.
+    let tags: BTreeSet<String> = std::fs::read_to_string(root.join("CHANGELOG.md"))
+        .context("reading CHANGELOG.md")?
+        .lines()
+        .filter_map(|line| line.strip_prefix("## ["))
+        .filter_map(|rest| rest.split_once("] - "))
+        .map(|(version, _)| version.to_owned())
+        .collect();
 
     let mut problems = Vec::new();
     let (mut paths, mut releases) = (0usize, 0usize);
@@ -2369,7 +2368,7 @@ fn check_docs(root: &Path) -> Result<()> {
                         .any(|t| t == number || t.starts_with(&format!("{number}.")));
                     if !tagged {
                         problems.push(format!(
-                            "{relative}:{}: emob {number} was never tagged",
+                            "{relative}:{}: emob {number} was never released (no dated heading in CHANGELOG.md)",
                             n + 1
                         ));
                     }
@@ -2424,7 +2423,7 @@ fn check_docs(root: &Path) -> Result<()> {
         );
     }
     println!(
-        "📖 check-docs: {paths} documented route(s), every one served; {releases} release(s) named, every one tagged; {links} README link(s), every one a file"
+        "📖 check-docs: {paths} documented route(s), every one served; {releases} release(s) named, every one released; {links} README link(s), every one a file"
     );
     Ok(())
 }
