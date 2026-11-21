@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -55,6 +56,15 @@ class Car:
     def suv(cls, *, soc: int = 20) -> Car:
         """A large car: 100 kWh, three phases, 32 A."""
         return cls(battery_kwh=100, soc=soc, max_amps=32, phases=3)
+
+
+@dataclass(frozen=True)
+class Reservation:
+    """A point the CSMS holds for one card, as the station was told."""
+
+    id: int
+    card: str
+    until: datetime
 
 
 @dataclass(frozen=True)
@@ -147,6 +157,14 @@ class Station:
                     f"{self.identity}'s display showed no {text!r} within {within:g} s:\n  {seen}"
                 )
             time.sleep(0.05)
+
+    @property
+    def reservations(self) -> list[Reservation]:
+        """What the CSMS holds this station for (`ReserveNow`), until cancelled."""
+        return [
+            Reservation(id, card, datetime.fromisoformat(until))
+            for id, card, until in self._native.reservations
+        ]
 
     @property
     def asked(self) -> list[str]:

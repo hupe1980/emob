@@ -153,6 +153,10 @@ pub struct StationView {
     /// Its newest note — what the person who drives out reads first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// `14:30` when the silent point is held for a driver (spec 025) — who
+    /// will arrive at a station that does not answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved_until: Option<String>,
 }
 
 /// A station is silent once nothing has been heard from it for longer than its
@@ -320,6 +324,9 @@ fn silent<J: Journal>(
                 carrier: network.as_deref().and_then(crate::carrier::name),
                 network,
                 note,
+                reserved_until: csmsd
+                    .reservation(identity)
+                    .map(|held| csmsd.held_until(identity, held.until)),
             })
         })
         .collect();
@@ -407,6 +414,14 @@ pub fn router<J: Journal>(
         .route(
             "/v1/csmsd/stations/{identity}/notes/{number}/remove",
             axum::routing::post(remove_note::<J>),
+        )
+        .route(
+            "/v1/csmsd/stations/{identity}/reservations",
+            axum::routing::post(reserve::<J>),
+        )
+        .route(
+            "/v1/csmsd/stations/{identity}/reservations/{number}/cancel",
+            axum::routing::post(cancel_reservation::<J>),
         )
         .with_state((csmsd, certificates));
     emob_service::serve::operator_only(routes, operators)
@@ -610,6 +625,68 @@ async fn remove_note<J: Journal>(
     }
 }
 
+/// A reservation asked for (spec 025).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReserveBody {
+    /// The card's UID, as the station reads it. Sent to the station and to
+    /// the provider, journalled as the provider's reference only (SR-176).
+    pub uid: String,
+    /// How long, 5–1440.
+    pub minutes: u32,
+    /// Why — what the next person reading the asset card needs.
+    pub reason: String,
+}
+
+/// What a reservation answers.
+#[derive(Debug, Serialize)]
+pub struct Held {
+    /// Its number on the station.
+    pub number: u64,
+    /// Held until.
+    #[serde(with = "time::serde::rfc3339")]
+    pub until: time::OffsetDateTime,
+}
+
+/// `POST /v1/csmsd/stations/{identity}/reservations`.
+async fn reserve<J: Journal>(
+    Extract((csmsd, _)): Extract<Shared<J>>,
+    axum::Extension(by): axum::Extension<emob_service::Actor>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    body: Result<Json<ReserveBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => return malformed(&error),
+    };
+    match csmsd
+        .reserve(&by, &identity, &body.uid, body.minutes, &body.reason)
+        .await
+    {
+        Ok((number, until)) => (
+            axum::http::StatusCode::CREATED,
+            Json(Held { number, until }),
+        )
+            .into_response(),
+        Err(refusal) if refusal.field == "identity" => {
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+        Err(refusal) => refused_write(&refusal),
+    }
+}
+
+/// `POST /v1/csmsd/stations/{identity}/reservations/{number}/cancel`.
+async fn cancel_reservation<J: Journal>(
+    Extract((csmsd, _)): Extract<Shared<J>>,
+    axum::Extension(by): axum::Extension<emob_service::Actor>,
+    axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
+) -> Response {
+    match csmsd.cancel_reservation(&by, &identity, number).await {
+        Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+        Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// What a station search may ask: nothing else is accepted.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -729,6 +806,9 @@ pub struct StationRow {
     pub longitude: rust_decimal::Decimal,
     /// Its newest note.
     pub note: Option<String>,
+    /// `14:30` while it is held for a driver (spec 025).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reserved_until: Option<String>,
     /// Every note it holds, for the search only.
     #[serde(skip)]
     notes: String,
@@ -976,6 +1056,11 @@ impl StationRow {
             latitude: entry.location.latitude,
             longitude: entry.location.longitude,
             note: known.notes.last().map(|note| note.text.clone()),
+            reserved_until: known
+                .reservation
+                .as_ref()
+                .filter(|held| held.until > time::OffsetDateTime::now_utc())
+                .map(|held| crate::reservation::wall_clock(&entry.location.time_zone, held.until)),
             notes: known
                 .notes
                 .iter()
@@ -1074,9 +1159,22 @@ pub struct StationPage {
     pub recent: Vec<RecentView>,
     /// Operators' notes, newest first (spec 023).
     pub notes: Vec<crate::journal::Note>,
+    /// The reservation holding it, if one is open (spec 025).
+    pub reservation: Option<ReservationView>,
     /// The price a session starting now is rated with, as the price page
     /// shows it (spec 015).
     pub price: Option<PriceView>,
+}
+
+/// A reservation, as the asset card shows it — the card's tail, never its
+/// UID (SR-176).
+#[derive(Debug, Serialize)]
+pub struct ReservationView {
+    /// The reservation itself.
+    #[serde(flatten)]
+    pub held: crate::journal::Reservation,
+    /// `until` on the station's wall clock, `14:30`.
+    pub until_local: String,
 }
 
 /// The price in force, as the asset card names it.
@@ -1257,6 +1355,12 @@ impl StationPage {
                 })
                 .collect(),
             notes: known.notes.into_iter().rev().collect(),
+            reservation: csmsd
+                .reservation(&entry.identity)
+                .map(|held| ReservationView {
+                    until_local: csmsd.held_until(&entry.identity, held.until),
+                    held,
+                }),
             price: csmsd
                 .tariff(&entry.tariff)
                 .and_then(|history| history.in_force_at(now))

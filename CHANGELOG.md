@@ -10,6 +10,25 @@ renames something says so under **Removed** or **Changed** instead.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-21
+
+A point is held for a driver.
+
+### Added
+
+- **A point is held for a driver.** The operator reserves a station for one
+  card from its asset card, 5 minutes to a day: the provider must accept the
+  card and the station `ReserveNow` (1.6, 2.0.1, 2.1). While held, `csmsd`
+  answers every other card `Invalid` itself; the price page says "Reserviert
+  bis 14:30" and Heute's silent row shows it. It ends honoured, cancelled,
+  expired or removed, each journalled under the card's provider reference.
+  The asset card counts down the time left and keeps what was typed when the
+  station or the provider says no, in the operator's words; Stationen marks a
+  held point. `POST /v1/csmsd/stations/{id}/reservations`, `…/{n}/cancel`.
+- emobtest's station keeps reservations: `cp.reservations`, each with its
+  card and `until`.
+- The example estate has a second driver's card, `04C0FFEE000002`.
+
 ## [0.6.0] - 2026-11-21
 
 The price before the plug, and a kit that proves the platform from outside.
@@ -434,7 +453,8 @@ could not.
 First release: fifteen crates from the signed meter value to the ledger posting,
 and eight daemons.
 
-[Unreleased]: https://github.com/hupe1980/emob/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/hupe1980/emob/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/hupe1980/emob/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hupe1980/emob/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hupe1980/emob/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hupe1980/emob/compare/v0.3.1...v0.4.0

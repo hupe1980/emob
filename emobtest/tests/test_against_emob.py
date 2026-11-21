@@ -28,6 +28,7 @@ CSMSD = os.environ.get("EMOB_CSMSD", "http://127.0.0.1:9001")
 TOKEN = os.environ.get("EMOB_OPERATOR_TOKEN")
 KNOWN = "04A1B2C3D4E5F6"  # ALLOWED in the example estate
 BLOCKED = "04DEADBEEF0001"
+OTHER = "04C0FFEE000002"  # a second driver on the same contract
 CP1_KEY = "6d6f636b2d73746174696f6e2d736563726574"  # hex of "mock-station-secret"
 ESTATE_METER = {"seed": 2026, "stream": "estate", "meter": 1}
 
@@ -114,3 +115,16 @@ def test_a_2x_display_shows_the_receipt_and_the_price(cp):
     cp.expect_display("Preisstand")  # the price, once the station has booted
     cp.charge(card=KNOWN, minutes=10).assert_accepted()
     assert _last(cp.identity)["receipt"] in cp.expect_display("Beleg:")
+
+
+def test_a_held_point_charges_only_its_card(cp):
+    held = _api(
+        f"/v1/csmsd/stations/{cp.identity}/reservations",
+        {"uid": KNOWN, "minutes": 30, "reason": "emobtest holds it"},
+    )
+    assert [r.id for r in cp.reservations] == [held["number"]], "the station was told"
+    assert cp.reservations[0].card == KNOWN
+    assert cp.reservations[0].until > et.utc(), "held into the future"
+    cp.charge(card=OTHER, minutes=5).assert_refused("Invalid")
+    cp.charge(card=KNOWN, minutes=10).assert_accepted().assert_bills()
+    assert _api(f"/v1/csmsd/stations/{cp.identity}")["reservation"] is None, "honoured"

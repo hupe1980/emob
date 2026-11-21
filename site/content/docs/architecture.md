@@ -132,7 +132,7 @@ model behind the operator token. `emob demo` runs the daemons' own
 configured rather than forked — and `deskd` takes its clock as a parameter, so
 the demo can play a morning at 60×. See [Run the estate](@/docs/run-the-estate.md).
 
-**1367 tests** cover the workspace.
+**1374 tests** cover the workspace.
 
 An end-to-end test drives the full chain: OCMF records signed with a real key at
 test time, verified, matched against a session, split into quarter hours, built
@@ -375,7 +375,7 @@ emob does not implement charging protocols; it depends on these libraries:
 | [`agentplane`](https://crates.io/crates/agentplane) | 0.61 | The run journal for `agentd` |
 
 The crates that decide money keep Rust 1.94 as their minimum version so that
-sibling workspaces (`mako` for German market communication, `hems` for home
+sibling workspaces ([`mako`](https://hupe1980.github.io/mako/) for German market communication, [`hems`](https://hupe1980.github.io/hems/) for home
 energy management) can consume them; `emob-roam` needs 1.96 because `ocpi-kit`
 does.
 

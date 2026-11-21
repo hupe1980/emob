@@ -1,5 +1,5 @@
 +++
-title = "emobtest: test and conformance for charging platforms"
+title = "Testing with emobtest"
 description = "A Python toolkit on emob's crates: stations and cars that drive a CSMS, a meter, the invoice's rating, an event inbox, and conformance suites."
 weight = 12
 +++
@@ -63,7 +63,9 @@ with et.Station("wss://csms.example/ocpp", "CP-1", password="…", ocpp="2.0.1")
 
 `fault="tampered"` changes the closing reading after it was signed,
 `"dropped"` signs one and never sends it. Register `cp.meter_key` with the
-CSMS first, or it is right to refuse to bill. `et.Emsp()` is the other side
+CSMS first, or it is right to refuse to bill. `cp.reservations` lists what
+the CSMS holds the station for (`ReserveNow`).
+`et.Emsp()` is the other side
 of an authorisation: `.on(uid).accepts()`, `.blocks()`, `.expired()`,
 `.stalls(3)`, `.fails(503)`, answered as `empd` does.
 

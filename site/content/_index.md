@@ -119,6 +119,8 @@ from **Heute**, the driver checks a **receipt**. New in 0.6:
   receipt and the station's display, and tariff versions announced ahead;
 - **[verify](@/verify.md)** any OCMF record in the browser, offline;
 - the AFIR table **pushed to the Mobilithek**, `driver-tariff.v1` for sellers;
+- a point **held for a driver**: reserved for one card from its asset card,
+  kept by the CSMS itself, "reserviert bis 14:30" on the price page;
 - **notes** on a station, for whoever comes next;
 - **[emobtest](@/docs/emobtest.md)** — stations, cars and an eMSP that drive
   any CSMS over OCPP, and conformance suites for a service that replaces one

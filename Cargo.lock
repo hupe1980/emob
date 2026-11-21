@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "agentplane",
  "anyhow",
@@ -281,7 +281,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "billd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "csmsd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "deskd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "emob-billing"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "emob-cdr"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "emob-eichrecht",
@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "emob-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "emob-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "iso15118",
  "jiff 1.0.1",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "emob-eebus"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "eebus",
  "emob-core",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "emob-eichrecht"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "hex",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "emob-ocpp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "emob-pnc"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.23.1",
  "emob-cdr",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "emob-poi"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "datex2",
  "emob-core",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "emob-roam"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-billing",
  "emob-cdr",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "emob-service"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "emob-session"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1205,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "emob-sim"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "emob-smart"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "emob-tariff"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "emob-thg"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "emob-verify"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-eichrecht",
  "ocmf",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "empd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2834,7 +2834,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "poid"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3327,7 +3327,7 @@ dependencies = [
 
 [[package]]
 name = "roamd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -3857,7 +3857,7 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "sited"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4027,7 +4027,7 @@ dependencies = [
 
 [[package]]
 name = "tarifd"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",

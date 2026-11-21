@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "emob-cdr"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "emob-eichrecht",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "emob-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "jiff 1.0.1",
  "rust_decimal",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "emob-eichrecht"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "hex",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "emob-ocpp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "emob-eichrecht",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "emob-session"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "emob-sim"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "emob-smart"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "emob-tariff"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -431,14 +431,14 @@ dependencies = [
 
 [[package]]
 name = "emob-verify"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ocmf",
 ]
 
 [[package]]
 name = "emobtest-native"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.23.1",
  "datex2",

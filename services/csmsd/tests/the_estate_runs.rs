@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use csmsd::{DeliveryState, Event, Outcome, Status, Target};
@@ -35,6 +35,8 @@ use rust_decimal::Decimal;
 const DEMO: &str = include_str!("../../../deploy/estate.example.toml");
 const GOOD_CARD: &str = "04A1B2C3D4E5F6";
 const BLOCKED_CARD: &str = "04DEADBEEF0001";
+/// A second driver on the same contract.
+const OTHER_CARD: &str = "04C0FFEE000002";
 const OPERATOR: &str = "operator-token";
 const SECRET: &str = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
 /// The bootstrap token the demo estate hands the partner out of band.
@@ -180,6 +182,15 @@ impl Estate {
     }
 
     async fn csmsd_with(&self, estate: csmsd::estate::Estate) -> csmsd::daemon::Running {
+        self.csmsd_clocked(estate, emob_service::system_clock())
+            .await
+    }
+
+    async fn csmsd_clocked(
+        &self,
+        estate: csmsd::estate::Estate,
+        clock: emob_service::Clock,
+    ) -> csmsd::daemon::Running {
         csmsd::daemon::run(csmsd::daemon::Options {
             ocpp: "127.0.0.1:0".parse().unwrap(),
             http: self.csmsd_http,
@@ -188,7 +199,7 @@ impl Estate {
             env: env(),
             shutdown: Shutdown::new(),
             identity: Identity::new("csmsd", "test"),
-            clock: emob_service::system_clock(),
+            clock,
         })
         .await
         .expect("csmsd starts")
@@ -1476,4 +1487,201 @@ async fn sr_144_sr_147_a_station_is_onboarded_and_retired_without_a_restart() {
         "a retired station is refused"
     );
     csmsd.kill();
+}
+
+// ── spec 025: a point is held ───────────────────────────────────────────────
+
+/// What a station that keeps reservations answers: `ReserveNow` with
+/// `status`, `CancelReservation` `Accepted`; every request it saw, by action.
+fn reserving(
+    status: &'static str,
+    seen: Arc<Mutex<Vec<String>>>,
+) -> impl Fn(
+    &ocpp_kit::transport::Ctx,
+    &ocpp_kit::engine::IncomingRequest,
+) -> Result<Box<ocpp_kit::RawValue>, ocpp_kit::rpc::CallError>
++ Send
++ Sync
++ 'static {
+    move |_, request| {
+        seen.lock().unwrap().push(request.action.clone());
+        let body = match request.action.as_str() {
+            "ReserveNow" => format!(r#"{{"status":"{status}"}}"#),
+            "CancelReservation" => r#"{"status":"Accepted"}"#.to_owned(),
+            other => return Err(ocpp_kit::rpc::CallError::not_supported(other)),
+        };
+        ocpp_kit::RawValue::from_string(body)
+            .map_err(|e| ocpp_kit::rpc::CallError::internal(e.to_string()))
+    }
+}
+
+async fn reserving_station(
+    ocpp: SocketAddr,
+    status: &'static str,
+) -> (MockStation, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let station = MockStation::builder("CP-1")
+        .versions([ocpp_kit::Version::V1_6])
+        .answer(reserving(status, Arc::clone(&seen)))
+        .connect(&format!("ws://{ocpp}/ocpp"))
+        .expect("a station");
+    station
+        .boot(ocpp_kit::Version::V1_6)
+        .await
+        .expect("the CSMS answers a boot");
+    (station, seen)
+}
+
+async fn reserve(
+    csmsd: &csmsd::daemon::Running,
+    card: &str,
+    minutes: u32,
+) -> (u16, serde_json::Value) {
+    send(
+        reqwest::Method::POST,
+        &format!("http://{}/v1/csmsd/stations/CP-1/reservations", csmsd.http),
+        Some(OPERATOR),
+        serde_json::json!({ "uid": card, "minutes": minutes, "reason": "fleet car due at nine" }),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sr_178_a_held_point_charges_only_its_card_and_ends_honoured() {
+    let estate = Estate::new("held");
+    let empd = estate.empd().await;
+    let csmsd = estate.csmsd().await;
+    let (station, seen) = reserving_station(csmsd.ocpp, "Accepted").await;
+
+    let (status, held) = reserve(&csmsd, GOOD_CARD, 30).await;
+    assert_eq!(status, 201, "{held}");
+    assert!(seen.lock().unwrap().contains(&"ReserveNow".to_owned()));
+    let (status, again) = reserve(&csmsd, OTHER_CARD, 30).await;
+    assert_eq!(status, 422, "one reservation per point: {again}");
+
+    // SR-176: the view names the card by its tail, never its UID.
+    let (_, page) = get(
+        &format!("http://{}/v1/csmsd/stations/CP-1", csmsd.http),
+        Some(OPERATOR),
+    )
+    .await;
+    assert!(
+        page.contains("\"card\":\"…F6\"") && !page.contains(GOOD_CARD),
+        "{page}"
+    );
+    let (_, price) = get(&format!("http://{}/p/DE*ABC*E00001", csmsd.http), None).await;
+    assert!(
+        price.contains("Reserviert bis") && !price.contains("F6"),
+        "{price}"
+    );
+
+    let other = charge(&station, OTHER_CARD, &[]).await;
+    assert_eq!(
+        other.id_tag_info.status,
+        v1_6::AuthorizationStatus::Invalid,
+        "another card is turned away at a held point, whatever the station did"
+    );
+    let reserved = charge(&station, GOOD_CARD, &[]).await;
+    assert_eq!(
+        reserved.id_tag_info.status,
+        v1_6::AuthorizationStatus::Accepted
+    );
+    assert!(
+        csmsd.csmsd.reservation("CP-1").is_none(),
+        "the reserved card's start ends it honoured"
+    );
+    station.shutdown(Duration::from_secs(1)).await;
+    csmsd.kill();
+    empd.kill();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sr_177_a_point_is_not_held_for_a_refused_card_a_refusing_station_or_too_long() {
+    let estate = Estate::new("refused-hold");
+    let empd = estate.empd().await;
+    let csmsd = estate.csmsd().await;
+    let (station, _) = reserving_station(csmsd.ocpp, "Occupied").await;
+
+    let (status, body) = reserve(&csmsd, BLOCKED_CARD, 30).await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (422, Some("uid")),
+        "{body}"
+    );
+    let (status, body) = reserve(&csmsd, GOOD_CARD, 3).await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (422, Some("minutes")),
+        "{body}"
+    );
+    let (status, body) = reserve(&csmsd, GOOD_CARD, 30).await;
+    assert_eq!(status, 422, "{body}");
+    assert!(
+        body["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Occupied"),
+        "{body}"
+    );
+    assert!(
+        csmsd.csmsd.reservation("CP-1").is_none(),
+        "nothing journalled"
+    );
+    station.shutdown(Duration::from_secs(1)).await;
+    csmsd.kill();
+    empd.kill();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_point_is_cancelled_on_the_station_and_expires_on_time() {
+    let estate = Estate::new("cancel-hold");
+    let empd = estate.empd().await;
+    let shift = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let clock: emob_service::Clock = {
+        let shift = Arc::clone(&shift);
+        Arc::new(move || {
+            time::OffsetDateTime::now_utc()
+                + time::Duration::minutes(shift.load(std::sync::atomic::Ordering::Relaxed))
+        })
+    };
+    let csmsd = estate.csmsd_clocked(estate.sections(), clock).await;
+    let (station, seen) = reserving_station(csmsd.ocpp, "Accepted").await;
+
+    let (_, held) = reserve(&csmsd, GOOD_CARD, 30).await;
+    let number = held["number"].as_u64().expect("a number");
+    let (status, _) = send(
+        reqwest::Method::POST,
+        &format!(
+            "http://{}/v1/csmsd/stations/CP-1/reservations/{number}/cancel",
+            csmsd.http
+        ),
+        Some(OPERATOR),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, 204);
+    assert!(
+        seen.lock()
+            .unwrap()
+            .contains(&"CancelReservation".to_owned())
+    );
+    assert!(csmsd.csmsd.reservation("CP-1").is_none());
+
+    let (status, _) = reserve(&csmsd, GOOD_CARD, 5).await;
+    assert_eq!(status, 201);
+    shift.store(6, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        csmsd.csmsd.expire_reservations(),
+        1,
+        "past its time, it ends"
+    );
+    let other = charge(&station, OTHER_CARD, &[]).await;
+    assert_eq!(
+        other.id_tag_info.status,
+        v1_6::AuthorizationStatus::Accepted,
+        "and the point is free"
+    );
+    station.shutdown(Duration::from_secs(1)).await;
+    csmsd.kill();
+    empd.kill();
 }

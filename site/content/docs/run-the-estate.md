@@ -352,6 +352,11 @@ without a restart:
 - **Notizen** on a station's page hold what the next person needs — access,
   keys, quirks — under the name of whoever wrote them; the newest one shows on
   Heute when the station goes silent, and the search finds stations by them.
+- **Reservierung** holds a point for one card, 5 minutes to a day, once the
+  provider accepts the card and the station `ReserveNow`. Only that card
+  charges there meanwhile, whatever the station's firmware does; the price
+  page says until when, never for whom. It ends when the card starts, when
+  cancelled, or on time.
 - The **Standort** card draws where the station is, and says so when the
   coordinates lie outside the country it is registered in — or when latitude
   and longitude look swapped — with a link to fix them. Every map a driver
@@ -369,6 +374,9 @@ curl -X POST -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" -H 'content-type: a
 (`{"station": …, "reason": …}`). A refusal is `422` naming the field.
 `POST /v1/csmsd/stations/{identity}/notes` takes `{"text": "…"}` (1–500
 characters) and `…/notes/{number}/remove` takes it off again.
+`POST /v1/csmsd/stations/{identity}/reservations` takes `{"uid", "minutes",
+"reason"}` and answers `{number, until}`; `…/reservations/{number}/cancel`
+ends it.
 `GET /v1/csmsd/map?q=&area=` answers the map of a search: `points` up to 300,
 else `cells` of a 16 × 16 grid; `area=west,south,east,north` narrows the
 search and the map alike.

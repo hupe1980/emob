@@ -35,6 +35,7 @@ fn station(identity: &str, silent_since: time::OffsetDateTime) -> Station {
         network: Some("26201".into()),
         carrier: Some("Telekom Deutschland".into()),
         note: Some("Zugang über <b>Tor 3</b>".into()),
+        reserved_until: Some("14:30".into()),
     }
 }
 
@@ -564,4 +565,8 @@ fn sr_155_a_silent_row_shows_its_newest_note_as_text() {
         "{page}"
     );
     assert!(!page.contains("<b>Tor 3</b>"));
+    assert!(
+        page.contains("Reserviert bis 14:30"),
+        "a driver is on the way to a silent station"
+    );
 }

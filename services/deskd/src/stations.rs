@@ -36,6 +36,9 @@ pub struct Row {
     /// Who runs it.
     #[serde(default)]
     pub carrier: Option<String>,
+    /// `14:30` while it is held for a driver.
+    #[serde(default)]
+    pub reserved_until: Option<String>,
 }
 
 /// `csmsd`'s map of a search (spec 022): dots, or a grid.
@@ -446,11 +449,19 @@ fn table(rows: &[Row], lang: Lang) -> String {
         let _ = write!(
             body,
             "<tr><td><a href=\"{href}\"><strong>{identity}</strong></a></td><td>{evse}</td><td>{ocpp}</td>\
-             <td><span class=\"badge {tone}\">{word}</span></td><td>{model}</td><td>{firmware}</td><td>{network}</td></tr>",
+             <td><span class=\"badge {tone}\">{word}</span>{held}</td><td>{model}</td><td>{firmware}</td><td>{network}</td></tr>",
             href = escape(&crate::station::href(&row.identity)),
             identity = escape(&row.identity),
             evse = escape(&row.evse),
             ocpp = escape(&row.ocpp),
+            held = row
+                .reserved_until
+                .as_deref()
+                .map_or_else(String::new, |until| format!(
+                    " <span class=\"badge tone-info\">{} {}</span>",
+                    lang.pick("reserviert bis", "held until"),
+                    escape(until)
+                )),
             model = escape(&format!(
                 "{} {}",
                 row.vendor.as_deref().unwrap_or(""),
@@ -951,6 +962,7 @@ mod tests {
                 firmware: Some("1.3.1".into()),
                 network: Some("26201".into()),
                 carrier: Some("Telekom Deutschland".into()),
+                reserved_until: (n == 0).then(|| "14:30".into()),
             })
             .collect();
         let found = Found {

@@ -660,7 +660,16 @@ fn silent(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
         Row {
             body: format!(
                 "<div><p class=\"what\">{badge} <a href=\"{href}\"><strong>{identity}</strong></a> · {evse}{network}</p>\
-                 <p class=\"why\">{says} <time datetime=\"{iso}\">{at}</time> — {beat}</p>{note}</div>{action}",
+                 <p class=\"why\">{says} <time datetime=\"{iso}\">{at}</time> — {beat}</p>{held}{note}</div>{action}",
+                // A driver is on the way to a station that does not answer.
+                held = station
+                    .reserved_until
+                    .as_deref()
+                    .map_or_else(String::new, |until| format!(
+                        "<p class=\"why tone-warn\">{} {}</p>",
+                        lang.pick("Reserviert bis", "Held until"),
+                        escape(until)
+                    )),
                 badge = badge(Tone::Warn, "◌", lang.pick("Still", "Silent")),
                 identity = escape(&station.identity),
                 href = escape(&crate::station::href(&station.identity)),

@@ -3074,7 +3074,10 @@ fn check_manifests(root: &Path) -> Result<()> {
     let release = root.join(".github/workflows/release.yml");
     if let Ok(workflow) = std::fs::read_to_string(&release) {
         for name in &publishable {
-            if !workflow.contains(&format!("cargo publish -p {name} ")) {
+            // Each crate is one step: `./.github/publish.sh <crate>`, which
+            // waits for a dependency the step before uploaded to reach the
+            // index (the race that stopped 0.6.0 after `emob-core`).
+            if !workflow.contains(&format!("publish.sh {name}\n")) {
                 problems.push(format!(
                     ".github/workflows/release.yml never publishes `{name}`: a release that \
                      uploads some of the workspace succeeds, and the crates it skipped are \

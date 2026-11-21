@@ -65,6 +65,7 @@ pub mod provisioning;
 pub mod read;
 pub mod receipt;
 pub mod registry;
+pub mod reservation;
 pub mod station;
 
 pub use authorize::{Answer, Authorize, Status};
@@ -734,6 +735,262 @@ impl<J: Journal> Csmsd<J> {
     /// A [`registry::Refusal`] naming `identity` for a station not registered,
     /// `text` for an empty or overlong note (SR-154), `journal` when the
     /// journal refuses.
+    /// The reservation holding `identity`, when one is open and its time is
+    /// ahead (spec 025).
+    #[must_use]
+    pub fn reservation(&self, identity: &str) -> Option<journal::Reservation> {
+        let now = self.now();
+        lock(&self.folded)
+            .state()
+            .stations
+            .get(identity)?
+            .reservation
+            .clone()
+            .filter(|held| held.until > now)
+    }
+
+    /// `14:30` — when a held point frees, on the station's own wall clock.
+    #[must_use]
+    pub fn held_until(&self, identity: &str, until: time::OffsetDateTime) -> String {
+        let zone = self
+            .registered(identity)
+            .map(|station| station.location.time_zone)
+            .unwrap_or_default();
+        reservation::wall_clock(&zone, until)
+    }
+
+    /// The provider's answer, held to the station's reservation (SR-178):
+    /// the reserved card charges and, at its start, ends the reservation
+    /// honoured; every other card is `Invalid`, whatever the station decided.
+    fn held(
+        &self,
+        by: &Actor,
+        identity: &Identity,
+        starting: bool,
+        answer: Answer,
+    ) -> Result<Answer, CallError> {
+        let Some(held) = self.reservation(identity.as_str()) else {
+            return Ok(answer);
+        };
+        // A card the provider refused keeps the provider's reason.
+        if answer.status != Status::Accepted {
+            return Ok(answer);
+        }
+        if answer.reference.as_deref() == Some(&held.reference) {
+            if starting {
+                self.record(
+                    by,
+                    Event::ReservationEnded {
+                        station: identity.to_string(),
+                        number: held.number,
+                        how: journal::Ended::Honoured,
+                        at: self.now(),
+                    },
+                )?;
+            }
+            return Ok(answer);
+        }
+        Ok(Answer::invalid(format!(
+            "the point is reserved for another driver until {}",
+            self.held_until(identity.as_str(), held.until)
+        )))
+    }
+
+    /// Hold `identity` for the card `uid` for `minutes` (spec 025): the
+    /// provider must accept the card, the station must accept `ReserveNow`,
+    /// and only then is the reservation a fact (SR-177).
+    ///
+    /// # Errors
+    ///
+    /// The field and the reason: an unknown station, a held one, a length
+    /// outside 5–1440 minutes, a card the provider refuses, a station that
+    /// is not connected or answers anything but `Accepted`.
+    pub async fn reserve(
+        &self,
+        by: &Actor,
+        identity: &str,
+        uid: &str,
+        minutes: u32,
+        reason: &str,
+    ) -> Result<(u64, time::OffsetDateTime), registry::Refusal> {
+        let refuse = |field: &str, reason: String| registry::Refusal {
+            field: field.to_owned(),
+            reason,
+        };
+        let station = self
+            .registered(identity)
+            .ok_or_else(|| refuse("identity", format!("{identity} is not registered")))?;
+        if !reservation::MINUTES.contains(&minutes) {
+            return Err(refuse(
+                "minutes",
+                "a point is held for 5 to 1440 minutes".to_owned(),
+            ));
+        }
+        let reason = station::note_text(reason)
+            .ok_or_else(|| refuse("reason", "say why the point is held".to_owned()))?;
+        if let Some(held) = self.reservation(identity) {
+            return Err(refuse(
+                "reservation",
+                format!(
+                    "{identity} is held until {}; cancel that first",
+                    self.held_until(identity, held.until)
+                ),
+            ));
+        }
+        let answer = self.authority.ask(uid.trim()).await;
+        let reference = match (answer.status, answer.reference) {
+            (Status::Accepted, Some(reference)) => reference,
+            (Status::Accepted, None) => {
+                return Err(refuse(
+                    "uid",
+                    "the provider names no reference for the card".to_owned(),
+                ));
+            }
+            (status, _) => {
+                return Err(refuse(
+                    "uid",
+                    format!("the provider answers {status:?}: {}", answer.reason),
+                ));
+            }
+        };
+        let Some((_, handle)) = self.display.get() else {
+            return Err(refuse(
+                "station",
+                "this CSMS is not listening for stations".to_owned(),
+            ));
+        };
+        let target =
+            Identity::new(identity).map_err(|error| refuse("identity", error.to_string()))?;
+        let number = lock(&self.folded)
+            .state()
+            .stations
+            .get(identity)
+            .map_or(0, |known| known.reservations_made)
+            + 1;
+        let id = i32::try_from(number)
+            .map_err(|_| refuse("reservation", "too many reservations".to_owned()))?;
+        let until = self.now() + time::Duration::minutes(i64::from(minutes));
+        match reservation::reserve(handle, &target, station.ocpp, id, uid.trim(), until).await {
+            Ok(status) if status == "Accepted" => {}
+            Ok(status) => return Err(refuse("station", format!("{identity} answered {status}"))),
+            Err(why) => return Err(refuse("station", format!("{identity}: {why}"))),
+        }
+        self.record(
+            by,
+            Event::Reserved {
+                station: identity.to_owned(),
+                number,
+                reference,
+                card: reservation::tail(uid),
+                until,
+                by: by.to_string(),
+                reason,
+                at: self.now(),
+            },
+        )
+        .map_err(|_| refuse("journal", "the journal refused the reservation".to_owned()))?;
+        tracing::info!(station = %identity, number, "a point is held");
+        Ok((number, until))
+    }
+
+    /// Cancel reservation `number` on `identity`: `CancelReservation` to the
+    /// station, best effort, and the end as a fact either way — the hold is
+    /// csmsd's to release.
+    ///
+    /// # Errors
+    ///
+    /// No such open reservation, or the journal refused.
+    pub async fn cancel_reservation(
+        &self,
+        by: &Actor,
+        identity: &str,
+        number: u64,
+    ) -> Result<(), registry::Refusal> {
+        let refuse = |reason: String| registry::Refusal {
+            field: "number".to_owned(),
+            reason,
+        };
+        let held = self
+            .reservation(identity)
+            .filter(|held| held.number == number)
+            .ok_or_else(|| refuse(format!("{identity} has no open reservation {number}")))?;
+        if let (Some((_, handle)), Some(station), Ok(target), Ok(id)) = (
+            self.display.get(),
+            self.registered(identity),
+            Identity::new(identity),
+            i32::try_from(held.number),
+        ) {
+            let status = reservation::cancel(handle, &target, station.ocpp, id).await;
+            tracing::info!(station = %identity, number, ?status, "reservation cancelled");
+        }
+        self.end_reservation(by, identity, number, journal::Ended::Cancelled)
+            .map_err(|_| refuse("the journal refused the cancellation".to_owned()))
+    }
+
+    fn end_reservation(
+        &self,
+        by: &Actor,
+        identity: &str,
+        number: u64,
+        how: journal::Ended,
+    ) -> Result<(), CallError> {
+        self.record(
+            by,
+            Event::ReservationEnded {
+                station: identity.to_owned(),
+                number,
+                how,
+                at: self.now(),
+            },
+        )
+    }
+
+    /// End every reservation whose time has passed — the minute sweep's job,
+    /// so a held point frees on time even if the station never says so.
+    pub fn expire_reservations(&self) -> usize {
+        let now = self.now();
+        let due: Vec<(String, u64)> = lock(&self.folded)
+            .state()
+            .stations
+            .iter()
+            .filter_map(|(identity, known)| {
+                known
+                    .reservation
+                    .as_ref()
+                    .filter(|held| held.until <= now)
+                    .map(|held| (identity.clone(), held.number))
+            })
+            .collect();
+        due.iter()
+            .filter(|(identity, number)| {
+                self.end_reservation(&Actor::Timer, identity, *number, journal::Ended::Expired)
+                    .is_ok()
+            })
+            .count()
+    }
+
+    /// A 2.x station's `ReservationStatusUpdate`: its reservation is over.
+    fn reservation_updated(
+        &self,
+        by: &Actor,
+        identity: &Identity,
+        id: i32,
+        status: &str,
+    ) -> Result<(), CallError> {
+        let Some(held) = self
+            .reservation(identity.as_str())
+            .filter(|held| i64::try_from(held.number).ok() == Some(i64::from(id)))
+        else {
+            return Ok(());
+        };
+        let how = if status == "Expired" {
+            journal::Ended::Expired
+        } else {
+            journal::Ended::Removed
+        };
+        self.end_reservation(by, identity.as_str(), held.number, how)
+    }
+
     pub fn note(&self, by: &Actor, identity: &str, text: &str) -> Result<u64, registry::Refusal> {
         if self.registered(identity).is_none() {
             return Err(registry::Refusal {
@@ -896,7 +1153,12 @@ impl<J: Journal> Csmsd<J> {
         transaction: Option<String>,
         uid: &str,
     ) -> Result<Answer, CallError> {
-        let answer = self.authority.ask(uid).await;
+        let answer = self.held(
+            by,
+            identity,
+            transaction.is_some(),
+            self.authority.ask(uid).await,
+        )?;
         if answer.status != Status::Accepted {
             tracing::info!(station = %identity, status = ?answer.status, reason = %answer.reason, "a token was turned away");
         }
@@ -1657,6 +1919,15 @@ impl<J: Journal> Csmsd<J> {
             v2_0_1::CsRequest::LogStatusNotification(_) => {
                 ctx.reply(&v2_0_1::LogStatusNotificationResponse::new())
             }
+            v2_0_1::CsRequest::ReservationStatusUpdate(update) => {
+                self.reservation_updated(
+                    by,
+                    ctx.identity(),
+                    update.reservation_id,
+                    &display::wire(&update.reservation_update_status),
+                )?;
+                ctx.reply(&v2_0_1::ReservationStatusUpdateResponse::new())
+            }
             v2_0_1::CsRequest::Authorize(authorize) => {
                 let answer = self
                     .authorize(by, ctx.identity(), None, &authorize.id_token.id_token)
@@ -1734,6 +2005,15 @@ impl<J: Journal> Csmsd<J> {
             }
             v2_1::CsRequest::LogStatusNotification(_) => {
                 ctx.reply(&v2_1::LogStatusNotificationResponse::new())
+            }
+            v2_1::CsRequest::ReservationStatusUpdate(update) => {
+                self.reservation_updated(
+                    by,
+                    ctx.identity(),
+                    update.reservation_id,
+                    &display::wire(&update.reservation_update_status),
+                )?;
+                ctx.reply(&v2_1::ReservationStatusUpdateResponse::new())
             }
             v2_1::CsRequest::Authorize(authorize) => {
                 let answer = self

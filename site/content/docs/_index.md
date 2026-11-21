@@ -18,6 +18,11 @@ or start with **[Getting started](@/docs/getting-started.md)** for library
 code; then read in the order below. Unfamiliar terms (CPO, eMSP, CDR,
 OCMF, AFIR …) are defined in the [glossary](@/docs/glossary.md).
 
+Its siblings: [mako](https://hupe1980.github.io/mako/) for German energy
+market communication (NZR-EMob Modell 2 for charge points) and
+[hems](https://hupe1980.github.io/hems/) for home energy management behind the
+meter.
+
 ## Reading order
 
 | # | Page | What it answers | Read it if you are… |

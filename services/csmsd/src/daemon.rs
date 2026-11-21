@@ -250,7 +250,8 @@ pub async fn run(options: Options) -> Result<Running> {
             () = stopping.wait() => {}
         }
     }));
-    // Spec 012: a station silent past its heartbeat becomes `Offline`, once.
+    // Spec 012: a station silent past its heartbeat becomes `Offline`, once;
+    // spec 025: a reservation past its time ends.
     let (presence, stopping) = (Arc::clone(&csmsd), shutdown.clone());
     tasks.push(tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -259,6 +260,11 @@ pub async fn run(options: Options) -> Result<Running> {
                 _ = ticker.tick() => {
                     if let Err(error) = presence.sweep(time::OffsetDateTime::now_utc()) {
                         tracing::error!(%error, "the presence sweep could not record a fact");
+                    }
+                    // Spec 025: a held point frees on time, whatever the station says.
+                    let expired = presence.expire_reservations();
+                    if expired > 0 {
+                        tracing::info!(expired, "reservations expired");
                     }
                 }
                 () = stopping.wait() => return,

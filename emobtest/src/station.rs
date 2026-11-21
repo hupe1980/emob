@@ -52,6 +52,8 @@ struct Answers {
     wallbox: Arc<Mutex<Option<Wallbox>>>,
     display: Arc<Mutex<Vec<String>>>,
     asked: Arc<Mutex<Vec<String>>>,
+    /// What the CSMS holds this station for: `(id, card, until)`.
+    reservations: Arc<Mutex<Vec<(i64, String, String)>>>,
 }
 
 impl Handler for Answers {
@@ -64,6 +66,41 @@ impl Handler for Answers {
             let payload = request.payload.get().to_owned();
             if let Ok(mut asked) = self.asked.lock() {
                 asked.push(request.action.clone());
+            }
+            // A reservation is kept and answered `Accepted`; a cancellation
+            // of one it holds too, of one it does not `Rejected`.
+            if request.action == "ReserveNow" || request.action == "CancelReservation" {
+                let asked: Value = serde_json::from_str(&payload).unwrap_or_default();
+                let id = asked["reservationId"]
+                    .as_i64()
+                    .or_else(|| asked["id"].as_i64())
+                    .unwrap_or_default();
+                let mut held = self
+                    .reservations
+                    .lock()
+                    .map_err(|e| CallError::internal(e.to_string()))?;
+                let status = if request.action == "ReserveNow" {
+                    let card = asked["idTag"]
+                        .as_str()
+                        .or_else(|| asked["idToken"]["idToken"].as_str())
+                        .unwrap_or_default()
+                        .to_owned();
+                    let until = asked["expiryDate"]
+                        .as_str()
+                        .or_else(|| asked["expiryDateTime"].as_str())
+                        .unwrap_or_default()
+                        .to_owned();
+                    held.retain(|(kept, _, _)| *kept != id);
+                    held.push((id, card, until));
+                    "Accepted"
+                } else if held.iter().any(|(kept, _, _)| *kept == id) {
+                    held.retain(|(kept, _, _)| *kept != id);
+                    "Accepted"
+                } else {
+                    "Rejected"
+                };
+                return RawValue::from_string(format!(r#"{{"status":"{status}"}}"#))
+                    .map_err(|e| CallError::internal(e.to_string()));
             }
             if request.action == "SetDisplayMessage" {
                 let shown: Value = serde_json::from_str(&payload).unwrap_or_default();
@@ -540,6 +577,16 @@ impl NativeStation {
             .display
             .lock()
             .map(|d| d.clone())
+            .unwrap_or_default()
+    }
+
+    /// What the CSMS holds the station for: `(id, card, until)`.
+    #[getter]
+    fn reservations(&self) -> Vec<(i64, String, String)> {
+        self.answers
+            .reservations
+            .lock()
+            .map(|held| held.clone())
             .unwrap_or_default()
     }
 

@@ -64,7 +64,11 @@ fn the_estates_contracts_are_seeded_once_and_a_second_start_changes_nothing() {
         "a seed already journalled is not journalled again"
     );
     assert_eq!(book.state().contracts().count(), 1);
-    assert_eq!(book.state().tokens().count(), 2);
+    assert_eq!(
+        book.state().tokens().count(),
+        3,
+        "two drivers and a blocked card"
+    );
 }
 
 #[test]

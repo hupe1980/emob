@@ -42,7 +42,7 @@ from .core import (
 )
 from .emsp import Emsp
 from .inbox import Inbox
-from .station import Car, Session, Station
+from .station import Car, Reservation, Session, Station
 
 __all__ = [
     "EVENT_TYPES",
@@ -55,6 +55,7 @@ __all__ = [
     "Inbox",
     "Meter",
     "Reading",
+    "Reservation",
     "Session",
     "Station",
     "Tariff",

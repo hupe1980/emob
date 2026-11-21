@@ -100,7 +100,7 @@ OCMF verifier that checks every signed value on the phone, offline once loaded.
 
 **The price before the plug, and a kit that proves the platform from outside.**
 The fifteen
-domain crates are built and tested (**1367 tests** across the workspace). The
+domain crates are built and tested (**1374 tests** across the workspace). The
 nine daemons start from one `estate.toml` and are wired end to end:
 
 - stations connect to `csmsd` over OCPP 1.6J, 2.0.1 and 2.1 with security
@@ -140,6 +140,9 @@ nine daemons start from one `estate.toml` and are wired end to end:
   Mobilithek over mutual TLS;
 - any OCMF record can be checked on the site's **verify** page, offline, by
   the receipt's own WebAssembly module;
+- an operator **holds a point** for one card from its asset card; `csmsd`
+  sends `ReserveNow`, turns every other card away itself, and frees it when
+  the card starts, when cancelled, or on time;
 - `emob check estate.toml` names a mistake by line and key, and editors
   complete the estate from its published JSON Schema;
 - the operator works from **Heute** (`deskd`), the driver checks a **receipt** —
@@ -448,6 +451,11 @@ Nine daemons, one image each, all started from the one estate file.
 Every regulatory claim in the code cites a document and section in a fixed form
 such as `[AFIR Art. 5(4)]`; `cargo xtask check-citations` fails the build on a
 citation it cannot resolve to an indexed source.
+
+**Sibling projects:** [mako](https://hupe1980.github.io/mako/) — German energy
+market communication in Rust, where NZR-EMob Modell 2 for charge points lives
+— and [hems](https://hupe1980.github.io/hems/) — home energy management, § 14a
+behind the meter. Both can build on emob's money crates.
 
 ## Security
 

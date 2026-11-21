@@ -229,6 +229,14 @@ fn router(desk: Arc<Page>, operators: emob_service::Operators) -> axum::Router {
             "/station/{identity}/edit",
             get(edit_station_page).post(edit_station),
         )
+        .route(
+            "/station/{identity}/reservations",
+            axum::routing::post(reserve),
+        )
+        .route(
+            "/station/{identity}/reservations/{number}/cancel",
+            axum::routing::post(cancel_reservation),
+        )
         .route("/station/{identity}/notes", axum::routing::post(write_note))
         .route(
             "/station/{identity}/notes/{number}/remove",
@@ -547,6 +555,120 @@ async fn retire_station(
             .into_response(),
         Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct ReserveForm {
+    uid: String,
+    minutes: u32,
+    reason: String,
+}
+
+/// `POST /station/{identity}/reservations` — forwarded with the operator's
+/// own token from this origin only, as a note is (spec 025).
+async fn reserve(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Form(form): axum::Form<ReserveForm>,
+) -> Response {
+    let lang = language(None, &headers);
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let url = format!(
+        "{}/v1/csmsd{}/reservations",
+        desk.csmsd.trim_end_matches('/'),
+        station::href(&identity).replacen("/station/", "/stations/", 1)
+    );
+    let body =
+        serde_json::json!({ "uid": form.uid, "minutes": form.minutes, "reason": form.reason });
+    let answer = desk
+        .reader
+        .write(reqwest::Method::POST, &url, &token, &body)
+        .await;
+    let typed = station::Typed {
+        uid: &form.uid,
+        minutes: form.minutes,
+        reason: &form.reason,
+    };
+    back_to(&identity, "reservation", answer, Some(&typed), lang)
+}
+
+/// `POST /station/{identity}/reservations/{number}/cancel`.
+async fn cancel_reservation(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
+    headers: HeaderMap,
+) -> Response {
+    let lang = language(None, &headers);
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let url = format!(
+        "{}/v1/csmsd{}/reservations/{number}/cancel",
+        desk.csmsd.trim_end_matches('/'),
+        station::href(&identity).replacen("/station/", "/stations/", 1)
+    );
+    let answer = desk
+        .reader
+        .write(
+            reqwest::Method::POST,
+            &url,
+            &token,
+            &serde_json::Value::Null,
+        )
+        .await;
+    back_to(&identity, "reservation", answer, None, lang)
+}
+
+/// Back to the section on the asset card; a refusal is a page that says why
+/// and links back — the station's own word when it was the station.
+fn back_to(
+    identity: &str,
+    section: &str,
+    answer: Result<(u16, serde_json::Value), fetch::Why>,
+    typed: Option<&station::Typed<'_>>,
+    lang: Lang,
+) -> Response {
+    let back = format!("{}#{section}", station::href(identity));
+    let reason = match answer {
+        Ok((201 | 204 | 404, _)) => return axum::response::Redirect::to(&back).into_response(),
+        Ok((_, body)) => station::refusal_text(body["reason"].as_str().unwrap_or("refused"), lang),
+        Err(_) => lang
+            .pick("csmsd antwortet nicht", "csmsd is not answering")
+            .to_owned(),
+    };
+    let body = format!(
+        "<div class=\"verdict tone-bad\"><span class=\"icon\" aria-hidden=\"true\">✗</span><div>\
+         <h1>{title}</h1><p>{reason}</p></div></div>{again_form}<p><a href=\"{back}\">{back_label}</a></p>",
+        title = match lang {
+            Lang::De => format!("{identity} ist nicht reserviert"),
+            Lang::En => format!("{identity} is not held"),
+        },
+        reason = ui::escape(&reason),
+        // What was typed stays, so a changed card or time is one click.
+        again_form = typed.map_or_else(String::new, |typed| format!(
+            "<section class=\"card\">{}</section>",
+            station::reserve_form(identity, Some(typed), lang)
+        )),
+        back = ui::escape(&back),
+        back_label = lang.pick("Zurück zur Station", "Back to the station"),
+    );
+    let mut page = ui::html(ui::page(
+        &ui::Shell {
+            title: lang.pick("Nicht reserviert", "Not held"),
+            place: lang.pick("Station", "Station"),
+            lang,
+            reading: true,
+            script: None,
+        },
+        &body,
+    ));
+    *page.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+    page
 }
 
 #[derive(Deserialize)]

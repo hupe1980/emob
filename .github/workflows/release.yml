@@ -110,94 +110,49 @@ jobs:
         run: echo "CARGO_REGISTRY_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: Publish emob-core
-        run: |
-          out=$(cargo publish -p emob-core --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-core
 
       - name: Publish emob-eichrecht
-        run: |
-          out=$(cargo publish -p emob-eichrecht --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-eichrecht
 
       - name: Publish emob-session
-        run: |
-          out=$(cargo publish -p emob-session --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-session
 
       - name: Publish emob-tariff
-        run: |
-          out=$(cargo publish -p emob-tariff --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-tariff
 
       - name: Publish emob-cdr
-        run: |
-          out=$(cargo publish -p emob-cdr --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-cdr
 
       - name: Publish emob-billing
-        run: |
-          out=$(cargo publish -p emob-billing --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-billing
 
       - name: Publish emob-smart
-        run: |
-          out=$(cargo publish -p emob-smart --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-smart
 
       - name: Publish emob-eebus
-        run: |
-          out=$(cargo publish -p emob-eebus --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-eebus
 
       - name: Publish emob-ocpp
-        run: |
-          out=$(cargo publish -p emob-ocpp --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-ocpp
 
       - name: Publish emob-sim
-        run: |
-          out=$(cargo publish -p emob-sim --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-sim
 
       - name: Publish emob-pnc
-        run: |
-          out=$(cargo publish -p emob-pnc --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-pnc
 
       - name: Publish emob-poi
-        run: |
-          out=$(cargo publish -p emob-poi --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-poi
 
       - name: Publish emob-roam
-        run: |
-          out=$(cargo publish -p emob-roam --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-roam
 
       - name: Publish emob-service
-        run: |
-          out=$(cargo publish -p emob-service --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-service
 
       - name: Publish emob-thg
-        run: |
-          out=$(cargo publish -p emob-thg --locked 2>&1) && rc=0 || rc=$?
-          echo "$out"
-          if [ "$rc" -ne 0 ] && ! echo "$out" | grep -qE "already uploaded|already exists on crates\.io"; then exit "$rc"; fi
+        run: ./.github/publish.sh emob-thg
 
   # The GitHub release, and what a consumer checks a release against: every
   # `.crate` as packaged here, the workspace SBOM, `SHA256SUMS` over both, and a

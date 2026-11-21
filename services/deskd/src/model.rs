@@ -123,6 +123,9 @@ pub struct Station {
     /// Its newest note.
     #[serde(default)]
     pub note: Option<String>,
+    /// `14:30` when the silent point is held for a driver.
+    #[serde(default)]
+    pub reserved_until: Option<String>,
 }
 
 /// `GET /v1/billd/today`.

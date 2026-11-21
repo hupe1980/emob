@@ -237,6 +237,40 @@ pub enum Event {
         #[serde(with = "time::serde::rfc3339")]
         at: time::OffsetDateTime,
     },
+    /// A point held for one card until a time (spec 025). The card is its
+    /// provider's reference and a masked tail, never the UID (SR-176).
+    Reserved {
+        /// Which station.
+        station: String,
+        /// Its number on that station, from 1 — the `reservationId` sent.
+        number: u64,
+        /// The provider's keyed digest of the card's UID.
+        reference: String,
+        /// The UID's last two characters, for a person to recognise it.
+        card: String,
+        /// Held until.
+        #[serde(with = "time::serde::rfc3339")]
+        until: time::OffsetDateTime,
+        /// Who asked, as the actor reads.
+        by: String,
+        /// Why.
+        reason: String,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A reservation is over.
+    ReservationEnded {
+        /// Which station.
+        station: String,
+        /// Which reservation.
+        number: u64,
+        /// How.
+        how: Ended,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
     /// A station's firmware or security report (SR-140).
     Reported {
         /// Which station.
@@ -271,6 +305,8 @@ impl Kinded for Event {
             Self::StationRetired { .. } => "station_retired",
             Self::StationNoted { .. } => "station_noted",
             Self::NoteRemoved { .. } => "note_removed",
+            Self::Reserved { .. } => "reserved",
+            Self::ReservationEnded { .. } => "reservation_ended",
         }
     }
 }
@@ -466,6 +502,41 @@ pub struct Known {
     pub notes: Vec<Note>,
     /// How many notes were ever written on it — the next one's number.
     pub notes_written: u64,
+    /// The reservation holding it, if one is open (spec 025).
+    pub reservation: Option<Reservation>,
+    /// How many reservations were ever made on it — the next one's number.
+    pub reservations_made: u64,
+}
+
+/// A point held for one card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Reservation {
+    /// Its number on the station.
+    pub number: u64,
+    /// The provider's reference for the card; never serialised to a view.
+    #[serde(skip)]
+    pub reference: String,
+    /// The card's masked tail, `…F6`.
+    pub card: String,
+    /// Held until.
+    #[serde(with = "time::serde::rfc3339")]
+    pub until: time::OffsetDateTime,
+    /// Who asked.
+    pub by: String,
+}
+
+/// How a reservation ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ended {
+    /// The reserved card started charging.
+    Honoured,
+    /// The operator cancelled it.
+    Cancelled,
+    /// Its time passed.
+    Expired,
+    /// The station ended it (2.x `ReservationStatusUpdate` `Removed`).
+    Removed,
 }
 
 /// How many notes a station's page and fold keep (SR-154).
@@ -629,6 +700,37 @@ pub fn apply(state: &mut State, event: Event) {
             });
             if known.notes.len() > NOTES {
                 known.notes.remove(0);
+            }
+        }
+        Event::Reserved {
+            station,
+            number,
+            reference,
+            card,
+            until,
+            by,
+            ..
+        } => {
+            let known = state.stations.entry(station).or_default();
+            known.reservations_made = known.reservations_made.max(number);
+            known.reservation = Some(Reservation {
+                number,
+                reference,
+                card,
+                until,
+                by,
+            });
+        }
+        Event::ReservationEnded {
+            station, number, ..
+        } => {
+            if let Some(known) = state.stations.get_mut(&station)
+                && known
+                    .reservation
+                    .as_ref()
+                    .is_some_and(|held| held.number == number)
+            {
+                known.reservation = None;
             }
         }
         Event::NoteRemoved {

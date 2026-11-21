@@ -61,7 +61,8 @@ vehicle, an emob-sim meter signing every register reading (register
 `tampered`, `dropped`. Its sessions are real to the CSMS — on production, use
 your own test card.
 
-`et.Emsp()` answers a CSMS's authorisation as `empd` does, and misbehaves on
+A `ReserveNow` is answered `Accepted` and kept: `cp.reservations` lists what
+the CSMS holds the station for. `et.Emsp()` answers a CSMS's authorisation as `empd` does, and misbehaves on
 cue: `.on(uid).accepts()`, `.blocks()`, `.expired()`, `.stalls(3)`,
 `.fails(503)`.
 

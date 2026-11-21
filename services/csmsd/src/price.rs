@@ -79,6 +79,9 @@ struct Point {
     site: String,
     zone: TimeZone,
     history: TariffHistory,
+    /// `14:30` while the point is reserved — the time only, never for whom
+    /// (SR-176).
+    held_until: Option<String>,
 }
 
 fn find<J: Journal>(csmsd: &Csmsd<J>, evse: &str) -> Option<Point> {
@@ -90,6 +93,9 @@ fn find<J: Journal>(csmsd: &Csmsd<J>, evse: &str) -> Option<Point> {
             .cloned()
     })?;
     Some(Point {
+        held_until: csmsd
+            .reservation(&station.identity)
+            .map(|held| csmsd.held_until(&station.identity, held.until)),
         history: csmsd.tariff(&station.tariff)?.clone(),
         power_kw: station.rated_power_kw,
         site: station.location.name.clone(),
@@ -231,6 +237,18 @@ fn render(
         evse = escape(&point.evse.to_string()),
         site = escape(&point.site),
     );
+    if let Some(until) = &point.held_until {
+        let _ = write!(
+            body,
+            "<p class=\"why tone-warn\"><strong>{} {}</strong> — {}</p>",
+            lang.pick("Reserviert bis", "Reserved until"),
+            escape(until),
+            lang.pick(
+                "bis dahin lädt hier nur, wer reserviert hat. Danach ist der Ladepunkt wieder frei.",
+                "until then only the driver who reserved it can charge here. Then it is free again.",
+            ),
+        );
+    }
     let Some(current) = point.history.in_force_at(now) else {
         let _ = write!(
             body,
@@ -555,6 +573,7 @@ mod tests {
                 version("0.52", Some(change), None),
             ])
             .unwrap(),
+            held_until: None,
         }
     }
 
@@ -563,6 +582,23 @@ mod tests {
             name: "Stadtwerke Musterstadt".to_owned(),
             contact: Some("service@example.org".to_owned()),
         }
+    }
+
+    #[test]
+    fn sr_176_a_held_point_says_until_when_and_nothing_about_whom() {
+        let held = Point {
+            held_until: Some("14:30".to_owned()),
+            ..point()
+        };
+        let html = render(
+            &held,
+            &operator(),
+            "https://p.example",
+            datetime!(2026-12-01 10:00 +1),
+            Lang::De,
+        );
+        assert!(html.contains("Reserviert bis 14:30</strong>"), "{html}");
+        assert!(!html.contains("Karte") && !html.contains("operator:"));
     }
 
     #[test]

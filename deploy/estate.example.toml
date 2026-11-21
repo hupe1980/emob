@@ -133,6 +133,7 @@ id = "DE-MSP-C00000001-W"
 from = "2026-01-01"
 tokens = [
   { uid = "04A1B2C3D4E5F6", type = "RFID", whitelist = "ALLOWED" },
+  { uid = "04C0FFEE000002", type = "RFID", whitelist = "ALLOWED" },
   { uid = "04DEADBEEF0001", type = "RFID", whitelist = "ALLOWED", blocked = true },
 ]
 

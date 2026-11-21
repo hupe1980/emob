@@ -41,6 +41,9 @@ pub struct StationPage {
     /// Operators' notes, newest first.
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// The reservation holding it (spec 025).
+    #[serde(default)]
+    pub reservation: Option<Held>,
     /// The price in force (spec 015).
     #[serde(default)]
     pub price: Option<Price>,
@@ -104,6 +107,20 @@ pub struct Price {
     pub preisstand: String,
     /// `/p/{evse}` on the public shell.
     pub path: String,
+}
+
+/// A reservation holding the point.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Held {
+    /// Its number on the station.
+    pub number: u64,
+    /// The card's tail, `…F6` — never its UID.
+    pub card: String,
+    /// Until.
+    #[serde(with = "time::serde::rfc3339")]
+    pub until: time::OffsetDateTime,
+    /// Who asked, as an actor.
+    pub by: String,
 }
 
 /// An operator's note.
@@ -272,7 +289,9 @@ pub fn render(
 ) -> String {
     let ctx = Ctx { lang, zone, now };
     let mut body = verdict(page, &ctx);
-    // What the next person needs to know comes before the numbers.
+    // Whether the point is held, then what the next person needs to know,
+    // before the numbers.
+    body.push_str(&reservation(page, &ctx));
     body.push_str(&notes(page, &ctx));
     body.push_str(&rate(page, &ctx));
     body.push_str(&asset(page, &ctx, receipts));
@@ -292,6 +311,178 @@ pub fn render(
         },
         &body,
     )
+}
+
+/// The reservation holding the point, cancellable, or a form to hold it
+/// for a card (spec 025). The card shows as its tail only (SR-176).
+fn reservation(page: &StationPage, ctx: &Ctx<'_>) -> String {
+    let lang = ctx.lang;
+    let station = escape(&href(&page.identity));
+    let mut out = format!(
+        "<section class=\"card\" id=\"reservation\" aria-labelledby=\"reservation-h\"><h2 id=\"reservation-h\">{}</h2>",
+        lang.pick("Reservierung", "Reservation")
+    );
+    if let Some(held) = &page.reservation {
+        let _ = write!(
+            out,
+            "<p class=\"why tone-warn\"><strong>{held_until} {until}</strong> · {left} · {for_card} <code>{card}</code> · {by}</p>\
+             <form method=\"post\" action=\"{station}/reservations/{number}/cancel\" class=\"noprint\">\
+             <button class=\"btn ghost\" type=\"submit\">{cancel}</button></form></section>",
+            held_until = lang.pick("Reserviert bis", "Held until"),
+            until = ctx.when(held.until),
+            left = left(held.until - ctx.now, lang),
+            for_card = lang.pick("für Karte", "for card"),
+            card = escape(&held.card),
+            by = escape(held.by.strip_prefix("operator:").unwrap_or(&held.by)),
+            number = held.number,
+            cancel = lang.pick("Reservierung aufheben", "Cancel the reservation"),
+        );
+        return out;
+    }
+    let _ = write!(
+        out,
+        "<details class=\"noprint\"><summary>{add}</summary>{form}</details></section>",
+        add = lang.pick("+ Für eine Karte reservieren", "+ Hold for a card"),
+        form = reserve_form(&page.identity, None, lang),
+    );
+    out
+}
+
+/// "noch 27 min", "noch 1 h 5 min" — how long a hold has left.
+fn left(remaining: time::Duration, lang: Lang) -> String {
+    let minutes = remaining.whole_minutes().max(0);
+    let span = if minutes >= 60 {
+        format!("{} h {} min", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes} min")
+    };
+    match lang {
+        Lang::De => format!("noch {span}"),
+        Lang::En => format!("{span} left"),
+    }
+}
+
+/// What the operator typed, put back after a refusal.
+pub struct Typed<'a> {
+    /// The card's UID.
+    pub uid: &'a str,
+    /// How long.
+    pub minutes: u32,
+    /// What for.
+    pub reason: &'a str,
+}
+
+/// The form that holds a point for a card — on the asset card, and again,
+/// filled in, beside a refusal.
+#[must_use]
+pub fn reserve_form(identity: &str, typed: Option<&Typed<'_>>, lang: Lang) -> String {
+    let chosen = typed.map_or(30, |typed| typed.minutes);
+    let mut minutes = String::new();
+    for m in [15, 30, 60, 120, 240, 480] {
+        let _ = write!(
+            minutes,
+            "<option value=\"{m}\"{selected}>{label}</option>",
+            selected = if m == chosen { " selected" } else { "" },
+            label = if m >= 60 {
+                format!("{} h", m / 60)
+            } else {
+                format!("{m} min")
+            },
+        );
+    }
+    format!(
+        "<form method=\"post\" action=\"{station}/reservations\">\
+         <p><label for=\"reserve-uid\">{card}</label><br><input type=\"text\" id=\"reserve-uid\" name=\"uid\" required maxlength=\"36\" autocomplete=\"off\" spellcheck=\"false\" inputmode=\"latin\" value=\"{uid}\" placeholder=\"04A1B2C3D4E5F6\" aria-describedby=\"reserve-hint\"></p>\
+         <p><label for=\"reserve-minutes\">{how_long}</label><br><select id=\"reserve-minutes\" name=\"minutes\">{minutes}</select></p>\
+         <p><label for=\"reserve-reason\">{why}</label><br><input type=\"text\" id=\"reserve-reason\" name=\"reason\" required maxlength=\"200\" value=\"{reason}\" placeholder=\"{example}\"></p>\
+         <p class=\"muted\" id=\"reserve-hint\">{hint}</p><p><button class=\"btn\" type=\"submit\">{save}</button></p></form>",
+        station = escape(&href(identity)),
+        uid = escape(typed.map_or("", |typed| typed.uid)),
+        reason = escape(typed.map_or("", |typed| typed.reason)),
+        card = lang.pick("Karte (UID, wie die Station sie liest)", "Card (UID, as the station reads it)"),
+        how_long = lang.pick("Wie lange", "For how long"),
+        why = lang.pick("Wofür", "What for"),
+        example = lang.pick("Flottenfahrzeug kommt um neun", "Fleet car due at nine"),
+        hint = lang.pick(
+            "Nur diese Karte lädt dann hier. Der Anbieter muss die Karte kennen, die Station muss zustimmen; die Preisseite zeigt nur, bis wann.",
+            "Only this card charges here meanwhile. The provider must know the card and the station must agree; the price page shows only until when.",
+        ),
+        save = lang.pick("Reservieren", "Hold the point"),
+    )
+}
+
+/// A refusal of a reservation in the operator's words: the station's own
+/// answer, the provider's, or the rule — whatever `csmsd` said.
+#[must_use]
+pub fn refusal_text(reason: &str, lang: Lang) -> String {
+    let station = [
+        (
+            "answered Occupied",
+            "Die Station ist gerade belegt.",
+            "The station is in use right now.",
+        ),
+        (
+            "answered Faulted",
+            "Die Station meldet eine Störung.",
+            "The station reports a fault.",
+        ),
+        (
+            "answered Unavailable",
+            "Die Station ist außer Betrieb.",
+            "The station is out of service.",
+        ),
+        (
+            "answered Rejected",
+            "Die Station nimmt keine Reservierungen an.",
+            "The station does not take reservations.",
+        ),
+        (
+            "not connected",
+            "Die Station ist gerade nicht verbunden.",
+            "The station is not connected right now.",
+        ),
+        (
+            "no answer",
+            "Die Station hat nicht geantwortet.",
+            "The station did not answer.",
+        ),
+        (
+            "CALLERROR",
+            "Die Station kennt keine Reservierungen.",
+            "The station does not support reservations.",
+        ),
+        (
+            "answers Blocked",
+            "Die Karte ist gesperrt.",
+            "The card is blocked.",
+        ),
+        (
+            "answers Expired",
+            "Der Vertrag der Karte ist abgelaufen.",
+            "The card's contract has ended.",
+        ),
+        (
+            "answers Invalid",
+            "Der Anbieter kennt die Karte nicht.",
+            "The provider does not know the card.",
+        ),
+        (
+            "5 to 1440 minutes",
+            "Eine Reservierung dauert 5 Minuten bis einen Tag.",
+            "A reservation lasts 5 minutes to a day.",
+        ),
+    ];
+    if let Some((_, de, en)) = station.iter().find(|(said, _, _)| reason.contains(said)) {
+        return lang.pick(de, en).to_owned();
+    }
+    if let Some(at) = reason.find("is held until ") {
+        let until = reason[at + 14..].split(';').next().unwrap_or_default();
+        return match lang {
+            Lang::De => format!("Sie ist schon bis {until} reserviert — erst diese aufheben."),
+            Lang::En => format!("It is already held until {until} — cancel that first."),
+        };
+    }
+    reason.to_owned()
 }
 
 /// The operators' notes, newest first, each removable, and a form for the
@@ -903,6 +1094,69 @@ mod tests {
         assert!(html.contains("action=\"/station/CP-1/notes\""));
         // Before the numbers: what the next person needs comes first.
         assert!(html.find("id=\"notes\"") < html.find("Ladeerfolg"));
+    }
+
+    #[test]
+    fn a_held_point_says_until_when_for_which_card_and_can_be_cancelled() {
+        let ber = TimeZone::new("Europe/Berlin").unwrap();
+        let noon = time::macros::datetime!(2026-11-20 12:00 UTC);
+        let free = render(&page(), Lang::De, &ber, noon, "");
+        assert!(
+            free.contains("action=\"/station/CP-1/reservations\""),
+            "a form when free"
+        );
+        let mut held = page();
+        held.reservation = Some(Held {
+            number: 3,
+            card: "…F6".to_owned(),
+            until: time::macros::datetime!(2026-11-20 13:30 UTC),
+            by: "operator:anna".to_owned(),
+        });
+        let html = render(&held, Lang::De, &ber, noon, "");
+        assert!(
+            html.contains(
+                ">14:30</time></strong> · noch 1 h 30 min · für Karte <code>…F6</code> · anna"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("action=\"/station/CP-1/reservations/3/cancel\""));
+        assert!(
+            !html.contains("action=\"/station/CP-1/reservations\""),
+            "no second hold"
+        );
+        assert!(html.find("id=\"reservation\"") < html.find("id=\"notes\""));
+    }
+
+    #[test]
+    fn a_refused_reservation_says_why_in_the_operators_words_and_keeps_what_was_typed() {
+        assert_eq!(
+            refusal_text("CP-1 answered Occupied", Lang::De),
+            "Die Station ist gerade belegt."
+        );
+        assert_eq!(
+            refusal_text(
+                "the provider answers Blocked: the token is blocked",
+                Lang::En
+            ),
+            "The card is blocked."
+        );
+        assert!(
+            refusal_text("CP-1 is held until 14:30; cancel that first", Lang::De)
+                .contains("bis 14:30")
+        );
+        let form = reserve_form(
+            "CP-1",
+            Some(&Typed {
+                uid: "04A1<b>",
+                minutes: 120,
+                reason: "Gast",
+            }),
+            Lang::De,
+        );
+        assert!(
+            form.contains("value=\"04A1&lt;b&gt;\"") && form.contains("value=\"120\" selected")
+        );
+        assert!(form.contains("value=\"Gast\""));
     }
 
     #[test]
