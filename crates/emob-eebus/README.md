@@ -56,10 +56,12 @@ assert_eq!(
   A negative limit, which `[LPC-001]` forbids, is `EebusError::NegativeLimit`.
 - **Silence has a state.** `Watchdog::limit_at` returns an `emob_smart::GridLimit`
   for any instant, carrying when the Energy Guard was last heard from.
-- **No floats on the binding path.** `eebus`'s use-case actor exposes `f64`
-  (SPINE guides talk in watts); this crate drives the `eebus` SPINE `Engine`
-  directly and takes the value off the datagram, and the workspace's
-  `no-floats` guard keeps it that way.
+- **No floats on the binding path.** The value comes off the datagram as a
+  `Decimal`, and the workspace's `no-floats` guard keeps it that way. This
+  crate drives the `eebus` SPINE `Engine` directly rather than taking its
+  `ControllableSystem`: the watchdog is a pure query by instant, a site nobody
+  has commissioned is `Uncontrolled` rather than in a failsafe, and a refused
+  write says why.
 
 ## How it works
 

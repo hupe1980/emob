@@ -190,6 +190,27 @@ pub struct Estate {
     /// Systems outside the estate that receive events.
     #[serde(default)]
     pub subscribers: Vec<Subscriber>,
+    /// Where `poid` delivers the DATEX II table (spec 016).
+    #[serde(default)]
+    pub mobilithek: Option<Mobilithek>,
+}
+
+/// `[mobilithek]` — read by `poid`: the national access point's publication
+/// the static table is posted to `[AFIR Art. 20(2)]` (spec 016).
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Mobilithek {
+    /// The publication's push address the Mobilithek issued — `https://`,
+    /// or `http://` on loopback for a mock.
+    pub url: String,
+    /// The client certificate (PEM) the Mobilithek authenticates the
+    /// operator by; required for `https://`.
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    /// Its private key (PEM).
+    #[serde(default)]
+    pub client_key: Option<String>,
 }
 
 /// `[receipts]` — read by `csmsd`.
@@ -446,6 +467,12 @@ pub struct Station {
     /// The day it went into service, `YYYY-MM-DD` — the asset card's age.
     #[serde(default)]
     pub commissioned: Option<String>,
+    /// Whether its display shows the price and the Preisstand — and on OCPP
+    /// 2.1 the price page's code — sent after every boot, one message per
+    /// tariff version over that version's window (spec 015). OCPP 1.6 has no
+    /// display message.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub show_price: bool,
 }
 
 /// The OCPP security profile a station is provisioned for.
@@ -609,12 +636,32 @@ pub struct TariffSpec {
         schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
     )]
     pub energy: Decimal,
-    /// The VAT rate inside [`TariffSpec::energy`], in percent.
+    /// The VAT rate inside every price of this version, in percent.
     #[cfg_attr(
         feature = "schema",
         schemars(with = "String", regex(pattern = r"^-?\d+(\.\d+)?$"))
     )]
     pub vat: Decimal,
+    /// Gross price per minute of charging, when the tariff has one.
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<String>", regex(pattern = r"^\d+(\.\d+)?$"))
+    )]
+    pub per_minute: Option<Decimal>,
+    /// Gross price per session, when the tariff has one.
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<String>", regex(pattern = r"^\d+(\.\d+)?$"))
+    )]
+    pub session_fee: Option<Decimal>,
+    /// From when this version is in force (RFC 3339, on a quarter hour) —
+    /// spec 015. A tariff id may appear once per version; the version without
+    /// one has always been in force, and each version ends where the next
+    /// begins.
+    #[serde(default)]
+    pub valid_from: Option<String>,
 }
 
 impl TariffSpec {
@@ -636,17 +683,96 @@ impl TariffSpec {
             .map_err(|e: emob_core::IdError| invalid("id", e.to_string()))?;
         let zone = emob_core::TimeZone::new(&self.time_zone)
             .map_err(|e| invalid("time_zone", e.to_string()))?;
+        let mut components = vec![
+            emob_tariff::PriceComponent::new(emob_tariff::Dimension::Energy, self.energy)
+                .with_vat(self.vat),
+        ];
+        if let Some(per_minute) = self.per_minute {
+            // Stored per hour, as OCPI carries it; shown per minute again by
+            // the display, exactly.
+            components.push(
+                emob_tariff::PriceComponent::new(
+                    emob_tariff::Dimension::Time,
+                    per_minute * Decimal::from(60),
+                )
+                .with_vat(self.vat),
+            );
+        }
+        if let Some(fee) = self.session_fee {
+            components.push(
+                emob_tariff::PriceComponent::new(emob_tariff::Dimension::Flat, fee)
+                    .with_vat(self.vat),
+            );
+        }
         Ok(emob_tariff::Tariff::simple(
             id,
             self.currency,
             emob_tariff::TariffKind::AdHoc,
             zone,
-            vec![
-                emob_tariff::PriceComponent::new(emob_tariff::Dimension::Energy, self.energy)
-                    .with_vat(self.vat),
-            ],
+            components,
         ))
     }
+
+    fn valid_from(&self, index: usize) -> Result<Option<time::OffsetDateTime>, EstateError> {
+        self.valid_from
+            .as_deref()
+            .map(|from| {
+                time::OffsetDateTime::parse(from, &time::format_description::well_known::Rfc3339)
+                    .map_err(|e| EstateError::Invalid {
+                        key: format!("tariffs[{index}].valid_from"),
+                        reason: format!(
+                            "{from} is not RFC 3339 like 2027-01-01T00:00:00+01:00 ({e})"
+                        ),
+                    })
+            })
+            .transpose()
+    }
+}
+
+/// Every tariff's history by id — the one function `csmsd` prices with and
+/// `tarifd` publishes from, so the version a driver is shown is the version a
+/// session is rated with (spec 015).
+///
+/// # Errors
+///
+/// [`EstateError::Invalid`] naming `tariffs[index]` for a version that does
+/// not build, two versions of one id without a `valid_from` between them, or a
+/// history `emob-tariff` refuses (a change off the quarter-hour grid).
+pub fn histories(
+    specs: &[TariffSpec],
+) -> Result<std::collections::BTreeMap<String, emob_tariff::TariffHistory>, EstateError> {
+    use std::collections::BTreeMap;
+    let mut by_id: BTreeMap<&str, Vec<(usize, Option<time::OffsetDateTime>)>> = BTreeMap::new();
+    for (index, spec) in specs.iter().enumerate() {
+        by_id
+            .entry(spec.id.as_str())
+            .or_default()
+            .push((index, spec.valid_from(index)?));
+    }
+    let mut histories = BTreeMap::new();
+    for (id, mut versions) in by_id {
+        versions.sort_by_key(|(_, from)| *from);
+        if let [(_, None), (second, None), ..] = versions[..] {
+            return Err(EstateError::Invalid {
+                key: format!("tariffs[{second}].valid_from"),
+                reason: format!(
+                    "{id} has two versions in force from the start; give the later one a valid_from"
+                ),
+            });
+        }
+        let mut built = Vec::with_capacity(versions.len());
+        for (position, (index, from)) in versions.iter().enumerate() {
+            let until = versions.get(position + 1).and_then(|(_, next)| *next);
+            built.push(specs[*index].to_tariff(*index)?.valid_between(*from, until));
+        }
+        let first = versions[0].0;
+        let history = emob_tariff::TariffHistory::new(built).map_err(|e| EstateError::Invalid {
+            key: format!("tariffs[{first}]"),
+            reason: e.to_string(),
+        })?;
+        histories.insert(id.to_owned(), history);
+    }
+    Ok(histories)
 }
 
 /// The party details an invoice needs.
@@ -1292,5 +1418,57 @@ service_token_env = "EMOB_SERVICE_TOKEN"
             .to_string()
             .contains("named twice")
         );
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Tariffs {
+        tariffs: Vec<TariffSpec>,
+    }
+
+    fn tariffs(text: &str) -> Vec<TariffSpec> {
+        toml::from_str::<Tariffs>(text).unwrap().tariffs
+    }
+
+    const TWO_VERSIONS: &str = r#"
+        [[tariffs]]
+        id = "ad-hoc"
+        currency = "EUR"
+        time_zone = "Europe/Berlin"
+        energy = "0.59"
+        vat = "19"
+
+        [[tariffs]]
+        id = "ad-hoc"
+        currency = "EUR"
+        time_zone = "Europe/Berlin"
+        energy = "0.52"
+        vat = "19"
+        session_fee = "0.50"
+        valid_from = "2027-01-01T00:00:00+01:00"
+    "#;
+
+    #[test]
+    fn a_tariff_has_versions_and_each_ends_where_the_next_begins() {
+        let histories = histories(&tariffs(TWO_VERSIONS)).unwrap();
+        let history = &histories["ad-hoc"];
+        assert_eq!(history.versions().len(), 2);
+        let new_year = time::macros::datetime!(2027-01-01 00:00 +1);
+        assert_eq!(history.versions()[0].valid_until, Some(new_year));
+        let before = history
+            .in_force_at(new_year - time::Duration::seconds(1))
+            .unwrap();
+        let after = history.in_force_at(new_year).unwrap();
+        assert_ne!(before.fingerprint(), after.fingerprint());
+        assert_eq!(after.dimensions().len(), 2, "energy and a session fee");
+    }
+
+    #[test]
+    fn a_version_off_the_quarter_hour_or_without_a_start_is_named() {
+        let off_grid = TWO_VERSIONS.replace("00:00:00+01:00", "00:07:00+01:00");
+        let error = histories(&tariffs(&off_grid)).unwrap_err().to_string();
+        assert!(error.contains("tariffs[0]"), "{error}");
+        let no_start = TWO_VERSIONS.replace("valid_from = \"2027-01-01T00:00:00+01:00\"", "");
+        let error = histories(&tariffs(&no_start)).unwrap_err().to_string();
+        assert!(error.contains("tariffs[1].valid_from"), "{error}");
     }
 }

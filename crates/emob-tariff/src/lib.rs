@@ -108,7 +108,7 @@ pub mod version;
 pub use conformance::{Conformance, Objection, check_afir, check_pangv};
 pub use display::{
     Bound, DisplayLine, NoGesamtpreis, PriceDescription, Tier, describe, describe_gross,
-    price_per_minute,
+    price_per_minute, worked_total,
 };
 pub use rating::{
     Adjustment, AdjustmentKind, AdjustmentPart, Chargeable, ChargeableError, Line, Period, Rated,

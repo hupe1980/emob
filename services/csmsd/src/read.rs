@@ -150,6 +150,9 @@ pub struct StationView {
     /// Who runs that network, when the table knows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carrier: Option<&'static str>,
+    /// Its newest note — what the person who drives out reads first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A station is silent once nothing has been heard from it for longer than its
@@ -287,6 +290,10 @@ fn silent<J: Journal>(
             if let Some(network) = &network {
                 per_network.entry(network.clone()).or_default().1 += 1;
             }
+            let note = known
+                .as_ref()
+                .and_then(|known| known.notes.last())
+                .map(|note| note.text.clone());
             let journalled = known.and_then(|known| known.presence);
             let (last_heard, since) = match journalled {
                 Some(crate::journal::Presence::Offline { last_heard, .. }) => {
@@ -312,6 +319,7 @@ fn silent<J: Journal>(
                 silent_since: since,
                 carrier: network.as_deref().and_then(crate::carrier::name),
                 network,
+                note,
             })
         })
         .collect();
@@ -391,6 +399,14 @@ pub fn router<J: Journal>(
         .route(
             "/v1/csmsd/stations/{identity}/password",
             axum::routing::post(new_password::<J>),
+        )
+        .route(
+            "/v1/csmsd/stations/{identity}/notes",
+            axum::routing::post(note::<J>),
+        )
+        .route(
+            "/v1/csmsd/stations/{identity}/notes/{number}/remove",
+            axum::routing::post(remove_note::<J>),
         )
         .with_state((csmsd, certificates));
     emob_service::serve::operator_only(routes, operators)
@@ -545,6 +561,55 @@ async fn retire_station<J: Journal>(
     }
 }
 
+/// A note, as the route takes it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoteBody {
+    /// 1–500 characters.
+    pub text: String,
+}
+
+/// What writing a note answers.
+#[derive(Debug, Serialize)]
+pub struct Written {
+    /// The note's number on the station.
+    pub number: u64,
+}
+
+/// `POST /v1/csmsd/stations/{identity}/notes` — a note on a station, under
+/// the operator who wrote it (spec 023, SR-156).
+async fn note<J: Journal>(
+    Extract((csmsd, _)): Extract<Shared<J>>,
+    axum::Extension(by): axum::Extension<emob_service::Actor>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    body: Result<Json<NoteBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) => return malformed(&error),
+    };
+    match csmsd.note(&by, &identity, &body.text) {
+        Ok(number) => (axum::http::StatusCode::CREATED, Json(Written { number })).into_response(),
+        Err(refusal) if refusal.field == "identity" => {
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+        Err(refusal) => refused_write(&refusal),
+    }
+}
+
+/// `POST /v1/csmsd/stations/{identity}/notes/{number}/remove`.
+async fn remove_note<J: Journal>(
+    Extract((csmsd, _)): Extract<Shared<J>>,
+    axum::Extension(by): axum::Extension<emob_service::Actor>,
+    axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
+) -> Response {
+    match csmsd.remove_note(&by, &identity, number) {
+        Ok(true) => axum::http::StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => axum::http::StatusCode::NOT_FOUND.into_response(),
+        Err(refusal) => refused_write(&refusal),
+    }
+}
+
 /// What a station search may ask: nothing else is accepted.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -662,6 +727,11 @@ pub struct StationRow {
     pub latitude: rust_decimal::Decimal,
     /// WGS 84, as registered.
     pub longitude: rust_decimal::Decimal,
+    /// Its newest note.
+    pub note: Option<String>,
+    /// Every note it holds, for the search only.
+    #[serde(skip)]
+    notes: String,
 }
 
 /// `GET /v1/csmsd/stations?q=&limit=&offset=` — the estate's stations, in
@@ -905,6 +975,13 @@ impl StationRow {
             network: said.and_then(|s| s.network),
             latitude: entry.location.latitude,
             longitude: entry.location.longitude,
+            note: known.notes.last().map(|note| note.text.clone()),
+            notes: known
+                .notes
+                .iter()
+                .map(|note| note.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
         }
     }
 
@@ -925,6 +1002,7 @@ impl StationRow {
             .chain(&self.network)
             .map(String::as_str)
             .chain(self.carrier)
+            .chain(Some(self.notes.as_str()))
         {
             text.push(' ');
             text.push_str(word);
@@ -994,6 +1072,22 @@ pub struct StationPage {
     pub success: StationSuccess,
     /// Its last sessions, newest first.
     pub recent: Vec<RecentView>,
+    /// Operators' notes, newest first (spec 023).
+    pub notes: Vec<crate::journal::Note>,
+    /// The price a session starting now is rated with, as the price page
+    /// shows it (spec 015).
+    pub price: Option<PriceView>,
+}
+
+/// The price in force, as the asset card names it.
+#[derive(Debug, Serialize)]
+pub struct PriceView {
+    /// Its first line, e.g. `0,49 € pro kWh`.
+    pub line: String,
+    /// The Preisstand.
+    pub preisstand: String,
+    /// The public price page, `/p/{evse}`.
+    pub path: String,
 }
 
 /// Presence on the page.
@@ -1162,6 +1256,15 @@ impl StationPage {
                     billed: recent.billed,
                 })
                 .collect(),
+            notes: known.notes.into_iter().rev().collect(),
+            price: csmsd
+                .tariff(&entry.tariff)
+                .and_then(|history| history.in_force_at(now))
+                .map(|tariff| PriceView {
+                    line: crate::price::headline(tariff, now),
+                    preisstand: crate::price::preisstand(tariff),
+                    path: crate::price::path(&entry.evse),
+                }),
         }
     }
 }

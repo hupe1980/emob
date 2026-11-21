@@ -143,6 +143,19 @@ pub enum Refusal {
     },
 }
 
+/// Whether a delivery is a sample, marked `"emobtest": true` on the envelope.
+///
+/// `emob subscribers test` and `emobtest` send them, and a receiver takes one
+/// and never books it — the event schemas' own rule. Asked after the signature
+/// holds: a sample is genuine too, or it is refused like any other delivery.
+#[must_use]
+pub fn is_test(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|event| event.get("emobtest").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
 /// Read a body as an event of exactly one type.
 ///
 /// # Errors
@@ -169,6 +182,17 @@ pub fn open<D: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sample_is_told_from_a_record_by_its_mark_alone() {
+        assert!(is_test(br#"{"type":"de.emob.cdr.issued","emobtest":true}"#));
+        assert!(!is_test(br#"{"type":"de.emob.cdr.issued"}"#));
+        assert!(
+            !is_test(br#"{"emobtest":"true"}"#),
+            "a boolean, not a string"
+        );
+        assert!(!is_test(b"not json"));
+    }
     use crate::events;
 
     fn at() -> time::OffsetDateTime {

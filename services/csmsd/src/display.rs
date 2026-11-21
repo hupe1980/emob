@@ -171,7 +171,7 @@ pub fn message_id(identity: &str, transaction: &str) -> i32 {
     i32::from_be_bytes([digest[0] & 0x7f, digest[1], digest[2], digest[3]])
 }
 
-fn until(ends: time::OffsetDateTime) -> Option<DateTime> {
+pub(crate) fn until(ends: time::OffsetDateTime) -> Option<DateTime> {
     ends.format(&time::format_description::well_known::Rfc3339)
         .ok()
         .and_then(|text| DateTime::parse(&text).ok())
@@ -209,14 +209,14 @@ pub fn message_v21(
     v2_1::SetDisplayMessageRequest::new(info)
 }
 
-fn wire(value: &impl serde::Serialize) -> String {
+pub(crate) fn wire(value: &impl serde::Serialize) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .unwrap_or_default()
 }
 
-const fn failure_name(failure: &ocpp_kit::engine::CallFailure) -> &'static str {
+pub(crate) const fn failure_name(failure: &ocpp_kit::engine::CallFailure) -> &'static str {
     use ocpp_kit::engine::CallFailure;
     match failure {
         CallFailure::Rejected(_) => "CALLERROR",

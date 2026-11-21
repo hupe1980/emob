@@ -29,7 +29,7 @@ use core::fmt;
 
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit as _, Mac};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 

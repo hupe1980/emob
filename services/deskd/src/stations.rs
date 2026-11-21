@@ -898,7 +898,7 @@ mod tests {
             Lang::De,
         );
         assert!(html.contains("a1b2") && html.contains("nur jetzt"));
-        assert!(html.contains("wss://csms/ocpp"));
+        assert!(html.contains("wss://csms/ocpp") && html.contains("Neustart ist nicht nötig"));
     }
 
     #[test]

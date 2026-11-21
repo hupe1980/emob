@@ -60,6 +60,7 @@ pub mod edge;
 pub mod estate;
 pub mod journal;
 pub mod outbox;
+pub mod price;
 pub mod provisioning;
 pub mod read;
 pub mod receipt;
@@ -246,7 +247,7 @@ pub struct Csmsd<J: Journal> {
     /// The `[[subscribers]]` that take `de.emob.cdr.issued`, by name.
     subscribers: Vec<String>,
     /// The estate's tariffs, which a registered station names (spec 021).
-    tariffs: std::collections::BTreeMap<String, emob_tariff::Tariff>,
+    tariffs: std::collections::BTreeMap<String, emob_tariff::TariffHistory>,
 }
 
 impl<J: Journal> core::fmt::Debug for Csmsd<J> {
@@ -327,6 +328,56 @@ impl<J: Journal> Csmsd<J> {
         handle: ocpp_kit::transport::CsmsHandle,
     ) {
         let _ = self.display.set((display, handle));
+    }
+
+    /// The price on a booted station's own display, when the estate asks for
+    /// it (spec 015): every tariff version still to come, over its window, on
+    /// its own task after the boot is answered — a courtesy like the receipt
+    /// link, never journalled, logged with the station and the outcome only.
+    fn show_price(&self, identity: &Identity) {
+        let (Some((_, handle)), Some(public)) = (self.display.get(), self.public_url()) else {
+            return;
+        };
+        let Some(station) = self.registered(identity.as_str()) else {
+            return;
+        };
+        if !station.show_price {
+            return;
+        }
+        let Some(history) = self.tariff(&station.tariff).cloned() else {
+            return;
+        };
+        let url = format!("{public}{}", price::path(&station.evse));
+        let (handle, target, now) = (handle.clone(), identity.clone(), self.now());
+        let ocpp = station.ocpp;
+        tokio::spawn(async move {
+            // After the `BootNotificationResponse`: a station takes no call
+            // before it is accepted.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let mut statuses = Vec::new();
+            match ocpp {
+                emob_service::estate::Ocpp::V1_6 => return,
+                emob_service::estate::Ocpp::V2_0_1 => {
+                    for request in price::messages_v201(target.as_str(), &history, &url, now) {
+                        statuses.push(display_status(
+                            tokio::time::timeout(display::TIMEOUT, handle.call(&target, request))
+                                .await
+                                .map(|answer| answer.map(|answer| display::wire(&answer.status))),
+                        ));
+                    }
+                }
+                emob_service::estate::Ocpp::V2_1 => {
+                    for request in price::messages_v21(target.as_str(), &history, &url, now) {
+                        statuses.push(display_status(
+                            tokio::time::timeout(display::TIMEOUT, handle.call(&target, request))
+                                .await
+                                .map(|answer| answer.map(|answer| display::wire(&answer.status))),
+                        ));
+                    }
+                }
+            }
+            tracing::info!(station = %target, statuses = ?statuses, "price on the display");
+        });
     }
 
     /// The receipt link for a transaction — `/r/{token}` — when this CSMS
@@ -468,7 +519,7 @@ impl<J: Journal> Csmsd<J> {
     #[must_use]
     pub fn pricing(
         mut self,
-        tariffs: std::collections::BTreeMap<String, emob_tariff::Tariff>,
+        tariffs: std::collections::BTreeMap<String, emob_tariff::TariffHistory>,
     ) -> Self {
         self.tariffs = tariffs;
         self
@@ -673,6 +724,101 @@ impl<J: Journal> Csmsd<J> {
             field: "journal".to_owned(),
             reason: "the journal refused the fact; the station is still registered".to_owned(),
         })
+    }
+
+    /// Write a note on a registered station under `by` (spec 023); its
+    /// number on that station.
+    ///
+    /// # Errors
+    ///
+    /// A [`registry::Refusal`] naming `identity` for a station not registered,
+    /// `text` for an empty or overlong note (SR-154), `journal` when the
+    /// journal refuses.
+    pub fn note(&self, by: &Actor, identity: &str, text: &str) -> Result<u64, registry::Refusal> {
+        if self.registered(identity).is_none() {
+            return Err(registry::Refusal {
+                field: "identity".to_owned(),
+                reason: format!("{identity} is not registered"),
+            });
+        }
+        let text = station::note_text(text).ok_or_else(|| registry::Refusal {
+            field: "text".to_owned(),
+            reason: format!(
+                "a note is 1 to {} characters — what the next person needs to know",
+                station::NOTE_LEN
+            ),
+        })?;
+        let at = self.now();
+        // Numbered and appended under one lock, so two notes written at once
+        // never share a number — removing one must not remove the other.
+        let mut folded = lock(&self.folded);
+        let number = folded
+            .state()
+            .stations
+            .get(identity)
+            .map_or(0, |known| known.notes_written)
+            + 1;
+        folded
+            .record(
+                by,
+                Event::StationNoted {
+                    identity: identity.to_owned(),
+                    number,
+                    by: by.to_string(),
+                    text,
+                    at,
+                },
+            )
+            .map_err(|_| registry::Refusal {
+                field: "journal".to_owned(),
+                reason: "the journal refused the note".to_owned(),
+            })?;
+        Ok(number)
+    }
+
+    /// Take a note off a station; `false` when it has no such note.
+    ///
+    /// # Errors
+    ///
+    /// A [`registry::Refusal`] naming `journal` when the journal refuses.
+    pub fn remove_note(
+        &self,
+        by: &Actor,
+        identity: &str,
+        number: u64,
+    ) -> Result<bool, registry::Refusal> {
+        let held = self
+            .known(identity)
+            .is_some_and(|known| known.notes.iter().any(|note| note.number == number));
+        if !held {
+            return Ok(false);
+        }
+        self.record(
+            by,
+            Event::NoteRemoved {
+                identity: identity.to_owned(),
+                number,
+                at: self.now(),
+            },
+        )
+        .map_err(|_| registry::Refusal {
+            field: "journal".to_owned(),
+            reason: "the journal refused the removal".to_owned(),
+        })?;
+        Ok(true)
+    }
+
+    /// Every version of a tariff, by its id (spec 015).
+    #[must_use]
+    pub fn tariff(&self, id: &str) -> Option<&emob_tariff::TariffHistory> {
+        self.tariffs.get(id)
+    }
+
+    /// Where the public pages — receipts and prices — are served, when they
+    /// are.
+    #[must_use]
+    pub fn public_url(&self) -> Option<&str> {
+        self.receipts.as_ref().map(receipt::Receipts::public_url)
     }
 
     /// What the facts say about one station (spec 012).
@@ -918,17 +1064,6 @@ impl<J: Journal> Csmsd<J> {
             },
         };
 
-        // A tariff the point may not offer is refused before it prices
-        // anything `[AFIR Art. 5(4)]`.
-        let conformance = emob_tariff::check_afir(&point.tariff, point.rated_power_kw);
-        if !conformance.is_lawful() {
-            let receipt = self.receipted(&key, point, None, Vec::new());
-            return receipt
-                .into_iter()
-                .chain([refuse(conformance.reasons().collect(), Vec::new())])
-                .collect();
-        }
-
         let assembled = match transaction.assemble(Direction::Import) {
             Ok(assembled) => assembled,
             Err(error) => {
@@ -939,6 +1074,33 @@ impl<J: Journal> Csmsd<J> {
                     .collect();
             }
         };
+
+        // The version in force when the session started is the one the driver
+        // was shown, so it is the one that rates `[AFIR Art. 5(4)]` (spec 015)
+        // — and a tariff the point may not offer is refused before it prices
+        // anything.
+        let started = assembled.session.started_at;
+        let Some(tariff) = point.tariff.in_force_at(started) else {
+            let receipt = self.receipted(&key, point, None, Vec::new());
+            return receipt
+                .into_iter()
+                .chain([refuse(
+                    vec![format!(
+                        "no version of tariff {} was in force when the session started",
+                        point.tariff.id()
+                    )],
+                    Vec::new(),
+                )])
+                .collect();
+        };
+        let conformance = emob_tariff::check_afir(tariff, point.rated_power_kw);
+        if !conformance.is_lawful() {
+            let receipt = self.receipted(&key, point, None, Vec::new());
+            return receipt
+                .into_iter()
+                .chain([refuse(conformance.reasons().collect(), Vec::new())])
+                .collect();
+        }
 
         // The receipt first: the verdict fact that follows completes it, and a
         // settlement the station retries files the same receipt again.
@@ -990,7 +1152,7 @@ impl<J: Journal> Csmsd<J> {
                 builder
                     .key(self.party.clone(), id)
                     .evidence(EvidenceRef::from_evidence(&evidence, "OCMF"))
-                    .rated_with(&point.tariff)
+                    .rated_with(tariff)
                     .build()
             });
 
@@ -1471,6 +1633,7 @@ impl<J: Journal> Csmsd<J> {
                     station::word(&boot.reason),
                     station::of_v2_0_1(boot),
                 )?;
+                self.show_price(ctx.identity());
                 answer_v2_0_1(ctx, &typed, self.now())
             }
             v2_0_1::CsRequest::FirmwareStatusNotification(note) => {
@@ -1548,6 +1711,7 @@ impl<J: Journal> Csmsd<J> {
                     station::word(&boot.reason),
                     station::of_v2_1(boot),
                 )?;
+                self.show_price(ctx.identity());
                 answer_v2_1(ctx, &typed, self.now())
             }
             v2_1::CsRequest::FirmwareStatusNotification(note) => {
@@ -1706,6 +1870,17 @@ fn answer_v2_1(
             ctx.reply(&v2_1::StatusNotificationResponse::new())
         }
         other => Err(CallError::not_supported(other.action().as_str())),
+    }
+}
+
+/// What a display call came to, as one word for the log line.
+fn display_status(
+    outcome: Result<Result<String, ocpp_kit::engine::CallFailure>, tokio::time::error::Elapsed>,
+) -> String {
+    match outcome {
+        Ok(Ok(status)) => status,
+        Ok(Err(failure)) => display::failure_name(&failure).to_owned(),
+        Err(_) => "no answer".to_owned(),
     }
 }
 

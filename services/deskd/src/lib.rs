@@ -229,6 +229,11 @@ fn router(desk: Arc<Page>, operators: emob_service::Operators) -> axum::Router {
             "/station/{identity}/edit",
             get(edit_station_page).post(edit_station),
         )
+        .route("/station/{identity}/notes", axum::routing::post(write_note))
+        .route(
+            "/station/{identity}/notes/{number}/remove",
+            axum::routing::post(remove_note),
+        )
         .route(
             "/station/{identity}/retire",
             axum::routing::post(retire_station),
@@ -544,6 +549,80 @@ async fn retire_station(
     }
 }
 
+#[derive(Deserialize)]
+struct NoteForm {
+    text: String,
+}
+
+/// `POST /station/{identity}/notes` — forwarded with the operator's own token
+/// (SR-156) from this origin only (SR-157); back to the notes.
+async fn write_note(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path(identity): axum::extract::Path<String>,
+    headers: HeaderMap,
+    axum::Form(note): axum::Form<NoteForm>,
+) -> Response {
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let url = format!(
+        "{}/v1/csmsd{}/notes",
+        desk.csmsd.trim_end_matches('/'),
+        station::href(&identity).replacen("/station/", "/stations/", 1)
+    );
+    let body = serde_json::json!({ "text": note.text });
+    back_to_notes(
+        &identity,
+        desk.reader
+            .write(reqwest::Method::POST, &url, &token, &body)
+            .await,
+    )
+}
+
+/// `POST /station/{identity}/notes/{number}/remove`.
+async fn remove_note(
+    State(desk): State<Arc<Page>>,
+    axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
+    headers: HeaderMap,
+) -> Response {
+    let token = match writer(&headers) {
+        Ok(token) => token,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let url = format!(
+        "{}/v1/csmsd{}/notes/{number}/remove",
+        desk.csmsd.trim_end_matches('/'),
+        station::href(&identity).replacen("/station/", "/stations/", 1)
+    );
+    let answer = desk
+        .reader
+        .write(
+            reqwest::Method::POST,
+            &url,
+            &token,
+            &serde_json::Value::Null,
+        )
+        .await;
+    back_to_notes(&identity, answer)
+}
+
+/// A note written or removed goes back to the notes; a refusal says why.
+fn back_to_notes(identity: &str, answer: Result<(u16, serde_json::Value), fetch::Why>) -> Response {
+    match answer {
+        Ok((201 | 204 | 404, _)) => {
+            axum::response::Redirect::to(&format!("{}#notes", station::href(identity)))
+                .into_response()
+        }
+        Ok((_, body)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            body["reason"].as_str().unwrap_or("refused").to_owned(),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
+    }
+}
+
 /// `POST /station/{identity}/password` — a new password, on a new sheet.
 async fn new_password(
     State(desk): State<Arc<Page>>,
@@ -719,6 +798,25 @@ pub async fn run(options: Options) -> Result<Running> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sr_148_sr_157_a_write_from_another_origin_is_refused_before_it_is_forwarded() {
+        use axum::http::HeaderValue;
+        let mut headers = HeaderMap::new();
+        // demo:token, as the browser sends it.
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Basic ZGVtbzp0b2tlbg=="),
+        );
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+        assert_eq!(writer(&headers).unwrap_err().0, StatusCode::FORBIDDEN);
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert_eq!(
+            writer(&headers).unwrap(),
+            "token",
+            "the operator's own token is forwarded"
+        );
+    }
+
     use super::*;
 
     #[test]

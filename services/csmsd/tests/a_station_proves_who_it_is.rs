@@ -57,20 +57,31 @@ fn demo() -> csmsd::estate::Estate {
     estate
 }
 
-async fn start(estate: csmsd::estate::Estate) -> anyhow::Result<Running> {
+fn scratch() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    std::env::temp_dir().join(format!(
         "emob-005-{}-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         time::OffsetDateTime::now_utc().unix_timestamp_nanos()
-    ));
+    ))
+}
+
+async fn start(estate: csmsd::estate::Estate) -> anyhow::Result<Running> {
+    start_in(estate, &scratch(), env()).await
+}
+
+async fn start_in(
+    estate: csmsd::estate::Estate,
+    dir: &std::path::Path,
+    env: Env,
+) -> anyhow::Result<Running> {
     run(Options {
         ocpp: "127.0.0.1:0".parse().unwrap(),
         http: "127.0.0.1:0".parse().unwrap(),
         journal: dir.join("csmsd.ndjson"),
         estate,
-        env: env(),
+        env,
         shutdown: Shutdown::new(),
         identity: Identity::new("csmsd", "test"),
         clock: emob_service::system_clock(),
@@ -343,5 +354,120 @@ async fn cve_2026_44383_a_second_connection_without_the_credential_cannot_take_t
         "and the station it impersonated still speaks"
     );
     real.shutdown(Duration::from_secs(1)).await;
+    running.kill();
+}
+
+/// A profile 2 station over TLS offering `versions`, in that preference order.
+fn station_on(
+    running: &Running,
+    identity: &str,
+    versions: &[Version],
+    password: BasicAuthPassword,
+) -> Handle {
+    Station::builder()
+        .identity(identity)
+        .unwrap()
+        .url(format!("wss://127.0.0.1:{}/ocpp", running.ocpp.port()))
+        .versions(versions.iter().copied())
+        .reconnect(false)
+        .ping_interval(None)
+        .handler(Quiet)
+        .security_profile(Wire::TlsBasicAuth)
+        .password(password)
+        .tls(
+            ClientTls::builder()
+                .root_file(fixture("ca.pem"))
+                .unwrap()
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap()
+        .spawn()
+        .unwrap()
+}
+
+/// Found by `emobtest`'s station: csmsd offered only the versions its
+/// estate's stations used, so a station registered later on another one could
+/// not connect. It offers every version and pins each station to its own.
+#[tokio::test]
+async fn a_station_registered_on_a_version_no_estate_station_uses_connects_at_once() {
+    let running = start(demo()).await.expect("csmsd starts with TLS");
+    let mut station = running.csmsd.registered("CP-1").expect("the demo station");
+    station.identity = "CP-201".to_owned();
+    station.evse = "DE*ABC*E00201".parse().unwrap();
+    station.ocpp = estate::Ocpp::V2_0_1;
+    station.password_hash = None;
+    let by = emob_service::Actor::operator("test operator").unwrap();
+    let password = running
+        .csmsd
+        .register(&by, station)
+        .expect("registered")
+        .expect("a password is minted for profile 2");
+    let handle = station_on(
+        &running,
+        "CP-201",
+        &[Version::V2_0_1],
+        BasicAuthPassword::for_version(Version::V2_0_1, &password).unwrap(),
+    );
+    let boot = RawValue::from_string(
+        r#"{"reason":"PowerUp","chargingStation":{"model":"Model-1","vendorName":"ACME"}}"#
+            .to_owned(),
+    )
+    .unwrap();
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        handle.call_raw(
+            "BootNotification",
+            boot,
+            ocpp_kit::engine::CallOptions::default(),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(answer, Ok(Ok(_))),
+        "the 2.0.1 station boots: {answer:?}"
+    );
+    handle.shutdown(Duration::from_secs(1)).await;
+    running.kill();
+}
+
+/// A station that would rather speak a newer version is held to the one it
+/// was provisioned for: CP-1 offers 2.1 first and boots on 1.6.
+#[tokio::test]
+async fn a_station_offering_several_versions_speaks_its_own() {
+    let running = start(demo()).await.expect("csmsd starts with TLS");
+    let multi = station_on(
+        &running,
+        "CP-1",
+        &[Version::V2_1, Version::V2_0_1, Version::V1_6],
+        BasicAuthPassword::hex(DEMO_KEY).unwrap(),
+    );
+    assert!(
+        boots(&multi).await,
+        "pinned to 1.6, its 1.6 boot is answered"
+    );
+    multi.shutdown(Duration::from_secs(1)).await;
+    running.kill();
+}
+
+/// A station that does not offer the version it was provisioned for is
+/// refused at the handshake, though csmsd speaks the one it does offer.
+#[tokio::test]
+async fn a_station_not_offering_its_own_version_is_refused() {
+    let running = start(demo()).await.expect("csmsd starts with TLS");
+    let handle = station_on(
+        &running,
+        "CP-1",
+        &[Version::V2_0_1],
+        BasicAuthPassword::hex(DEMO_KEY).unwrap(),
+    );
+    assert!(!boots(&handle).await, "refused at the handshake");
+    let right = station(&running, true, "CP-1", Presents::Password(DEMO_KEY));
+    assert!(
+        boots(&right).await,
+        "the same station on its own version is admitted"
+    );
+    right.shutdown(Duration::from_secs(1)).await;
     running.kill();
 }

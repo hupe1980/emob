@@ -59,6 +59,7 @@
 #![warn(missing_docs, clippy::pedantic)]
 
 pub mod http;
+pub mod push;
 pub mod record;
 
 pub use record::{Event, Ledger};
@@ -158,7 +159,7 @@ pub struct Poid<'a> {
     /// prices change on a different clock from concrete, and the same point may
     /// be published under different rates to different access points. In a
     /// deployment this reads what `tarifd` published.
-    pub rate_for: &'a dyn Fn(&ChargingPoint) -> Option<Rate>,
+    pub rate_for: &'a (dyn Fn(&ChargingPoint) -> Option<Rate> + Sync),
     /// What the access point last accepted.
     accepted: Option<Accepted>,
 }
@@ -170,7 +171,7 @@ impl<'a> Poid<'a> {
         publisher: Publisher,
         table: Facility,
         sites: Vec<Site>,
-        rate_for: &'a dyn Fn(&ChargingPoint) -> Option<Rate>,
+        rate_for: &'a (dyn Fn(&ChargingPoint) -> Option<Rate> + Sync),
     ) -> Self {
         Self {
             publisher,
@@ -294,4 +295,30 @@ impl<'a> Poid<'a> {
             }
         }
     }
+}
+
+/// Each point's price at `at`: the version of its station's tariff in force
+/// then, as the feed publishes it, named `<tariff>-<Preisstand>` — the code
+/// the price page, the display and the receipt show (specs 015, 016).
+///
+/// # Errors
+///
+/// [`emob_service::estate::EstateError`] for tariffs that do not build into a
+/// history.
+pub fn rates(
+    estate: &http::Estate,
+    at: time::OffsetDateTime,
+) -> Result<std::collections::BTreeMap<emob_core::EvseId, Rate>, emob_service::estate::EstateError>
+{
+    let histories = emob_service::estate::histories(&estate.tariffs)?;
+    Ok(estate
+        .stations
+        .iter()
+        .filter_map(|station| {
+            let tariff = histories.get(&station.tariff)?.in_force_at(at)?;
+            let id = format!("{}-{}", station.tariff, tariff.fingerprint().code());
+            let (rate, _notes) = emob_poi::rate::publish(tariff, id);
+            Some((station.evse.clone(), rate))
+        })
+        .collect())
 }

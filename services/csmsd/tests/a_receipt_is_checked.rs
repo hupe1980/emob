@@ -24,7 +24,7 @@ use emob_service::{Identity as ShellIdentity, Readiness, Server, Shutdown};
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
 use ocmf::PublicKey;
 use ocpp_kit::transport::{
-    Auth, AuthOutcome, BasicAuthPassword, Csms, Handle, SecurityProfile, SessionContext, Station,
+    Admission, Auth, AuthOutcome, BasicAuthPassword, Csms, Handle, SecurityProfile, Station,
 };
 use ocpp_kit::types::{DateTime, Identity};
 use ocpp_kit::{RawValue, Version, v1_6};
@@ -129,7 +129,7 @@ async fn serve(csmsd: Arc<Csmsd<Memory>>) -> (SocketAddr, tokio::task::JoinHandl
         ChargePoint {
             evse_id: "DE*ABC*E00001".parse().unwrap(),
             rated_power_kw: Decimal::from(150),
-            tariff: tariff(),
+            tariff: emob_tariff::TariffHistory::single(tariff()).unwrap(),
             ocpp: Version::V1_6,
         },
     );
@@ -140,7 +140,7 @@ async fn serve(csmsd: Arc<Csmsd<Memory>>) -> (SocketAddr, tokio::task::JoinHandl
             let point = fleet.get(&auth.identity).cloned();
             async move {
                 match point {
-                    Some(point) => AuthOutcome::Accept(SessionContext::new(point)),
+                    Some(point) => Admission::new().context(point).into(),
                     None => AuthOutcome::Unknown,
                 }
             }
@@ -178,7 +178,7 @@ async fn one_session(csmsd: &Arc<Csmsd<Memory>>) {
         ))
         .await
         .unwrap();
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     let started = handle
         .call(v1_6::StartTransactionRequest::new(
             1,
@@ -319,7 +319,7 @@ async fn a_billed_session_reads_verdict_first_and_checks_on_the_device() {
     });
     assert_eq!(energy_kwh, "0.636");
     assert!(
-        text.contains(&format!("{} €", gross.replace('.', ","))),
+        text.contains(&format!("{}\u{a0}€", gross.replace('.', ","))),
         "{gross}: {text}"
     );
     assert!(text.contains("[MessEG §33]"));
@@ -589,7 +589,7 @@ async fn a_session_signed_with_a_key_nobody_registered_says_why_it_was_not_bille
     let text = visible(&page.text());
     assert!(text.contains("Nicht abgerechnet"), "{text}");
     assert!(text.contains("[MessEG §33]"));
-    assert!(!text.contains(" €"), "no price on a refusal: {text}");
+    assert!(!text.contains("\u{a0}€"), "no price on a refusal: {text}");
     assert!(text.contains("Signierte Messwerte"));
     // Nothing verified against the registry, so no file is offered as evidence.
     assert!(!page.text().contains("transparenz.xml"));

@@ -13,7 +13,7 @@ point operator (CPO) issues a CDR — a charge detail record — and the driver'
 e-mobility service provider (eMSP) pays it. The two companies must agree on a
 number neither can re-measure. `emob-roam` keeps one canonical `Cdr` and
 translates it to each wire — [OCPI](https://evroaming.org/) 2.3.0 and 2.2.1 in
-both directions (via `ocpi-kit` 0.4), OICP 2.3 to Hubject (via `oicp-kit` 0.1) —
+both directions (via `ocpi-kit` 0.5), OICP 2.3 to Hubject (via `oicp-kit` 0.1) —
 and every translation states what it lost.
 
 ## One canonical CDR, every roaming protocol native

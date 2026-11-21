@@ -45,6 +45,31 @@ pub struct Estate {
     /// Systems outside the estate that receive events.
     #[serde(default)]
     pub subscribers: Vec<emob_service::estate::Subscriber>,
+    /// The seller, whom the price page names as the operator (spec 015).
+    #[serde(default)]
+    pub billing: Option<emob_service::estate::BillingSection>,
+}
+
+impl Estate {
+    /// Who runs the points, as the price page names them: the seller on the
+    /// invoices, else the operator's party id.
+    #[must_use]
+    pub fn operator(&self) -> crate::price::Operator {
+        self.billing.as_ref().map_or_else(
+            || crate::price::Operator {
+                name: self.parties.operator.to_string(),
+                contact: None,
+            },
+            |billing| crate::price::Operator {
+                name: billing.seller.name.clone(),
+                contact: billing
+                    .contact
+                    .as_ref()
+                    .map(|contact| format!("{} · {}", contact.phone, contact.email))
+                    .or_else(|| billing.seller.electronic_address.clone()),
+            },
+        )
+    }
 }
 
 /// `[desk] time_zone` — the zone the operator page tells "today" in, which is
@@ -133,12 +158,10 @@ pub fn provisioning(estate: &Estate) -> Result<Provisioning, EstateError> {
 /// # Errors
 ///
 /// [`EstateError::Invalid`] naming `tariffs[index]`.
-pub fn tariffs(estate: &Estate) -> Result<BTreeMap<String, emob_tariff::Tariff>, EstateError> {
-    let mut tariffs = BTreeMap::new();
-    for (index, spec) in estate.tariffs.iter().enumerate() {
-        tariffs.insert(spec.id.clone(), spec.to_tariff(index)?);
-    }
-    Ok(tariffs)
+pub fn tariffs(
+    estate: &Estate,
+) -> Result<BTreeMap<String, emob_tariff::TariffHistory>, EstateError> {
+    emob_service::estate::histories(&estate.tariffs)
 }
 
 /// The key registry, each key with the provenance the estate states.

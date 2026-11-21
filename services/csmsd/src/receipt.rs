@@ -45,7 +45,7 @@ use emob_eichrecht::{Evidence, FindingKind, PublicKey, Record};
 use emob_service::journal::Journal;
 use emob_service::ui::{self, Lang, Shell, escape};
 use emob_tariff::{Dimension, TaxIncluded};
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive as _;
 use sha2::{Digest as _, Sha256};
@@ -143,6 +143,12 @@ impl Receipts {
         mac.update(key.1.as_bytes());
         let tag = mac.finalize().into_bytes();
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&tag[..16])
+    }
+
+    /// Where the public pages are served, without a trailing slash.
+    #[must_use]
+    pub fn public_url(&self) -> &str {
+        &self.public_url
     }
 
     /// `/r/{token}`.
@@ -252,20 +258,20 @@ pub fn sites(stations: &[emob_service::estate::Station]) -> BTreeMap<EvseId, Sit
 /// One global fixed window (SR-067). The 128-bit token is what stops
 /// enumeration; this bounds what a flood costs a CSMS that also serves stations.
 #[derive(Debug)]
-struct Window {
+pub(crate) struct Window {
     limit: u32,
     held: Mutex<(Instant, u32)>,
 }
 
 impl Window {
-    fn new(limit: u32) -> Self {
+    pub(crate) fn new(limit: u32) -> Self {
         Self {
             limit,
             held: Mutex::new((Instant::now(), 0)),
         }
     }
 
-    fn admits(&self) -> bool {
+    pub(crate) fn admits(&self) -> bool {
         let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
         if now.duration_since(held.0) >= Duration::from_secs(1) {
@@ -496,21 +502,25 @@ fn registered_key<J: Journal>(csmsd: &Csmsd<J>, receipt: &Receipt) -> Option<Pub
 // ── The page ────────────────────────────────────────────────────────────────
 
 /// German decimals with a comma; English as written.
-fn number(text: &str, lang: Lang) -> String {
+pub(crate) fn number(text: &str, lang: Lang) -> String {
     match lang {
         Lang::De => text.replace('.', ","),
         Lang::En => text.to_owned(),
     }
 }
 
-fn money(amount: Decimal, currency: emob_core::Currency, lang: Lang) -> String {
+pub(crate) fn money(amount: Decimal, currency: emob_core::Currency, lang: Lang) -> String {
     let rounded = emob_core::Money::new(amount, currency).round_to_minor_unit();
     let code = currency.to_string();
     let symbol = if code == "EUR" { "€" } else { code.as_str() };
-    format!("{} {symbol}", number(&rounded.amount().to_string(), lang))
+    // A no-break space: an amount never breaks from its currency.
+    format!(
+        "{}\u{a0}{symbol}",
+        number(&rounded.amount().to_string(), lang)
+    )
 }
 
-fn when(at: time::OffsetDateTime, zone: &TimeZone, lang: Lang) -> String {
+pub(crate) fn when(at: time::OffsetDateTime, zone: &TimeZone, lang: Lang) -> String {
     let local = zone.local(at);
     let (d, t) = (local.date, local.time);
     match lang {
@@ -857,6 +867,16 @@ fn render(
             lang.pick("Gesamt", "Total"),
             escape(&money(cost.gross().amount(), currency, lang)),
         );
+        // The version that rated this session, by the code the price page and
+        // the station's display showed before it started (spec 015).
+        let _ = write!(
+            b,
+            "<p class=\"preisstand\"><span class=\"muted\">Preisstand</span> <strong>{code}</strong> · \
+             <a href=\"{page}\">{link}</a></p>",
+            code = escape(&cost.tariff_fingerprint.code()),
+            page = escape(&crate::price::path(&found.issued.receipt.evse)),
+            link = lang.pick("Preis dieses Ladepunkts", "This charge point's price"),
+        );
     }
 
     // 4. The signed values, each with a slot the self-check fills.
@@ -966,8 +986,8 @@ fn render(
             fail = lang.pick("Der Prüfer ließ sich nicht laden.", "The verifier could not be loaded."),
             title = lang.pick("Selbst prüfen", "Check it yourself"),
             explain = lang.pick(
-                "Ihr Gerät prüft jede Signatur selbst, mit einer WebAssembly-Fassung der OCMF-Prüfung — nichts auf diesem Server muss stimmen. Ist die Seite geladen, funktioniert das auch offline.",
-                "Your device checks every signature itself, with a WebAssembly build of the OCMF check — nothing on this server has to be trusted. Once the page has loaded, this works offline too."
+                "Ihr Gerät prüft jede Signatur selbst, mit einer WebAssembly-Fassung der OCMF-Prüfung — nichts auf diesem Server muss stimmen. Ist die Seite geladen, funktioniert das auch offline. Dasselbe Modul prüft jeden OCMF-Wert, auch ohne Beleg, unter hupe1980.github.io/emob/verify.",
+                "Your device checks every signature itself, with a WebAssembly build of the OCMF check — nothing on this server has to be trusted. Once the page has loaded, this works offline too. The same module checks any OCMF value, without a receipt, at hupe1980.github.io/emob/verify."
             ),
             nojs = lang.pick("Dafür braucht es JavaScript; die Transparenzdatei geht auch ohne.", "This needs JavaScript; the transparency file works without it."),
             button = lang.pick("Selbst prüfen", "Check it myself"),

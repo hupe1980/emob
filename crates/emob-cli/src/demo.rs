@@ -537,7 +537,17 @@ async fn demo(
         }
         hashes.try_into().expect("three stations")
     };
-    let text = estate::text(options.seed, &ports, &hashes, &tls);
+    // The first of the month after next: after every session this run makes.
+    let price_change = (1..=2)
+        .try_fold(start.date(), |day, _| {
+            day.replace_day(1)
+                .ok()?
+                .checked_add(time::Duration::days(32))?
+                .replace_day(1)
+                .ok()
+        })
+        .context("the day the demo's price changes")?;
+    let text = estate::text(options.seed, &ports, &hashes, &tls, price_change);
     std::fs::write(scratch.0.join("estate.toml"), &text).context("writing the estate")?;
     // Spec 012: the estate the demo runs is one `emob check` passes — the
     // demo is the first estate anybody reads.
@@ -819,6 +829,14 @@ async fn demo(
             )
         })
         .collect();
+    // Spec 023: what the next person needs, on the station they will drive to.
+    if let Ok(by) = emob_service::Actor::operator("demo") {
+        let _ = estate.csmsd.csmsd.note(
+            &by,
+            "CP-3",
+            "Zufahrt über das Tor am Betriebshof, Schlüssel im Kasten neben Säule 2.",
+        );
+    }
     for (number, records, total) in &invoices {
         out.say(format!(
             "  ⏩ month end ({next_month}): billd issues invoice {number} to MSP Mobility GmbH — {} lines, {total}",
@@ -935,9 +953,27 @@ async fn demo(
                     .map(|(_, path)| format!("Beleg: http://{}{path}", ports.csmsd))
                     .collect();
                 expected.sort();
-                let mut shown = wire.displayed();
+                let mut shown: Vec<String> = wire
+                    .displayed()
+                    .into_iter()
+                    .filter(|message| message.starts_with("Beleg: "))
+                    .collect();
                 shown.sort();
                 (wire.identity.to_owned(), shown, expected)
+            })
+            .collect();
+        // Spec 015: what each station's display was given besides receipts —
+        // the price, its Preisstand and, on 2.1, the page's own code.
+        seen.prices = wires
+            .iter()
+            .map(|wire| {
+                (
+                    wire.identity.to_owned(),
+                    wire.displayed()
+                        .into_iter()
+                        .filter(|message| !message.starts_with("Beleg: "))
+                        .collect(),
+                )
             })
             .collect();
         seen.unattributed = unattributed(&scratch.0);
@@ -1074,6 +1110,8 @@ struct Observed {
     /// Each station: what it said at boot, and whether a meter signed a
     /// billed session there (spec 012).
     known: Vec<(String, Option<String>, bool, Option<String>)>,
+    /// What each station's display showed that is not a receipt (spec 015).
+    prices: Vec<(String, Vec<String>)>,
 }
 
 /// SC-002: every record of every journal the demo wrote names who caused it.
@@ -1175,6 +1213,7 @@ fn observe(
         witnessed: Vec::new(),
         unattributed: Vec::new(),
         displayed: Vec::new(),
+        prices: Vec::new(),
         known: estate::CHARGE_POINTS
             .iter()
             .map(|point| {
@@ -1308,6 +1347,18 @@ fn judge(seen: &Observed, billable: usize) -> Vec<String> {
         ),
     );
     expect(
+        seen.prices.len() == 3
+            && seen.prices[0].1.is_empty()
+            && seen.prices[1..]
+                .iter()
+                .all(|(_, shown)| shown.iter().any(|m| m.contains("pro kWh · Preisstand ")))
+            && seen.prices[2].1.iter().any(|m| m.contains("/p/DE*MUS*E")),
+        format!(
+            "spec 015: the 2.x displays show the price and its Preisstand, CP-3 the price page's code, CP-1 (1.6) nothing: {:?}",
+            seen.prices
+        ),
+    );
+    expect(
         seen.unattributed.is_empty(),
         format!(
             "SC-002: every journalled fact names an actor: {:?}",
@@ -1366,6 +1417,23 @@ mod tests {
                     vec!["Beleg: http://127.0.0.1:9001/r/x".to_owned()],
                 ),
             ],
+            prices: vec![
+                ("CP-1".to_owned(), Vec::new()),
+                (
+                    "CP-2".to_owned(),
+                    vec![
+                        "0,49 € pro kWh · Preisstand 7F3A · http://127.0.0.1:9001/p/DE*MUS*E00002"
+                            .to_owned(),
+                    ],
+                ),
+                (
+                    "CP-3".to_owned(),
+                    vec![
+                        "0,49 € pro kWh · Preisstand 7F3A".to_owned(),
+                        "http://127.0.0.1:9001/p/DE*MUS*E00003".to_owned(),
+                    ],
+                ),
+            ],
             known: ["CP-1", "CP-2", "CP-3"]
                 .iter()
                 .map(|id| {
@@ -1387,7 +1455,7 @@ mod tests {
             "the story as told passes"
         );
         type Break = fn(&mut Observed);
-        let wrong: [(&str, Break); 16] = [
+        let wrong: [(&str, Break); 17] = [
             ("billed by csmsd", |o| drop(o.settled.pop())),
             ("billd received", |o| drop(o.received.pop())),
             ("partner holds", |o| o.partner_cdrs = 6),
@@ -1414,6 +1482,7 @@ mod tests {
             ("spec 022", |o| {
                 o.known[1].3 = Some("262011234500002".to_owned())
             }),
+            ("spec 015", |o| o.prices[2].1.clear()),
         ];
         for (named, break_it) in wrong {
             let mut seen = story_as_told();
@@ -1494,6 +1563,7 @@ mod tests {
             &ports,
             &[hash.clone(), hash.clone(), hash],
             Path::new("/t"),
+            time::macros::date!(2027 - 01 - 01),
         );
         for secret in one
             .never_printed()

@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use emob_service::estate::{SecurityProfile, Station};
-use emob_tariff::Tariff;
+use emob_tariff::TariffHistory;
 use ocpp_kit::types::Identity;
 use serde::Serialize;
 
@@ -46,7 +46,7 @@ fn refuse(field: &str, reason: impl Into<String>) -> Refusal {
 pub fn check(
     station: &Station,
     registry: &BTreeMap<String, Station>,
-    tariffs: &BTreeMap<String, Tariff>,
+    tariffs: &BTreeMap<String, TariffHistory>,
     replacing: Option<&str>,
 ) -> Result<(), Refusal> {
     Identity::new(&station.identity).map_err(|e| refuse("identity", e.to_string()))?;
@@ -132,7 +132,10 @@ pub fn mint(station: &Station) -> Result<(String, String), Refusal> {
 
 /// What admission and pricing need from a registered station.
 #[must_use]
-pub fn charge_point(station: &Station, tariffs: &BTreeMap<String, Tariff>) -> Option<ChargePoint> {
+pub fn charge_point(
+    station: &Station,
+    tariffs: &BTreeMap<String, TariffHistory>,
+) -> Option<ChargePoint> {
     Some(ChargePoint {
         evse_id: station.evse.clone(),
         rated_power_kw: station.rated_power_kw,

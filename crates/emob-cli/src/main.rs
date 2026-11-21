@@ -27,7 +27,9 @@ use std::process::ExitCode;
 use emob_verify::Verdict;
 
 mod check;
+mod check_feed;
 mod demo;
+mod qr;
 mod subscribers;
 mod witness;
 
@@ -38,6 +40,11 @@ const USAGE: &str = "usage: emob check [--secrets] [--schema] <estate.toml>\n   
     subscribers test\n\
             Sends one signed sample of every event type a [[subscribers]]\n\
             entry takes, marked emobtest, and prints each answer.\n\
+    check-feed <file>\n\
+            Reads a DATEX II AFIR file (XML or JSON), lists what the reader\n\
+            tolerated and holds every publication to the Mobilithek profile.\n\
+    qr      Writes the QR code of a charge point's price page as SVG, for print:\n\
+            emob qr estate.toml DE*ABC*E00001 > sticker.svg\n\
     verify  Checks every signed meter value in a S.A.F.E. transparency file against\n\
             the key it carries, offline. Exit 0 = all verified, 1 = one did not\n\
             verify, 2 = one could not be checked here.\n\
@@ -58,6 +65,10 @@ fn main() -> ExitCode {
             return witness::main(rest);
         }
         [command, rest @ ..] if command == "check" => check::main(rest, &mut out, &mut err),
+        [command, rest @ ..] if command == "qr" => qr::main(rest, &mut out, &mut err),
+        [command, rest @ ..] if command == "check-feed" => {
+            check_feed::main(rest, &mut out, &mut err)
+        }
         [command, rest @ ..] if command == "subscribers" => {
             subscribers::main(rest, &mut out, &mut err)
         }

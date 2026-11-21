@@ -42,7 +42,7 @@
     },
     "emobtest": {
       "type": "boolean",
-      "description": "Present and true only on a sample sent by `emob subscribers test`; never book it."
+      "description": "Present and true only on a sample `emob subscribers test` or emobtest sent: take it (2xx) and never book it."
     },
     "data": {
       "type": "object",

@@ -81,6 +81,43 @@ jobs:
           node-version: 22
       - run: just a11y
 
+  # emobtest, the Python toolkit (spec 024): outside the Cargo workspace, so
+  # the jobs above need no Python. The wheel is built at the abi3 floor, its
+  # suite runs against the wheel, and the Python layer is linted — a consumer
+  # reads it.
+  emobtest:
+    name: emobtest (toolkit, and emob driven by it)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: emobtest
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Build the wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.15.0
+          command: build
+          args: --manifest-path emobtest/Cargo.toml --out dist
+      - name: Test the wheel, lint the Python
+        run: |
+          pip install pytest ruff
+          pip install --no-deps dist/*.whl
+          cd emobtest && pytest -q && ruff check . && ruff format --check .
+      # emob driven from outside: the estate's daemons, and emobtest's
+      # stations charging on OCPP 1.6, 2.0.1 and 2.1 against them.
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - name: Drive the estate (just e2e)
+        run: just e2e
+
   guards:
     name: Workspace guards
     runs-on: ubuntu-latest

@@ -52,6 +52,10 @@ flowchart LR
     class BILL,TX out
 ```
 
+Anyone can check a single signed value without emob or a receipt:
+[the verifier](@/verify.md) runs the receipt's own WebAssembly module in the
+browser and uploads nothing.
+
 The transparency file comes from the evidence, not from a successful outcome: a
 disputed session that did **not** bill is exactly when the driver needs to check
 it. In the running estate, the driver's receipt for a refused session says so

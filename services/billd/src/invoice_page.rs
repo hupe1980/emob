@@ -49,7 +49,7 @@ use emob_billing::{Specification, Syntax};
 use emob_service::journal::Journal;
 use emob_service::ui::{self, Lang, Shell, escape};
 use emob_tariff::Dimension;
-use hmac::{Hmac, Mac as _};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive as _;
 use sha2::{Digest as _, Sha256};

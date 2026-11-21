@@ -9,7 +9,9 @@ The point-of-interest daemon: publishes a charge point operator's static and dyn
 | ✅ library | `poid::Poid` builds checked snapshot and status publications from `emob-poi`'s DATEX II documents and reports a stale feed; `poid::Ledger` records which snapshot the access point accepted — tested in `tests/a_snapshot_goes_out.rs` |
 | ✅ journal | on start the daemon folds its journal (`poid` under `EMOB_JOURNAL_DIR`) and restores the last accepted snapshot, or warns that none was ever accepted. Every record names its actor; the head is signed under `POID_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
 | ✅ estate | the inventory is the estate's `[[stations]]`, one site per `location.id`, with exact decimal coordinates; the publisher country is the operator party's |
-| ⏳ not wired | the push client: it logs whether the feed is stale and pushes nothing to the Mobilithek; prices from `tarifd` |
+| ✅ prices | each point's rate is the version of its station's tariff in force at the moment of publication, from the same history `csmsd` rates with, named `<tariff>-<Preisstand>` |
+| ✅ push | with `[mobilithek]` (`url`, `client_cert`, `client_key`), the table goes to the Mobilithek at start and hourly over mutual TLS; only a `2xx` is journalled, and each documented refusal is named — `400` document, `401`/`403` certificate, `404` publication, anything else retried next round (`tests/the_table_reaches_the_access_point.rs`) |
+| ⏳ not wired | the dynamic delta (status and ad-hoc price within a minute): the library builds it, the daemon does not send it yet; the inventory is the estate's, not yet `csmsd`'s registry |
 
 ## What it owns
 

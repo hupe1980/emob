@@ -82,8 +82,10 @@ Each `[[stations]]` entry names its `security_profile` `[OCPP 2.0.1 Part 2 §A00
 | 3 | a TLS client certificate | the chain to `[csms] client_ca` and a CN equal to the identity; refused at start behind a proxy |
 
 An unknown identity gets **404**, a wrong credential **401** (logged with the
-identity), a connection over `max_connections` **503**. A station that does not
-offer its provisioned OCPP version is refused. Each connection has a budget of
+identity), a connection over `max_connections` **503**. csmsd offers 1.6,
+2.0.1 and 2.1 and pins each station to its provisioned version, so one that
+also speaks a newer one speaks its own; one that does not offer it is
+refused. Each connection has a budget of
 `messages_per_minute` (excess answered with `SecurityError`, not processed) and
 an `idle_timeout_secs`; the counters are on the running daemon's edge. A second
 connection under a known identity supersedes the first — the credential check
@@ -176,6 +178,8 @@ In the example estate `CP-1` is a profile-2 station whose `AuthorizationKey` is
 | `GET /v1/csmsd/stations?q=&area=&limit=&offset=` | operator token: the registry searched — every word in a station's identity, EVSE id, OCPP version, state, vendor, model, firmware, network or carrier; `{ total, items }` |
 | `POST /v1/csmsd/stations`, `PUT …/<identity>`, `POST …/<identity>/password`, `POST …/<identity>/retire` | operator token: register (the password in this answer only), change, mint a new password, retire — each with a reason, journalled under the operator; a refusal is `422` with `{ field, reason }` |
 | `GET /v1/csmsd/stations/<identity>` | operator token: one station — estate entry, presence, what it said at boot, meters with key status, firmware history, reports, boots in 7 days, success today and over 7 days, last 20 sessions with receipt paths. An identity the estate does not list is an empty `404` |
+| `POST /v1/csmsd/stations/<identity>/notes`, `POST …/notes/<number>/remove` | operator token: a note (`{text}`, 1–500 characters) under the operator, answered `{number}`; removing one is a fact too. The newest ten per station are in the station view, the newest on its silent row, all of them in the search |
+| `GET /p/{evse}`, `GET /p/{evse}.atom` | public: the point's price — the version a session starting now is rated with, components in `[AFIR Art. 5(4)]`'s order, three worked totals, the Preisstand, announced versions — and every version as Atom. Cacheable for 60 s, `noindex`, rate-limited; an unknown EVSE is an empty `404` |
 | `GET /v1/csmsd/map?q=&area=` | operator token: the map of a station search — `points` (identity, coordinates, presence) up to 300 matches, else `cells` of a 16 × 16 grid over their extent with station and silent counts; `area=west,south,east,north` in degrees narrows it, anything else is `400` |
 | `GET /v1/csmsd/today?limit=&refused=&silent=` | operator token: registry size, the charging success rate for **today** and the **last 7 days** in `[desk] time_zone` (each with causes and weakest points), refused sessions with typed, cited `findings` and their `receipt_path`, silent stations with their mobile network, and `networks` (silent and total stations per network with a silent one) — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page. Its size depends on `limit` and the number of stations, never on the history |
 | `GET /v1/csmsd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
@@ -188,7 +192,7 @@ In the example estate `CP-1` is a profile-2 station whose `AuthorizationKey` is
 ## Built on
 
 `emob-ocpp`, `emob-eichrecht`, `emob-session`, `emob-tariff`, `emob-cdr`,
-`emob-service`, `emob-verify` (the receipt's verifier), and [`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.6 for
+`emob-service`, `emob-verify` (the receipt's verifier), and [`ocpp-kit`](https://crates.io/crates/ocpp-kit) 0.7 for
 transport and the operational ledger. See
 [The OCPP seam](https://hupe1980.github.io/emob/docs/ocpp/) and the
 [workspace README](../../README.md).

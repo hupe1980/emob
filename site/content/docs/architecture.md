@@ -102,8 +102,8 @@ adding partners changes the transport, never the arithmetic.
 | `billd` | Receiving CDRs, closing each partner's month into an invoice, numbering, postings; the invoice page and signed delivery to the operator system | ✅ · ⏳ SEPA runs |
 | `roamd` | OCPI in both directions behind a reach-back guard; who a record goes to | ✅ OCPI · ⏳ OICP transport |
 | `deskd` | The operator page Heute; the witness of every journal's signed head | ✅ |
-| `tarifd` | Publishing the estate's tariff versions | ✅ read model · ⏳ push clients |
-| `poid` | The inventory for the national access point | ✅ inventory from the estate · ⏳ push |
+| `tarifd` | Publishing the estate's tariff versions | ✅ read model · ✅ `driver-tariff.v1` · ⏳ push clients |
+| `poid` | The inventory for the national access point | ✅ inventory from the estate, priced · ✅ table push · ⏳ dynamic delta |
 | `sited` | The § 14a site controller, run **at** the site | ⏳ SHIP session, OCPP leg |
 | `agentd` | Advisory specialists over many records, run under the read-only advisory principal | ✅ runtime · ⏳ nothing triggers a run |
 
@@ -132,7 +132,7 @@ model behind the operator token. `emob demo` runs the daemons' own
 configured rather than forked — and `deskd` takes its clock as a parameter, so
 the demo can play a morning at 60×. See [Run the estate](@/docs/run-the-estate.md).
 
-**1341 tests** cover the workspace.
+**1367 tests** cover the workspace.
 
 An end-to-end test drives the full chain: OCMF records signed with a real key at
 test time, verified, matched against a session, split into quarter hours, built
@@ -362,14 +362,15 @@ emob does not implement charging protocols; it depends on these libraries:
 
 | Library | Version | What emob uses |
 |---|---|---|
-| [`ocmf`](https://crates.io/crates/ocmf) | 0.1 | Parsing and verifying OCMF records without disturbing the signed bytes; the S.A.F.E. transparency container |
-| [`ocpp-kit`](https://crates.io/crates/ocpp-kit) | 0.5 | OCPP 1.6J / 2.0.1 / 2.1 messages, transport and the CSMS ledger |
-| [`ocpi-kit`](https://crates.io/crates/ocpi-kit) | 0.4 | OCPI 2.1.1 / 2.2.1 / 2.3.0 models, version translation and the client. **Not** its tariff engine: one pricing engine means one answer |
+| [`ocmf`](https://crates.io/crates/ocmf) | 0.2 | Parsing and verifying OCMF records without disturbing the signed bytes; the S.A.F.E. transparency container |
+| [`ocpp-kit`](https://crates.io/crates/ocpp-kit) | 0.8 | OCPP 1.6J / 2.0.1 / 2.1 messages, transport and the CSMS ledger |
+| [`ocpi-kit`](https://crates.io/crates/ocpi-kit) | 0.5 | OCPI 2.1.1 / 2.2.1 / 2.3.0 models, version translation and the client. **Not** its tariff engine: one pricing engine means one answer |
 | [`oicp-kit`](https://crates.io/crates/oicp-kit) | 0.1 | Hubject OICP, CPO and EMP sides |
+| [`datex2`](https://crates.io/crates/datex2) | 0.3 | DATEX II for the AFIR feed to the Mobilithek |
 | [`iso15118`](https://crates.io/crates/iso15118) | 0.9 | Certificate path validation for Plug & Charge |
-| [`eebus`](https://crates.io/crates/eebus) | 0.11 | SHIP and SPINE for § 14a; used without its runtime, so `emob-eebus` stays sans-I/O |
+| [`eebus`](https://crates.io/crates/eebus) | 0.13 | SHIP and SPINE for § 14a; used without its runtime, so `emob-eebus` stays sans-I/O |
 | [`en16931`](https://crates.io/crates/en16931), `en16931-formats` | 0.10 | The European e-invoice model, validation, UBL and CII |
-| [`sepa`](https://crates.io/crates/sepa) | 0.9 | SEPA direct debit (pain.008) |
+| [`sepa`](https://crates.io/crates/sepa) | 0.10 | SEPA direct debit (pain.008) |
 | [`doubleentry`](https://crates.io/crates/doubleentry) | 0.9 | Bookkeeping in `billd` |
 | [`agentplane`](https://crates.io/crates/agentplane) | 0.61 | The run journal for `agentd` |
 

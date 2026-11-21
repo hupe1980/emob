@@ -10,6 +10,79 @@ renames something says so under **Removed** or **Changed** instead.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-21
+
+The price before the plug, and a kit that proves the platform from outside.
+
+### Changed
+
+- `ocmf` 0.2 and the 0.14 RustCrypto generation (`sha2` 0.11, `p256`/`p521`
+  0.14, `hmac` 0.13). RUSTSEC-2026-0387 no longer applies and `deny.toml` no
+  longer ignores it. The verified curves are named one by one — `curves-pure`
+  would bring brainpool on unaudited arithmetic — and the curve crates are
+  optimised in debug builds, so the signing tests run in seconds again.
+- `ocpi-kit` 0.5 with `exact-json`: OCPI numbers are exact, and the client
+  refuses an internal address on every connection and redirect hop, which
+  closes the DNS-rebinding window `roamd` documented.
+- `ocpp-kit` 0.8: `csmsd` pins each station to its provisioned version and
+  logs a refused connection with the kit's typed reason.
+- `eebus` 0.13.1: the kit holds LPC/LPP limits, the failsafe value and MGCP
+  curtailment exactly. `emob-eebus` keeps its own watchdog for the query by
+  instant and the `Uncontrolled` site.
+
+### Added
+
+- **emobtest** — the Python test and conformance toolkit for any charging
+  platform, on emob's own crates (`pip install emobtest`):
+  - `Station` and `Car` charge on any CSMS over OCPP 1.6, 2.0.1 and 2.1, every
+    reading signed by an emob-sim meter, with `tampered` and `dropped` faults;
+    `Emsp` answers authorisations as `empd` does, or stalls and fails on cue;
+  - a signing meter, the receipt's verifier, the Eichrecht chain, the tariff
+    rating and the Preisstand, event schemas and a Standard Webhooks inbox;
+  - the `receiver` and `authorize` conformance suites a replacement for
+    `billd` or `empd` runs — emob's own pass both;
+  - a pytest plugin and a CLI. `just e2e` drives the estate with it on all
+    three OCPP versions, in CI too.
+- `billd` and `roamd` take a signed delivery marked `emobtest` with `202` and
+  never book it, as the event schemas say a receiver must.
+- **The price, before the plug** (`[PAngG §3]` from 01.01.2027). A public page
+  per charge point, `/p/{evse}`: the price per kWh first, every component in
+  `[AFIR Art. 5(4)]`'s order, what 10, 30 and 50 kWh cost (rated by the
+  function that bills), and the **Preisstand** — the version's code, also on
+  the receipt and, with `show_price`, on the station's display (OCPP 2.1 with
+  the page's QR code). Announced versions are shown ahead and listed in
+  `/p/{evse}.atom`. `emob qr <estate> <evse>` writes the code as SVG for print.
+- **Verify anything** — a page on the public site, `/verify/`: paste an OCMF
+  record and a key, and the receipt's own WebAssembly module answers in the
+  browser, offline, with a worked example and its tampered twin; the page's
+  policy allows no request but the module, and it shows the module's SHA-256
+  as computed from the bytes it loaded. Every receipt names it.
+- **The table reaches the Mobilithek.** `poid` prices each point with the
+  tariff version in force at publication and, with `[mobilithek]` (push
+  address, client certificate), posts the table at start and hourly over
+  mutual TLS; only an accepted push is journalled, and each documented refusal
+  is named (document, certificate, publication, outage). The dynamic delta is
+  not sent yet.
+- **`driver-tariff.v1`** — a seller imports a tariff instead of typing it:
+  `GET /v1/driver-tariffs/{id}` (in force) and `…/{id}/{version}` (for ever)
+  on `tarifd`; schema `schemas/driver-tariff.v1.json`.
+- **`emob check-feed <file>`** holds any DATEX II AFIR file to the Mobilithek
+  profile.
+- **Tariff versions.** A `[[tariffs]]` id may repeat with `valid_from` (and
+  `per_minute`, `session_fee`); a session is rated with the version in force
+  when it started, and `csmsd` and `tarifd` read one history.
+- **Notes on a station.** What the next person needs — access, keys, quirks —
+  as a journalled note under the operator's name on the asset card, removable
+  as a fact; the newest shows on Heute's row when the station goes silent, and
+  the search finds stations by their notes.
+  `POST /v1/csmsd/stations/{id}/notes`, `…/notes/{n}/remove`.
+
+### Fixed
+
+- A station registered on an OCPP version no estate station used could not
+  connect: `csmsd` offered only the estate's versions. It offers all three
+  and pins each station to its own. Found by emobtest's station.
+
 ## [0.5.0] - 2026-11-20
 
 The way in is short, and the fleet has a registry, a map and a network.
@@ -361,7 +434,8 @@ could not.
 First release: fifteen crates from the signed meter value to the ledger posting,
 and eight daemons.
 
-[Unreleased]: https://github.com/hupe1980/emob/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/hupe1980/emob/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/hupe1980/emob/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hupe1980/emob/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/hupe1980/emob/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/hupe1980/emob/compare/v0.3.0...v0.3.1

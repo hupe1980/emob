@@ -106,8 +106,16 @@ pub fn meters(seed: u64) -> Vec<VirtualStation> {
 ///
 /// `hashes` are the Argon2id hashes of the three stations' passwords, in
 /// [`CHARGE_POINTS`] order; `tls` is the directory `just dev-ca` wrote.
+/// `price_change` is the day the tariff's announced second version starts
+/// (spec 015): after every session the demo runs, so its totals never move.
 #[must_use]
-pub fn text(seed: u64, ports: &Ports, hashes: &[String; 3], tls: &Path) -> String {
+pub fn text(
+    seed: u64,
+    ports: &Ports,
+    hashes: &[String; 3],
+    tls: &Path,
+    price_change: time::Date,
+) -> String {
     let meters = meters(seed);
     let mut out = String::from(
         "# The demonstration estate `emob demo` writes — Stadtwerke Musterstadt eMobility.\n\
@@ -118,7 +126,7 @@ pub fn text(seed: u64, ports: &Ports, hashes: &[String; 3], tls: &Path) -> Strin
         out.push_str(&format!(
             "[[stations]]\nidentity = \"{identity}\"\nocpp = \"{ocpp}\"\nsecurity_profile = 2\n\
              password_hash = \"{hash}\"\nevse = \"{evse}\"\nrated_power_kw = \"{power}\"\n\
-             tariff = \"ad-hoc\"\nconnector = \"{connector}\"\n{display}\
+             tariff = \"ad-hoc\"\nconnector = \"{connector}\"\n{display}{price}\
              location = {{ id = \"LOC-MUS-1\", name = \"Betriebshof Musterstadt\", \
              street = \"Am Stadtwerk\", house_number = \"1\", postal_code = \"12345\", \
              city = \"Musterstadt\", country = \"DE\", latitude = \"51.163400\", \
@@ -130,6 +138,12 @@ pub fn text(seed: u64, ports: &Ports, hashes: &[String; 3], tls: &Path) -> Strin
                 "receipt_display_minutes = 10\n"
             } else {
                 ""
+            },
+            // Spec 015: the 2.x stations show the price and its Preisstand.
+            price = if point.version == Version::V1_6 {
+                ""
+            } else {
+                "show_price = true\n"
             },
             evse = point.evse,
             power = meter.rated_power_kw,
@@ -156,6 +170,18 @@ currency = "EUR"
 time_zone = "Europe/Berlin"
 energy = "0.49"
 vat = "19"
+
+# Announced: from the first of the month after next, a session fee and a lower
+# price per kWh. The price page shows it ahead, and the station's display
+# switches on its own at that minute.
+[[tariffs]]
+id = "ad-hoc"
+currency = "EUR"
+time_zone = "Europe/Berlin"
+energy = "0.45"
+session_fee = "0.50"
+vat = "19"
+valid_from = "{price_change}"
 
 [[partners]]
 party = "DE*MSP"
@@ -215,6 +241,12 @@ retry_secs = 1
 public_url = "http://{roamd}/ocpi"
 reach_back_allow = ["127.0.0.1", "::1", "localhost"]
 "#,
+        // Local midnight in the stations' zone, as the instant it is.
+        price_change = emob_core::TimeZone::new("Europe/Berlin")
+            .ok()
+            .and_then(|zone| zone.instant_at(price_change, time::Time::MIDNIGHT))
+            .and_then(|at| at.format(&time::format_description::well_known::Rfc3339).ok())
+            .unwrap_or_default(),
         token_a = env::TOKEN_A,
         good = GOOD_CARD,
         blocked = BLOCKED_CARD,
@@ -256,6 +288,7 @@ mod tests {
             &ports(),
             &[hash.clone(), hash.clone(), hash],
             Path::new("/tmp/dev-tls"),
+            time::macros::date!(2027 - 01 - 01),
         )
     }
 

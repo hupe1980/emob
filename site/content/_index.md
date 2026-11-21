@@ -26,7 +26,8 @@ Also inside: [Plug & Charge for ISO 15118-2 and -20](@/docs/plug-and-charge.md) 
 [§ 14a smart charging](@/docs/smart-charging.md) ·
 [MiSpeL for bidirectional charging](@/docs/bidirectional.md) ·
 [AFIR data and the Mobilithek feed](@/docs/locations.md) ·
-THG-Quote filing.
+THG-Quote filing · **[verify an OCMF record in your browser](@/verify.md)** ·
+**[test any charging platform from Python](@/docs/emobtest.md)**.
 
 ## How a charging session becomes an invoice
 
@@ -77,9 +78,10 @@ exactly when it matters. [Read the Eichrecht guide →](@/docs/eichrecht.md)
 
 | Date | Rule | In emob |
 |---|---|---|
-| 14 Apr 2026 | AFIR Art. 20: static and dynamic data as DATEX II via the Mobilithek | ✅ feed generated · ⏳ push |
+| 14 Apr 2026 | AFIR Art. 20: static and dynamic data as DATEX II via the Mobilithek | ✅ table priced and pushed · ⏳ dynamic delta |
 | 11 Sep 2026 | Cyber Resilience Act: vulnerability reporting | ✅ assessed per company |
 | 21 Oct 2026 | BNetzA MiSpeL: levy relief for bidirectional charging points | ✅ month and year netted · two entitlements |
+| 1 Jan 2027 | PAngG § 3: fines for a charging price not, not correctly or not completely shown | ✅ price page per point · Preisstand on page, display and receipt |
 | 1 Jan 2027 | ISO 15118-20 on new public points (Delegated Regulation 2025/656) | ✅ duty modelled · -2 and -20 contract chains validated under named roots |
 | 1 Jan 2027 | AFIR card payment at existing ≥ 50 kW TEN-T points | ✅ duty modelled |
 | 1 Jan 2027 | German B2B e-invoices issued for turnover above €800k | ✅ EN 16931 / XRechnung in UBL and CII · invoice page · signed handover |
@@ -106,37 +108,29 @@ partner and a seeded morning of sessions — and prints two links worth opening.
 
 ## Where it stands
 
-**✅ Release 0.5 — the way in is short, and the fleet is visible.** Nine
+**✅ Release 0.6 — the price before the plug, and a kit to prove it.** Nine
 daemons start from one `estate.toml`, which `emob check` reads the way `rustc`
-reads code — line, key, what would be valid — and editors complete from its
-JSON Schema. Stations connect to `csmsd` over OCPP with security profiles 1–3
-and TLS; `empd` answers every authorisation, failing closed; sessions are
-journalled (sealed under a per-daemon data key), billed by `billd` into a
-monthly EN 16931 invoice and pushed to roaming partners by `roamd` over OCPI.
-The operator works from **Heute**, the driver checks a **receipt** in the
-browser, and releases are signed and attested. Also:
+reads code. Stations connect to `csmsd` over OCPP 1.6, 2.0.1 and 2.1 with
+security profiles 1–3; `empd` answers every authorisation, failing closed;
+`billd` invoices in EN 16931 and `roamd` roams over OCPI. The operator works
+from **Heute**, the driver checks a **receipt**. New in 0.6:
 
-- a journalled **station registry**: onboard a station in one form with an
-  installer sheet, find one among ten thousand, change or retire it without a
-  restart; each station an **asset card** — what it says it runs, what its
-  meter signs, its firmware history;
-- the fleet on a **map** drawn by the server (no tiles, no third party), a
-  locator that names swapped coordinates, and silent stations grouped by
-  **mobile network**;
-- every journal fact names its **actor**, and each journal **signs its head**
-  for a **witness**;
-- the **MiSpeL month**, **ISO 15118-20** contract chains, the **invoice page**
-  with its XRechnung files, and every record and invoice to any system you name
-  as a **subscriber**, as a signed CloudEvent;
-- an **accessibility check** on every page in CI, and a Docker-only `just demo`.
+- a public **price page** per charge point with its **Preisstand**, also on the
+  receipt and the station's display, and tariff versions announced ahead;
+- **[verify](@/verify.md)** any OCMF record in the browser, offline;
+- the AFIR table **pushed to the Mobilithek**, `driver-tariff.v1` for sellers;
+- **notes** on a station, for whoever comes next;
+- **[emobtest](@/docs/emobtest.md)** — stations, cars and an eMSP that drive
+  any CSMS over OCPP, and conformance suites for a service that replaces one
+  of emob's. CI drives the estate with it on every push.
 
 **✅ Underneath:** fifteen domain crates — Eichrecht verification, sessions and
 the quarter-hour split, CDRs, tariffs, OCPP, OCPI and OICP crossings, AFIR data,
 EN 16931 invoices and SEPA, THG-Quote, § 14a, Plug & Charge — each with no I/O,
 no clock and no binary floats.
 
-**⏳ In a library, not in a daemon:** the OICP and national-access-point push
-clients, SEPA runs from `billd`, the SHIP/EEBUS session for § 14a, and MiSpeL
+**⏳ In a library, not in a daemon:** the OICP push client, the Mobilithek's
+dynamic delta, SEPA runs from `billd`, the SHIP/EEBUS session for § 14a, and MiSpeL
 on Heute.
 
 Every page in these docs marks what ✅ runs and what ⏳ only a library does, and

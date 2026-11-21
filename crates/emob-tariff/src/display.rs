@@ -506,6 +506,54 @@ pub fn describe_gross(
     })
 }
 
+/// What a session of `kwh` at `power_kw` would cost under `tariff` if it
+/// started at `at` — the worked example a price page shows beside the rates,
+/// because a driver compares totals (spec 015).
+///
+/// Rated by [`crate::rating::rate`] itself over one charging period of
+/// `kwh / power_kw` hours, so the example is the bill the same session would
+/// get, rounded to the currency's minor unit as an invoice line is. `None`
+/// for a non-positive energy or power.
+///
+/// ```
+/// use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, worked_total};
+/// use emob_core::{Currency, TimeZone};
+/// use rust_decimal::Decimal;
+/// use time::macros::datetime;
+///
+/// let tariff = Tariff::simple(
+///     "ad-hoc".parse()?,
+///     Currency::EUR,
+///     TariffKind::AdHoc,
+///     TimeZone::new("Europe/Berlin")?,
+///     vec![
+///         PriceComponent::new(Dimension::Energy, Decimal::new(59, 2)),
+///         PriceComponent::new(Dimension::Flat, Decimal::new(50, 2)),
+///     ],
+/// );
+/// let total = worked_total(&tariff, Decimal::from(30), Decimal::from(150), datetime!(2026-12-01 10:00 +1));
+/// assert_eq!(total.unwrap().to_string(), "18.20 EUR");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[must_use]
+pub fn worked_total(
+    tariff: &Tariff,
+    kwh: Decimal,
+    power_kw: Decimal,
+    at: time::OffsetDateTime,
+) -> Option<emob_core::Money> {
+    use rust_decimal::prelude::ToPrimitive as _;
+    if kwh <= Decimal::ZERO || power_kw <= Decimal::ZERO {
+        return None;
+    }
+    let seconds = (kwh * Decimal::from(3600) / power_kw).ceil().to_i64()?;
+    let energy = emob_core::Energy::from_kwh(kwh).ok()?;
+    let session =
+        crate::rating::Chargeable::energy_only(energy, at, at + time::Duration::seconds(seconds))
+            .ok()?;
+    Some(crate::rating::rate(tariff, &session).total())
+}
+
 /// One element's prices, in the order the article prescribes.
 fn lines_of(element: &TariffElement) -> Vec<DisplayLine> {
     let mut lines: Vec<DisplayLine> = element

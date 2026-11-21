@@ -28,7 +28,7 @@ msrv       = "1.94"
 #   stat_curves       the ECDSA curves the pure-Rust build verifies — OCMF's
 #                     four (p192, p256, p384, k256) plus ISO 15118 Annex F's p521
 stat_obligations = "51"
-stat_tests = "1341"
+stat_tests = "1367"
 stat_crates      = "17"
 stat_floats      = "0"
 stat_curves      = "5"

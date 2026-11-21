@@ -6,6 +6,7 @@ on:
     paths:
       - "site/**"
       - "schemas/**"
+      - "services/csmsd/assets/emob_verify.wasm"
       - ".github/workflows/site.yml"
   workflow_dispatch:
 
@@ -33,6 +34,8 @@ jobs:
       # The estate's and the events' JSON Schemas, at the `$id` they name
       # (spec 012): https://hupe1980.github.io/emob/schemas/…
       - run: mkdir -p site/static/schemas && cp -R schemas/. site/static/schemas/
+      # Spec 017: the receipt's own verifier, on the public verify page.
+      - run: mkdir -p site/static/verify && cp services/csmsd/assets/emob_verify.wasm site/static/verify/
       - run: cd site && zola build
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

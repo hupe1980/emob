@@ -146,6 +146,16 @@ async fn deliveries<J: Journal>(
             return refuse(StatusCode::UNAUTHORIZED, refusal.to_string());
         }
     };
+    // A signed sample (`emobtest`): taken and never booked, so an operator can
+    // test this receiver — and a replacement for it — against the real thing.
+    if emob_service::cloudevent::is_test(&body) {
+        tracing::info!(%id, "a test delivery was taken and not booked");
+        return (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "test": true })),
+        )
+            .into_response();
+    }
     // A `de.emob.cdr.issued` CloudEvent and nothing else; the record is its data.
     let body: Body =
         match emob_service::cloudevent::open::<Body>(&body, emob_service::events::cdr::ISSUED) {

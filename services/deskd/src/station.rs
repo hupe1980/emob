@@ -38,6 +38,12 @@ pub struct StationPage {
     /// Minutes its display shows a receipt's code.
     #[serde(default)]
     pub receipt_display_minutes: Option<u8>,
+    /// Operators' notes, newest first.
+    #[serde(default)]
+    pub notes: Vec<Note>,
+    /// The price in force (spec 015).
+    #[serde(default)]
+    pub price: Option<Price>,
     /// Where it stands.
     pub location: Option<Place>,
     /// Online or offline.
@@ -87,6 +93,31 @@ pub struct Place {
     pub longitude: String,
     /// IANA zone.
     pub time_zone: String,
+}
+
+/// The price in force, as the price page shows it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Price {
+    /// `0,49 € pro kWh`.
+    pub line: String,
+    /// The Preisstand.
+    pub preisstand: String,
+    /// `/p/{evse}` on the public shell.
+    pub path: String,
+}
+
+/// An operator's note.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Note {
+    /// Its number on the station.
+    pub number: u64,
+    /// Who wrote it, as an actor: `operator:<name>`.
+    pub by: String,
+    /// What it says.
+    pub text: String,
+    /// When.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
 }
 
 /// Presence.
@@ -241,8 +272,10 @@ pub fn render(
 ) -> String {
     let ctx = Ctx { lang, zone, now };
     let mut body = verdict(page, &ctx);
+    // What the next person needs to know comes before the numbers.
+    body.push_str(&notes(page, &ctx));
     body.push_str(&rate(page, &ctx));
-    body.push_str(&asset(page, &ctx));
+    body.push_str(&asset(page, &ctx, receipts));
     body.push_str(&place(page, &ctx));
     body.push_str(&meters(page, &ctx));
     body.push_str(&firmware(page, &ctx));
@@ -259,6 +292,56 @@ pub fn render(
         },
         &body,
     )
+}
+
+/// The operators' notes, newest first, each removable, and a form for the
+/// next one (spec 023). Every text is escaped (SR-155).
+fn notes(page: &StationPage, ctx: &Ctx<'_>) -> String {
+    let lang = ctx.lang;
+    let station = escape(&href(&page.identity));
+    let mut out = format!(
+        "<section class=\"card\" id=\"notes\" aria-labelledby=\"notes-h\"><h2 id=\"notes-h\">{}</h2>",
+        lang.pick("Notizen", "Notes")
+    );
+    if !page.notes.is_empty() {
+        out.push_str("<ol class=\"notes\">");
+        for note in &page.notes {
+            let _ = write!(
+                out,
+                "<li><p class=\"text\">{text}</p><span class=\"muted\">{by} · {at}</span>\
+                 <form method=\"post\" action=\"{station}/notes/{number}/remove\" class=\"noprint\">\
+                 <button class=\"btn ghost\" type=\"submit\" aria-label=\"{remove_label}\">{remove}</button></form></li>",
+                text = escape(&note.text),
+                by = escape(note.by.strip_prefix("operator:").unwrap_or(&note.by)),
+                at = ctx.when(note.at),
+                number = note.number,
+                remove = lang.pick("Entfernen", "Remove"),
+                remove_label = escape(&match lang {
+                    Lang::De => format!("Notiz vom {} entfernen", ctx.when(note.at)),
+                    Lang::En => format!("Remove the note of {}", ctx.when(note.at)),
+                }),
+            );
+        }
+        out.push_str("</ol>");
+    }
+    let _ = write!(
+        out,
+        "<details class=\"noprint\"{open}><summary>{add}</summary>\
+         <form method=\"post\" action=\"{station}/notes\"><p><label for=\"note-text\">{label}</label><br>\
+         <textarea id=\"note-text\" name=\"text\" required maxlength=\"500\" aria-describedby=\"note-hint\" placeholder=\"{example}\"></textarea></p>\
+         <p class=\"muted\" id=\"note-hint\">{hint}</p><p><button class=\"btn\" type=\"submit\">{save}</button></p></form></details></section>",
+        // Open while there is nothing to read; a disclosure once there is.
+        open = if page.notes.is_empty() { " open" } else { "" },
+        add = lang.pick("+ Notiz hinzufügen", "+ Add a note"),
+        label = lang.pick("Neue Notiz", "New note"),
+        example = lang.pick("Zugang über Tor 3, Schlüssel beim Pförtner", "Access through gate 3, key at the gatehouse"),
+        hint = lang.pick(
+            "Was die Nächste wissen muss — Zugang, Schlüssel, Eigenheiten. Keine Namen oder Nummern von Privatpersonen.",
+            "What the next person needs to know — access, keys, quirks. No private persons' names or numbers.",
+        ),
+        save = lang.pick("Notiz speichern", "Save the note"),
+    );
+    out
 }
 
 /// Online since when, silent since when, or never heard.
@@ -333,7 +416,7 @@ fn rate(page: &StationPage, ctx: &Ctx<'_>) -> String {
 }
 
 /// What the estate and the station say it is.
-fn asset(page: &StationPage, ctx: &Ctx<'_>) -> String {
+fn asset(page: &StationPage, ctx: &Ctx<'_>, public: &str) -> String {
     let lang = ctx.lang;
     let row = |dt: &str, dd: String| format!("<dt>{dt}</dt><dd>{dd}</dd>");
     let mut card = String::new();
@@ -342,6 +425,21 @@ fn asset(page: &StationPage, ctx: &Ctx<'_>) -> String {
         lang.pick("Leistung", "Power"),
         format!("{} kW", escape(&page.rated_power_kw)),
     ));
+    if let Some(price) = &page.price {
+        // The public page lives on the public shell; the card says where by
+        // its path and names the code a driver compares (spec 015).
+        card.push_str(&row(
+            lang.pick("Preis", "Price"),
+            format!(
+                "{line} <span class=\"muted\">· Preisstand <strong>{code}</strong> · \
+                 <a href=\"{href}\">{page_word}</a></span>",
+                line = escape(&price.line),
+                code = escape(&price.preisstand),
+                href = escape(&format!("{}{}", public.trim_end_matches('/'), price.path)),
+                page_word = lang.pick("Preisseite", "Price page"),
+            ),
+        ));
+    }
     card.push_str(&row(
         "OCPP",
         format!(
@@ -757,7 +855,8 @@ mod tests {
             "firmware_history": [{"at": "2026-11-20T07:00:00Z", "component": "station", "from": "1.2", "to": "1.3"}],
             "meters": [], "boots_7d": 1,
             "reports": [{"at": "2026-11-20T08:00:00Z", "kind": "security", "event": "TamperDetectionActivated", "detail": "lid"}],
-            "success": {"today": null, "week": null}, "recent": []
+            "success": {"today": null, "week": null}, "recent": [],
+            "notes": [{"number": 2, "by": "operator:anna", "text": "Tor 3\n<i>Schlüssel</i> beim Pförtner", "at": "2026-11-20T09:00:00Z"}]
         }))
         .unwrap()
     }
@@ -782,6 +881,57 @@ mod tests {
         assert!(
             html.contains("TamperDetectionActivated"),
             "the report is listed"
+        );
+    }
+
+    #[test]
+    fn sr_155_a_note_is_text_names_its_author_and_can_be_removed() {
+        let html = render(
+            &page(),
+            Lang::De,
+            &TimeZone::new("Europe/Berlin").unwrap(),
+            time::macros::datetime!(2026-11-20 12:00 UTC),
+            "",
+        );
+        assert!(html.contains("&lt;i&gt;Schlüssel&lt;/i&gt;"), "{html}");
+        assert!(!html.contains("<i>Schlüssel</i>"));
+        assert!(
+            html.contains("anna ·"),
+            "the author, without the actor's prefix"
+        );
+        assert!(html.contains("action=\"/station/CP-1/notes/2/remove\""));
+        assert!(html.contains("action=\"/station/CP-1/notes\""));
+        // Before the numbers: what the next person needs comes first.
+        assert!(html.find("id=\"notes\"") < html.find("Ladeerfolg"));
+    }
+
+    #[test]
+    fn swapped_coordinates_are_named_on_the_card_with_a_way_to_fix_them() {
+        let mut swapped = page();
+        if let Some(place) = &mut swapped.location {
+            core::mem::swap(&mut place.latitude, &mut place.longitude);
+        }
+        let html = render(
+            &swapped,
+            Lang::De,
+            &TimeZone::new("Europe/Berlin").unwrap(),
+            time::macros::datetime!(2026-11-20 12:00 UTC),
+            "",
+        );
+        assert!(
+            html.contains("Breite und Länge sind vermutlich vertauscht"),
+            "{html}"
+        );
+        assert!(html.contains("href=\"/station/CP-1/edit\""));
+        assert!(
+            !render(
+                &page(),
+                Lang::De,
+                &TimeZone::new("Europe/Berlin").unwrap(),
+                time::macros::datetime!(2026-11-20 12:00 UTC),
+                ""
+            )
+            .contains("vertauscht")
         );
     }
 

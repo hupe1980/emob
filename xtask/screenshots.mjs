@@ -26,7 +26,8 @@
 // the scheme, the width and the element (SR-135).
 import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, extname, normalize } from "node:path";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -189,6 +190,19 @@ const stationList = `${links.heute.replace(/\/$/, "")}/stations?lang=de`;
 const stationNew = `${links.heute.replace(/\/$/, "")}/stations/new?lang=de`;
 // Spec 022: changing a station, from its card.
 const stationEdit = `${links.heute.replace(/\/$/, "")}/station/CP-3/edit?lang=de`;
+// Spec 015: a charge point's public price page — a driver's page, on a phone.
+const price = `${new URL(links.receipt).origin}/p/DE*MUS*E00003?lang=de`;
+// SC-001: at 320 px without script, the price per kWh is the first heading,
+// the largest text on the page and above the fold.
+const PRICE_FIRST = `(() => {
+  const h1 = document.querySelector("h1");
+  if (!h1 || !h1.classList.contains("price")) return ["price: the first heading is not the price"];
+  const size = (el) => parseFloat(getComputedStyle(el).fontSize);
+  const larger = [...document.querySelectorAll("body *")].filter((el) => el !== h1 && el.childElementCount === 0 && el.textContent.trim() && size(el) > size(h1));
+  const found = larger.map((el) => "price: " + el.tagName.toLowerCase() + " is larger than the price");
+  if (h1.getBoundingClientRect().bottom > innerHeight) found.push("price: below the fold");
+  return found;
+})()`;
 const SELF_CHECK = `(async () => {
     document.getElementById('self-check-run').click();
     for (let i = 0; i < 50 && !document.querySelector('.check.tone-good, .check.tone-bad'); i++) await new Promise((r) => setTimeout(r, 100));
@@ -339,8 +353,10 @@ async function treeFindings() {
 
 async function accessible(url, metrics, scheme, headers, then) {
   await open(url, { ...metrics, deviceScaleFactor: 1 }, scheme, headers);
-  if (then) { await js(then); await sleep(300); }
-  const found = [...await js(PAGE_CHECKS), ...await treeFindings()];
+  // A step to take first; when it answers with findings, they count too.
+  const said = then ? await js(then) : null;
+  if (then) await sleep(300);
+  const found = [...(Array.isArray(said) ? said : []), ...await js(PAGE_CHECKS), ...await treeFindings()];
   if (metrics.width <= 320) {
     const overflow = await js("document.documentElement.scrollWidth - document.documentElement.clientWidth");
     if (overflow > 0) found.push(`reflow: scrolls sideways by ${overflow} px`);
@@ -365,6 +381,34 @@ async function accessible(url, metrics, scheme, headers, then) {
   return found;
 }
 
+// Spec 017: the public site's verifier, when `zola build` has written it —
+// served from site/public on loopback, the module included. Its step loads
+// the worked example and the tampered one and says what each answered.
+let verifyPage = null;
+if (A11Y && existsSync("site/public/verify/index.html") && existsSync("site/public/verify/emob_verify.wasm")) {
+  const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".png": "image/png", ".webp": "image/webp", ".json": "application/json" };
+  const site = createServer((req, res) => {
+    let path = normalize(decodeURIComponent(new URL(req.url, "http://x").pathname)).replace(/^(\.\.[/\\])+/, "");
+    if (path.endsWith("/")) path += "index.html";
+    const file = join("site/public", path);
+    if (!existsSync(file)) { res.writeHead(404).end(); return; }
+    res.writeHead(200, { "content-type": types[extname(file)] ?? "application/octet-stream" }).end(readFileSync(file));
+  });
+  await new Promise((done) => site.listen(0, "127.0.0.1", done));
+  site.unref();
+  verifyPage = `http://127.0.0.1:${site.address().port}/verify/`;
+}
+const VERIFY_EXAMPLE = `(async () => {
+  const wait = async (want) => { for (let i = 0; i < 50 && !document.querySelector("#verdict").className.includes(want); i++) await new Promise((r) => setTimeout(r, 100)); };
+  const found = [];
+  document.getElementById("example").click(); await wait("tone-good");
+  if (!document.querySelector("#verdict").className.includes("tone-good")) found.push("verify: the worked example did not verify: " + document.querySelector("#verdict").textContent);
+  document.getElementById("tamper").click(); await wait("tone-bad");
+  if (!document.querySelector("#verdict").className.includes("tone-bad")) found.push("verify: the tampered example did not fail");
+  if (!/[0-9a-f]{64}/.test(document.querySelector("#module").textContent)) found.push("verify: no module hash shown");
+  return found;
+})()`;
+
 if (A11Y) {
   const pages = [
     ["Heute", heute, basic],
@@ -372,6 +416,8 @@ if (A11Y) {
     ["stations", stationList, basic],
     ["new station", stationNew, basic],
     ["change station", stationEdit, basic],
+    ["price", price, {}, PRICE_FIRST],
+    ...(verifyPage ? [["verifier (site)", verifyPage, {}, VERIFY_EXAMPLE]] : []),
     ["receipt (billed)", receipt],
     ["receipt (refused)", refused],
     ["receipt (checked)", receipt, {}, SELF_CHECK],
@@ -409,6 +455,8 @@ await shot("station-dark.webp", { url: station, metrics: DESKTOP, scheme: "dark"
 await shot("stations-light.webp", { url: stationList, metrics: DESKTOP, headers: basic });
 await shot("stations-dark.webp", { url: stationList, metrics: DESKTOP, scheme: "dark", headers: basic });
 await shot("station-new-light.webp", { url: stationNew, metrics: DESKTOP, headers: basic });
+await shot("price-light.webp", { url: price, metrics: PHONE });
+await shot("price-dark.webp", { url: price, metrics: PHONE, scheme: "dark" });
 await shot("receipt-light.webp", { url: receipt, metrics: PHONE });
 await shot("receipt-dark.webp", { url: receipt, metrics: PHONE, scheme: "dark" });
 await shot("receipt-refused.webp", { url: refused, metrics: PHONE });

@@ -119,7 +119,7 @@ mod tests {
         let key = PublicKey::from_sec1(
             ocmf::Curve::Secp256r1,
             p256::ecdsa::VerifyingKey::from(&signing)
-                .to_encoded_point(false)
+                .to_sec1_point(false)
                 .as_bytes(),
         )
         .expect("a valid key");

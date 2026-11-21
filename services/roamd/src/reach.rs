@@ -11,10 +11,17 @@
 //! multicast group, only for a host the estate allowlists. The name is resolved
 //! **once** here and every address it resolves to is checked.
 //!
-//! What this does not close: the kit's client resolves the name again when it
-//! connects, so a name whose answer changes between the two lookups (DNS
-//! rebinding) still has a window. Pinning the resolved address needs the kit to
-//! accept one; that is recorded in the threat model rather than worked around.
+//! This check is the early answer, in a sentence the registrant is shown. The
+//! enforcement is the kit's: since `ocpi-kit` 0.5 its resolver refuses every
+//! address the URL policy does not permit on every connection and every
+//! redirect hop, so a name that rebinds to an internal address between this
+//! lookup and the connection is refused there too. "Internal" is the kit's own
+//! rule — the IANA special-purpose registries — so the two cannot disagree.
+//!
+//! `[roaming] reach_back_allow` is for development estates: the kit's policy
+//! cannot say "private only for these hosts", so a non-empty allowlist opens
+//! private addresses to every peer's connection, and only this check still
+//! names the hosts. A production estate leaves it empty.
 
 use std::net::IpAddr;
 
@@ -94,34 +101,12 @@ impl ReachBack {
     }
 }
 
-/// Loopback, private, link-local, shared (CGNAT), unspecified, broadcast or
-/// multicast — anything that is not a public unicast address.
+/// Anything that is not a globally reachable unicast address, by the IANA
+/// special-purpose registries — the rule `ocpi-kit`'s resolver enforces on the
+/// connection itself.
 #[must_use]
 pub fn is_internal(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_documentation()
-                // 100.64.0.0/10, shared address space.
-                || (a == 100 && (64..128).contains(&b))
-        }
-        IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_internal(IpAddr::V4(mapped));
-            }
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-        }
-    }
+    !ocpi_kit::types::UrlPolicy::default().permits_address(address)
 }
 
 #[cfg(test)]
@@ -170,5 +155,11 @@ mod tests {
         assert!(!is_internal("8.8.8.8".parse().unwrap()));
         assert!(!is_internal("2a00:1450:4001::1".parse().unwrap()));
         assert!(is_internal("100.64.0.1".parse().unwrap()));
+        // Ranges the registries name that a hand-written list missed.
+        assert!(is_internal("198.18.0.1".parse().unwrap()), "benchmarking");
+        assert!(
+            is_internal("192.0.0.8".parse().unwrap()),
+            "IETF protocol assignments"
+        );
     }
 }

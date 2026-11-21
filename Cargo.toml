@@ -29,9 +29,11 @@ members = [
     "services/tarifd",
     "xtask",
 ]
+# The Python toolkit builds against a Python; the workspace does not.
+exclude = ["emobtest"]
 
 [workspace.package]
-version      = "0.5.0"
+version      = "0.6.0"
 authors      = ["hupe1980"]
 edition      = "2024"
 license      = "MIT OR Apache-2.0"
@@ -89,7 +91,7 @@ rust_decimal = { version = "1", features = ["macros", "serde-with-str"] }
 # out of both the 2.x field and the 1.6 `SignedData` string that holds the same
 # object. Every verdict type is `#[must_use]`, which is the compiler reaching
 # across a repository boundary that no guard here can (D306, D327).
-ocpp-kit = { version = "0.6", default-features = false }
+ocpp-kit = { version = "0.8", default-features = false }
 
 # ── The OCPI wire ───────────────────────────────────────────────────────────
 # The wire *model* for `emob-roam`; `roamd` adds `client` on top, because the
@@ -100,7 +102,7 @@ ocpp-kit = { version = "0.6", default-features = false }
 # decided silently. `payments` is deliberately absent — a pre-authorisation hold
 # is the acquirer's, and `Tariff.preauthorize_amount` decides nothing
 # `emob-tariff` computes.
-ocpi-kit = { version = "0.4", default-features = false, features = ["v2_3_0", "v2_2_1", "convert"] }
+ocpi-kit = { version = "0.5", default-features = false, features = ["v2_3_0", "v2_2_1", "convert", "exact-json"] }
 
 # ── The OICP wire ───────────────────────────────────────────────────────────
 # The wire model only: `cpo` and `emp` for the crossing, `eichrecht` for the CDR
@@ -137,7 +139,7 @@ iso15118 = { version = "0.9", default-features = false }
 # What this workspace takes is the *protocol*. The **rule** — what a site draws
 # while nobody is telling it anything — is `emob-smart`'s, read from
 # `[LPC §2.3.2]` and decided there (D302).
-eebus = { version = "0.11", default-features = false, features = ["std"] }
+eebus = { version = "0.13", default-features = false, features = ["std"] }
 
 # ── The money leaves the platform ───────────────────────────────────────────
 # Only `emob-billing` sees these. Three standards this workspace has no business
@@ -179,50 +181,50 @@ sepa = { version = "0.10", default-features = false, features = ["time"] }
 #
 # `session` is the sequence half `[OCMF §Signing and Verification Process]`
 # assigns to a check component; `xml` is the S.A.F.E. transparency container.
-# `curves-pure` is the four that verify without a C library — secp192r1 included,
-# because the eBZ LD3 sample the Transparenzsoftware ships is signed with it. The
-# other three of `[OCMF Tab. 22]` need the crate's OpenSSL backend, which a
-# domain crate may not link, so they are refused by name.
-ocmf = { version = "0.1", default-features = false, features = [
-    "std", "verify", "curves-pure", "session", "xml",
+# The four curves with audited pure-Rust arithmetic, named one by one rather
+# than as `curves-pure` — which since `ocmf` 0.2 also brings the brainpool pair
+# on RustCrypto's unaudited `bp256`/`bp384` (R18). secp192r1 is included because
+# the eBZ LD3 sample the Transparenzsoftware ships is signed with it. The other
+# three of `[OCMF Tab. 22]` are refused by name.
+ocmf = { version = "0.2", default-features = false, features = [
+    "std", "verify", "curve-p192", "curve-p256", "curve-p384", "curve-k256", "session", "xml",
 ] }
 
 # Signing, for the simulator's virtual meters and for test fixtures only.
 # Nothing on the billing path signs anything: `ocmf` verifies.
 #
-# **One RustCrypto generation here, and it is `ocmf`'s (D304).** The 1.0-track
-# releases — `sha2` 0.11, `hmac` 0.13, `p256` 0.14 — take `digest` 0.11 and
-# `ecdsa` 0.17 with them, and `ocmf` links 0.10 and 0.16. Two implementations of
-# SHA-256 in one binary would compile, because the boundary is SEC1 bytes, and
-# that is the problem: the simulator is only worth something if the signature it
-# writes and the signature `ocmf` checks go through the same code. When `ocmf`
-# moves, this moves.
-sha2      = "0.10"
-p256      = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
+# **One RustCrypto generation here, and it is `ocmf`'s (D304)** — 0.14 since
+# `ocmf` 0.2: `sha2` 0.11, `ecdsa` 0.17. Two implementations of SHA-256 in one
+# binary would compile, because the boundary is SEC1 bytes, and that is the
+# problem: the simulator is only worth something if the signature it writes and
+# the signature `ocmf` checks go through the same code. When `ocmf` moves, this
+# moves.
+sha2      = "0.11"
+p256      = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 # The other curve `[V2G2-884]`'s Annex F admits, and the one ISO 15118-20 raises
-# to: secp521r1. On the same `ecdsa` 0.16 / `elliptic-curve` 0.13 generation as
+# to: secp521r1. On the same `ecdsa` 0.17 / `elliptic-curve` 0.14 generation as
 # `p256` above, so taking it costs no second implementation of anything —
 # which is the whole of D304's rule and the reason the check was worth making.
-p521      = { version = "0.13", default-features = false, features = ["ecdsa"] }
+p521      = { version = "0.14", default-features = false, features = ["ecdsa"] }
 hex       = "0.4"
 base64    = "0.23"
 
 # ── Internal (path + version so the domain crates can be published) ─────────
-emob-core      = { path = "crates/emob-core",      version = "0.5" }
-emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.5" }
-emob-session   = { path = "crates/emob-session",   version = "0.5" }
-emob-cdr       = { path = "crates/emob-cdr",       version = "0.5" }
-emob-tariff    = { path = "crates/emob-tariff",    version = "0.5" }
-emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.5" }
-emob-eebus     = { path = "crates/emob-eebus",     version = "0.5" }
-emob-pnc       = { path = "crates/emob-pnc",       version = "0.5" }
-emob-poi       = { path = "crates/emob-poi",       version = "0.5" }
-emob-sim       = { path = "crates/emob-sim",       version = "0.5" }
-emob-smart     = { path = "crates/emob-smart",     version = "0.5" }
-emob-roam      = { path = "crates/emob-roam",      version = "0.5" }
-emob-billing   = { path = "crates/emob-billing",   version = "0.5" }
-emob-thg       = { path = "crates/emob-thg",       version = "0.5" }
-emob-service   = { path = "crates/emob-service",   version = "0.5" }
+emob-core      = { path = "crates/emob-core",      version = "0.6" }
+emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.6" }
+emob-session   = { path = "crates/emob-session",   version = "0.6" }
+emob-cdr       = { path = "crates/emob-cdr",       version = "0.6" }
+emob-tariff    = { path = "crates/emob-tariff",    version = "0.6" }
+emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.6" }
+emob-eebus     = { path = "crates/emob-eebus",     version = "0.6" }
+emob-pnc       = { path = "crates/emob-pnc",       version = "0.6" }
+emob-poi       = { path = "crates/emob-poi",       version = "0.6" }
+emob-sim       = { path = "crates/emob-sim",       version = "0.6" }
+emob-smart     = { path = "crates/emob-smart",     version = "0.6" }
+emob-roam      = { path = "crates/emob-roam",      version = "0.6" }
+emob-billing   = { path = "crates/emob-billing",   version = "0.6" }
+emob-thg       = { path = "crates/emob-thg",       version = "0.6" }
+emob-service   = { path = "crates/emob-service",   version = "0.6" }
 
 # ── The daemon shell ────────────────────────────────────────────────────────
 # Only `emob-service` and the daemons above it see these. Every domain crate
@@ -239,7 +241,7 @@ toml               = { version = "1.1", default-features = false, features = ["p
 # base64 — and the comparison has to be constant time, which is what `subtle`
 # is for. A signature compared with `==` leaks where two differ, one byte of
 # timing at a time.
-hmac   = { version = "0.12", default-features = false }
+hmac   = { version = "0.13", default-features = false }
 subtle = { version = "2", default-features = false }
 
 # Data at rest (spec 005): AES-256-GCM and the system RNG from `aws-lc-rs`,
@@ -272,6 +274,31 @@ cedar-policy = { version = "4.12", default-features = false, features = ["dateti
 # back on replay. `manifest` because what an agent may do has to be a file a
 # reviewer sees in a diff rather than a builder call nobody reads.
 agentplane = { version = "0.61", default-features = false, features = ["redb", "manifest"] }
+
+# The elliptic-curve arithmetic, optimised even in a debug build: unoptimised,
+# the 0.14 generation `ocmf` 0.2 brought made `emob-sim`'s reference day — a
+# hundred stations' sessions signed and verified — take 40 s instead of 8.
+# Only these crates; the workspace's own code stays debuggable.
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.primeorder]
+opt-level = 3
+[profile.dev.package.elliptic-curve]
+opt-level = 3
+[profile.dev.package.ecdsa]
+opt-level = 3
+[profile.dev.package.p256]
+opt-level = 3
+[profile.dev.package.p192]
+opt-level = 3
+[profile.dev.package.p384]
+opt-level = 3
+[profile.dev.package.k256]
+opt-level = 3
+[profile.dev.package.p521]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
 
 [profile.release]
 opt-level     = 3

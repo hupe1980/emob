@@ -29,7 +29,7 @@ use emob_service::journal::{File, Journal, Memory};
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind};
 use ocmf::PublicKey;
 use ocpp_kit::transport::{
-    Auth, AuthOutcome, BasicAuthPassword, Csms, Handle, SecurityProfile, SessionContext, Station,
+    Admission, Auth, AuthOutcome, BasicAuthPassword, Csms, Handle, SecurityProfile, Station,
 };
 use ocpp_kit::types::{DateTime, Identity};
 use ocpp_kit::{RawValue, Version, v1_6};
@@ -101,7 +101,7 @@ fn provisioning() -> Provisioning {
         ChargePoint {
             evse_id: "DE*ABC*E00001".parse().unwrap(),
             rated_power_kw: Decimal::from(150),
-            tariff: tariff(),
+            tariff: emob_tariff::TariffHistory::single(tariff()).unwrap(),
             ocpp: Version::V1_6,
         },
     )
@@ -177,7 +177,7 @@ async fn serve<J: Journal>(csmsd: Arc<Csmsd<J>>) -> (SocketAddr, tokio::task::Jo
             let point = fleet.get(&auth.identity).cloned();
             async move {
                 match point {
-                    Some(point) => AuthOutcome::Accept(SessionContext::new(point)),
+                    Some(point) => Admission::new().context(point).into(),
                     None => AuthOutcome::Unknown,
                 }
             }
@@ -221,7 +221,7 @@ fn boot() -> v1_6::BootNotificationRequest {
 /// Boot, open a transaction, close it with the OCA's signed data.
 async fn run_one_session(handle: &Handle) {
     handle.call(boot()).await.expect("the CSMS answers a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
 
     // 1.6 has the CSMS assign the transaction id, in the *response*.
     let started = handle
@@ -373,7 +373,7 @@ async fn a_station_whose_claimed_key_does_not_decode_is_named_rather_than_skippe
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("the CSMS answers a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     let started = handle
         .call(v1_6::StartTransactionRequest::new(
             1,
@@ -454,7 +454,7 @@ async fn a_station_claiming_signed_data_and_sending_none_is_named_not_ignored() 
     let handle = connect(&addr, "CP-1");
 
     handle.call(boot()).await.expect("the CSMS answers a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     let started = handle
         .call(v1_6::StartTransactionRequest::new(
             1,
@@ -516,7 +516,7 @@ async fn a_retransmitted_stop_does_not_settle_a_second_time_or_refuse_the_first(
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("the CSMS answers a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     let started = handle
         .call(v1_6::StartTransactionRequest::new(
             1,
@@ -564,7 +564,7 @@ async fn a_signed_value_arriving_after_the_stop_is_named_rather_than_billed_as_a
     let (addr, server) = serve(Arc::clone(&csmsd)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("the CSMS answers a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     let started = handle
         .call(v1_6::StartTransactionRequest::new(
             1,
@@ -664,7 +664,7 @@ async fn a_transaction_open_across_a_restart_settles_after_it() {
     let (addr, server) = serve(Arc::clone(&first)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     let started = handle
         .call(v1_6::StartTransactionRequest::new(
             1,
@@ -683,7 +683,7 @@ async fn a_transaction_open_across_a_restart_settles_after_it() {
     let (addr, server) = serve(Arc::clone(&restarted)).await;
     let handle = connect(&addr, "CP-1");
     handle.call(boot()).await.expect("a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     handle
         .call(stop_transaction(started.transaction_id))
         .await
@@ -760,7 +760,7 @@ async fn a_station_is_told_the_time_and_not_the_epoch() {
         "the boot answered {told}, which is not now ({before}..={after})"
     );
 
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     let beat = handle
         .call(v1_6::HeartbeatRequest::new())
         .await
@@ -784,7 +784,7 @@ async fn sr_136_sr_138_sr_140_a_station_is_known_by_its_transitions_and_its_word
     first.firmware_version = Some("1.2.0".to_owned());
     first.charge_point_serial_number = Some("SN-0001\u{0007}".to_owned());
     handle.call(first).await.expect("the CSMS answers a boot");
-    handle.wait_ready().await;
+    let _ = handle.wait_ready().await;
     for _ in 0..10 {
         handle
             .call(v1_6::HeartbeatRequest::new())

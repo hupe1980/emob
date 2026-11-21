@@ -57,9 +57,13 @@ fn ten_thousand_stations_are_searched_in_one_pass() {
         time_zone: "Europe/Berlin".to_owned(),
         energy: rust_decimal::Decimal::new(49, 2),
         vat: rust_decimal::Decimal::from(19),
+        per_minute: None,
+        session_fee: None,
+        valid_from: None,
     }
     .to_tariff(0)
     .unwrap();
+    let tariff = emob_tariff::TariffHistory::single(tariff).unwrap();
     let csmsd = Arc::new(
         Csmsd::open(
             PartyId::new("DE", "ABC").unwrap(),

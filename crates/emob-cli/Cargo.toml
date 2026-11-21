@@ -22,6 +22,12 @@ path = "src/main.rs"
 [dependencies]
 emob-eichrecht = { workspace = true }
 emob-verify    = { path = "../emob-verify" }
+# `emob qr`: the price page's code for print. Only the encoder; the SVG is drawn
+# here, so no image library comes with it.
+qrcode         = { version = "0.14", default-features = false }
+# `emob check-feed`: any DATEX II AFIR file read, and held to the Mobilithek
+# profile by the writer `poid` publishes with (spec 016).
+datex2         = { workspace = true }
 
 # `emob demo`: the estate's own daemons, started through the `daemon::run` each
 # `main` is a configuration shim over, with the kits' station and partner as
@@ -55,6 +61,7 @@ time           = { workspace = true }
 tokio          = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "net"] }
 
 [dev-dependencies]
+emob-poi       = { workspace = true }
 jsonschema     = { workspace = true }
 emob-eichrecht = { workspace = true }
 hex            = { workspace = true }

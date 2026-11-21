@@ -156,7 +156,7 @@ and whether full power is granted or the grid operator has gone silent.
 | `serde` | yes | `Serialize`/`Deserialize` for every public type |
 
 OCPP 1.6J, 2.0.1 and 2.1 support comes from
-[`ocpp-kit`](https://github.com/hupe1980/ocpp-kit) 0.6 and is always enabled.
+[`ocpp-kit`](https://github.com/hupe1980/ocpp-kit) 0.7 and is always enabled.
 
 ## Standards and sources
 

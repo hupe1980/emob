@@ -155,6 +155,23 @@ pub fn of_v2_1(boot: &ocpp_kit::v2_1::BootNotificationRequest) -> StationIdentit
     }
 }
 
+/// The longest note (spec 023, SR-154).
+pub const NOTE_LEN: usize = 500;
+
+/// A note as it may be kept: control characters other than line breaks
+/// removed, trimmed; `None` when that leaves nothing or more than
+/// [`NOTE_LEN`] characters (SR-154, SR-155).
+#[must_use]
+pub fn note_text(text: &str) -> Option<String> {
+    let kept: String = text
+        .replace("\r\n", "\n")
+        .chars()
+        .filter(|c| *c == '\n' || !c.is_control())
+        .collect();
+    let kept = kept.trim();
+    (!kept.is_empty() && kept.chars().count() <= NOTE_LEN).then(|| kept.to_owned())
+}
+
 /// What a station reported about itself that settles nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -202,6 +219,20 @@ mod tests {
         assert!(cleaned.chars().count() <= MAX_LEN);
         assert!(!cleaned.chars().any(char::is_control), "{cleaned:?}");
         assert!(cleaned.starts_with("Model"));
+    }
+
+    #[test]
+    fn sr_154_a_note_is_bounded_and_keeps_its_line_breaks() {
+        assert_eq!(
+            note_text("  Tor 3\r\nSchlüssel beim Pförtner\u{0007} ").as_deref(),
+            Some("Tor 3\nSchlüssel beim Pförtner")
+        );
+        assert_eq!(note_text(" \n "), None, "nothing to say");
+        assert_eq!(
+            note_text(&"x".repeat(NOTE_LEN)).map(|t| t.len()),
+            Some(NOTE_LEN)
+        );
+        assert_eq!(note_text(&"x".repeat(NOTE_LEN + 1)), None);
     }
 
     #[test]

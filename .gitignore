@@ -50,3 +50,11 @@ var/
 
 # Copied from schemas/ when the site is built.
 /site/static/schemas/
+/site/static/verify/emob_verify.wasm
+
+# emobtest's virtualenv and build, and what `maturin develop` and pytest leave
+/emobtest/.venv/
+/emobtest/target/
+/emobtest/python/emobtest/_native.abi3.so
+__pycache__/
+.pytest_cache/

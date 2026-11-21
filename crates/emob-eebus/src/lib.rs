@@ -26,15 +26,19 @@
 //! `csmsd` draws the same one with `ocpp-kit`: that crate's CSMS ledger answers
 //! an *operational* question from a numeric register, and **no billed
 //! kilowatt-hour is routed through it**. Here the kit answers the
-//! *communication* question — its surface is `f64`, because SPINE's
-//! implementation guides talk in watts — and the value that **binds an
-//! allocation** comes off the `ScaledNumber` on the datagram. `no-floats` is
-//! what keeps that from quietly stopping being true, and it is why this crate
-//! drives the engine directly rather than taking
-//! `eebus::usecases::limitation::ControllableSystem`, whose configuration is
-//! `f64` (`CsConfig::new(failsafe_watts, …)`) and whose failsafe is a figure an
-//! operator has to reproduce two years later.
+//! *communication* question, and the value that **binds an allocation** comes
+//! off the `ScaledNumber` on the datagram as a `Decimal`.
 //!
+//! Since `eebus` 0.13 the kit holds every regulatory quantity exactly too, so
+//! this is no longer about floats. It is about two things the kit's
+//! `ControllableSystem` is not built to be: a **pure query** — [`Watchdog`]
+//! answers "which state at this instant" from facts, the same answer whether it
+//! is asked at 21:00 or two years later in a dispute, where the kit's machine is
+//! advanced by timeouts — and a site **nobody has commissioned**, which
+//! `emob_smart::GridLimit` calls `Uncontrolled` (D302) and the kit, describing a
+//! commissioned device, starts in its failsafe. And [`read_limit_write`] says
+//! *why* a write is refused, which is what `sited` reports.
+
 //! # No I/O, no clock
 //!
 //! A datagram is a value and every instant is an argument; the sockets, the TLS

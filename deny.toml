@@ -67,7 +67,6 @@ yanked = "deny"
 # exposure analysis, the upstream it waits on, and the date it is looked at
 # again. The reasoning in full is D334 in the decision log.
 ignore = [
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 timing variability, via elliptic-curve 0.13 <- p256/k256/p384/p192 0.13, the RustCrypto generation the ocmf crate pins and this workspace matches so the simulator signs with the code ocmf verifies with (D304). Exposure: emob verifies over public keys and public signatures, where a timing channel has no secret to leak; only emob-sim and test fixtures sign, with throwaway keys. Upstream: ocmf moving to the 0.14 curve generation, requested in our ocmf feedback (2026-11-18). Review 2027-03-01." },
     { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (no known vulnerability), via cedar-policy, agentd's policy engine (D300); emob's own time types are time and jiff. Exposure: none beyond an unmaintained parser of policy-file dates the operator writes. Upstream: cedar-policy moving off chrono. Review 2027-03-01." },
 ]
 

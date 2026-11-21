@@ -22,6 +22,9 @@
 <title>{{ meta_title }}</title>
 <meta name="description" content="{{ meta_desc }}">
 <link rel="canonical" href="{{ meta_url }}">
+{%- if page is defined and page.extra.csp %}
+<meta http-equiv="Content-Security-Policy" content="{{ page.extra.csp }}">
+{%- endif %}
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#b8410f" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0f1216" media="(prefers-color-scheme: dark)">
@@ -102,6 +105,8 @@ nav{max-width:56rem;margin:0 auto;padding:.9rem 1.25rem;display:flex;gap:1.25rem
 nav .brand{font-weight:700;font-size:1.15rem;color:var(--fg)}
 nav .spacer{flex:1}
 nav a[aria-current=page]{font-weight:600;color:var(--fg)}
+/* A navigation link is a target too (WCAG 2.2 2.5.8). */
+nav a{display:inline-block;padding:.2rem 0}
 main{max-width:56rem;margin:0 auto;padding:2.5rem 1.25rem 4rem}
 h1{font-size:2.1rem;line-height:1.2;margin:.2em 0 .4em;letter-spacing:-.015em}
 h2{font-size:1.45rem;margin-top:2.4rem;padding-top:.4rem;border-top:1px solid var(--line);scroll-margin-top:4rem}
@@ -166,7 +171,8 @@ figure.diagram{margin:1.6rem 0}
 main.wide{max-width:68rem}
 .hero-inner{max-width:68rem;display:grid;grid-template-columns:minmax(0,1fr);gap:2.5rem;align-items:center}
 @media(min-width:62rem){.hero-inner{grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr)}}
-html,body{overflow-x:clip}
+/* The hero's grid and gradient, and nothing else, may not widen the page. */
+.hero{overflow-x:clip}
 .hero-title{font-size:clamp(2.1rem,4.6vw,3.2rem);max-width:18ch;text-wrap:balance}
 .hero{background:radial-gradient(60rem 22rem at 85% -10%,color-mix(in srgb,var(--accent) 14%,transparent),transparent),linear-gradient(180deg,var(--soft),var(--bg))}
 .term{margin:0;border:1px solid var(--line);border-radius:12px;background:var(--code);box-shadow:0 12px 40px -18px rgba(0,0,0,.35);overflow:hidden;min-width:0}
@@ -208,6 +214,17 @@ figure.shot.phone{max-width:390px}
 .shot-pair{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(14rem,1fr));margin:1.5rem 0}
 .shot-pair figure.shot{margin:0}
 @media(max-width:44rem){.shots{grid-template-columns:1fr}}
+/* The verifier (spec 017). */
+.verifier textarea{width:100%;box-sizing:border-box;font:.86rem/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;padding:.6rem;border:1px solid var(--line);border-radius:6px;background:var(--soft);color:var(--fg)}
+.verifier button{font:inherit;font-weight:600;padding:.55rem 1rem;min-height:2.6rem;border-radius:6px;border:1px solid var(--accent);background:var(--accent);color:var(--bg);cursor:pointer;margin:0 .4rem .4rem 0}
+.verifier button[type=button]{background:transparent;color:var(--accent)}
+.verdict{font-weight:600;font-size:1.1rem;padding:.7rem .9rem;border-radius:6px;margin:.6rem 0}
+.verdict:empty{display:none}
+.verdict.tone-good{background:#e8f5ec;color:#1f7a3a}
+.verdict.tone-bad{background:#fdecea;color:#b42318}
+.verdict.tone-warn{background:#fff4dc;color:#8a5a00}
+@media (prefers-color-scheme:dark){.verdict.tone-good{background:#12291a;color:#6fd08c}.verdict.tone-bad{background:#331714;color:#ff8b80}.verdict.tone-warn{background:#2d2410;color:#f3c25b}}
+.verifier .module{color:var(--muted);font-size:.84rem;overflow-wrap:anywhere}
 </style>
 </head>
 <body>
@@ -237,6 +254,7 @@ figure.shot.phone{max-width:390px}
 <!-- Diagrams are authored as ```mermaid fences, so they stay readable and
      diffable in the Markdown source. The renderer is fetched only on pages that
      actually contain one, and the page is fully readable without it. -->
+{%- if not (page is defined and page.extra.csp) %}
 <script type="module">
   // Zola emits `<code data-lang="mermaid">`; the class form is what most other
   // Markdown pipelines produce. Match both so a diagram cannot go silently
@@ -289,5 +307,6 @@ figure.shot.phone{max-width:390px}
     }
   }
 </script>
+{%- endif %}
 </body>
 </html>

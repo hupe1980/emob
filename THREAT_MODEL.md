@@ -103,7 +103,7 @@ flowchart LR
 | A retransmission or replayed delivery settles twice | critical | **Control** | `the_estate_runs.rs` (restarts of every daemon, replayed deliveries) |
 | A journal copy is a working partner credential | high | **Control** | the end-to-end test searches the journals on disk for tokens and UIDs |
 | Card UIDs and bank data at rest cannot be erased | medium | **Control** | sealed journals; `empd` crypto-erasure; redacted `Debug` for mandates |
-| The handshake is pointed at an internal address | medium | **Partial** | https and resolved-address checks; a DNS-rebinding window between the check and the protocol library's own connect remains |
+| The handshake is pointed at an internal address | medium | **Control** | https and resolved-address checks before the handshake; `ocpi-kit`'s resolver refuses an internal address on every connection and redirect hop, so a name that rebinds is refused too. `reach_back_allow` is for development estates |
 | An invoice number is issued twice or a correction booked out of order | high | **Control** | `services/billd/tests/a_month_is_closed_once.rs` |
 | The displayed price differs from the billed one | high | **Control** | `crates/emob-tariff/src/display.rs::the_displayed_price_is_the_price_that_rates` |
 
@@ -146,21 +146,17 @@ flowchart LR
 | A release cannot be told from one built elsewhere | medium | **Partial** | SBOM, checksums and provenance are produced by `release.yml`; verified on the first tag |
 | A reporter has no private route | high | **Control** | [SECURITY.md](SECURITY.md) |
 
-`cargo deny` ignores two upstream advisories with a written exposure analysis
-and a review date: `crypto-bigint` 0.5 (timing side channels; emob verifies over
-public keys and signatures, and only the simulator signs) and `chrono`
-(unmaintained, through `cedar-policy`).
+`cargo deny` ignores one upstream advisory, with a written exposure analysis
+and a review date: `chrono` (unmaintained, through `cedar-policy`).
 
 ## Open risks, ranked
 
-1. **DNS rebinding in the handshake** — needs the OCPI library to connect to the
-   address that was checked.
-2. **Plain HTTP between daemons** — accepted while the estate runs on one host;
+1. **Plain HTTP between daemons** — accepted while the estate runs on one host;
    TLS between daemons when it does not.
-3. **A rewrite past the witnessed head by a signing-key holder** — a Merkle
+2. **A rewrite past the witnessed head by a signing-key holder** — a Merkle
    log with consistency proofs would close it.
-4. **Release provenance** — verified on the first tagged release.
-5. **Ed448 contract chains** — refused until a stable Rust implementation on
+3. **Release provenance** — verified on the first tagged release.
+4. **Ed448 contract chains** — refused until a stable Rust implementation on
    the workspace's cryptography generation exists.
 
 ## Extending the model

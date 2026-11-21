@@ -178,8 +178,17 @@ the same bytes.
 with coordinates as exact decimals; `GET /v1/poid` shows it to operators. Its
 library decides **when** a snapshot goes out: it records the table the access
 point accepted, refuses updates no consumer could resolve, and reports when the
-feed has gone stale (`Poid::stale`). ⏳ The push to the Mobilithek is not
-wired. See [Run the estate](@/docs/run-the-estate.md).
+feed has gone stale (`Poid::stale`). Its prices are the version of each
+station's tariff in force at the moment of publication. With a `[mobilithek]`
+section — the publication's push address and the operator's client
+certificate — the daemon posts the table at start and hourly, journals only an
+accepted push, and names each documented refusal. ⏳ The dynamic delta is built
+but not yet sent.
+
+`emob check-feed <file>` reads any DATEX II AFIR file — XML or JSON, emob's or
+anyone's — lists what the reader tolerated, and holds every publication to the
+Mobilithek profile with the writer `poid` uses. See
+[Run the estate](@/docs/run-the-estate.md).
 
 **Related:** [Tariffs and price transparency](@/docs/pricing.md) ·
 [Roaming](@/docs/roaming.md) · [Compliance](@/docs/compliance.md) ·

@@ -115,6 +115,31 @@ One signed sample of every type the `[[subscribers]]` entry takes, sent as the
 daemons send the real one, marked `emobtest: true` with an id starting `test-`.
 Nothing is journalled. Exit `1` when one answer is not `2xx`.
 
+## `emob check-feed`
+
+```console
+$ emob check-feed table.json
+table.json: 1 publication(s), JSON in its envelope
+  ✓ publication 1: the Mobilithek profile takes it
+✓ table.json: the Mobilithek profile takes every publication
+```
+
+Any DATEX II AFIR file, XML or JSON, emob's or another operator's: every
+deviation the reader tolerated is listed, and each publication is held to the
+Mobilithek profile by the writer `poid` publishes with, which names the member
+and the rule it breaks. Exit `1` when the profile refuses one.
+
+## `emob qr`
+
+```console
+$ emob qr deploy/estate.example.toml 'DE*ABC*E00001' > sticker.svg
+```
+
+The QR code of a charge point's price page, `<receipts.public_url>/p/<evse>`,
+as SVG with the address in plain text beneath it, for a sign at the point. It
+carries no Preisstand, because that changes with the price; the station's
+display and the page show it.
+
 ## `emob witness`
 
 ```console

@@ -349,6 +349,9 @@ without a restart:
   mints a new password (a new sheet) or retires the station — its next
   connection is refused; its history stays. Each asks why, and every change is
   journalled under the operator's name.
+- **Notizen** on a station's page hold what the next person needs — access,
+  keys, quirks — under the name of whoever wrote them; the newest one shows on
+  Heute when the station goes silent, and the search finds stations by them.
 - The **Standort** card draws where the station is, and says so when the
   coordinates lie outside the country it is registered in — or when latitude
   and longitude look swapped — with a link to fix them. Every map a driver
@@ -364,6 +367,8 @@ curl -X POST -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" -H 'content-type: a
 `POST /v1/csmsd/stations/{identity}/password` and `…/retire` take
 `{"reason": "…"}`; `PUT /v1/csmsd/stations/{identity}` replaces a record
 (`{"station": …, "reason": …}`). A refusal is `422` naming the field.
+`POST /v1/csmsd/stations/{identity}/notes` takes `{"text": "…"}` (1–500
+characters) and `…/notes/{number}/remove` takes it off again.
 `GET /v1/csmsd/map?q=&area=` answers the map of a search: `points` up to 300,
 else `cells` of a 16 × 16 grid; `area=west,south,east,north` narrows the
 search and the map alike.
@@ -398,6 +403,31 @@ rest of the page renders. Sign in with HTTP Basic: any user name, an
 `[[operators]]` token as the password. The page works without JavaScript; a
 small script refreshes it while it is visible. Run it on its own with `just
 desk` (or `cargo run -p deskd`) on `127.0.0.1:9587`.
+
+## The price page
+
+Every charge point has a public page, `/p/<evse>`, served by `csmsd` beside
+the receipts: the price per kWh as the largest thing on it, then every other
+component in `[AFIR Art. 5(4)]`'s order, what 10, 30 and 50 kWh cost at the
+point's power (rated by the function that bills), and the **Preisstand** —
+four characters naming the tariff version. The same code stands on the
+station's display and on the receipt, and the page says to scan the display,
+not a sticker. A version announced in the estate is shown ahead ("Ab
+01.01.2027: …"), and `/p/<evse>.atom` lists every version for anyone who
+watches prices.
+
+<figure class="shot phone">
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/price-dark.webp"><img src="../../img/price-light.webp" width="390" height="844" loading="lazy" alt="The price page on a phone: 0,49 € pro kWh as the heading, what 10, 30 and 50 kWh cost at 150 kW, the Preisstand in large letters with how to check it, and an announced lower price with a session fee"></picture>
+<figcaption>A charge point's price page from <code>just demo</code>.</figcaption>
+</figure>
+
+A price change is a second `[[tariffs]]` entry with the same id and a
+`valid_from` on a quarter hour; a session is rated with the version in force
+when it started. With `show_price = true` on a 2.x station, `csmsd` keeps the
+price and its Preisstand on the display — one message per version, each over
+its window, so the screen changes on its own at the minute the price does;
+on OCPP 2.1 with the page's own QR code. `emob qr estate.toml <evse> >
+sticker.svg` prints the code for a sign.
 
 ## The driver receipt
 
@@ -596,8 +626,8 @@ build provenance.
 
 ## What the daemons do not do
 
-⏳ The OICP (Hubject) and national-access-point push clients, SEPA runs from
-`billd`, the OCPI tokens endpoint, and the SHIP/EEBUS session for § 14a. The
+⏳ The OICP (Hubject) push client, the Mobilithek's dynamic delta, SEPA runs
+from `billd`, the OCPI tokens endpoint, and the SHIP/EEBUS session for § 14a. The
 libraries do each of these and are tested; no daemon calls them.
 
 **Related:** [Getting started](@/docs/getting-started.md) ·

@@ -47,8 +47,8 @@ use emob_service::estate::{Csms, EstateError, SecurityProfile, Station};
 use ocpp_kit::Version;
 use ocpp_kit::engine::RateLimit;
 use ocpp_kit::transport::{
-    Auth, AuthOutcome, BoxFuture, Credentials, CsmsHandle, DisconnectReason, ServerTls,
-    SessionContext, SessionEvent,
+    Admission, Auth, AuthOutcome, BoxFuture, Credentials, CsmsHandle, DisconnectReason, ServerTls,
+    SessionEvent,
 };
 
 use crate::ChargePoint;
@@ -291,21 +291,21 @@ impl Edge {
                 }
                 Ok(SessionEvent::Refused {
                     identity,
-                    status,
+                    reason,
                     remote,
                 }) => {
-                    let counter = match status {
-                        401 => &self.counters.refused_credentials,
-                        404 => &self.counters.refused_unknown,
-                        503 => &self.counters.refused_capacity,
-                        _ => continue,
-                    };
-                    counter.fetch_add(1, Ordering::Relaxed);
                     let station = identity
                         .as_ref()
                         .map(ToString::to_string)
                         .unwrap_or_default();
-                    tracing::warn!(%station, %remote, status, "a station's upgrade was refused");
+                    tracing::warn!(%station, %remote, %reason, "a station's connection was refused");
+                    let counter = match reason.status() {
+                        Some(401) => &self.counters.refused_credentials,
+                        Some(404) => &self.counters.refused_unknown,
+                        Some(503) => &self.counters.refused_capacity,
+                        _ => continue,
+                    };
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
@@ -393,9 +393,12 @@ impl Gate {
             tracing::warn!(station = %auth.identity, remote = %auth.remote, profile = %auth.profile, "{why}");
             AuthOutcome::Reject
         };
-        if !auth.offered.contains(&point.ocpp) {
-            return refuse("the station does not offer the OCPP version it was provisioned for");
-        }
+        // The station speaks the version it was provisioned for, whatever it
+        // would rather: the admission pins it, and one that does not offer
+        // it is refused `[OCPP 2.0.1 Part 4 §3.2]`.
+        let version = point.ocpp;
+        let admit =
+            move |point| AuthOutcome::from(Admission::new().context(point).version(version));
         let Ok(credential) = credential_of(&station) else {
             return refuse("the station has no credential provisioned");
         };
@@ -415,7 +418,7 @@ impl Gate {
                         .await
                         .unwrap_or(false);
                 if verified {
-                    AuthOutcome::Accept(SessionContext::new(point))
+                    admit(point)
                 } else {
                     refuse("the station's password does not match its provisioned hash")
                 }
@@ -423,9 +426,7 @@ impl Gate {
             (Credential::Password { .. }, _) => refuse("the station sent no Basic password"),
             (Credential::Certificate, Credentials::ClientCertificate { der }) => {
                 match common_name(&der) {
-                    Some(name) if name == auth.identity.as_str() => {
-                        AuthOutcome::Accept(SessionContext::new(point))
-                    }
+                    Some(name) if name == auth.identity.as_str() => admit(point),
                     _ => refuse("the station's certificate names another identity"),
                 }
             }

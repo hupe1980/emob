@@ -2205,6 +2205,16 @@ fn check_reach(root: &Path) -> Result<()> {
     for file in &sources {
         haystack.push_str(&code_and_quoted(&std::fs::read_to_string(file)?));
     }
+    // emobtest's bindings call the crates from outside the workspace: they
+    // are callers, though nothing in them is held to having one.
+    if let Ok(entries) = std::fs::read_dir(root.join("emobtest/src")) {
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                haystack.push_str(&code_and_quoted(&std::fs::read_to_string(&path)?));
+            }
+        }
+    }
     // The **tracked** prose only, and only the part of it that is quoting code.
     //
     // Tracked, because `concepts/` is gitignored and CI builds a clone: reading

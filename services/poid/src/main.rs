@@ -79,58 +79,117 @@ async fn main() -> Result<()> {
     let sites = poid::http::sites(&estate)?;
     let view = poid::http::View::of(&sites, held.clone());
 
-    let no_rates = |_: &emob_poi::site::ChargingPoint| None;
-    let mut service = Poid::new(
-        Publisher {
-            country: estate.parties.operator.country_code().to_owned(),
-            // The identifier the national access point issued (spec 012):
-            // refused when absent rather than published as a placeholder
-            // nobody at the Mobilithek ever issued.
-            national_identifier: std::env::var("POID_NAP_IDENTIFIER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .context(
-                    "POID_NAP_IDENTIFIER is not set: the identifier the national access point \
-                     issued this operator — `just dev-keys` sets DE-NAP-DEV for one machine",
-                )?,
-            language: "de".to_owned(),
-        },
-        Facility::new(format!("{}-TABLE", estate.parties.operator)),
-        sites,
-        &no_rates,
-    );
-    if let Some(accepted) = &held {
-        service.restore(accepted.clone());
-        tracing::info!(
+    // The identifier the national access point issued (spec 012): refused
+    // when absent rather than published as a placeholder nobody at the
+    // Mobilithek ever issued.
+    let publisher = Publisher {
+        country: estate.parties.operator.country_code().to_owned(),
+        national_identifier: std::env::var("POID_NAP_IDENTIFIER")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .context(
+                "POID_NAP_IDENTIFIER is not set: the identifier the national access point \
+                 issued this operator — `just dev-keys` sets DE-NAP-DEV for one machine",
+            )?,
+        language: "de".to_owned(),
+    };
+    let table = Facility::new(format!("{}-TABLE", estate.parties.operator));
+    // Checked now, so a tariff or a [mobilithek] section that cannot work
+    // refuses the start rather than the first round.
+    poid::rates(&estate, time::OffsetDateTime::now_utc())?;
+    let client = estate
+        .mobilithek
+        .as_ref()
+        .map(poid::push::client)
+        .transpose()?;
+    match &held {
+        Some(accepted) => tracing::info!(
             published_at = %accepted.published_at,
             accepted_at = %accepted.at,
             head = ledger.journal().head().map(|head| head.position).unwrap_or_default(),
             "the access point holds this snapshot, and a status message may address its versions"
-        );
-    } else {
-        tracing::warn!(
+        ),
+        None => tracing::warn!(
             "no snapshot has ever been accepted: every point this operator runs is absent from \
              the feed `[AFIR Art. 20(2)]`"
-        );
+        ),
     }
     readiness.up(INVENTORY);
 
-    let now = time::OffsetDateTime::now_utc();
-    if let Some(stale) = service.stale(now, CADENCE) {
-        tracing::warn!(feed = %stale, "the national access point is behind");
-    }
-    // The push itself is a socket the deployment supplies: `snapshotPush` to
-    // the Mobilithek, with the operator's credentials — which is the one leg of
-    // M12 that is a subscription rather than a client. Only a push that came
-    // back accepted is recorded, which is why `Ledger::accepted` is a separate
-    // call and why it writes the record **after** the answer.
-    let _ = (&service, &ledger);
+    // Spec 016: the table goes out at start and on the cadence, priced with
+    // the version in force at that instant, and is recorded only once the
+    // access point took it. Without [mobilithek] the feed is built and
+    // checked, and the operator is told nothing is sent.
+    let shared = std::sync::Arc::new(std::sync::RwLock::new(view));
+    let (loop_view, loop_shutdown) = (std::sync::Arc::clone(&shared), shutdown.clone());
+    tokio::spawn(async move {
+        let mut ledger = ledger;
+        let mut held = held;
+        let mut ticker = tokio::time::interval(CADENCE.unsigned_abs());
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                () = loop_shutdown.wait() => return,
+            }
+            let now = time::OffsetDateTime::now_utc();
+            let Ok(rates) = poid::rates(&estate, now) else {
+                continue;
+            };
+            let rate_for =
+                |point: &emob_poi::site::ChargingPoint| rates.get(&point.evse_id).cloned();
+            let mut service = Poid::new(publisher.clone(), table.clone(), sites.clone(), &rate_for);
+            if let Some(accepted) = &held {
+                service.restore(accepted.clone());
+            }
+            let publication = match service.snapshot(now) {
+                Ok(publication) => publication,
+                Err(error) => {
+                    tracing::error!(%error, "the table cannot be published as it stands");
+                    continue;
+                }
+            };
+            let (Some(client), Some(mobilithek)) = (&client, &estate.mobilithek) else {
+                tracing::info!(
+                    "the table is built and checked; no [mobilithek] is set, so nothing is sent"
+                );
+                continue;
+            };
+            match poid::push::push(client, &mobilithek.url, &publication).await {
+                Ok(()) => {
+                    match ledger.accepted(
+                        &emob_service::Actor::Timer,
+                        &mut service,
+                        &publication,
+                        now,
+                    ) {
+                        Ok(_) => {
+                            held = service.last_accepted().cloned();
+                            let mut view = loop_view
+                                .write()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            view.last_accepted.clone_from(&held);
+                            tracing::info!(published_at = %now, "the Mobilithek took the table");
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "the Mobilithek took the table and the journal refused the fact")
+                        }
+                    }
+                }
+                Err(refused) => {
+                    tracing::warn!(%refused, retries = refused.retries(), "the Mobilithek did not take the table")
+                }
+            }
+            if let Some(stale) = service.stale(now, CADENCE) {
+                tracing::warn!(feed = %stale, "the national access point is behind");
+            }
+        }
+    });
 
     let signal = shutdown.clone();
     tokio::spawn(async move { signal.on_signal().await });
 
     Server::new(me, readiness, shutdown)
-        .with(poid::http::router(view, operators.clone()).merge(
+        .with(poid::http::router(shared, operators.clone()).merge(
             emob_service::serve::operator_only(head::router("poid", latest), operators),
         ))
         .draining_for(std::time::Duration::from_secs(3))

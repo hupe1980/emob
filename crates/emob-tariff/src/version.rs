@@ -69,6 +69,19 @@ impl TariffFingerprint {
     pub fn short(&self) -> String {
         self.to_string()[..8].to_owned()
     }
+
+    /// The **Preisstand**: the first four hex characters, upper case — the
+    /// code a driver compares on the price page, the station's display and
+    /// the receipt (spec 015).
+    ///
+    /// Four, because a person reads it off a screen in a car park and checks
+    /// it twice more. It tells the versions of *one* tariff apart, where a
+    /// collision is one in 65 536; it is not an identifier between companies,
+    /// which is what the full fingerprint is for.
+    #[must_use]
+    pub fn code(&self) -> String {
+        self.to_string()[..4].to_ascii_uppercase()
+    }
 }
 
 impl fmt::Display for TariffFingerprint {

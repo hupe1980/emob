@@ -25,6 +25,12 @@ pub struct Estate {
     /// Who may read the read model.
     #[serde(default)]
     pub operators: Vec<Operator>,
+    /// The tariffs the stations name — the feed's prices (spec 016).
+    #[serde(default)]
+    pub tariffs: Vec<emob_service::estate::TariffSpec>,
+    /// Where the table is posted; absent, nothing is sent.
+    #[serde(default)]
+    pub mobilithek: Option<emob_service::estate::Mobilithek>,
 }
 
 /// The estate's stations, one site per `location.id`.
@@ -118,14 +124,23 @@ impl View {
     }
 }
 
+/// The read model as the publish loop keeps it current.
+pub type Shared = Arc<std::sync::RwLock<View>>;
+
 /// `GET /v1/poid`, behind the operators.
-pub fn router(view: View, operators: Operators) -> axum::Router {
+pub fn router(view: Shared, operators: Operators) -> axum::Router {
     let routes = axum::Router::new()
         .route(
             "/v1/poid",
-            get(|State(view): State<Arc<View>>| async move { Json(view.as_ref().clone()) }),
+            get(|State(view): State<Shared>| async move {
+                Json(
+                    view.read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                )
+            }),
         )
-        .with_state(Arc::new(view));
+        .with_state(view);
     emob_service::serve::operator_only(routes, operators)
 }
 

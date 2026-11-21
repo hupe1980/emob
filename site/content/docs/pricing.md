@@ -449,6 +449,12 @@ let cdr = CdrBuilder::from_session(&session, Direction::Import)?
     .build()?;
 ```
 
+In the estate a version is a `[[tariffs]]` entry with the tariff's id and a
+`valid_from`; `emob_service::estate::histories` chains them, and `csmsd` and
+`tarifd` both read that one history. Each version's **Preisstand** —
+`fingerprint().code()`, four characters — is printed on the price page, the
+station's display and the receipt, so a driver can see that the three agree.
+
 `TariffHistory` refuses overlapping versions and reports gaps. Windows are
 half-open, `[from, until)`. `[PTB-A 50.7 §3.1.7.2]` — *"Ein Tarifwechsel ist erst
 mit dem Beginn der nächsten Messperiode durchzuführen"* — means a version that
@@ -582,8 +588,13 @@ charge. A delivery is recorded only after the answer comes back.
 
 The tariff that rates a session in `csmsd` and the one `tarifd` publishes are
 built from the estate's `[[tariffs]]` by one function, so they cannot drift
-apart. ⏳ `tarifd` logs what it would publish; its three push clients are not
-wired. See [Run the estate](@/docs/run-the-estate.md).
+apart. A seller — a web shop, a fleet portal, `esales` — imports a version
+instead of typing its price: `GET /v1/driver-tariffs/{id}` serves the version
+in force as `driver-tariff.v1` ([schema](https://hupe1980.github.io/emob/schemas/driver-tariff.v1.json)),
+and `/v1/driver-tariffs/{id}/{version}` serves that version for as long as a
+contract sold on it refers to it. ⏳ `tarifd`'s push clients to stations and
+partners are not wired; the access point gets its prices through `poid`. See
+[Run the estate](@/docs/run-the-estate.md).
 
 ## Not in emob-tariff
 

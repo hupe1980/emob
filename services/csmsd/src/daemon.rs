@@ -17,7 +17,6 @@ use emob_service::health::Probe;
 use emob_service::journal::{File, Journal as _};
 use emob_service::vault::{DataKey, Sealing};
 use emob_service::{Identity, Readiness, Server, Shutdown};
-use ocpp_kit::Version;
 use ocpp_kit::transport::Csms;
 
 use crate::authorize::Empd;
@@ -210,13 +209,14 @@ pub async fn run(options: Options) -> Result<Running> {
         "the ledger is what the journal says it is"
     );
 
-    let mut versions: Vec<Version> = Vec::new();
-    for station in &estate.stations {
-        let version = crate::estate::version(station.ocpp);
-        if !versions.contains(&version) {
-            versions.push(version);
-        }
-    }
+    // Every version csmsd speaks: the gate pins each station to the one it
+    // was provisioned for, so a station registered on any of them connects
+    // at once, and one that also speaks a newer version stays on its own.
+    let versions = [
+        ocpp_kit::Version::V2_1,
+        ocpp_kit::Version::V2_0_1,
+        ocpp_kit::Version::V1_6,
+    ];
     // Spec 005: the credential each station's profile requires, TLS or a
     // reason there is none, and the limits — all in `edge`.
     let security = Arc::new(Security::from_estate(&estate.csms, &estate.stations, ocpp)?);
@@ -317,6 +317,7 @@ pub async fn run(options: Options) -> Result<Running> {
             security.admits_certificates(),
         ))
         .with(crate::receipt::router(Arc::clone(&csmsd), sites))
+        .with(crate::price::router(Arc::clone(&csmsd), estate.operator()))
         // Long enough for an in-progress `StopTransaction` to land.
         .draining_for(Duration::from_secs(15));
     tasks.push(tokio::spawn(async move {

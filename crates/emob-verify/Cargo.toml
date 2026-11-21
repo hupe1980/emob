@@ -20,7 +20,7 @@ crate-type = ["cdylib", "rlib"]
 # Not `ocmf = { workspace = true }`: the workspace entry carries `xml` and
 # `session`, which the browser does not need and which would double the module.
 # `alloc` + `verify` + the four pure-Rust curves, nothing else.
-ocmf = { version = "0.1", default-features = false, features = ["alloc", "verify", "curves-pure"] }
+ocmf = { version = "0.2", default-features = false, features = ["alloc", "verify", "curve-p192", "curve-p256", "curve-p384", "curve-k256"] }
 
 [dev-dependencies]
 emob-eichrecht = { workspace = true }

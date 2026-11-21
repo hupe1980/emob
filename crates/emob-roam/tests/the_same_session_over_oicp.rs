@@ -87,7 +87,7 @@ fn registry() -> KeyRegistry {
                     Curve::Secp256r1,
                     signing_key()
                         .verifying_key()
-                        .to_encoded_point(false)
+                        .to_sec1_point(false)
                         .as_bytes(),
                 )
                 .expect("a well-formed SEC1 point"),
@@ -231,7 +231,7 @@ fn context<'a>(token: &'a RoamingToken, session_id: String) -> Context<'a> {
         public_key: Some(hex::encode(
             signing_key()
                 .verifying_key()
-                .to_encoded_point(false)
+                .to_sec1_point(false)
                 .as_bytes(),
         )),
         product_id: Some("AC1".to_owned()),

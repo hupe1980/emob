@@ -98,9 +98,9 @@ OCMF verifier that checks every signed value on the phone, offline once loaded.
 
 ## Status
 
-**The journal you can trust, events any system can subscribe to, and ready for
-1 January 2027.** The fifteen
-domain crates are built and tested (**1341 tests** across the workspace). The
+**The price before the plug, and a kit that proves the platform from outside.**
+The fifteen
+domain crates are built and tested (**1367 tests** across the workspace). The
 nine daemons start from one `estate.toml` and are wired end to end:
 
 - stations connect to `csmsd` over OCPP 1.6J, 2.0.1 and 2.1 with security
@@ -134,6 +134,12 @@ nine daemons start from one `estate.toml` and are wired end to end:
   third party); a station's locator names coordinates that lie outside its
   country or look swapped, and Heute groups silent stations by **mobile
   network** (MCC-MNC, never the IMSI);
+- every charge point has a public **price page** with its **Preisstand** — the
+  version's code, also on the receipt and the station's display — and a
+  tariff change is announced ahead; `poid` pushes the AFIR table to the
+  Mobilithek over mutual TLS;
+- any OCMF record can be checked on the site's **verify** page, offline, by
+  the receipt's own WebAssembly module;
 - `emob check estate.toml` names a mistake by line and key, and editors
   complete the estate from its published JSON Schema;
 - the operator works from **Heute** (`deskd`), the driver checks a **receipt** —
@@ -143,14 +149,17 @@ nine daemons start from one `estate.toml` and are wired end to end:
   contract chains under named roots;
 - releases are signed and attested, with an SBOM.
 
-Not wired into a daemon: the OICP and national-access-point push clients, SEPA
-runs from `billd`, the SHIP/EEBUS session for § 14a, and MiSpeL on Heute (no
+Not wired into a daemon: the OICP push client, the Mobilithek's dynamic delta,
+SEPA runs from `billd`, the SHIP/EEBUS session for § 14a, and MiSpeL on Heute (no
 grid-meter series reaches a daemon). emob has had no external security review and no
 production deployment; see [THREAT_MODEL.md](THREAT_MODEL.md) for what holds and
 what is open.
 
 ### What the tests prove
 
+- **The platform, driven from outside.** `just e2e` (CI too) has
+  [`emobtest`](emobtest)'s stations charge cars on OCPP 1.6, 2.0.1 and 2.1
+  against the running estate and checks what it billed, refused and showed.
 - **A real message, end to end.** The Open Charge Alliance's published OCPP
   example goes in at the wire and comes out as a taxable amount and a file the
   driver's own verifier reads.
@@ -268,6 +277,7 @@ at `https://hupe1980.github.io/emob/schemas/estate.schema.json`.
 just doctor                 # check the tools
 just demo                   # everything, in one process, on loopback
 just desk                   # Heute on :9587, against daemons started from the example estate
+just e2e                    # the example estate, driven by emobtest's stations on OCPP 1.6, 2.0.1 and 2.1
 just up                     # all nine in containers; shells on :8080…:8088, OCPP on wss://localhost:9000
 just down                   # stop, keeping the journals
 just images                 # build the nine daemon images and `emob` from one Dockerfile (docker buildx bake)
@@ -395,6 +405,12 @@ Two unpublished crates ship with the daemons:
 | [`emob-verify`](crates/emob-verify) | One OCMF record, one key, one verdict — natively and as the receipt page's WebAssembly module (C ABI, no `wasm-bindgen`, no npm) | ✅ |
 | [`emob-cli`](crates/emob-cli) | `emob verify <transparency-file>` (exit 0/1/2/64/66), `emob demo` and `emob witness` (exit 0/1/2/64) | ✅ |
 
+And one Python package, on PyPI:
+
+| Package | What it holds | State |
+|---|---|---|
+| [`emobtest`](emobtest) | The test and conformance toolkit for any charging platform, on these crates: stations and cars that charge on any CSMS over OCPP 1.6/2.0.1/2.1, an eMSP that answers it, a meter that signs OCMF, the verifier and the Eichrecht chain, the tariff rating and the Preisstand, event schemas and Standard Webhooks, a signed-event inbox, and the `receiver` and `authorize` conformance suites a replacement for `billd` or `empd` runs — `pip install emobtest` | ✅ |
+
 Nine daemons, one image each, all started from the one estate file.
 
 | Service | Owns | State |
@@ -404,8 +420,8 @@ Nine daemons, one image each, all started from the one estate file.
 | [`empd`](services/empd) | The provider side: keyed token store, authorisation for `csmsd` | ✅ · ⏳ OCPI tokens, fees |
 | [`billd`](services/billd) | Receiving CDRs, closing each partner's month once into an EN 16931 invoice, numbering, postings; the invoice page and signed delivery to the operator's system | ✅ · ⏳ SEPA runs |
 | [`deskd`](services/deskd) | The operator's page Heute: the charging success rate, refused sessions with "Warum?", what needs a person today, and the witness of every journal | ✅ |
-| [`tarifd`](services/tarifd) | Publishing the estate's tariff versions to all audiences before they take effect | ✅ read model · ⏳ push clients |
-| [`poid`](services/poid) | The inventory and snapshots for the national access point `[AFIR Art. 20(2)]` | ✅ inventory · ⏳ push |
+| [`tarifd`](services/tarifd) | Publishing the estate's tariff versions to all audiences before they take effect | ✅ read model · ✅ `driver-tariff.v1` · ⏳ push clients |
+| [`poid`](services/poid) | The inventory and snapshots for the national access point `[AFIR Art. 20(2)]` | ✅ inventory, priced · ✅ table push · ⏳ dynamic delta |
 | [`sited`](services/sited) | The site controller for § 14a setpoints, with a failsafe when the grid operator goes silent | ⏳ SHIP session, OCPP leg |
 | [`agentd`](services/agentd) | Advisory agents on `agentplane` (evidence triage, tariff and compliance sweeps), run under the read-only advisory principal, that cannot move money | ✅ runtime · ⏳ event feed |
 
@@ -415,6 +431,8 @@ Nine daemons, one image each, all started from the one estate file.
   [Run the estate](https://hupe1980.github.io/emob/docs/run-the-estate/) ·
   [Architecture](https://hupe1980.github.io/emob/docs/architecture/) ·
   [Glossary](https://hupe1980.github.io/emob/docs/glossary/)
+- [Verify an OCMF record in your browser](https://hupe1980.github.io/emob/verify/) —
+  paste a signed value and a key; nothing is uploaded
 - [Eichrecht](https://hupe1980.github.io/emob/docs/eichrecht/) ·
   [Settlement](https://hupe1980.github.io/emob/docs/settlement/) ·
   [Tariffs](https://hupe1980.github.io/emob/docs/pricing/) ·

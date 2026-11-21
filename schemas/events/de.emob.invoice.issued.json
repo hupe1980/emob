@@ -14,7 +14,7 @@
     "time": { "type": "string", "format": "date-time" },
     "datacontenttype": { "const": "application/xml" },
     "invoiceurl": { "type": "string", "format": "uri", "description": "The invoice page, when billing.public_url is set." },
-    "emobtest": { "type": "boolean", "description": "Present and true only on a sample sent by `emob subscribers test`; never book it." },
+    "emobtest": { "type": "boolean", "description": "Present and true only on a sample `emob subscribers test` or emobtest sent: take it (2xx) and never book it." },
     "data": { "type": "string", "minLength": 1, "description": "The invoice file, EN 16931 in UBL or CII syntax as configured." }
   }
 }

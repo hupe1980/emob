@@ -1,0 +1,56 @@
+[build-system]
+requires      = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name            = "emobtest"
+# From Cargo.toml, which `tests/test_version.py` holds to the emob workspace.
+dynamic         = ["version"]
+description     = "Test & conformance toolkit for EV charging platforms: OCPP stations and cars that drive any CSMS, signed OCMF, Eichrecht, AFIR prices, CloudEvents — on emob's crates"
+readme          = "README.md"
+requires-python = ">=3.11"
+license         = { text = "MIT OR Apache-2.0" }
+keywords        = ["ev-charging", "ocmf", "eichrecht", "afir", "ocpp", "testing", "pytest", "conformance"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Testing",
+]
+# Nothing: everything a standard defines is compiled into the extension, and
+# the rest is the standard library. `pytest` loads the plugin only inside a run.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+emobtest = "emobtest.cli:main"
+
+[project.urls]
+Repository    = "https://github.com/hupe1980/emob"
+Documentation = "https://hupe1980.github.io/emob/docs/emobtest/"
+
+[project.entry-points.pytest11]
+emobtest = "emobtest.plugin"
+
+[tool.maturin]
+python-source = "python"
+module-name   = "emobtest._native"
+# Here only: as a Cargo feature it would break `cargo test`'s link.
+features      = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+src = ["python", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]

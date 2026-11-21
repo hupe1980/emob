@@ -34,6 +34,7 @@ fn station(identity: &str, silent_since: time::OffsetDateTime) -> Station {
         silent_since,
         network: Some("26201".into()),
         carrier: Some("Telekom Deutschland".into()),
+        note: Some("Zugang über <b>Tor 3</b>".into()),
     }
 }
 
@@ -553,4 +554,14 @@ fn silent_stations_on_one_network_are_said_once_as_a_likely_outage() {
         csmsd.networks[0].silent = 1;
     }
     assert!(!render(&snapshot, Lang::De).contains("Nach Mobilfunknetz"));
+}
+
+#[test]
+fn sr_155_a_silent_row_shows_its_newest_note_as_text() {
+    let page = render(&busy(), Lang::De);
+    assert!(
+        page.contains("Zugang über &lt;b&gt;Tor 3&lt;/b&gt;"),
+        "{page}"
+    );
+    assert!(!page.contains("<b>Tor 3</b>"));
 }

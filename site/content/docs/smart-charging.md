@@ -64,9 +64,10 @@ signal — is 4.14 kW. Sixty watts apart, and a platform must tell them apart to
 show it honoured the claim.
 
 SPINE (the EEBUS data model) carries power as a `ScaledNumber`: an integer
-mantissa and a power of ten, which is a decimal. Converting it to `f64` (as the
-upstream use-case library does) loses that — 70 % of 9.9 kW is
-`6930.000000000001` in `f64`. `emob_eebus::watts_of` reads it exactly:
+mantissa and a power of ten, which is a decimal. Converting it to `f64` loses
+that — 70 % of 9.9 kW is `6930.000000000001` in `f64`, which is why `eebus` holds
+its limits as `ScaledNumber` since 0.13. `emob_eebus::watts_of` reads one into a
+`Decimal`, exactly:
 
 ```rust
 use emob_eebus::watts_of;

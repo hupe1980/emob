@@ -8,7 +8,7 @@ The billing daemon: decides when a month is closed, which invoice number it gets
 |---|---|
 | ✅ library | `billd::Billd` and `billd::Books` implement numbering, closing once, cancellation and re-billing, submission state, and double-entry posting into [`doubleentry`](https://crates.io/crates/doubleentry) 0.9 — tested in `tests/a_month_is_closed_once.rs` |
 | ✅ journal | on start the daemon folds its hash-chained journal (`billd` under `EMOB_JOURNAL_DIR`) and resumes the number series from it before reporting ready. Record bodies — received CDRs carry a card UID, invoices an IBAN — are sealed under `BILLD_DATA_KEY`; every record names its actor; the head is signed under `BILLD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
-| ✅ deliveries | `POST /v1/deliveries` takes the `de.emob.cdr.issued` CloudEvents `csmsd` emits (any other type is refused): 1 MiB cap, Standard-Webhooks signature and 300 s freshness, id = CDR key, issuer must be an estate partner; journalled as `received`, then answered. A duplicate is answered `200 duplicate` |
+| ✅ deliveries | `POST /v1/deliveries` takes the `de.emob.cdr.issued` CloudEvents `csmsd` emits (any other type is refused): 1 MiB cap, Standard-Webhooks signature and 300 s freshness, id = CDR key, issuer must be an estate partner; journalled as `received`, then answered. A duplicate is answered `200 duplicate`; a signed sample marked `emobtest` is `202` and never booked, so a replacement and this one pass the same `emobtest conformance receiver` |
 | ✅ month close | an hourly calendar closes each partner's previous month once: one EN 16931 invoice per partner and calendar month from the records received, seller from `[billing]`, buyer from the partner, in the partner's `specification` (EN 16931 or XRechnung). A document that specification rejects is refused at the close, while it is only a spent number. Each line carries the driver's receipt link |
 | ✅ invoice page | every issued invoice has a page at `/i/{token}` with its UBL and CII files |
 | ✅ delivery | with `[billing.delivery]`, each issued invoice is posted, signed, to the operator's ERP or Peppol provider until it answers; an accepted one is booked |
@@ -213,7 +213,7 @@ shell on `localhost:8082`, journal on a named volume).
 
 | Path | Answers |
 |---|---|
-| `POST /v1/deliveries` | a `de.emob.cdr.issued` CloudEvent from `csmsd`, signed and fresh |
+| `POST /v1/deliveries` | a `de.emob.cdr.issued` CloudEvent from `csmsd`, signed and fresh; an `emobtest` sample is `202`, not booked |
 | `GET /i/{token}`, `/i/{token}/ubl.xml`, `/i/{token}/cii.xml` | unauthenticated, behind the token: the invoice page and its two files |
 | `GET /v1/billd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
 | `GET /v1/billd/today?limit=&invoices=` | operator token: counts of records received and refused deliveries, and the documents waiting on the recipient (`submission` issued or rejected with the reason) — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page |

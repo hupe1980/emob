@@ -86,7 +86,7 @@ fn registry() -> KeyRegistry {
                     Curve::Secp256r1,
                     signing_key()
                         .verifying_key()
-                        .to_encoded_point(false)
+                        .to_sec1_point(false)
                         .as_bytes(),
                 )
                 .expect("a well-formed SEC1 point"),

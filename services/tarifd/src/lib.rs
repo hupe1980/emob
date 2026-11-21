@@ -58,6 +58,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
+pub mod driver;
 pub mod http;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -416,6 +417,15 @@ impl Tarifd {
     /// The tariffs this service publishes.
     pub fn tariffs(&self) -> impl Iterator<Item = &TariffId> {
         self.histories.keys()
+    }
+
+    /// Every version of one tariff.
+    #[must_use]
+    pub fn history(&self, id: &str) -> Option<&TariffHistory> {
+        self.histories
+            .iter()
+            .find(|(held, _)| held.as_str() == id)
+            .map(|(_, history)| history)
     }
 }
 

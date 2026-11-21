@@ -213,6 +213,30 @@ pub enum Event {
         #[serde(with = "time::serde::rfc3339")]
         at: time::OffsetDateTime,
     },
+    /// An operator's note on a station (spec 023).
+    StationNoted {
+        /// Which station.
+        identity: String,
+        /// Its number on that station, from 1.
+        number: u64,
+        /// Who wrote it, as the actor reads.
+        by: String,
+        /// What it says, cleaned and bounded (SR-154).
+        text: String,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A note taken off a station; the fact that wrote it stays.
+    NoteRemoved {
+        /// Which station.
+        identity: String,
+        /// Which note.
+        number: u64,
+        /// When.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
     /// A station's firmware or security report (SR-140).
     Reported {
         /// Which station.
@@ -245,6 +269,8 @@ impl Kinded for Event {
             Self::StationRegistered { .. } => "station_registered",
             Self::StationUpdated { .. } => "station_updated",
             Self::StationRetired { .. } => "station_retired",
+            Self::StationNoted { .. } => "station_noted",
+            Self::NoteRemoved { .. } => "note_removed",
         }
     }
 }
@@ -436,6 +462,27 @@ pub struct Known {
     pub boots: Vec<time::OffsetDateTime>,
     /// Its last sessions, newest last ([`RECENT`]).
     pub recent: Vec<Recent>,
+    /// Its notes, newest last ([`NOTES`]).
+    pub notes: Vec<Note>,
+    /// How many notes were ever written on it — the next one's number.
+    pub notes_written: u64,
+}
+
+/// How many notes a station's page and fold keep (SR-154).
+pub const NOTES: usize = 10;
+
+/// An operator's note on a station.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Note {
+    /// Its number on the station.
+    pub number: u64,
+    /// Who wrote it.
+    pub by: String,
+    /// What it says.
+    pub text: String,
+    /// When.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
 }
 
 /// How many sessions a station's page lists.
@@ -564,6 +611,32 @@ pub fn apply(state: &mut State, event: Event) {
         }
         Event::StationRetired { identity, .. } => {
             state.registry.remove(&identity);
+        }
+        Event::StationNoted {
+            identity,
+            number,
+            by,
+            text,
+            at,
+        } => {
+            let known = state.stations.entry(identity).or_default();
+            known.notes_written = known.notes_written.max(number);
+            known.notes.push(Note {
+                number,
+                by,
+                text,
+                at,
+            });
+            if known.notes.len() > NOTES {
+                known.notes.remove(0);
+            }
+        }
+        Event::NoteRemoved {
+            identity, number, ..
+        } => {
+            if let Some(known) = state.stations.get_mut(&identity) {
+                known.notes.retain(|note| note.number != number);
+            }
         }
         Event::Online { station, at } => {
             state.stations.entry(station).or_default().presence = Some(Presence::Online(at));

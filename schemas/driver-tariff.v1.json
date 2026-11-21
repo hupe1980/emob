@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hupe1980.github.io/emob/schemas/driver-tariff.v1.json",
+  "title": "driver-tariff.v1",
+  "description": "One version of an emob tariff as a seller imports it: served by tarifd at /v1/driver-tariffs/{id} (the version in force) and /v1/driver-tariffs/{id}/{version} (that version, for ever). Public; nothing about any customer.",
+  "type": "object",
+  "required": ["schema", "id", "version", "preisstand", "valid_from", "valid_until", "currency", "components", "display", "examples", "tariff"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "driver-tariff.v1" },
+    "id": { "type": "string", "minLength": 1, "description": "The tariff's id, stable across versions." },
+    "version": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The version: SHA-256 over everything that can change a price." },
+    "preisstand": { "type": "string", "pattern": "^[0-9A-F]{4}$", "description": "The code a driver compares on the price page, the station's display and the receipt: the version's first four hex characters." },
+    "valid_from": { "type": ["string", "null"], "format": "date-time", "description": "In force from, inclusive; null when it has always been." },
+    "valid_until": { "type": ["string", "null"], "format": "date-time", "description": "In force until, exclusive; null while no later version is announced." },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["dimension", "price", "unit", "basis", "vat"],
+        "additionalProperties": false,
+        "properties": {
+          "dimension": { "enum": ["ENERGY", "TIME", "PARKING_TIME", "FLAT"] },
+          "price": { "type": "string", "pattern": "^\\d+(\\.\\d+)?$", "description": "Exactly as the tariff states it; never a float." },
+          "unit": { "enum": ["kWh", "hour", "session"] },
+          "basis": { "enum": ["gross", "net"] },
+          "vat": { "type": ["string", "null"], "pattern": "^\\d+(\\.\\d+)?$" }
+        }
+      }
+    },
+    "display": { "type": "array", "items": { "type": "string" }, "description": "What a driver must be shown, in AFIR Art. 5(4)'s order." },
+    "examples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kwh", "power_kw", "total"],
+        "additionalProperties": false,
+        "properties": {
+          "kwh": { "type": "string" },
+          "power_kw": { "type": "string" },
+          "total": { "type": "string", "description": "Rated by the function that bills, rounded as an invoice line is." }
+        }
+      }
+    },
+    "tariff": { "type": "object", "description": "The tariff as emob-tariff serialises it: what a price check recomputes a session with." }
+  }
+}

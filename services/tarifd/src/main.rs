@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
 
     Server::new(me, readiness, shutdown)
         .with(tarifd::http::router(Arc::clone(&service), operators))
+        .with(tarifd::driver::router(Arc::clone(&service)))
         .draining_for(std::time::Duration::from_secs(3))
         .listen(http)
         .await?;

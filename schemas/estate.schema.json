@@ -127,6 +127,17 @@
       "items": {
         "$ref": "#/$defs/Subscriber"
       }
+    },
+    "mobilithek": {
+      "description": "Where `poid` delivers the DATEX II table (spec 016).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Mobilithek"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -230,6 +241,10 @@
             "null"
           ],
           "default": null
+        },
+        "show_price": {
+          "description": "Whether its display shows the price and the Preisstand — and on OCPP\n2.1 the price page's code — sent after every boot, one message per\ntariff version over that version's window (spec 015). OCPP 1.6 has no\ndisplay message.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -398,9 +413,35 @@
           "pattern": "^-?\\d+(\\.\\d+)?$"
         },
         "vat": {
-          "description": "The VAT rate inside [`TariffSpec::energy`], in percent.",
+          "description": "The VAT rate inside every price of this version, in percent.",
           "type": "string",
           "pattern": "^-?\\d+(\\.\\d+)?$"
+        },
+        "per_minute": {
+          "description": "Gross price per minute of charging, when the tariff has one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^\\d+(\\.\\d+)?$",
+          "default": null
+        },
+        "session_fee": {
+          "description": "Gross price per session, when the tariff has one.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^\\d+(\\.\\d+)?$",
+          "default": null
+        },
+        "valid_from": {
+          "description": "From when this version is in force (RFC 3339, on a quarter hour) —\nspec 015. A tariff id may appear once per version; the version without\none has always been in force, and each version ends where the next\nbegins.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -984,6 +1025,36 @@
         "url",
         "secret_env",
         "types"
+      ]
+    },
+    "Mobilithek": {
+      "description": "`[mobilithek]` — read by `poid`: the national access point's publication\nthe static table is posted to `[AFIR Art. 20(2)]` (spec 016).",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "The publication's push address the Mobilithek issued — `https://`,\nor `http://` on loopback for a mock.",
+          "type": "string"
+        },
+        "client_cert": {
+          "description": "The client certificate (PEM) the Mobilithek authenticates the\noperator by; required for `https://`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "client_key": {
+          "description": "Its private key (PEM).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
       ]
     }
   },

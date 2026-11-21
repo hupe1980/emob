@@ -161,7 +161,7 @@ impl VirtualStation {
             Curve::Secp256r1,
             self.signing_key
                 .verifying_key()
-                .to_encoded_point(false)
+                .to_sec1_point(false)
                 .as_bytes(),
         )
         .expect("a verifying key encodes to a well-formed SEC1 point")
@@ -313,6 +313,34 @@ impl VirtualStation {
             started_at: plan.started_at,
             ended_at: plan.ended_at,
         }
+    }
+
+    /// One register reading signed as this meter's OCMF record — what a
+    /// station attaches to a register value it reports, outside a planned
+    /// session.
+    ///
+    /// `pagination` counts this meter's records from one, `marker` is the
+    /// transaction marker (`B` begin, `C` charging, `E` end) and `register_kwh`
+    /// the import register. A station simulator that takes its physics from
+    /// elsewhere signs with this, so its records are this crate's bytes.
+    #[must_use]
+    pub fn sign_reading(
+        &self,
+        pagination: u64,
+        marker: char,
+        at: time::OffsetDateTime,
+        register_kwh: Decimal,
+    ) -> String {
+        let marker = marker.to_string();
+        self.sign(&SignedReading {
+            pagination,
+            marker: &marker,
+            state: "G",
+            register: IMPORT_REGISTER,
+            clock: 'S',
+            at,
+            value: register_kwh,
+        })
     }
 
     fn sign(&self, reading: &SignedReading<'_>) -> String {

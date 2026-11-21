@@ -120,6 +120,9 @@ pub struct Station {
     /// Who runs it.
     #[serde(default)]
     pub carrier: Option<String>,
+    /// Its newest note.
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// `GET /v1/billd/today`.

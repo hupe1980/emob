@@ -84,7 +84,7 @@ footer.foot p > a:only-child { display: inline-block; padding: .3rem .25rem; }
 /* Search and forms (spec 021): a field is a full-width target with its label above. */
 form.search { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 0 0 1rem; }
 form.search input { flex: 1 1 16rem; }
-input[type=text], input[type=search], input[type=date], input[type=number], select { font: inherit; padding: .5rem .6rem; min-height: 2.5rem;
+input[type=text], input[type=search], input[type=date], input[type=number], select, textarea { font: inherit; padding: .5rem .6rem; min-height: 2.5rem;
   border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); width: 100%; max-width: 32rem; }
 input[aria-invalid=true] { border-color: var(--bad); }
 /* A link that is a table row's name is a target too (WCAG 2.2 2.5.8). */
@@ -184,3 +184,26 @@ table.totals th { text-transform: none; letter-spacing: 0; font-size: .94rem; co
 .callout { padding: .6rem .8rem; border-radius: 8px; background: var(--warn-fill); color: var(--text); }
 .callout.tone-warn { border-left: 4px solid var(--warn); }
 .group .lead { margin: .2rem 0 .6rem; }
+
+/* Notes on a station (deskd, spec 023): what the next person needs, in their
+   own words, with who wrote it and when. */
+textarea { min-height: 5rem; resize: vertical; }
+ol.notes { list-style: none; padding: 0; margin: 0 0 1rem; }
+ol.notes li { display: flex; flex-wrap: wrap; gap: .2rem .8rem; align-items: baseline; padding: .6rem 0; border-bottom: 1px solid var(--line); }
+ol.notes .text { flex-basis: 100%; white-space: pre-line; margin: 0; }
+ol.notes form { margin-left: auto; }
+.rows .note { margin: .2rem 0 0; white-space: pre-line; }
+#notes details > summary { cursor: pointer; color: var(--accent); font-weight: 600; padding: .4rem 0; min-height: 24px; }
+
+/* The price page (csmsd /p/{evse}, spec 015): the price per kWh is the
+   largest thing on it, then the other components in AFIR's order, then what a
+   session costs, then the code a driver compares on the display and receipt. */
+h1.price { font-size: clamp(2.2rem, 9vw, 3rem); letter-spacing: -.02em; line-height: 1.1; margin: .2rem 0 .4rem; font-variant-numeric: tabular-nums; }
+ul.components { list-style: none; padding: 0; margin: 0 0 .4rem; font-size: 1.15rem; font-weight: 600; }
+dl.examples { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem; margin: 0 0 1rem; font-variant-numeric: tabular-nums; }
+dl.examples dt { color: var(--muted); }
+dl.examples dd { margin: 0; font-weight: 600; }
+.preisstand .code strong { font: 700 1.6rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }
+p.preisstand strong { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+.preisstand .url { overflow-wrap: anywhere; }
+p.next { border-left: 4px solid var(--info); padding-left: .7rem; }

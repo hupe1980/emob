@@ -152,9 +152,11 @@ after the receiver answered, so a failed push stays pending across a restart.
 During the credentials handshake a partner names a URL this node then calls.
 `roamd::reach` admits only `https`, and `http` or a private, loopback or
 link-local address only for hosts listed in `[roaming] reach_back_allow` — so a
-registering partner cannot point the node at an internal service. The name is
-resolved once; a DNS-rebinding window between that check and the OCPI client's
-own connect remains (see [THREAT_MODEL.md](../../THREAT_MODEL.md)).
+registering partner cannot point the node at an internal service. The answer
+it gives is early and readable; the enforcement is `ocpi-kit`'s, whose resolver
+refuses an internal address on every connection and redirect hop, so a name
+that rebinds after the check is refused too. Keep `reach_back_allow` empty in
+production: the kit's policy cannot open private addresses for one host only.
 
 ## Configuration
 
@@ -183,7 +185,7 @@ Or `just up` for the whole estate (`roamd`'s shell on `localhost:8081`).
 | Path | Answers |
 |---|---|
 | `/ocpi/…` | OCPI `versions`, `credentials` and `cdrs` for registered partners |
-| `POST /v1/deliveries` | a `de.emob.cdr.issued` CloudEvent from `csmsd`: Standard-Webhooks signature, 300 s freshness, size cap |
+| `POST /v1/deliveries` | a `de.emob.cdr.issued` CloudEvent from `csmsd`: Standard-Webhooks signature, 300 s freshness, size cap; a signed sample marked `emobtest` is `202` and never booked |
 | `GET /v1/roamd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
 | `GET /v1/roamd/today?limit=&consignments=` | operator token: partners (registered or not), counts, and the consignments no partner has accepted yet — each list `{ total, items, older }` — the newest `limit` (default 50, max 200; anything else is `400`), with `older` the cursor for the next page |
 | `GET /health/live` | `200` while the process runs |
@@ -193,7 +195,7 @@ Or `just up` for the whole estate (`roamd`'s shell on `localhost:8081`).
 ## Built on
 
 `emob-roam` (documents and routing), `emob-cdr`, `emob-service` (shell,
-journal, Cedar policies), [`ocpi-kit`](https://crates.io/crates/ocpi-kit) 0.4
+journal, Cedar policies), [`ocpi-kit`](https://crates.io/crates/ocpi-kit) 0.5
 (client and server). See [Roaming](https://hupe1980.github.io/emob/docs/roaming/)
 and the [workspace README](../../README.md).
 

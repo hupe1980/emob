@@ -222,16 +222,18 @@ dev-keys estate="deploy/estate.example.toml":
     echo "export EMOB_ESTATE={{ estate }}"
 
 # The nine daemons from source on loopback, against the example estate (or
-# EMOB_ESTATE), with the secrets in `.env` — written by `just dev-keys` on the
-# first run. Checks the estate first, waits until every daemon is ready, prints
-# where Heute is, and stops them all on Ctrl-C. Journals go to `var/`.
+# the one named: `just run my.toml`), with the secrets in `.env` — written by
+# `just dev-keys` on the first run. Checks the estate first, waits until every
+# daemon is ready, prints where Heute is, and stops them all on Ctrl-C.
+# Journals go to `var/` (or EMOB_JOURNAL_DIR).
 #
 # ▶️  Run the estate from source
-run:
+run estate="":
     #!/usr/bin/env bash
     set -euo pipefail
     [ -f .env ] || { just dev-keys > .env; echo "🔑 wrote .env (gitignored) — the secrets for this machine"; }
     set -a; . ./.env; set +a
+    [ -z "{{ estate }}" ] || export EMOB_ESTATE="{{ estate }}"
     [ -f target/dev-tls/server.pem ] || just dev-ca
     cargo build -q --bins
     target/debug/emob check --secrets "$EMOB_ESTATE"
@@ -393,11 +395,13 @@ down:
 # 🌐 Serve the documentation site locally
 site:
     mkdir -p site/static/schemas && cp -R schemas/. site/static/schemas/
+    mkdir -p site/static/verify && cp services/csmsd/assets/emob_verify.wasm site/static/verify/
     cd site && zola serve
 
 # 🌐 Build the documentation site
 site-build:
     mkdir -p site/static/schemas && cp -R schemas/. site/static/schemas/
+    mkdir -p site/static/verify && cp services/csmsd/assets/emob_verify.wasm site/static/verify/
     cd site && zola build
 
 # One CycloneDX bill of materials for the whole workspace — every crate and
@@ -433,3 +437,38 @@ sbom:
 pins:
     @grep -hoE 'uses: [^ ]+@[0-9a-f]{40} # .*' .github/workflows/*.yml | sed 's/uses: //' | sort -u
     @grep -E '^FROM .+@sha256:' Dockerfile | sed 's/^FROM //; s/ AS .*//'
+
+# 🐍 emobtest, the Python toolkit: build the extension into emobtest/.venv,
+# run its suite, lint it. Outside the Cargo workspace, so `just ci` needs no
+# Python.
+emobtest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd emobtest
+    [ -d .venv ] || uv venv -q --python 3.11 .venv || uv venv -q .venv
+    . .venv/bin/activate
+    uv pip install -q maturin pytest ruff
+    maturin develop -q --uv
+    pytest -q
+    ruff check . && ruff format --check .
+
+
+# 🚗 emob driven from outside: the example estate on a scratch journal; a
+# 2.0.1 and a 2.1 station are onboarded through csmsd's registry, and
+# emobtest's stations charge cars on all three versions over wss:// — a good
+# session, a tampered and a dropped reading, a blocked card, the 2.x displays
+# — asserting what csmsd billed, refused and showed. Stops the estate after;
+# CI runs it on the wheel it built.
+e2e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -n "${CI:-}" ] || just emobtest
+    scratch=$(mktemp -d) runner=""
+    trap 'kill $runner 2>/dev/null; pkill -P $runner 2>/dev/null; wait 2>/dev/null; rm -rf "$scratch"' EXIT
+    EMOB_JOURNAL_DIR="$scratch" just run > "$scratch/run.log" 2>&1 & runner=$!
+    for _ in $(seq 600); do grep -q "the estate runs" "$scratch/run.log" 2>/dev/null && break; sleep 0.5; done
+    curl -fsS http://127.0.0.1:9001/health/ready >/dev/null 2>&1 || { cat "$scratch/run.log" "$scratch"/csmsd.log 2>/dev/null; exit 1; }
+    set -a; . ./.env; set +a
+    cd emobtest
+    [ -n "${CI:-}" ] || . .venv/bin/activate
+    pytest -q tests/test_against_emob.py --emob-ocpp wss://127.0.0.1:9000/ocpp --emob-ca ../target/dev-tls/ca.pem

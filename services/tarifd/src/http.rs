@@ -8,7 +8,6 @@ use axum::extract::State;
 use axum::routing::get;
 use emob_service::Operators;
 use emob_service::estate::{EstateError, Operator, Parties, TariffSpec};
-use emob_tariff::TariffHistory;
 use serde::{Deserialize, Serialize};
 
 use crate::Tarifd;
@@ -32,13 +31,10 @@ pub struct Estate {
 /// [`EstateError::Invalid`] naming `tariffs[index]` for a tariff that does not
 /// build or whose history does not hold.
 pub fn published(estate: &Estate) -> Result<Tarifd, EstateError> {
+    // The same histories `csmsd` rates with (spec 015): one function, so the
+    // version published is the version billed.
     let mut service = Tarifd::new();
-    for (index, spec) in estate.tariffs.iter().enumerate() {
-        let tariff = spec.to_tariff(index)?;
-        let history = TariffHistory::new(vec![tariff]).map_err(|error| EstateError::Invalid {
-            key: format!("tariffs[{index}]"),
-            reason: error.to_string(),
-        })?;
+    for history in emob_service::estate::histories(&estate.tariffs)?.into_values() {
         service.publish(history);
     }
     Ok(service)

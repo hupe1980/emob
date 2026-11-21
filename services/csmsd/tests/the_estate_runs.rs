@@ -592,7 +592,68 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
             .amount()
             .to_string()
             .replace('.', ",");
-        assert!(page.contains(&format!("{gross} €")), "{gross}");
+        assert!(page.contains(&format!("{gross}\u{a0}€")), "{gross}");
+        // Spec 015, SC-002: the receipt names the version that rated it by the
+        // same Preisstand the point's price page shows — public, cacheable,
+        // not indexed — and an EVSE nobody runs is an empty 404.
+        let code = cdr.cost.as_ref().unwrap().tariff_fingerprint.code();
+        assert!(page.contains(&format!("<strong>{code}</strong>")), "{page}");
+        let evse = cdr.evse_id.to_string();
+        let price = reqwest::get(format!("http://{}/p/{evse}", estate.csmsd_http))
+            .await
+            .unwrap();
+        assert_eq!(price.status(), 200);
+        assert_eq!(price.headers()["cache-control"], "public, max-age=60");
+        assert_eq!(price.headers()["x-robots-tag"], "noindex");
+        let price = price.text().await.unwrap();
+        assert!(
+            price.contains(&format!("<strong>{code}</strong>")),
+            "{price}"
+        );
+        assert!(price.contains("pro kWh"), "{price}");
+        // SR-158: a price and where it is, nothing about anyone's session.
+        assert!(!price.contains(GOOD_CARD), "no card on a public page");
+        assert!(
+            !price.contains(&cdr.key.to_string()),
+            "no transaction either"
+        );
+        let (status, body) = get(
+            &format!("http://{}/p/DE*ZZZ*E99999", estate.csmsd_http),
+            None,
+        )
+        .await;
+        assert_eq!((status, body.as_str()), (404, ""));
+        let feed = reqwest::get(format!("http://{}/p/{evse}.atom", estate.csmsd_http))
+            .await
+            .unwrap();
+        assert!(
+            feed.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("application/atom+xml")
+        );
+        assert!(
+            feed.text()
+                .await
+                .unwrap()
+                .contains(&format!("Preisstand {code}"))
+        );
+        // SR-160: a burst past the window is answered 429, not served.
+        let client = reqwest::Client::new();
+        let mut limited = false;
+        for _ in 0..(csmsd::price::PER_SECOND * 2) {
+            let status = client
+                .get(format!("http://{}/p/{evse}", estate.csmsd_http))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            if status == 429 {
+                limited = true;
+                break;
+            }
+        }
+        assert!(limited, "the price page is rate-limited");
         let token = path.trim_start_matches("/r/");
         let journal = std::fs::read_to_string(estate.dir.join("csmsd.ndjson")).unwrap();
         assert!(
@@ -1333,6 +1394,60 @@ async fn sr_144_sr_147_a_station_is_onboarded_and_retired_without_a_restart() {
     let (status, body) = get(&map, Some(OPERATOR)).await;
     assert_eq!(status, 200);
     assert!(body.contains(r#""identity":"CP-NEW""#), "{body}");
+
+    // Spec 023: a note, under the operator, bounded, found, removed.
+    let notes = format!("{base}/CP-NEW/notes");
+    let tor = serde_json::json!({"text": "Zugang über Tor 3, <b>Schlüssel</b> beim Pförtner"});
+    let (status, _) = send(reqwest::Method::POST, &notes, None, tor.clone()).await;
+    assert_eq!(status, 401, "SR-156: no token, no note");
+    let (status, body) = send(
+        reqwest::Method::POST,
+        &notes,
+        Some(OPERATOR),
+        serde_json::json!({"text": "x".repeat(501)}),
+    )
+    .await;
+    assert_eq!(
+        (status, body["field"].as_str()),
+        (422, Some("text")),
+        "SR-154"
+    );
+    let (status, body) = send(reqwest::Method::POST, &notes, Some(OPERATOR), tor).await;
+    assert_eq!((status, body["number"].as_u64()), (201, Some(1)), "{body}");
+    let (_, view) = get(&format!("{base}/CP-NEW"), Some(OPERATOR)).await;
+    let view: serde_json::Value = serde_json::from_str(&view).unwrap();
+    assert_eq!(view["notes"][0]["number"], 1);
+    assert!(
+        view["notes"][0]["by"]
+            .as_str()
+            .unwrap()
+            .starts_with("operator:"),
+        "SR-156: the note names its author: {view}"
+    );
+    let (_, found) = get(&format!("{base}?q=tor+3"), Some(OPERATOR)).await;
+    assert!(found.contains("CP-NEW"), "a note is searchable: {found}");
+    let remove = format!("{notes}/1/remove");
+    let (status, _) = send(
+        reqwest::Method::POST,
+        &remove,
+        Some(OPERATOR),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, _) = send(
+        reqwest::Method::POST,
+        &remove,
+        Some(OPERATOR),
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(status, 404, "a note is removed once");
+    let (_, view) = get(&format!("{base}/CP-NEW"), Some(OPERATOR)).await;
+    assert!(
+        !view.contains("Tor 3"),
+        "a removed note leaves the view: {view}"
+    );
 
     // Retired with a reason: refused at once.
     let retire = format!("{base}/CP-NEW/retire");
