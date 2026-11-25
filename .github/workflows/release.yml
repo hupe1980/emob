@@ -247,8 +247,9 @@ jobs:
           set -euo pipefail
           # Only the published crates: the daemons and tools are publish = false
           # and some depend on path-only crates, which `cargo package` refuses.
-          cargo package --locked --no-verify $(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.publish != []) | "-p " + .name')
+          cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | "-p", .name' \
+            | xargs cargo package --locked --no-verify
           just sbom
           mkdir -p dist
           cp target/package/emob-*.crate target/sbom/*.cdx.json dist/
