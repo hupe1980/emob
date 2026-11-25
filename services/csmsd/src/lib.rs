@@ -58,9 +58,11 @@ pub mod daemon;
 pub mod display;
 pub mod edge;
 pub mod estate;
+mod investigation;
 pub mod journal;
 pub mod outbox;
 pub mod price;
+pub mod provider_price;
 pub mod provisioning;
 pub mod read;
 pub mod receipt;
@@ -222,6 +224,7 @@ pub const HEARTBEAT_SECS: i32 = 300;
 
 /// The CSMS.
 pub struct Csmsd<J: Journal> {
+    public_plans: provider_price::PlansByPoint,
     party: PartyId,
     registry: KeyRegistry,
     authority: Arc<dyn Authorize>,
@@ -236,6 +239,8 @@ pub struct Csmsd<J: Journal> {
     presence: Mutex<std::collections::BTreeMap<String, time::OffsetDateTime>>,
     /// When this process started; nothing heard before it is known.
     started: time::OffsetDateTime,
+    /// Earliest trusted connector source time in the configured publication clock domain.
+    publication_since: time::OffsetDateTime,
     /// The key receipts are minted under (spec 003). `None` is a CSMS that
     /// issues none — a test that does not look at them; the daemon always
     /// sets one.
@@ -276,6 +281,7 @@ impl<J: Journal> Csmsd<J> {
         journal: J,
         zone: emob_core::TimeZone,
     ) -> Result<Self, JournalError> {
+        let started = time::OffsetDateTime::now_utc();
         Ok(Self {
             party,
             registry,
@@ -283,11 +289,13 @@ impl<J: Journal> Csmsd<J> {
             operational: Mutex::new(Ledger::default()),
             folded: Mutex::new(Folded::open(State::new(zone), journal, journal::apply)?),
             presence: Mutex::new(std::collections::BTreeMap::new()),
-            started: time::OffsetDateTime::now_utc(),
+            started,
+            publication_since: started,
             receipts: None,
             display: std::sync::OnceLock::new(),
             clock: emob_service::system_clock(),
             subscribers: Vec::new(),
+            public_plans: std::collections::BTreeMap::new(),
             tariffs: std::collections::BTreeMap::new(),
         })
     }
@@ -303,6 +311,7 @@ impl<J: Journal> Csmsd<J> {
     /// simulated estate's, so its "today" is the page's.
     #[must_use]
     pub fn with_clock(mut self, clock: emob_service::Clock) -> Self {
+        self.publication_since = clock();
         self.clock = clock;
         self
     }
@@ -342,7 +351,7 @@ impl<J: Journal> Csmsd<J> {
         let Some(station) = self.registered(identity.as_str()) else {
             return;
         };
-        if !station.show_price {
+        if !station.show_price || !station.publicly_accessible {
             return;
         }
         let Some(history) = self.tariff(&station.tariff).cloned() else {
@@ -385,7 +394,16 @@ impl<J: Journal> Csmsd<J> {
     /// issues receipts. Minted again from the key, never read from the journal.
     #[must_use]
     pub fn receipt_path(&self, key: &Key) -> Option<String> {
-        self.receipts.as_ref().map(|receipts| receipts.path(key))
+        self.with_state(|state| self.filed_receipt_path(state, key))
+    }
+
+    fn filed_receipt_path(&self, state: &State, key: &Key) -> Option<String> {
+        let receipts = self.receipts.as_ref()?;
+        let digest = state.receipt_of.get(key)?;
+        let issued = state.receipts.get(digest)?;
+        issued.verdict.as_ref()?;
+        let token = receipts.token(key);
+        (receipt::digest(&token) == *digest).then(|| format!("/r/{token}"))
     }
 
     /// The absolute receipt link `billd` puts on the invoice line, for the
@@ -394,8 +412,9 @@ impl<J: Journal> Csmsd<J> {
     pub fn receipt_url_for_record(&self, cdr: &str) -> Option<String> {
         let receipts = self.receipts.as_ref()?;
         // By key, never by a search over every receipt issued (FR-003).
-        let key = self.with_state(|state| state.receipt_for.get(cdr).cloned())?;
-        Some(receipts.url(&key))
+        let path =
+            self.with_state(|state| self.filed_receipt_path(state, state.receipt_for.get(cdr)?))?;
+        Some(format!("{}{path}", receipts.public_url()))
     }
 
     /// The `Receipted` fact for a transaction, when this CSMS issues receipts.
@@ -406,9 +425,15 @@ impl<J: Journal> Csmsd<J> {
         at: Option<time::OffsetDateTime>,
         signed: Vec<String>,
     ) -> Option<Event> {
-        self.receipts
-            .as_ref()
-            .map(|receipts| receipts.issue(key, point.evse_id.clone(), at, signed))
+        let receipts = self.receipts.as_ref()?;
+        let issued = self.with_state(|state| {
+            state
+                .receipt_of
+                .get(key)
+                .and_then(|digest| state.receipts.get(digest))
+                .is_some_and(|issued| issued.verdict.is_some())
+        });
+        (!issued).then(|| receipts.issue(key, point.evse_id.clone(), at, signed))
     }
 
     /// The receipt link of `key` on its own station's display, when it
@@ -422,6 +447,27 @@ impl<J: Journal> Csmsd<J> {
         } else if let Some(station) = self.registered(&key.0) {
             display::Display::send_registered(handle, &station, &key.1, receipts.url(key));
         }
+    }
+
+    fn connector_report(
+        &self,
+        by: &Actor,
+        identity: &Identity,
+        status: String,
+        at: Option<time::OffsetDateTime>,
+    ) -> Result<(), CallError> {
+        if at.is_some_and(|source| source <= self.publication_since) {
+            return Ok(());
+        }
+        self.record(
+            by,
+            Event::ConnectorObserved {
+                station: identity.to_string(),
+                received_at: Some(self.now()),
+                observation: at
+                    .map(|at| emob_service::publication::ConnectorObservation { status, at }),
+            },
+        )
     }
 
     /// A station was heard from now — and, when the fold holds it offline or
@@ -561,7 +607,12 @@ impl<J: Journal> Csmsd<J> {
     pub fn seed(&self, stations: &[emob_service::estate::Station]) -> Result<usize, String> {
         let mut seeded = 0;
         for station in stations {
-            if self.registered(&station.identity).is_some() {
+            if self.with_registry(|_, state| {
+                state
+                    .stations
+                    .get(&station.identity)
+                    .is_some_and(|known| known.registered_at.is_some())
+            }) {
                 continue;
             }
             {
@@ -572,6 +623,7 @@ impl<J: Journal> Csmsd<J> {
             self.record(
                 &Actor::Estate,
                 Event::StationRegistered {
+                    offers: self.snapshots_for(station),
                     station: Box::new(station.clone()),
                     at: self.now(),
                 },
@@ -611,6 +663,7 @@ impl<J: Journal> Csmsd<J> {
         self.record(
             by,
             Event::StationRegistered {
+                offers: self.snapshots_for(&station),
                 station: Box::new(station),
                 at: self.now(),
             },
@@ -678,6 +731,7 @@ impl<J: Journal> Csmsd<J> {
         self.record(
             by,
             Event::StationUpdated {
+                offers: self.snapshots_for(&station),
                 station: Box::new(station),
                 reason: reason.trim().to_owned(),
                 at: self.now(),
@@ -837,7 +891,7 @@ impl<J: Journal> Csmsd<J> {
                 ),
             ));
         }
-        let answer = self.authority.ask(uid.trim()).await;
+        let answer = self.ask_at(identity, uid.trim()).await;
         let reference = match (answer.status, answer.reference) {
             (Status::Accepted, Some(reference)) => reference,
             (Status::Accepted, None) => {
@@ -1145,6 +1199,38 @@ impl<J: Journal> Csmsd<J> {
             })
     }
 
+    /// A native agreement covers one point and one immutable retail offer. Check the
+    /// registry again after the provider returns, before allowing a start or a hold.
+    async fn ask_at(&self, identity: &str, uid: &str) -> Answer {
+        let point = self.registered(identity).map(|station| station.evse);
+        let answer = self.authority.ask(uid, point.as_ref()).await;
+        if answer.status != Status::Accepted {
+            return answer;
+        }
+        let Some(token) = &answer.token else {
+            return Answer::invalid("the provider returned no charging identity");
+        };
+        if let Some(scope) = &answer.retail {
+            let current_point = self.registered(identity).map(|station| station.evse);
+            if current_point.as_ref() != Some(&scope.point)
+                || point != current_point
+                || token.issuer != scope.provider
+                || self
+                    .current_retail_reference(
+                        &scope.point,
+                        &scope.provider,
+                        &scope.plan,
+                        self.now(),
+                    )
+                    .as_ref()
+                    != Some(&scope.reference)
+            {
+                return Answer::invalid("the driver's agreed offer is unavailable at this point");
+            }
+        }
+        answer
+    }
+
     /// Ask the provider about a token, and journal what it said.
     async fn authorize(
         &self,
@@ -1157,7 +1243,7 @@ impl<J: Journal> Csmsd<J> {
             by,
             identity,
             transaction.is_some(),
-            self.authority.ask(uid).await,
+            self.ask_at(identity.as_str(), uid).await,
         )?;
         if answer.status != Status::Accepted {
             tracing::info!(station = %identity, status = ?answer.status, reason = %answer.reason, "a token was turned away");
@@ -1326,6 +1412,12 @@ impl<J: Journal> Csmsd<J> {
             },
         };
 
+        // The CDR and receipt both use a station-scoped transaction ID.
+        // In particular a prior refusal has no CDR for the ledger to detect.
+        if self.with_state(|state| state.closed_refusals.contains(&key)) {
+            return vec![refuse(vec!["the station reused the ID of a closed refused transaction; a new charge needs a fresh transaction ID".to_owned()], Vec::new())];
+        }
+
         let assembled = match transaction.assemble(Direction::Import) {
             Ok(assembled) => assembled,
             Err(error) => {
@@ -1462,10 +1554,10 @@ impl<J: Journal> Csmsd<J> {
         // billed — so its signature verified against the registry — and only
         // when it differs from what the fold holds for this point (SR-136).
         if matches!(acceptance, Acceptance::Stored)
-            && let Some(meter) = borrowed
-                .first()
-                .and_then(|record| station::MeterIdentity::of(record.payload()))
+            && let Some(record) = borrowed.first()
+            && let Some(mut meter) = station::MeterIdentity::of(record.payload())
         {
+            meter.component = self.registry.component_for_record(record).ok();
             let evse = point.evse_id.to_string();
             let known = lock(&self.folded)
                 .state()
@@ -1799,6 +1891,15 @@ impl<J: Journal> Csmsd<J> {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v1_6::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         match &typed {
+            v1_6::CsRequest::StatusNotification(note) if note.connector_id == 1 => {
+                self.connector_report(
+                    by,
+                    ctx.identity(),
+                    station::word(&note.status),
+                    note.timestamp.map(emob_ocpp::kit::instant),
+                )?;
+                return ctx.reply(&v1_6::StatusNotificationResponse::new());
+            }
             v1_6::CsRequest::BootNotification(boot) => {
                 self.booted(
                     by,
@@ -1888,6 +1989,17 @@ impl<J: Journal> Csmsd<J> {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_0_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         match &typed {
+            v2_0_1::CsRequest::StatusNotification(note)
+                if note.connector_id == 1 && note.evse_id == 1 =>
+            {
+                self.connector_report(
+                    by,
+                    ctx.identity(),
+                    station::word(&note.connector_status),
+                    Some(emob_ocpp::kit::instant(note.timestamp)),
+                )?;
+                ctx.reply(&v2_0_1::StatusNotificationResponse::new())
+            }
             v2_0_1::CsRequest::BootNotification(boot) => {
                 self.booted(
                     by,
@@ -1975,6 +2087,17 @@ impl<J: Journal> Csmsd<J> {
             .ok_or_else(|| CallError::not_implemented(&request.action))?;
         let typed = v2_1::CsRequest::decode(action, &request.payload, ctx.decode_options())?;
         match &typed {
+            v2_1::CsRequest::StatusNotification(note)
+                if note.connector_id == 1 && note.evse_id == 1 =>
+            {
+                self.connector_report(
+                    by,
+                    ctx.identity(),
+                    station::word(&note.connector_status),
+                    Some(emob_ocpp::kit::instant(note.timestamp)),
+                )?;
+                ctx.reply(&v2_1::StatusNotificationResponse::new())
+            }
             v2_1::CsRequest::BootNotification(boot) => {
                 self.booted(
                     by,

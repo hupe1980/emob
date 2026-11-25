@@ -34,6 +34,19 @@ pub enum Status {
     Invalid,
 }
 
+/// A native agreement requires a live match at this point before use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetailScope {
+    /// Sole point covered by this agreement.
+    pub point: emob_core::EvseId,
+    /// Provider that issued the agreement.
+    pub provider: emob_core::PartyId,
+    /// Published plan code.
+    pub plan: String,
+    /// Digest of the full point offer that the operator accepted.
+    pub reference: String,
+}
+
 /// The answer, its reason, and — when it is `Accepted` — whom the session
 /// bills.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +59,9 @@ pub struct Answer {
     pub token: Option<Presented>,
     /// The provider's keyed digest of the uid — what a session may hold.
     pub reference: Option<String>,
+    /// Published terms against which the CSMS must check a native agreement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retail: Option<RetailScope>,
 }
 
 impl Answer {
@@ -57,6 +73,7 @@ impl Answer {
             reason: reason.into(),
             token: None,
             reference: None,
+            retail: None,
         }
     }
 
@@ -93,7 +110,11 @@ impl Answer {
 /// Who answers. A trait so a test can stand in for `empd` without a socket.
 pub trait Authorize: Send + Sync {
     /// Ask about one uid.
-    fn ask<'a>(&'a self, uid: &'a str) -> Pin<Box<dyn Future<Output = Answer> + Send + 'a>>;
+    fn ask<'a>(
+        &'a self,
+        uid: &'a str,
+        evse: Option<&'a emob_core::EvseId>,
+    ) -> Pin<Box<dyn Future<Output = Answer> + Send + 'a>>;
 }
 
 /// `empd`, over HTTP.
@@ -125,12 +146,12 @@ impl Empd {
         })
     }
 
-    async fn call(&self, uid: &str) -> Answer {
+    async fn call(&self, uid: &str, evse: Option<&emob_core::EvseId>) -> Answer {
         let response = self
             .client
             .post(&self.url)
             .bearer_auth(self.token.expose())
-            .json(&serde_json::json!({ "uid": uid }))
+            .json(&serde_json::json!({ "uid": uid, "evse": evse }))
             .send()
             .await;
         let response = match response {
@@ -161,8 +182,12 @@ impl Empd {
 }
 
 impl Authorize for Empd {
-    fn ask<'a>(&'a self, uid: &'a str) -> Pin<Box<dyn Future<Output = Answer> + Send + 'a>> {
-        Box::pin(self.call(uid))
+    fn ask<'a>(
+        &'a self,
+        uid: &'a str,
+        evse: Option<&'a emob_core::EvseId>,
+    ) -> Pin<Box<dyn Future<Output = Answer> + Send + 'a>> {
+        Box::pin(self.call(uid, evse))
     }
 }
 
@@ -219,7 +244,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .unwrap();
-        let answer = empd.ask("04A1B2C3D4E5F6").await;
+        let answer = empd.ask("04A1B2C3D4E5F6", None).await;
         assert_eq!(answer.status, Status::Invalid);
         assert!(
             answer.reason.contains("refused rather than waved through"),
@@ -236,6 +261,7 @@ mod tests {
             reason: String::new(),
             token: None,
             reference: None,
+            retail: None,
         };
         assert!(!answer.is_accepted());
     }

@@ -6,8 +6,8 @@ that prices the session.
 
 [![crates.io](https://img.shields.io/crates/v/emob-poi.svg)](https://crates.io/crates/emob-poi) [![docs.rs](https://img.shields.io/docsrs/emob-poi)](https://docs.rs/emob-poi) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-poi.svg)](#license)
 
-`[AFIR Art. 5(2)]` makes the price shown before a session the price that may be
-charged, and `[AFIR Art. 20(2)(c)]` requires operators to publish that ad-hoc
+`[AFIR Art. 5(4)]` makes the price shown before a session the price that may be
+charged, and `[AFIR Art. 20(2)(f)]` requires operators to publish that ad-hoc
 price, free of charge, through the national access point — in Germany the
 Mobilithek, in the DATEX II Recharging profile, from 14 April 2026
 `[DATEX-II-Profil]`. Most stacks compute that number twice, once for billing and
@@ -195,8 +195,7 @@ reference instances; LSV 2026; PAngV.
 ## Part of emob
 
 emob is an open-source e-mobility stack for charge point operators and
-e-mobility service providers. The `poid` service builds its inventory
-from the estate's stations; pushing to the Mobilithek is still to come. See
+e-mobility service providers. The `poid` service reads the public station registry and delivers separate static and dynamic offers to the configured Mobilithek endpoints. See
 [locations and the national access point](https://hupe1980.github.io/emob/docs/locations/)
 on the documentation site and the [root README](https://github.com/hupe1980/emob).
 

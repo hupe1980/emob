@@ -59,6 +59,9 @@ pub fn network(imsi: Option<&String>) -> Option<String> {
 /// What a meter signs about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MeterIdentity {
+    /// The registered signing component used to verify the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<emob_eichrecht::ComponentRef>,
     /// `MV`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
@@ -81,6 +84,7 @@ impl MeterIdentity {
     #[must_use]
     pub fn of(payload: &ocmf::Payload<'_>) -> Option<Self> {
         let identity = Self {
+            component: None,
             vendor: payload.meter_vendor().map(clean),
             model: payload.meter_model().map(clean),
             serial: payload.meter_serial().map(clean),

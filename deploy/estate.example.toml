@@ -1,21 +1,18 @@
 #:schema ../schemas/estate.schema.json
 
-# The demonstration estate — one file every emob daemon reads its own sections of.
-#
-# Path: EMOB_ESTATE (default ./estate.toml). A daemon reads only the sections it
-# uses and refuses to start, naming the key, on one it cannot parse. Secrets are
-# never written here: every `*_env` field names an environment variable.
-# `emob check estate.toml` checks it before a daemon does; the line at the top
-# lets Taplo or Tombi complete and check it as you type.
-#
-# Loopback only: `[roaming] reach_back_allow` lets the OCPI handshake reach a
-# partner on 127.0.0.1 over http, which a production estate must not allow.
+# Shared configuration for the local demo. Set EMOB_ESTATE to use another file.
+# Credential fields ending in _env name environment variables. The example card
+# identifiers and station password are fixtures. Validate with emob check.
+# The roaming peer on loopback uses HTTP only in this example.
 
 [parties]
 operator = "DE*ABC"   # the CPO: stations, CDRs and invoices are issued under it
 provider = "DE*MSP"   # the e-mobility provider empd runs
 
 [[stations]]
+publicly_accessible = true
+# Set to true or false when the origin of supply has been established.
+# fully_renewable = true
 identity = "CP-1"
 ocpp = "1.6"
 # Security profile 2: HTTP Basic over TLS. The hash is of the demo station's
@@ -52,6 +49,7 @@ time_zone = "Europe/Berlin"
 energy = "0.49"   # gross, per kWh: the price a driver is shown, VAT included [PAngV §3(1)]
 vat = "19"        # the rate inside it; the invoice strips it, and asks for what the receipts said
 # per_minute = "0.10"   # optional: gross, per minute of charging
+# occupancy_per_minute = "0.10"  # optional: gross, while connected and not requesting energy
 # session_fee = "0.50"  # optional: gross, per session
 #
 # A price change is a second [[tariffs]] entry with the same id and a
@@ -68,13 +66,37 @@ vat = "19"        # the rate inside it; the invoice strips it, and asks for what
 # vat = "19"
 # valid_from = "2027-01-01T00:00:00+01:00"
 
-# Where poid posts the DATEX II table (spec 016): the publication's push
-# address the Mobilithek issued, and the operator's client certificate. Absent,
-# the table is built and checked and nothing is sent.
+# The 2.1 station example carries exactly 1.00 EUR/kWh net in SetDefaultTariff.
+[[tariffs]]
+id = "station-display"
+currency = "EUR"
+time_zone = "Europe/Berlin"
+energy = "1.19"
+vat = "19"
+
+# Configure both Mobilithek offer URLs and the client certificate to enable delivery.
 # [mobilithek]
-# url = "https://mobilithek.info:8443/mobilithek/api/v1.0/publication/<id>"
+# url = "https://mobilithek.info:8443/mobilithek/api/v1.0/publication/<static-id>"
+# dynamic_url = "https://mobilithek.info:8443/mobilithek/api/v1.0/publication/<dynamic-id>"
 # client_cert = "/run/secrets/mobilithek.pem"
 # client_key = "/run/secrets/mobilithek.key"
+
+[[public_plans]]
+provider = "DE*MSP"
+code = "standard"
+name = "MSP Standard"
+uniform_public_terms = true
+points = ["DE*ABC*E00001"]
+
+[[public_plans.schedules]]
+version = "v1"
+from = "2020-01-01T00:00:00Z"
+currency = "EUR"
+vat = "19"
+energy = "0.11"
+session = "0"
+roaming = "0.30"
+monthly = "0"
 
 [[partners]]
 party = "DE*MSP"
@@ -128,13 +150,18 @@ seller = { name = "ABC Charging GmbH", street = "Invalidenstrasse 1", post_code 
 # secret_env = "EMOB_WAREHOUSE_SECRET"
 # types = ["de.emob.*"]
 
+# Unissued RFID for the standalone driver-enrolment walkthrough.
+[[card_stock]]
+code = "STOCK-1004"
+uid = "04AB0000000004"
+
 [[contracts]]
 id = "DE-MSP-C00000001-W"
 from = "2026-01-01"
 tokens = [
-  { uid = "04A1B2C3D4E5F6", type = "RFID", whitelist = "ALLOWED" },
+  { uid = "04A1B2C3D4E5F6", visual_number = "MOB-1001", type = "RFID", whitelist = "ALLOWED" },
   { uid = "04C0FFEE000002", type = "RFID", whitelist = "ALLOWED" },
-  { uid = "04DEADBEEF0001", type = "RFID", whitelist = "ALLOWED", blocked = true },
+  { uid = "04DEADBEEF0001", visual_number = "MOB-1003", type = "RFID", whitelist = "ALLOWED", blocked = true },
 ]
 
 # `name` is who this operator is on every journal record and log line it causes
@@ -142,6 +169,11 @@ tokens = [
 [[operators]]
 name = "demo operator"
 token_env = "EMOB_OPERATOR_TOKEN"
+write = true
+
+[[operators]]
+name = "desk reader"
+token_env = "EMOB_DESK_READ_TOKEN"
 
 # How csmsd's OCPP listener is exposed. Throwaway loopback certificates —
 # `just dev-ca` writes these. A production estate names its own.
@@ -156,8 +188,9 @@ idle_timeout_secs = 900
 # What the operator page (deskd) reads, with which of the operator tokens. billd
 # and roamd are read at their [services] addresses.
 [desk]
+poid = "http://127.0.0.1:9582"
 csmsd = "http://127.0.0.1:9001"
-token_env = "EMOB_OPERATOR_TOKEN"
+token_env = "EMOB_DESK_READ_TOKEN"
 time_zone = "Europe/Berlin"   # the page's "today" and its clock
 ocpp_url = "wss://127.0.0.1:9000/ocpp"   # printed on the installer sheet a new station gets
 

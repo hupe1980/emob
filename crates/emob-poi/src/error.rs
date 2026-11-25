@@ -122,7 +122,7 @@ pub enum PoiError {
 
     /// A price update addresses a rate `idG` the published table never gave out.
     ///
-    /// `[AFIR Art. 20(2)(c)]` makes the ad-hoc price dynamic, so a tariff that
+    /// `[AFIR Art. 20(2)(f)]` makes the ad-hoc price dynamic, so a tariff that
     /// changes at noon travels as a status message addressed to a rate the
     /// table already named. One addressed to a name no table carried resolves
     /// against nothing and is dropped the same silent way — and the price the

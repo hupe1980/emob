@@ -893,3 +893,29 @@ fn a_re_rated_session_still_moves_the_total_after_a_restart() {
         "the restatement is what the fold must have rebuilt, not the first figure"
     );
 }
+
+#[test]
+fn public_plan_rates_operator_and_provider_fees_as_one_gross_contract_price() {
+    let mut base = tariff();
+    for component in &mut base.elements[0].components {
+        component.vat = Some(dec("19"));
+    }
+    let terms = empd::PublicPlanFees {
+        energy: dec("0.11"),
+        session: dec("0.15"),
+        roaming: dec("0.30"),
+        vat: dec("19"),
+    };
+    let retail = empd::public_retail_tariff(&base, terms).unwrap();
+    assert_eq!(retail.kind, TariffKind::Contract);
+    // Ten kWh at 0.49 + 0.11, with three distinct one-off charges of
+    // 0.35, 0.15 and 0.30. The old quote method still has its own callers.
+    let example = emob_tariff::worked_total(
+        &retail,
+        dec("10"),
+        dec("10"),
+        datetime!(2026-11-25 12:00 UTC),
+    )
+    .unwrap();
+    assert_eq!(example.amount(), dec("6.80"));
+}

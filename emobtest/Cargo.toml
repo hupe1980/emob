@@ -2,7 +2,7 @@
 name         = "emobtest-native"
 # Held to the workspace's version by `tests/test_version.py`: the wheel and the
 # crates it binds never disagree.
-version      = "0.6.1"
+version      = "0.7.0"
 edition      = "2024"
 rust-version = "1.96"
 license      = "MIT OR Apache-2.0"
@@ -26,6 +26,7 @@ emob-sim       = { path = "../crates/emob-sim" }
 emob-tariff    = { path = "../crates/emob-tariff" }
 emob-verify    = { path = "../crates/emob-verify" }
 datex2         = "0.3"
+getrandom      = "0.4"
 hex            = "0.4"
 jsonschema     = { version = "0.61", default-features = false }
 rust_decimal   = { version = "1", features = ["serde-with-str"] }

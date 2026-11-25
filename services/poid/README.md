@@ -8,10 +8,10 @@ The point-of-interest daemon: publishes a charge point operator's static and dyn
 |---|---|
 | ✅ library | `poid::Poid` builds checked snapshot and status publications from `emob-poi`'s DATEX II documents and reports a stale feed; `poid::Ledger` records which snapshot the access point accepted — tested in `tests/a_snapshot_goes_out.rs` |
 | ✅ journal | on start the daemon folds its journal (`poid` under `EMOB_JOURNAL_DIR`) and restores the last accepted snapshot, or warns that none was ever accepted. Every record names its actor; the head is signed under `POID_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
-| ✅ estate | the inventory is the estate's `[[stations]]`, one site per `location.id`, with exact decimal coordinates; the publisher country is the operator party's |
-| ✅ prices | each point's rate is the version of its station's tariff in force at the moment of publication, from the same history `csmsd` rates with, named `<tariff>-<Preisstand>` |
-| ✅ push | with `[mobilithek]` (`url`, `client_cert`, `client_key`), the table goes to the Mobilithek at start and hourly over mutual TLS; only a `2xx` is journalled, and each documented refusal is named — `400` document, `401`/`403` certificate, `404` publication, anything else retried next round (`tests/the_table_reaches_the_access_point.rs`) |
-| ⏳ not wired | the dynamic delta (status and ad-hoc price within a minute): the library builds it, the daemon does not send it yet; the inventory is the estate's, not yet `csmsd`'s registry |
+| ✅ estate | the live source is the paged public CSMS registry. The example estate seeds stations. Each distinct location becomes one site with exact decimal coordinates |
+| ✅ prices | each point's rate is the version of its station's tariff in force at the moment of publication, from the same history `csmsd` rates with, addressed on the live feed by the stable `<EVSE>-ADHOC` rate ID |
+| ✅ push | with `[mobilithek]` (`url`, `dynamic_url`, `client_cert`, `client_key`), the table goes to the Mobilithek at start and hourly over mutual TLS; only a direct `2xx` advances the accepted position, and each documented refusal is named — `400` document, `401`/`403` certificate, `404` publication, anything else retried next round (`tests/the_table_reaches_the_access_point.rs`) |
+| Dynamic offer | Public registry from the CSMS, complete snapshots and timestamped deltas. The operator view records receiver acknowledgement and deadline misses. |
 
 ## What it owns
 
@@ -43,10 +43,9 @@ publication gave it, and a consumer cannot resolve a version it never received
 been accepted, and checks references against **the snapshot the access point
 holds**, not the current inventory.
 
-### Recording only what was accepted
+### Delivery history
 
-`snapshot` and `status` return documents; the daemon pushes them; only a push
-the access point accepted is recorded (`Poid::accepted`, `Ledger::accepted`).
+`snapshot` and `status` return documents; the daemon pushes them; the ledger records attempts and failures separately from acknowledged content.
 The accepted snapshot survives a restart, so the daemon neither forgets its
 version references nor republishes the whole estate after every restart.
 
@@ -66,7 +65,7 @@ drivers to a fiction.
 | Variable | Default | Purpose |
 |---|---|---|
 | `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[stations]]`, `[[operators]]` |
-| `EMOB_OPERATOR_TOKEN` | **required** | the variable `[[operators]]` names: the read model's bearer |
+| `EMOB_OPERATOR_TOKEN`, `EMOB_DESK_READ_TOKEN` | **required** | the example estate’s named operator and background read credentials |
 | `POID_HTTP_BIND` | `127.0.0.1:9582` | health/readiness shell |
 | `EMOB_HTTP_BIND` | — | estate-wide shell address, used when `POID_HTTP_BIND` is unset; defaults are loopback, unreachable inside a container |
 | `POID_NAP_IDENTIFIER` | **required** | the identifier the national access point issued this operator, carried by every publication; `poid` refuses to start without it |
@@ -78,7 +77,8 @@ drivers to a fiction.
 ## Running
 
 ```console
-EMOB_ESTATE=deploy/estate.example.toml EMOB_OPERATOR_TOKEN=… cargo run -p poid
+source .env    # local estate and credentials from `just dev-keys`
+cargo run -p poid
 ```
 
 Or `just up` for the whole estate (`poid`'s shell on `localhost:8084`).
@@ -87,6 +87,7 @@ Or `just up` for the whole estate (`poid`'s shell on `localhost:8084`).
 
 | Path | Answers |
 |---|---|
+| `GET /v1/poid/dynamic` | operator token: source change time, latest attempt, outstanding age, receiver acknowledgement and cumulative missed deadlines |
 | `GET /v1/poid/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key`. deskd does not read it; witness it with `emob witness` |
 | `GET /v1/poid` | operator token: the points (EVSE, location) and the last accepted snapshot |
 | `GET /health/live` | `200` while the process runs |
@@ -102,3 +103,7 @@ Or `just up` for the whole estate (`poid`'s shell on `localhost:8084`).
 ## License
 
 MIT OR Apache-2.0
+
+Public registry rows are paged at a single revision. The dynamic offer receives a complete snapshot after table changes, after six hours or at the 3,500-delta-message threshold. Other rounds send changed source facts only. Inspect `dynamic` in the operator view for the last acceptance, overdue changes and missing data. Receiver acceptance and on-site visibility require separate evidence.
+
+When the final point retires the worker sends an empty dynamic snapshot and prompts the operator to withdraw the static offer. The German static profile requires at least one site.

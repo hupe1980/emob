@@ -214,6 +214,7 @@ struct TariffSpec {
     energy: Decimal,
     vat: Decimal,
     per_minute: Option<Decimal>,
+    occupancy_per_minute: Option<Decimal>,
     session_fee: Option<Decimal>,
 }
 
@@ -226,6 +227,12 @@ fn tariff(spec: &str) -> PyResult<Tariff> {
         components.push(
             PriceComponent::new(Dimension::Time, per_minute * Decimal::from(60)).with_vat(spec.vat),
         );
+    }
+    if let Some(fee) = spec.occupancy_per_minute {
+        let component = PriceComponent::occupancy_per_minute(fee).ok_or_else(|| {
+            refused("occupancy_per_minute requires an exact nonnegative hourly conversion")
+        })?;
+        components.push(component.with_vat(spec.vat));
     }
     if let Some(fee) = spec.session_fee {
         components.push(PriceComponent::new(Dimension::Flat, fee).with_vat(spec.vat));

@@ -1,6 +1,6 @@
 # emob
 
-> Open-source EV charging back office for Europe, written in Rust: charge point operator (CSMS, OCPP 1.6/2.0.1/2.1) and e-mobility service provider (contracts, OCPI 2.3.0 / OICP 2.3 roaming, EN 16931 e-invoices, SEPA) in one workspace. Signed meter values (OCMF) are verified under German calibration law (Eichrecht); money is exact decimal; EU and German charging regulation (AFIR, LSV, PAngV, NIS2, CRA) is modelled as dated, cited duties. Fifteen domain crates do no I/O and read no clock; nine daemons run them from one estate file (release 0.2): OCPP security profiles 1–3, journalled and sealed ledgers, an operator page (Heute) and a driver receipt verifiable in the browser. `just demo` runs the whole estate on one machine.
+> Self-hosted EV charging software for charge point operators and mobility providers. The Rust services manage OCPP stations and driver contracts, verify signed OCMF meter values, exchange OCPI records, publish DATEX II data and settle partner invoices. Run just demo for a local estate with simulated stations.
 
 ## Docs
 

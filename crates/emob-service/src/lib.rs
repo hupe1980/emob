@@ -84,6 +84,7 @@ pub mod journal;
 pub mod page;
 #[cfg(feature = "policy")]
 pub mod policy;
+pub mod publication;
 pub mod serve;
 pub mod shutdown;
 pub mod telemetry;

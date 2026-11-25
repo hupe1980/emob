@@ -12,6 +12,8 @@
 //! loses duplicate detection for messages in flight — which `CdrLedger`'s
 //! idempotence on the record key backs up.
 
+mod connector;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use emob_cdr::{Cdr, CdrLedger};
@@ -34,6 +36,34 @@ pub type Key = (String, String);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "fact", rename_all = "snake_case")]
 pub enum Event {
+    /// Direct response to the current OCPP 2.1 station tariff.
+    StationTariff {
+        /// Station the CSMS addressed.
+        station: String,
+        /// What was attempted and observed.
+        delivery: StationTariff,
+    },
+    /// Public terms activated by an estate configuration change.
+    PublicOfferPublished {
+        /// The reproducible terms.
+        snapshot: Box<emob_service::estate::RetailTerms>,
+    },
+    /// The daemon restarted and pre-restart connector availability became unknown.
+    PublicationRestarted {
+        /// Restart time on the source clock.
+        #[serde(with = "time::serde::rfc3339")]
+        at: time::OffsetDateTime,
+    },
+    /// A timestamped connector status from the registered single-point station.
+    ConnectorObserved {
+        /// Reporting station.
+        station: String,
+        /// Receipt time on the CSMS clock. Earlier journals filtered future timestamps before append.
+        #[serde(with = "time::serde::rfc3339::option", default)]
+        received_at: Option<time::OffsetDateTime>,
+        /// Source status and time.
+        observation: Option<emob_service::publication::ConnectorObservation>,
+    },
     /// A 1.6 transaction id was handed out.
     Allocated {
         /// The id.
@@ -187,6 +217,9 @@ pub enum Event {
     /// A station joined the registry (spec 021) — from the estate at start,
     /// or from an operator. Only the password's hash is ever in it (SR-144).
     StationRegistered {
+        /// Newly applicable public provider terms, atomic with the assignment.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        offers: Vec<emob_service::estate::RetailTerms>,
         /// The record, as the estate spells a station.
         station: Box<emob_service::estate::Station>,
         /// When.
@@ -195,6 +228,9 @@ pub enum Event {
     },
     /// A registered station's record was replaced.
     StationUpdated {
+        /// Newly applicable public provider terms.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        offers: Vec<emob_service::estate::RetailTerms>,
         /// The new record.
         station: Box<emob_service::estate::Station>,
         /// Why, in the operator's words.
@@ -286,6 +322,7 @@ pub enum Event {
 impl Kinded for Event {
     fn kind(&self) -> &'static str {
         match self {
+            Self::PublicOfferPublished { .. } => "public_offer_published",
             Self::Allocated { .. } => "allocated",
             Self::Authorized { .. } => "authorized",
             Self::Observed { .. } => "observed",
@@ -300,6 +337,9 @@ impl Kinded for Event {
             Self::Booted { .. } => "booted",
             Self::Metered { .. } => "metered",
             Self::Reported { .. } => "reported",
+            Self::StationTariff { .. } => "station_tariff",
+            Self::PublicationRestarted { .. } => "publication_restarted",
+            Self::ConnectorObserved { .. } => "connector_observed",
             Self::StationRegistered { .. } => "station_registered",
             Self::StationUpdated { .. } => "station_updated",
             Self::StationRetired { .. } => "station_retired",
@@ -440,6 +480,13 @@ pub struct Open {
 /// `csmsd`'s state: the fold of its journal.
 #[derive(Debug)]
 pub struct State {
+    /// Final refusals prevent a new charge from reusing the driver's original transaction identity.
+    pub(crate) closed_refusals: BTreeSet<Key>,
+    pub(crate) investigations: crate::investigation::Investigations,
+    /// Revision used for consistent paged publication.
+    pub publication_revision: u64,
+    /// Site revisions across changes of station membership and metadata.
+    pub site_versions: BTreeMap<String, u32>,
     /// Transactions open now.
     pub inflight: BTreeMap<Key, Open>,
     /// The billable view.
@@ -478,12 +525,50 @@ pub struct State {
     /// Who may connect, and as what (spec 021): the registered stations, by
     /// identity. A retired one is not here.
     pub registry: BTreeMap<String, emob_service::estate::Station>,
+    /// Live point to registry identity, rebuilt on replay.
+    pub evse_registry: BTreeMap<String, String>,
+    /// Public offer versions retained for drivers.
+    pub offer_archive: crate::provider_price::Archive,
+}
+
+/// One attempt to install the effective tariff on a station.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StationTariff {
+    /// Full tariff fingerprint.
+    pub version: String,
+    /// Identity of this registration.
+    pub facility_version: u32,
+    /// Monotone boot count, including two boots at the same clock instant. Zero denotes a legacy receipt.
+    #[serde(default)]
+    pub boot_generation: u64,
+    /// The boot answered before sending the request.
+    #[serde(with = "time::serde::rfc3339")]
+    pub boot: time::OffsetDateTime,
+    /// When the attempt ended.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
+    /// Station response or local representation/transport failure.
+    pub outcome: String,
+    /// A later attempt may succeed after a transport failure.
+    pub retry: bool,
 }
 
 /// One station, as the facts describe it. Every list is bounded
 /// ([`crate::station::KEPT`]).
 #[derive(Debug, Clone, Default)]
 pub struct Known {
+    /// Current boot and registry version’s tariff delivery.
+    pub station_tariff: Option<StationTariff>,
+    /// Monotone revision of this identity, including re-registration.
+    pub facility_version: u32,
+    /// The latest registration or change.
+    pub registered_at: Option<time::OffsetDateTime>,
+    /// Last boot still eligible for tariff deliveries on the current registration.
+    pub tariff_boot: Option<time::OffsetDateTime>,
+    /// Number of boot facts folded for this station, including repeated timestamps.
+    pub boot_generation: u64,
+    /// Device observation and the source boundaries that can invalidate it.
+    connector: connector::ConnectorState,
     /// Online since, or offline since and last heard.
     pub presence: Option<Presence>,
     /// What it said at its last boot, and when.
@@ -506,6 +591,34 @@ pub struct Known {
     pub reservation: Option<Reservation>,
     /// How many reservations were ever made on it — the next one's number.
     pub reservations_made: u64,
+}
+
+impl Known {
+    /// An existing station report might have to become unknown at daemon startup.
+    pub(crate) fn has_connector_report(&self) -> bool {
+        self.connector.has_report()
+    }
+
+    /// A sweeper journals the end later; publication changes at the actual reservation deadline.
+    pub(crate) fn projected_expiry(
+        &self,
+        now: time::OffsetDateTime,
+    ) -> Option<time::OffsetDateTime> {
+        let until = self.reservation.as_ref()?.until;
+        (until <= now && self.connector.reserved_as_of(until)).then_some(until)
+    }
+
+    /// Current public connector evidence and the time the effective source state last changed.
+    pub(crate) fn public_status(
+        &self,
+        now: time::OffsetDateTime,
+    ) -> (
+        Option<emob_service::publication::ConnectorObservation>,
+        Option<time::OffsetDateTime>,
+    ) {
+        self.projected_expiry(now)
+            .map_or_else(|| self.connector.projection(), |end| (None, Some(end)))
+    }
 }
 
 /// A point held for one card.
@@ -562,6 +675,8 @@ pub const RECENT: usize = 20;
 /// One session, as a station's page lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Recent {
+    /// The immutable outcome position.
+    pub position: u64,
     /// The transaction.
     pub transaction: String,
     /// When it was decided.
@@ -581,6 +696,7 @@ impl State {
     ) {
         let recent = &mut self.stations.entry(station.to_owned()).or_default().recent;
         recent.push(Recent {
+            position: self.outcomes.len() as u64,
             transaction: transaction.to_owned(),
             at,
             billed,
@@ -632,6 +748,10 @@ impl State {
     #[must_use]
     pub fn new(zone: TimeZone) -> Self {
         Self {
+            closed_refusals: BTreeSet::new(),
+            investigations: Default::default(),
+            publication_revision: 0,
+            site_versions: BTreeMap::new(),
             inflight: BTreeMap::new(),
             cdrs: CdrLedger::new(),
             outcomes: Vec::new(),
@@ -648,6 +768,8 @@ impl State {
             receipt_for: BTreeMap::new(),
             stations: BTreeMap::new(),
             registry: BTreeMap::new(),
+            evse_registry: BTreeMap::new(),
+            offer_archive: crate::provider_price::Archive::default(),
         }
     }
 
@@ -677,11 +799,108 @@ impl State {
 /// Fold one fact.
 pub fn apply(state: &mut State, event: Event) {
     match event {
-        Event::StationRegistered { station, .. } | Event::StationUpdated { station, .. } => {
-            state.registry.insert(station.identity.clone(), *station);
+        Event::StationTariff { station, delivery } => {
+            if !state.registry.contains_key(&station) {
+                return;
+            }
+            let known = state.stations.entry(station).or_default();
+            if known.facility_version == delivery.facility_version
+                && known.tariff_boot == Some(delivery.boot)
+                && (delivery.boot_generation == 0
+                    || known.boot_generation == delivery.boot_generation)
+            {
+                known.station_tariff = Some(delivery);
+            }
+        }
+        Event::PublicationRestarted { at } => {
+            for known in state.stations.values_mut() {
+                if let Some(expiry) = known.projected_expiry(at) {
+                    known.connector.release(expiry);
+                }
+                known.connector.invalidate(at, false);
+            }
+            state.publication_revision += 1;
+        }
+        Event::ConnectorObserved {
+            station,
+            received_at,
+            observation,
+        } => {
+            if state.registry.contains_key(&station)
+                && let Some(known) = state.stations.get_mut(&station)
+                && !matches!(known.presence, Some(Presence::Offline { .. }))
+            {
+                let expiry = received_at
+                    .or_else(|| observation.as_ref().map(|report| report.at))
+                    .and_then(|now| known.projected_expiry(now));
+                if let Some(at) = expiry {
+                    known.connector.release(at);
+                }
+                let changed = match observation {
+                    Some(report) => known.connector.observe(
+                        report,
+                        received_at,
+                        known.reservation.as_ref().map(|r| r.until),
+                    ),
+                    None => received_at.is_some_and(|at| known.connector.lose_clock(at)),
+                };
+                if changed || expiry.is_some() {
+                    state.publication_revision += 1;
+                }
+            }
+        }
+        Event::PublicOfferPublished { snapshot } => state.offer_archive.insert(*snapshot),
+        Event::StationRegistered {
+            station,
+            at,
+            offers,
+        }
+        | Event::StationUpdated {
+            station,
+            at,
+            offers,
+            ..
+        } => {
+            state.publication_revision += 1;
+            let known = state.stations.entry(station.identity.clone()).or_default();
+            known.facility_version = known.facility_version.saturating_add(1);
+            known.registered_at = Some(at);
+            if !state.registry.contains_key(&station.identity) {
+                known.tariff_boot = None;
+            }
+            known.station_tariff = None;
+            known.connector.invalidate(at, true);
+            let site = station.location.id.clone();
+            *state.site_versions.entry(site.clone()).or_default() += 1;
+            let identity = station.identity.clone();
+            let evse = station.evse.to_string();
+            if let Some(old) = state.registry.insert(identity.clone(), *station) {
+                if old.location.id != site {
+                    *state
+                        .site_versions
+                        .entry(old.location.id.clone())
+                        .or_default() += 1;
+                }
+                state.evse_registry.remove(&old.evse.to_string());
+            }
+            state.evse_registry.insert(evse, identity);
+            for offer in offers {
+                state.offer_archive.insert(offer);
+            }
         }
         Event::StationRetired { identity, .. } => {
-            state.registry.remove(&identity);
+            state.publication_revision += 1;
+            if let Some(known) = state.stations.get_mut(&identity) {
+                known.tariff_boot = None;
+                known.station_tariff = None;
+            }
+            if let Some(old) = state.registry.remove(&identity) {
+                *state
+                    .site_versions
+                    .entry(old.location.id.clone())
+                    .or_default() += 1;
+                state.evse_registry.remove(&old.evse.to_string());
+            }
         }
         Event::StationNoted {
             identity,
@@ -709,10 +928,13 @@ pub fn apply(state: &mut State, event: Event) {
             card,
             until,
             by,
+            at,
             ..
         } => {
             let known = state.stations.entry(station).or_default();
             known.reservations_made = known.reservations_made.max(number);
+            known.connector.reserve(at);
+            state.publication_revision += 1;
             known.reservation = Some(Reservation {
                 number,
                 reference,
@@ -722,14 +944,19 @@ pub fn apply(state: &mut State, event: Event) {
             });
         }
         Event::ReservationEnded {
-            station, number, ..
+            station,
+            number,
+            at,
+            ..
         } => {
             if let Some(known) = state.stations.get_mut(&station)
-                && known
+                && let Some(held) = known
                     .reservation
                     .as_ref()
-                    .is_some_and(|held| held.number == number)
+                    .filter(|held| held.number == number)
             {
+                known.connector.release(at.min(held.until));
+                state.publication_revision += 1;
                 known.reservation = None;
             }
         }
@@ -741,6 +968,7 @@ pub fn apply(state: &mut State, event: Event) {
             }
         }
         Event::Online { station, at } => {
+            state.publication_revision += 1;
             state.stations.entry(station).or_default().presence = Some(Presence::Online(at));
         }
         Event::Offline {
@@ -748,7 +976,10 @@ pub fn apply(state: &mut State, event: Event) {
             last_heard,
             at,
         } => {
-            state.stations.entry(station).or_default().presence = Some(Presence::Offline {
+            state.publication_revision += 1;
+            let known = state.stations.entry(station).or_default();
+            known.connector.invalidate(at, false);
+            known.presence = Some(Presence::Offline {
                 since: at,
                 last_heard,
             });
@@ -780,6 +1011,11 @@ pub fn apply(state: &mut State, event: Event) {
             }
             known.identity = Some((identity, at));
             known.presence = Some(Presence::Online(at));
+            known.station_tariff = None;
+            known.connector.invalidate(at, false);
+            state.publication_revision += 1;
+            known.tariff_boot = Some(at);
+            known.boot_generation = known.boot_generation.saturating_add(1);
             keep_last(&mut known.boots, at);
         }
         Event::Metered {
@@ -883,19 +1119,25 @@ pub fn apply(state: &mut State, event: Event) {
             receipt,
         } => {
             let key = (station, transaction);
-            state.receipt_of.insert(key.clone(), receipt.digest.clone());
-            let verdict = state
-                .receipts
-                .get(&receipt.digest)
-                .and_then(|held| held.verdict.clone());
-            state.receipts.insert(
-                receipt.digest.clone(),
-                Issued {
-                    key,
-                    receipt,
-                    verdict,
-                },
-            );
+            // A capability already handed to a driver must always open the
+            // same signed evidence. An unfinished receipt, on the other hand,
+            // follows the evidence the retried decision is actually about.
+            if state
+                .receipt_of
+                .get(&key)
+                .and_then(|digest| state.receipts.get(digest))
+                .is_none_or(|issued| issued.verdict.is_none())
+            {
+                state.receipt_of.insert(key.clone(), receipt.digest.clone());
+                state.receipts.insert(
+                    receipt.digest.clone(),
+                    Issued {
+                        key,
+                        receipt,
+                        verdict: None,
+                    },
+                );
+            }
         }
         Event::Settled {
             station,
@@ -906,15 +1148,41 @@ pub fn apply(state: &mut State, event: Event) {
             at,
         } => {
             let key = (station.clone(), transaction.clone());
-            if let Some(issued) = state
+            let issued = state
                 .receipt_of
                 .get(&key)
                 .and_then(|digest| state.receipts.get_mut(digest))
-            {
-                issued.verdict = Some(Verdict::Billed(cdr.key.clone()));
-                state.receipt_for.insert(cdr.key.to_string(), key.clone());
+                .filter(|issued| issued.verdict.is_none());
+            let has_receipt = issued.is_some();
+            if let Some(issued) = issued {
+                match &outcome {
+                    Outcome::Settled { .. } => {
+                        issued.verdict = Some(Verdict::Billed(cdr.key.clone()));
+                        state.receipt_for.insert(cdr.key.to_string(), key.clone());
+                    }
+                    Outcome::Refused {
+                        reasons, findings, ..
+                    } => {
+                        issued.verdict = Some(Verdict::Refused {
+                            reasons: reasons.clone(),
+                            findings: findings.clone(),
+                        });
+                    }
+                    _ => {}
+                }
             }
-            state.inflight.remove(&(station.clone(), transaction));
+            let open = state.inflight.remove(&key);
+            state.authorized.remove(&key);
+            if matches!(outcome, Outcome::Settled { .. } | Outcome::Refused { .. }) {
+                state.investigations.record(
+                    state.outcomes.len() as u64,
+                    &key,
+                    at,
+                    matches!(outcome, Outcome::Settled { .. }),
+                    open.as_ref(),
+                    has_receipt,
+                );
+            }
             // A record stored is a success; a retry the ledger already held is
             // not a second attempt; a conflict is a record nobody may bill.
             match &outcome {
@@ -942,23 +1210,40 @@ pub fn apply(state: &mut State, event: Event) {
             outcome,
             at,
         } => {
-            if let (
-                Some(key),
-                Outcome::Refused {
-                    reasons, findings, ..
-                },
-            ) = (&closes, &outcome)
-                && let Some(issued) = state
-                    .receipt_of
-                    .get(key)
-                    .and_then(|digest| state.receipts.get_mut(digest))
+            let mut has_receipt = false;
+            if let Outcome::Refused {
+                identity,
+                transaction,
+                reasons,
+                findings,
+            } = &outcome
             {
-                issued.verdict = Some(Verdict::Refused {
-                    reasons: reasons.clone(),
-                    findings: findings.clone(),
-                });
+                if let Some(key) = &closes
+                    && let Some(issued) = state
+                        .receipt_of
+                        .get(key)
+                        .and_then(|digest| state.receipts.get_mut(digest))
+                        .filter(|issued| issued.verdict.is_none())
+                {
+                    issued.verdict = Some(Verdict::Refused {
+                        reasons: reasons.clone(),
+                        findings: findings.clone(),
+                    });
+                    has_receipt = true;
+                }
+                let key = (identity.clone(), transaction.clone());
+                let open = state.inflight.get(&key);
+                state.investigations.record(
+                    state.outcomes.len() as u64,
+                    &key,
+                    at,
+                    false,
+                    open,
+                    has_receipt,
+                );
             }
             if let Some(key) = closes {
+                state.authorized.remove(&key);
                 let open = state.inflight.remove(&key);
                 if let Outcome::Refused { findings, .. } = &outcome {
                     let events = open
@@ -973,6 +1258,7 @@ pub fn apply(state: &mut State, event: Event) {
                     let cause = cause_of_refusal(stopped, nothing_measured);
                     state.attempt(at, &key.0, Ending::Failed(cause));
                     state.remember(&key.0, &key.1, at, false);
+                    state.closed_refusals.insert(key);
                 }
             }
             state.keep(outcome);
@@ -999,6 +1285,187 @@ mod tests {
 
     fn berlin() -> State {
         State::new(TimeZone::new("Europe/Berlin").unwrap())
+    }
+
+    fn registered_point() -> State {
+        let mut state = berlin();
+        let mut estate: crate::estate::Estate =
+            emob_service::estate::from_str(include_str!("../../../deploy/estate.example.toml"))
+                .unwrap();
+        apply(
+            &mut state,
+            Event::StationRegistered {
+                station: Box::new(estate.stations.remove(0)),
+                at: AT,
+                offers: vec![],
+            },
+        );
+        state
+    }
+
+    fn at(seconds: i64) -> time::OffsetDateTime {
+        AT + time::Duration::seconds(seconds)
+    }
+
+    fn report(state: &mut State, status: &str, reported: i64, received: i64) {
+        apply(
+            state,
+            Event::ConnectorObserved {
+                station: "CP-1".into(),
+                received_at: Some(at(received)),
+                observation: Some(emob_service::publication::ConnectorObservation {
+                    status: status.into(),
+                    at: at(reported),
+                }),
+            },
+        );
+    }
+
+    fn status(
+        state: &State,
+        now: i64,
+    ) -> (
+        Option<(String, time::OffsetDateTime)>,
+        Option<time::OffsetDateTime>,
+    ) {
+        let (observation, changed) = state.stations["CP-1"].public_status(at(now));
+        (observation.map(|o| (o.status, o.at)), changed)
+    }
+
+    #[test]
+    fn sr_207_a_conflicted_or_future_station_clock_cannot_restore_availability_on_retry() {
+        let mut state = registered_point();
+        assert_eq!(status(&state, 0), (None, Some(AT)));
+        report(&mut state, "Available", 10, 11);
+        report(&mut state, "Available", 12, 13);
+        assert_eq!(
+            status(&state, 13),
+            (Some(("Available".into(), at(12))), Some(at(10)))
+        );
+        let revision = state.publication_revision;
+        report(&mut state, "Available", 12, 13);
+        assert_eq!(state.publication_revision, revision);
+        report(&mut state, "Faulted", 12, 14);
+        report(&mut state, "Available", 12, 15);
+        report(&mut state, "Faulted", 11, 16);
+        assert_eq!(status(&state, 16), (None, Some(at(12))));
+        report(&mut state, "Occupied", 17, 17);
+        report(&mut state, "Available", 900, 18);
+        assert_eq!(status(&state, 18), (None, Some(at(18))));
+        report(&mut state, "Available", 17, 19);
+        assert_eq!(status(&state, 19), (None, Some(at(18))));
+        report(&mut state, "Faulted", 20, 20);
+        assert_eq!(
+            status(&state, 20),
+            (Some(("Faulted".into(), at(20))), Some(at(20)))
+        );
+        apply(
+            &mut state,
+            Event::ConnectorObserved {
+                station: "CP-1".into(),
+                received_at: Some(at(21)),
+                observation: None,
+            },
+        );
+        assert_eq!(status(&state, 21), (None, Some(at(21))));
+    }
+
+    #[test]
+    fn sr_207_registration_boot_offline_and_restart_fence_delayed_status_and_preserve_the_deadline()
+    {
+        let mut state = registered_point();
+        report(&mut state, "Available", -1, 1);
+        assert_eq!(status(&state, 1), (None, Some(AT)));
+        report(&mut state, "Occupied", 2, 2);
+        apply(
+            &mut state,
+            Event::Booted {
+                station: "CP-1".into(),
+                at: at(3),
+                reason: "PowerUp".into(),
+                identity: Default::default(),
+            },
+        );
+        report(&mut state, "Available", 3, 4);
+        assert_eq!(status(&state, 4), (None, Some(at(3))));
+        report(&mut state, "Available", 5, 5);
+        apply(
+            &mut state,
+            Event::Offline {
+                station: "CP-1".into(),
+                last_heard: at(5),
+                at: at(6),
+            },
+        );
+        report(&mut state, "Available", 7, 7);
+        assert_eq!(status(&state, 7), (None, Some(at(6))));
+        apply(
+            &mut state,
+            Event::Online {
+                station: "CP-1".into(),
+                at: at(8),
+            },
+        );
+        report(&mut state, "Available", 6, 8);
+        assert_eq!(status(&state, 8), (None, Some(at(6))));
+        report(&mut state, "Available", 9, 10);
+        apply(&mut state, Event::PublicationRestarted { at: at(11) });
+        apply(&mut state, Event::PublicationRestarted { at: at(12) });
+        report(&mut state, "Available", 11, 13);
+        assert_eq!(status(&state, 13), (None, Some(at(11))));
+        report(&mut state, "Available", 14, 14);
+        assert_eq!(
+            status(&state, 14),
+            (Some(("Available".into(), at(14))), Some(at(14)))
+        );
+    }
+
+    #[test]
+    fn sr_207_a_reservation_changes_availability_without_refreshing_the_device_observation() {
+        let mut state = registered_point();
+        report(&mut state, "Available", 4, 5);
+        apply(
+            &mut state,
+            Event::Reserved {
+                station: "CP-1".into(),
+                number: 1,
+                reference: "fixture".into(),
+                card: "00".into(),
+                until: at(20),
+                by: "fixture".into(),
+                reason: "test booking".into(),
+                at: at(8),
+            },
+        );
+        assert_eq!(
+            status(&state, 8),
+            (Some(("Reserved".into(), at(4))), Some(at(8)))
+        );
+        report(&mut state, "Available", 6, 9);
+        report(&mut state, "Available", 12, 13);
+        assert_eq!(
+            status(&state, 13),
+            (Some(("Reserved".into(), at(12))), Some(at(8)))
+        );
+        assert_eq!(status(&state, 20), (None, Some(at(20))));
+        report(&mut state, "Occupied", 19, 22);
+        assert_eq!(status(&state, 22), (None, Some(at(20))));
+        apply(
+            &mut state,
+            Event::ReservationEnded {
+                station: "CP-1".into(),
+                number: 1,
+                how: Ended::Expired,
+                at: at(27),
+            },
+        );
+        report(&mut state, "Available", 19, 28);
+        assert_eq!(status(&state, 28), (None, Some(at(20))));
+        report(&mut state, "Available", 29, 29);
+        assert_eq!(
+            status(&state, 29),
+            (Some(("Available".into(), at(29))), Some(at(29)))
+        );
     }
 
     fn refused(closes: Option<Key>, at: time::OffsetDateTime) -> Event {

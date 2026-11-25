@@ -370,19 +370,39 @@ pub async fn read_bounded(
 /// may read, not one everybody may. An admitted request carries its operator
 /// as an [`crate::Actor`] extension ([`acting`]).
 pub fn operator_only(routes: Router, operators: crate::authority::Operators) -> Router {
+    operator_gate(routes, operators, false)
+}
+
+/// Require a named operator whose estate grant allows writes. Unknown
+/// credentials receive 401 and a valid read-only credential receives 403.
+pub fn operator_write(routes: Router, operators: crate::authority::Operators) -> Router {
+    operator_gate(routes, operators, true)
+}
+
+fn operator_gate(routes: Router, operators: crate::authority::Operators, write: bool) -> Router {
     routes.layer(axum::middleware::from_fn(
         move |mut request: axum::extract::Request, next: axum::middleware::Next| {
             let operators = operators.clone();
             async move {
-                let offered = request
+                use axum::response::IntoResponse as _;
+                let authorization = request
                     .headers()
                     .get(axum::http::header::AUTHORIZATION)
                     .and_then(|value| value.to_str().ok());
-                if let Some(actor) = operators.admit(offered).cloned() {
-                    acting(&mut request, actor);
-                    next.run(request).await
-                } else {
-                    axum::response::IntoResponse::into_response(StatusCode::UNAUTHORIZED)
+                match operators.admit(authorization) {
+                    None => (
+                        StatusCode::UNAUTHORIZED,
+                        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+                    )
+                        .into_response(),
+                    Some((_, access)) if write && !access.can_write() => {
+                        StatusCode::FORBIDDEN.into_response()
+                    }
+                    Some((actor, access)) => {
+                        acting(&mut request, actor.clone());
+                        request.extensions_mut().insert(access);
+                        next.run(request).await
+                    }
                 }
             }
         },
@@ -475,9 +495,11 @@ mod tests {
             status(guarded.call(request(Some("guess"))).await.unwrap()),
             StatusCode::UNAUTHORIZED
         );
+        let challenge = guarded.call(request(None)).await.unwrap();
+        assert_eq!(challenge.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(
-            status(guarded.call(request(None)).await.unwrap()),
-            StatusCode::UNAUTHORIZED
+            challenge.headers()[axum::http::header::WWW_AUTHENTICATE],
+            "Bearer"
         );
         let mut unconfigured = operator_only(model, Operators::default());
         assert_eq!(

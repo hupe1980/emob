@@ -362,6 +362,33 @@ impl Memory {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Verify a complete, quiescent journal and copy its records into memory.
+    /// Unlike startup after a crash, a recovery drill requires every input line
+    /// to be present. Subsequent appends affect only this disposable copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a partial final line, malformed record or broken chain.
+    pub fn from_cold_cut(bytes: &[u8]) -> Result<Self, JournalError> {
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err(JournalError::Encoding {
+                doing: "checked for a complete final line",
+                source: serde_json::Error::io(std::io::ErrorKind::UnexpectedEof.into()),
+            });
+        }
+        let mut records = Vec::new();
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            records.push(serde_json::from_slice(line).map_err(|source| {
+                JournalError::Encoding {
+                    doing: "read from a cold cut",
+                    source,
+                }
+            })?);
+        }
+        verify(&records)?;
+        Ok(Self(Mutex::new(records)))
+    }
 }
 
 impl Journal for Memory {

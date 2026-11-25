@@ -9,65 +9,33 @@ feed_filenames = ["atom.xml"]
 
 [markdown]
 smart_punctuation = true
-# Deep links to every heading: a documentation page whose sections cannot be
-# linked to is one nobody links to.
 insert_anchor_links = "heading"
 
 [extra]
 repository = "https://github.com/hupe1980/emob"
 tagline    = "open-source charging operations for the European market"
 msrv       = "1.94"
-# The landing page's five numbers, and where each comes from. `cargo xtask
-# check-concepts` holds the first three against their sources; a number that
-# does not match its source is worse than no number.
-#
-#   stat_obligations  emob_core::obligation::CALENDAR — one entry per `id:`
-#   stat_tests        cargo test --workspace --all-features
-#   stat_crates       the crates under crates/ (fifteen published, plus emob-verify and emob-cli)
-#   stat_floats       cargo xtask no-floats
-#   stat_curves       the ECDSA curves the pure-Rust build verifies — OCMF's
-#                     four (p192, p256, p384, k256) plus ISO 15118 Annex F's p521
+# check-concepts verifies the calendar, workspace test and crate counts.
 stat_obligations = "51"
-stat_tests = "1374"
+stat_tests = "1426"
 stat_crates      = "17"
 stat_floats      = "0"
 stat_curves      = "5"
 
 keywords = "EV charging, CPO, EMP, eMSP, CSMS, OCPP 2.1, OCPI 2.3.0, OICP, ISO 15118, OCMF, Eichrecht, AFIR, NIS2, Cyber Resilience Act, DATEX II, Plug and Charge, roaming, CDR, Rust, charging station management"
 
-# The landing page's questions. Rendered as visible <details> *and* as FAQPage
-# JSON-LD from this one list, so the structured data can never say something the
-# page does not.
-[[extra.faq]]
-q = "What is emob?"
-a = "emob is an open-source back office for EV charging in Europe, written in Rust. It covers both halves of a charging business — the charge point operator (CPO), with a charging station management system speaking OCPP, and the e-mobility service provider (eMSP), with contracts, roaming and invoicing — as fifteen reusable domain crates, nine daemons that run them from one estate file, and an operator page."
-[[extra.faq]]
-q = "Which protocols does emob support?"
-a = "OCPP 1.6J, 2.0.1 and 2.1 towards charging stations; OCPI 2.3.0 and 2.2.1 and Hubject's OICP 2.3 for roaming; OCMF for signed meter values; ISO 15118 contract certificates for Plug & Charge; EEBUS for § 14a grid control; DATEX II for the AFIR national access point; EN 16931 (UBL and CII) for e-invoices and ISO 20022 pain.008 for SEPA direct debit. The protocol implementations come from dedicated open-source kits; emob adds the rules that decide money."
-[[extra.faq]]
-q = "How does emob handle Eichrecht?"
-a = "German calibration law lets an operator bill only a measured value the customer can verify. emob verifies every OCMF signature against a key registered out of band, checks the session's records for gaps, refuses readings the meter itself flagged, and produces the transparency file the S.A.F.E. verifier reads. A value that does not verify cannot be billed, and the refusal says why."
-[[extra.faq]]
-q = "Is emob production-ready?"
-a = "Not yet, and the docs say exactly where. Release 0.3 runs the estate end to end: stations connect over OCPP with security profiles 1 to 3, authorisation is answered by the provider daemon, sessions are journalled, billed and roamed, invoices are served and handed to the operator's ERP, the operator sees it all on the Heute page and the driver checks a receipt in the browser. `just demo` runs it on one machine. What is still missing — the OICP and national-access-point push clients, SEPA runs, the SHIP/EEBUS session, high availability and an external security review — is marked on every page."
 [[extra.faq]]
 q = "How do I try emob?"
-a = "Clone the repository and run `just demo`. It starts every daemon in one process on loopback with three simulated stations (OCPP 1.6, 2.0.1 and 2.1 over TLS), an OCPI roaming partner and a seeded morning, then prints three links: the operator page Heute, a driver receipt and the partner's inbox. `just doctor` lists anything missing first."
+a = "Run just demo in the checkout. It starts five services, three simulated charging stations and a local OCPI peer. Open the printed links to Heute and the driver receipt."
 [[extra.faq]]
-q = "Can a driver check a charging session themselves?"
-a = "Yes. Every session has a receipt page with the verdict, the energy, the price lines and the meter key to compare with the charge-point label. It offers the S.A.F.E. transparency file for the Transparenzsoftware, and a Selbst prüfen button that checks every signed OCMF value on the phone with a WebAssembly verifier. On the command line, `emob verify` does the same."
+q = "How can a driver check a charge?"
+a = "The receipt shows energy, price lines and the meter key. Drivers can verify signed OCMF readings in the browser or download the transparency file for S.A.F.E. Transparenzsoftware."
 [[extra.faq]]
-q = "How do I know a journal was not cut short or restored from an old backup?"
-a = "Every journalled daemon signs where its journal ends — position and hash, Ed25519, as a C2SP signed note — after every append, and refuses to start from a journal shorter than that signed head. Because the head file can be deleted along with the journal, a witness keeps its own copy: the operator page Heute checks every head every 30 seconds, and `emob witness` does the same from any machine. A head that goes backwards, forks or changes key is an alarm that stays until someone deliberately clears it."
+q = "What can an operator do in Heute?"
+a = "Investigate refused sessions, manage stations and reservations, issue or block driver cards, and inspect partner invoices. Card issuance records the agreed point and gross price."
 [[extra.faq]]
-q = "Does emob support bidirectional charging under MiSpeL?"
-a = "Yes, on the levy side. The Bundesnetzagentur's MiSpeL ruling, in effect since 21 October 2026, relieves of levies the grid draw a bidirectional point fed back. emob nets a calendar month (or part month) on quarter-hour values under the Abgrenzungsoption's Formelsätze A2 and A11, computes the Pauschaloption's year with its factor of 0.2, and refuses by name what the ruling does not allow — including the Pauschaloption itself until the European Commission's state-aid approval."
+q = "Which interfaces are available?"
+a = "The CSMS accepts OCPP 1.6J, 2.0.1 and 2.1. The estate exchanges OCPI records, publishes DATEX II charging data and produces EN 16931 invoices. Rust libraries also provide OICP conversion, SEPA files and ISO 15118 certificate validation."
 [[extra.faq]]
-q = "Is emob ready for ISO 15118-20 and e-invoicing on 1 January 2027?"
-a = "The platform side is. ISO 15118-20 contract chains (secp521r1) validate under the root of their own Plug & Charge ecosystem, with the protocol generation named per call, and the calendar carries the delegated act's -20 duties. For German B2B e-invoicing, each monthly invoice is EN 16931 or XRechnung in UBL and CII, served on an invoice page and handed to the operator's ERP or Peppol provider through a signed webhook."
-[[extra.faq]]
-q = "Which regulations does emob model?"
-a = "The EU Alternative Fuels Infrastructure Regulation (AFIR) and its delegated act on ISO 15118, the German Ladesäulenverordnung, the price indication ordinance (PAngV), calibration law (MessEG, MessEV, PTB-A 50.7), the greenhouse-gas quota ordinance (38. BImSchV), § 14a EnWG, the MiSpeL ruling for bidirectional charging, NIS2 and the Cyber Resilience Act — as dated duties, each citing the paragraph it comes from."
-[[extra.faq]]
-q = "What licence is emob under?"
-a = "emob is dual-licensed under MIT or Apache-2.0, at your option. The regulatory documents it cites are referenced, never redistributed."
+q = "What deployment has been tested?"
+a = "Acceptance runs use a single-host estate, simulated stations and local recipients. External connections and physical charging equipment require installation-specific checks."

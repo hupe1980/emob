@@ -173,6 +173,7 @@ class Tariff:
     currency: str = "EUR"
     time_zone: str = "Europe/Berlin"
     id: str = "ad-hoc"
+    occupancy_per_minute: Number | None = None
 
     def _spec(self) -> str:
         spec: dict[str, Any] = {
@@ -183,6 +184,9 @@ class Tariff:
             "vat": _text(self.vat),
             "per_minute": None if self.per_minute is None else _text(self.per_minute),
             "session_fee": None if self.session_fee is None else _text(self.session_fee),
+            "occupancy_per_minute": (
+                None if self.occupancy_per_minute is None else _text(self.occupancy_per_minute)
+            ),
         }
         return json.dumps(spec)
 

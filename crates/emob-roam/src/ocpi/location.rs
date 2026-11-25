@@ -4,7 +4,7 @@
 //!
 //! A CPO states where a charge point is twice: to a roaming partner, in an
 //! OCPI `CdrLocation` and the Locations module, and to the public, in the
-//! national access point feed `[AFIR Art. 20(2)(c)]`. Almost every stack
+//! national access point feed `[AFIR Art. 20(2)(f)]`. Almost every stack
 //! generates the two from different systems, and the drift is invisible
 //! because nobody ever compares them — a connector retyped from CCS to
 //! `CHAdeMO` in one and not the other produces a partner whose app sends drivers

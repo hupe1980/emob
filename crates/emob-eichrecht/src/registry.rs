@@ -313,6 +313,29 @@ impl KeyRegistry {
         record: &Record<'_>,
         at: time::OffsetDateTime,
     ) -> Result<&RegisteredKey, KeyLookupError> {
+        let component = self.component_for_record(record)?;
+        self.key_at(&component, at)
+            .ok_or_else(|| KeyLookupError::NoKeyValidAt {
+                component: component.to_string(),
+                at,
+                windows: self
+                    .keys
+                    .get(&component)
+                    .map(|held| held.iter().map(window_of).collect::<Vec<_>>().join(", "))
+                    .unwrap_or_default(),
+            })
+    }
+
+    /// Identify the registered signing component from the signed record, using
+    /// the most specific binding known to the registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the record has no identified or registered signer.
+    pub fn component_for_record(
+        &self,
+        record: &Record<'_>,
+    ) -> Result<ComponentRef, KeyLookupError> {
         let payload = record.payload();
         let meter = payload.meter_serial();
         let gateway = payload.gateway_serial();
@@ -358,10 +381,11 @@ impl KeyRegistry {
         // arriving through the clock instead. Once the component is
         // identified, an expired window is an answer the operator needs rather
         // than a reason to consult a different identity.
-        let Some(component) = candidates
+        let component = candidates
             .iter()
             .find(|candidate| self.keys.contains_key(candidate))
-        else {
+            .cloned();
+        let Some(component) = component else {
             return Err(KeyLookupError::NoKeyForComponent {
                 component: candidates
                     .first()
@@ -370,16 +394,7 @@ impl KeyRegistry {
             });
         };
 
-        self.key_at(component, at)
-            .ok_or_else(|| KeyLookupError::NoKeyValidAt {
-                component: component.to_string(),
-                at,
-                windows: self
-                    .keys
-                    .get(component)
-                    .map(|held| held.iter().map(window_of).collect::<Vec<_>>().join(", "))
-                    .unwrap_or_default(),
-            })
+        Ok(component)
     }
 }
 

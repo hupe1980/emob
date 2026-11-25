@@ -1,0 +1,17 @@
+# Only send the inputs consumed by the workspace Dockerfile to the builder.
+**
+!Dockerfile
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!crates/
+!crates/**
+!services/
+!services/**
+!xtask/
+!xtask/**
+!deploy/
+!deploy/estate.example.toml
+!deploy/recovery-drill.py
+**/__pycache__/
+**/.DS_Store

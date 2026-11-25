@@ -1274,7 +1274,7 @@ fn check_wire(root: &Path) -> Result<()> {
 
         for (name, attrs, fields) in serialisable_structs(body) {
             for (field, ty, field_attrs) in struct_fields(&fields) {
-                if !mentions_a_time_type(&ty) || field_attrs.contains("serde(with") {
+                if !mentions_a_time_type(&ty) || has_wire_adapter(&field_attrs) {
                     continue;
                 }
                 checked += 1;
@@ -1378,6 +1378,35 @@ fn struct_fields(body: &str) -> Vec<(String, String, String)> {
         attrs.clear();
     }
     out
+}
+
+/// Recognize the actual serde option wherever it appears in an attribute list.
+fn has_wire_adapter(attributes: &str) -> bool {
+    use syn::parse::Parser as _;
+    use syn::punctuated::Punctuated;
+
+    fn uses_adapter(meta: &syn::Meta) -> bool {
+        let syn::Meta::List(list) = meta else {
+            return false;
+        };
+        if !(list.path.is_ident("serde") || list.path.is_ident("cfg_attr")) {
+            return false;
+        }
+        let Ok(args) =
+            list.parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        else {
+            return false;
+        };
+        if list.path.is_ident("cfg_attr") {
+            return args.iter().skip(1).any(uses_adapter);
+        }
+        args.iter().any(
+            |option| matches!(option, syn::Meta::NameValue(value) if value.path.is_ident("with")),
+        )
+    }
+    syn::Attribute::parse_outer
+        .parse_str(attributes)
+        .is_ok_and(|attrs| attrs.iter().any(|attr| uses_adapter(&attr.meta)))
 }
 
 /// Whether a field's type mentions something `time` serialises structurally.
@@ -1650,6 +1679,7 @@ fn is_requirement_id(phrase: &str) -> bool {
 /// whose needle is broad enough to match anything is worse than no entry: it
 /// reports a citation as checked when nothing checked it.
 const CITATION_SOURCES: &[(&str, &str, &str)] = &[
+    ("[RFC 9110 ", "HTTP Semantics", "rfc9110.txt"),
     ("[AFIR ", "Regulation (EU) 2023/1804", "afir-2023-1804"),
     (
         "[DA-656",
@@ -3104,6 +3134,17 @@ fn check_manifests(root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wire_adapter_recognizes_reordered_serde_options() {
+        assert!(super::has_wire_adapter(
+            r#"#[serde(default, skip_serializing_if="Option::is_none", with="time::serde::rfc3339::option")]"#
+        ));
+        assert!(super::has_wire_adapter(
+            r#"#[cfg_attr(feature="serde", serde(default, with="date"))]"#
+        ));
+        assert!(!super::has_wire_adapter(r#"#[serde(rename="serde(with")]"#));
+    }
+
     use super::*;
 
     #[test]

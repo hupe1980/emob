@@ -36,6 +36,7 @@ fn env() -> Env {
             "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw".to_owned(),
         ),
         ("EMOB_SERVICE_TOKEN", "service-token".to_owned()),
+        ("EMOB_DESK_READ_TOKEN", "reader-token".to_owned()),
         ("EMOB_OPERATOR_TOKEN", "operator-token".to_owned()),
         ("CSMSD_DATA_KEY", emob_service::vault::DataKey::generate()),
         (
@@ -181,7 +182,7 @@ async fn sr_040_a_profile_2_station_with_its_password_is_admitted_over_tls_and_a
         rises(&running.edge.counters.refused_credentials).await,
         "SR-040: the 401 is counted"
     );
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -194,7 +195,7 @@ async fn sr_042_a_profile_2_station_on_a_plain_socket_is_refused_even_with_its_p
     let plain = station(&running, false, "CP-1", Presents::Password(DEMO_KEY));
     assert!(!boots(&plain).await, "profile 2 means TLS");
     assert!(rises(&running.edge.counters.refused_credentials).await);
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -234,7 +235,7 @@ async fn sr_041_a_profile_3_station_is_admitted_by_its_own_certificate() {
     let running = start(profile_3()).await.unwrap();
     let cp1 = station(&running, true, "CP-1", Presents::Certificate("cp-1"));
     assert!(boots(&cp1).await, "CN=CP-1 under the configured CA");
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -243,7 +244,7 @@ async fn sr_041_a_certificate_naming_another_station_is_refused() {
     let impostor = station(&running, true, "CP-1", Presents::Certificate("cp-2"));
     assert!(!boots(&impostor).await, "CN=CP-2 presented as CP-1");
     assert!(rises(&running.edge.counters.refused_credentials).await);
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -254,7 +255,7 @@ async fn sr_041_a_certificate_from_another_ca_is_refused() {
         !boots(&rogue).await,
         "the TLS handshake refuses a foreign chain"
     );
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -263,7 +264,7 @@ async fn sr_041_a_profile_3_station_without_a_certificate_is_refused() {
     let bare = station(&running, true, "CP-1", Presents::Password(DEMO_KEY));
     assert!(!boots(&bare).await, "a password is not a certificate");
     assert!(rises(&running.edge.counters.refused_credentials).await);
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -279,7 +280,7 @@ async fn sr_043_a_connection_past_the_cap_is_refused_and_counted() {
         rises(&running.edge.counters.refused_capacity).await,
         "SR-043: the 503 is counted"
     );
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -296,7 +297,7 @@ async fn sr_043_a_message_past_the_budget_is_refused_and_counted() {
         "the third, at once, is over budget"
     );
     assert_eq!(Counters::get(&running.edge.counters.rate_limited), 1);
-    running.kill();
+    running.kill().await;
 }
 
 #[tokio::test]
@@ -310,7 +311,7 @@ async fn sr_043_a_silent_session_is_closed_and_counted() {
         rises(&running.edge.counters.idle_closed).await,
         "closed after a second of silence"
     );
-    running.kill();
+    running.kill().await;
 }
 
 /// CISA ICSA-26-062-08 (2026): a charging backend admitted a WebSocket by the
@@ -328,7 +329,7 @@ async fn icsa_26_062_08_an_identity_alone_is_never_a_credential() {
     let bare = station(&running, false, "CP-1", Presents::Nothing);
     assert!(!boots(&bare).await, "an identity is not a credential");
     assert!(rises(&running.edge.counters.refused_credentials).await);
-    running.kill();
+    running.kill().await;
 }
 
 /// CVE-2026-44383 (2026): a second connection under a live identity took the
@@ -354,7 +355,7 @@ async fn cve_2026_44383_a_second_connection_without_the_credential_cannot_take_t
         "and the station it impersonated still speaks"
     );
     real.shutdown(Duration::from_secs(1)).await;
-    running.kill();
+    running.kill().await;
 }
 
 /// A profile 2 station over TLS offering `versions`, in that preference order.
@@ -429,7 +430,7 @@ async fn a_station_registered_on_a_version_no_estate_station_uses_connects_at_on
         "the 2.0.1 station boots: {answer:?}"
     );
     handle.shutdown(Duration::from_secs(1)).await;
-    running.kill();
+    running.kill().await;
 }
 
 /// A station that would rather speak a newer version is held to the one it
@@ -448,7 +449,7 @@ async fn a_station_offering_several_versions_speaks_its_own() {
         "pinned to 1.6, its 1.6 boot is answered"
     );
     multi.shutdown(Duration::from_secs(1)).await;
-    running.kill();
+    running.kill().await;
 }
 
 /// A station that does not offer the version it was provisioned for is
@@ -469,5 +470,5 @@ async fn a_station_not_offering_its_own_version_is_refused() {
         "the same station on its own version is admitted"
     );
     right.shutdown(Duration::from_secs(1)).await;
-    running.kill();
+    running.kill().await;
 }

@@ -228,6 +228,12 @@ impl Daily {
         }
     }
 
+    /// The retained tally for one local date, including its estate total.
+    #[must_use]
+    pub fn on(&self, day: time::Date) -> Option<&Tally> {
+        self.days.get(&day)
+    }
+
     /// The attempts of the days `from..=to`, summed; empty when none.
     #[must_use]
     pub fn window(&self, from: time::Date, to: time::Date) -> Tally {

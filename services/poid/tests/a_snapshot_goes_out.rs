@@ -176,6 +176,7 @@ fn a_status_message_before_a_snapshot_is_refused_rather_than_dropped_in_silence(
         // Off the point the feed publishes: `ChargingPoint::report` is the
         // only constructor, so a status is checked against the register that
         // will carry it.
+        changed_at: time::OffsetDateTime::UNIX_EPOCH,
         report: site("Europe/Berlin")
             .points()
             .next()
@@ -186,7 +187,7 @@ fn a_status_message_before_a_snapshot_is_refused_rather_than_dropped_in_silence(
     }];
 
     let err = poid
-        .status(&updates, at(1))
+        .status(emob_poi::datex::Delivery::Delta, &updates, at(1))
         .expect_err("no table has been accepted yet");
     assert!(matches!(err, PublishError::NoSnapshotYet), "{err}");
     assert!(err.to_string().contains("publish the table first"), "{err}");
@@ -197,7 +198,7 @@ fn a_status_message_before_a_snapshot_is_refused_rather_than_dropped_in_silence(
         .expect("a coherent inventory publishes");
     poid.accepted(&snapshot, at(1));
     let status = poid
-        .status(&updates, at(2))
+        .status(emob_poi::datex::Delivery::Delta, &updates, at(2))
         .expect("references that resolve");
     let json = status.to_json().expect("the profile's own JSON");
     assert!(json.contains("SITE-1-POINT-1"), "{json}");
@@ -284,6 +285,7 @@ fn a_status_for_a_version_the_access_point_never_received_is_refused() {
         site: Facility::new("SITE-1"),
         station: Facility::new("SITE-1-STATION"),
         point: Facility::new("SITE-1-POINT-1").at_version(2),
+        changed_at: time::OffsetDateTime::UNIX_EPOCH,
         report: poid.sites[0]
             .points()
             .next()
@@ -294,7 +296,7 @@ fn a_status_for_a_version_the_access_point_never_received_is_refused() {
     }];
 
     let refused = poid
-        .status(&updates, at(2))
+        .status(emob_poi::datex::Delivery::Delta, &updates, at(2))
         .expect_err("the access point holds version 1");
     let PublishError::Feed(emob_poi::PoiError::NotInAcceptedTable {
         ref facility,
@@ -318,14 +320,14 @@ fn a_status_for_a_version_the_access_point_never_received_is_refused() {
         .expect("the revised inventory publishes");
     poid.accepted(&republished, at(4));
     let status = poid
-        .status(&updates, at(5))
+        .status(emob_poi::datex::Delivery::Delta, &updates, at(5))
         .expect("references that resolve");
     assert!(status.to_json().expect("JSON").contains("SITE-1-POINT-1"));
 }
 
 #[test]
 fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
-    // `[AFIR Art. 20(2)(c)]` makes the ad-hoc price dynamic, so a change at noon
+    // `[AFIR Art. 20(2)(f)]` makes the ad-hoc price dynamic, so a change at noon
     // is a status message addressed to a rate the table already named by `idG`.
     // Nothing checked that name, and one that resolves against nothing is
     // dropped in the same silence as a version — leaving the public price the
@@ -348,6 +350,7 @@ fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
             site: Facility::new("SITE-1"),
             station: Facility::new("SITE-1-STATION"),
             point: Facility::new("SITE-1-POINT-1"),
+            changed_at: time::OffsetDateTime::UNIX_EPOCH,
             report: poid.sites[0]
                 .points()
                 .next()
@@ -356,14 +359,23 @@ fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
                 .expect("an operating point may report `available`"),
             price: Some(emob_poi::datex::PriceUpdate {
                 rate_id: rate_id.to_owned(),
-                price_type: emob_poi::rate::PriceType::PricePerKwh,
-                value: dec("0.37"),
+                changed_at: time::OffsetDateTime::UNIX_EPOCH,
+                prices: vec![emob_poi::rate::Price {
+                    price_type: emob_poi::rate::PriceType::PricePerKwh,
+                    value: dec("0.37"),
+                    tax_rate: None,
+                    tax_included: None,
+                    additional_information: None,
+                    period: None,
+                    energy_applicability: None,
+                    time_applicability: None,
+                }],
             }),
         }]
     };
 
     let refused = poid
-        .status(&update("RATE-2"), at(2))
+        .status(emob_poi::datex::Delivery::Delta, &update("RATE-2"), at(2))
         .expect_err("no table named RATE-2");
     assert!(
         matches!(
@@ -375,7 +387,7 @@ fn a_price_update_addressed_to_a_rate_no_table_named_is_refused() {
     );
 
     // The name the table gave out resolves.
-    poid.status(&update("RATE-1"), at(2))
+    poid.status(emob_poi::datex::Delivery::Delta, &update("RATE-1"), at(2))
         .expect("the rate the table named");
 }
 
@@ -460,7 +472,7 @@ fn the_snapshot_the_access_point_holds_is_the_one_a_restart_reads_back() {
         poid.stale(at(30), time::Duration::hours(24)).is_none(),
         "a feed the access point refreshed an hour ago is not stale because this process restarted"
     );
-    poid.status(&[], at(31))
+    poid.status(emob_poi::datex::Delivery::Delta, &[], at(31))
         .expect("a status message resolves against the snapshot the access point holds");
 }
 

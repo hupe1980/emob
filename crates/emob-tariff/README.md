@@ -79,7 +79,7 @@ assert_eq!(rated.tax().to_string(), "2.31 EUR");      // 19 % of the electricity
 | the driver, at the point, before starting | `describe()` → OCPP 2.1 `SetDefaultTariff` (`emob-ocpp`) | `[AFIR Art. 5(4)]` |
 | the session being invoiced | `rate()` | the money |
 | the roaming partner | `emob-roam` → OCPI 2.3.0 | what two companies settle |
-| the national access point | `emob-poi` → DATEX II | `[AFIR Art. 20(2)(c)]` |
+| the national access point | `emob-poi` → DATEX II | `[AFIR Art. 20(2)(f)]` |
 
 ## Rating: periods, tiers and thresholds
 
@@ -297,7 +297,7 @@ let cdr = CdrBuilder::from_session(&session, Direction::Import)?
 `[from, until)` windows, and refuses a version boundary off the quarter-hour
 grid `[PTB-A 50.7 §3.1.7.2]`, naming the *next* boundary. Publishing a version
 to its readers before it takes effect is the job of the `tarifd` service,
-which publishes the estate's tariffs (its push clients are still to come).
+which serves the estate’s versioned tariff documents.
 
 ## Reservations
 

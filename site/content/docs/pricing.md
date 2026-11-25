@@ -16,6 +16,10 @@ and the invoice come from two systems they drift; here `describe()` and `rate()`
 read the same `PriceComponent`s and select the applicable price **through the
 same function**.
 
+In an estate `[[tariffs]]` entry, `energy = "0.49"` is the gross price per kWh. Add `occupancy_per_minute = "0.10"` to charge ten cents per minute while the vehicle is connected and no longer requesting energy. The separate `per_minute` field prices charging time. The station page shows the applicable gross rates together. The seller document carries the occupancy component in the hourly billing unit, so the same example has an exact rate of 6.00 per hour.
+
+On OCPP 2.x the text message carries the applicable prices before any optional URL. If the full disclosure exceeds the protocol text limit, it directs the driver to check the on-site price sign. A station acknowledgement records the message exchange. The operator checks the installed screen or sign before charging, including devices that display less than the protocol allows, and records the station, version and observation time. On OCPI the tariff has a `PARKING_TIME` component. The supported DATEX profile uses `other` with an explanation of the occupancy fee and records that mapping in the publication notes.
+
 ```rust
 use emob_tariff::{Dimension, PriceComponent, Tariff, TariffKind, describe, rate};
 
@@ -45,7 +49,7 @@ The same price leaves emob three times, each under its own duty:
 |---|---|---|
 | the driver, at the charge point, **before** starting | OCPP 2.1 `SetDefaultTariff` | `[AFIR Art. 5(4)]` |
 | the roaming partner who settles against it | OCPI 2.3.0 `Tariff` | the number two companies reconcile |
-| the national access point | DATEX II `EnergyRate` | `[AFIR Art. 20(2)(c)]` |
+| the national access point | DATEX II `EnergyRate` | `[AFIR Art. 20(2)(f)]` |
 
 ```mermaid
 flowchart LR
@@ -606,3 +610,9 @@ session does not hold.
 **Related:** [Sessions and settlement](@/docs/settlement.md) ·
 [The OCPP seam](@/docs/ocpp.md) · [Roaming](@/docs/roaming.md) ·
 [Locations](@/docs/locations.md) · [Glossary](@/docs/glossary.md)
+
+## Choosing a provider plan
+
+Open a public point's `/p/{evse}` page to see the ad-hoc price and the provider plans offered at that point. Choose a plan to see its effective schedule, gross components and a worked session. A monthly charge is shown separately. The page names unsupported or unavailable offers explicitly. An offer link identifies the published schedule so that a later reader can compare the original terms.
+
+Operators configure published plans in `[[public_plans]]` and explicitly mark participating stations `publicly_accessible = true`. The example estate includes a working configuration. At a public fast charger, check the visible energy price and applicable occupancy fee on the equipment. An HTTP response or acknowledgement shows delivery to a system. Only an observation at the station establishes what the driver could see.

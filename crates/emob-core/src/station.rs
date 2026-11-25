@@ -635,25 +635,23 @@ impl core::str::FromStr for V2gProtocol {
     }
 }
 
-/// What is published about a point, and where.
+/// The operator's declarations about publication at a public charge point.
 ///
-/// `[AFIR Art. 20]` splits into three duties that are usually collapsed into
-/// one and should not be: the **static** data of Art. 20(2)(a)–(b), the
-/// **dynamic** data of Art. 20(2)(c) — which explicitly does not bind a point
-/// that charges nothing — and the **API** of Art. 20(3), which is a separate
-/// thing an operator has to stand up and register with the national access
-/// point.
+/// The operator or owner by arrangement declares the static and dynamic classes
+/// independently. These flags record neither delivery receipts nor update times.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "each flag is one duty of Article 20, and they have different exemptions"
+    reason = "each flag declares a distinct publication duty"
 )]
 pub struct DataPublication {
-    /// Location, connectors, opening hours, power, contact — `[AFIR Art. 20(2)(a)–(b)]`.
+    /// Static information including the point's identity, connectors, power
+    /// and whether electricity supplied is 100% renewable
+    /// `[AFIR Art. 20(2)(a)–(b)]`.
     pub static_data: bool,
-    /// Operational status, availability, ad-hoc price, renewable share —
-    /// `[AFIR Art. 20(2)(c)]`.
+    /// Operational status, availability and ad-hoc price `[AFIR Art. 20(2)(f)]`.
+    /// An unknown tariff supplies no evidence of a zero price.
     pub dynamic_data: bool,
     /// A free and unrestricted API, registered with the national access point
     /// — `[AFIR Art. 20(3)]`.
@@ -1359,12 +1357,9 @@ pub struct ChargePointProfile {
     /// easy to miss: a truck parking area away from the corridor is in scope
     /// just as a motorway service station is.
     pub on_safe_secure_parking: bool,
-    /// Whether the recharging service is paid for at all.
-    ///
-    /// `[AFIR Art. 5(1)]` exempts points "that do not require payment for the
-    /// recharging service" from the whole payment-instrument régime, and
-    /// `[AFIR Art. 20(2)]` exempts them from the dynamic-data duty. A free
-    /// workplace or municipal charger owes neither.
+    /// Whether the recharging service requires payment. This determines the
+    /// payment-instrument duties in `[AFIR Art. 5(1)]`. All public points
+    /// remain within the data-publication scope of `[AFIR Art. 20(2)]`.
     pub requires_payment: bool,
     /// How someone without a contract pays.
     pub ad_hoc_payment: AdHocPayment,
@@ -2220,6 +2215,31 @@ mod tests {
 
     fn evse() -> EvseId {
         "DE*AB7*E840*6487".parse().unwrap()
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_recorded_profile_preserves_its_independent_publication_declarations() {
+        use crate::obligation::{ObligationId, Status};
+        // The publication object as stored before the Article 20(2) correction.
+        let historical = serde_json::json!({
+            "static_data": false, "dynamic_data": true, "open_api": true, "datex2": false
+        });
+        let mut recorded =
+            serde_json::to_value(ChargePointProfile::bare(evse(), date!(2024 - 07 - 01))).unwrap();
+        recorded["data"] = historical.clone();
+        recorded["requires_payment"] = serde_json::Value::Bool(false);
+        let point: ChargePointProfile = serde_json::from_value(recorded).unwrap();
+        assert_eq!(serde_json::to_value(point.data).unwrap(), historical);
+        let report = crate::obligation::assess(&point, date!(2025 - 04 - 14));
+        assert_eq!(
+            report.status_of(ObligationId::AfirStaticData),
+            Some(Status::Failing)
+        );
+        assert_eq!(
+            report.status_of(ObligationId::AfirDynamicData),
+            Some(Status::Satisfied)
+        );
     }
 
     #[test]

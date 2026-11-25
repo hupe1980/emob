@@ -226,6 +226,110 @@ pub(crate) const fn failure_name(failure: &ocpp_kit::engine::CallFailure) -> &'s
     }
 }
 
+fn suppress_attempt(
+    previous: &crate::journal::StationTariff,
+    version: &str,
+    now: time::OffsetDateTime,
+) -> bool {
+    previous.version == version
+        && (!previous.retry || now - previous.at < time::Duration::minutes(1))
+}
+
+/// Install the effective tariff on a connected, opted-in 2.1 station after boot.
+pub(crate) async fn install_tariff<J: emob_service::journal::Journal>(
+    csms: &crate::Csmsd<J>,
+    handle: &CsmsHandle,
+    identity: &Identity,
+) {
+    let selected = csms.with_registry(|registry, state| {
+        let station = registry.get(identity.as_str())?;
+        if !station.show_price || !station.publicly_accessible || station.ocpp != Ocpp::V2_1 {
+            return None;
+        }
+        let known = state.stations.get(identity.as_str())?;
+        Some((
+            station.tariff.clone(),
+            known.facility_version,
+            known.boot_generation,
+            known.tariff_boot?,
+            known.station_tariff.clone(),
+        ))
+    });
+    let Some((tariff_id, facility_version, boot_generation, boot, previous)) = selected else {
+        return;
+    };
+    let Some(session) = handle.session(identity).await else {
+        return;
+    };
+    if session
+        .session::<crate::ChargePoint>()
+        .is_none_or(|p| p.ocpp != ocpp_kit::Version::V2_1)
+    {
+        return;
+    }
+    let now = csms.now();
+    let Some(tariff) = csms.tariff(&tariff_id).and_then(|h| h.in_force_at(now)) else {
+        return;
+    };
+    let version = tariff.fingerprint().to_string();
+    if previous
+        .as_ref()
+        .is_some_and(|delivery| suppress_attempt(delivery, &version, now))
+    {
+        return;
+    }
+    let (outcome, retry) = match emob_ocpp::tariff::to_ocpp(tariff, now) {
+        Ok(wire) if wire.is_lossless() => {
+            match tokio::time::timeout(
+                TIMEOUT,
+                session.call(v2_1::SetDefaultTariffRequest::new(1, wire.value)),
+            )
+            .await
+            {
+                Ok(Ok(answer)) => (self::wire(&answer.status), false),
+                Ok(Err(ocpp_kit::engine::CallFailure::Rejected(error))) => {
+                    // Omit the peer's free-text description, details and non-standard codes.
+                    let code = match error.code {
+                        ocpp_kit::rpc::ErrorCode::Other(_) => "Other",
+                        ref code => code.as_wire(ocpp_kit::Version::V2_1),
+                    };
+                    (format!("CALLERROR {code}"), false)
+                }
+                Ok(Err(error)) => (failure_name(&error).to_owned(), true),
+                Err(_) => ("no answer".to_owned(), true),
+            }
+        }
+        Ok(crossing) => (
+            crossing
+                .notes()
+                .iter()
+                .map(|n| n.reason.as_str())
+                .collect::<Vec<_>>()
+                .join(" · "),
+            false,
+        ),
+        Err(error) => (error.to_string(), false),
+    };
+    let delivery = crate::journal::StationTariff {
+        version,
+        facility_version,
+        boot_generation,
+        boot,
+        at: csms.now(),
+        outcome,
+        retry,
+    };
+    if let Err(error) = csms.record(
+        &emob_service::Actor::Timer,
+        crate::journal::Event::StationTariff {
+            station: identity.to_string(),
+            delivery,
+        },
+    ) {
+        tracing::error!(%error, "station tariff response could not be recorded");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +339,111 @@ mod tests {
             emob_service::estate::from_str(include_str!("../../../deploy/estate.example.toml"))
                 .expect("the example estate");
         estate.stations
+    }
+
+    #[test]
+    fn sr_209_a_late_station_receipt_cannot_replace_the_current_boot_or_registration() {
+        use crate::journal::{Event, State, StationTariff, apply};
+        let mut state = State::new(emob_core::TimeZone::utc());
+        let station = stations().remove(0);
+        let name = station.identity.clone();
+        let at = time::macros::datetime!(2026-11-25 12:00 UTC);
+        let register = Event::StationRegistered {
+            station: Box::new(station),
+            at,
+            offers: vec![],
+        };
+        let boot = Event::Booted {
+            station: name.clone(),
+            at,
+            reason: "PowerUp".into(),
+            identity: Default::default(),
+        };
+        let receipt = |boot_generation, facility_version| Event::StationTariff {
+            station: name.clone(),
+            delivery: StationTariff {
+                version: "e".repeat(64),
+                facility_version,
+                boot_generation,
+                boot: at,
+                at,
+                outcome: "Accepted".to_owned(),
+                retry: false,
+            },
+        };
+        apply(&mut state, register.clone());
+        apply(&mut state, boot.clone());
+        apply(&mut state, receipt(1, 1));
+        assert_eq!(
+            state.stations[&name]
+                .station_tariff
+                .as_ref()
+                .unwrap()
+                .outcome,
+            "Accepted"
+        );
+        // A controlled clock can give two distinct boots exactly the same timestamp.
+        apply(&mut state, boot.clone());
+        apply(&mut state, receipt(1, 1));
+        assert!(state.stations[&name].station_tariff.is_none());
+        apply(&mut state, receipt(2, 1));
+        assert_eq!(
+            state.stations[&name]
+                .station_tariff
+                .as_ref()
+                .unwrap()
+                .boot_generation,
+            2
+        );
+        apply(
+            &mut state,
+            Event::StationRetired {
+                identity: name.clone(),
+                reason: "retired".into(),
+                at,
+            },
+        );
+        apply(&mut state, receipt(2, 1));
+        assert!(state.stations[&name].station_tariff.is_none());
+        apply(&mut state, register);
+        apply(&mut state, boot);
+        apply(&mut state, receipt(3, 1));
+        assert!(state.stations[&name].station_tariff.is_none());
+        apply(&mut state, receipt(3, 2));
+        assert!(state.stations[&name].station_tariff.is_some());
+    }
+
+    #[test]
+    fn sr_209_transport_failures_retry_after_a_minute_and_a_terminal_station_result_stops() {
+        let now = time::macros::datetime!(2026-11-25 12:00 UTC);
+        let version = "a".repeat(64);
+        let mut attempt = crate::journal::StationTariff {
+            version: version.clone(),
+            facility_version: 1,
+            boot_generation: 1,
+            boot: now,
+            at: now,
+            outcome: "no answer".into(),
+            retry: true,
+        };
+        assert!(suppress_attempt(
+            &attempt,
+            &version,
+            now + time::Duration::seconds(59)
+        ));
+        assert!(!suppress_attempt(
+            &attempt,
+            &version,
+            now + time::Duration::seconds(60)
+        ));
+        attempt.outcome = "CALLERROR NotSupported".into();
+        attempt.retry = false;
+        assert!(suppress_attempt(
+            &attempt,
+            &version,
+            now + time::Duration::hours(1)
+        ));
+        assert!(!suppress_attempt(&attempt, &"b".repeat(64), now));
     }
 
     #[test]

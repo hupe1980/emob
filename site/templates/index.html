@@ -26,11 +26,8 @@
   <div class="hero-inner">
     <div class="hero-copy">
       <p class="hero-eyebrow">Open source · Rust · OCPP 2.1 · OCPI 2.3.0 · Eichrecht · AFIR</p>
-      <h1 class="hero-title">Charging software that can prove every kilowatt-hour.</h1>
-      <p class="hero-sub">emob is the open-source back office for EV charging in Europe — charge
-        point operator and e-mobility provider in one Rust workspace. It verifies signed meter
-        values under German calibration law, prices and settles them to the cent, and models
-        AFIR, Eichrecht and NIS2 as cited, dated code.</p>
+      <h1 class="hero-title">Charging operations from station to settlement.</h1>
+      <p class="hero-sub">Run stations and driver contracts in one self-hosted platform. Verify signed meter readings, publish charging prices and reconcile partner invoices.</p>
       <div class="hero-cta">
         <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started.md') | safe }}">Get started</a>
         <a class="btn btn-ghost" href="{{ get_url(path='@/docs/_index.md') | safe }}">Documentation</a>
@@ -70,19 +67,19 @@
       <a class="aud" href="{{ get_url(path='@/docs/ocpp.md') | safe }}">
         <span class="aud-icon" aria-hidden="true">⚡</span>
         <h3>Charge point operators</h3>
-        <p>Connect OCPP 1.6, 2.0.1 and 2.1 stations, bill only what the meter signed, and publish one price to the station screen, roaming partners and the national access point.</p>
+        <p>Connect OCPP 1.6, 2.0.1 and 2.1 stations, bill only what the meter signed, and publish prices for drivers and the national access point.</p>
         <span class="more">OCPP and pricing →</span>
       </a>
       <a class="aud" href="{{ get_url(path='@/docs/settlement.md') | safe }}">
         <span class="aud-icon" aria-hidden="true">🧾</span>
         <h3>E-mobility providers</h3>
-        <p>Authorise contracts, exchange charge detail records over OCPI 2.3.0 and OICP, and close the month into EN 16931 e-invoices, SEPA direct debits and balanced books.</p>
+        <p>Manage driver agreements and cards, exchange charge detail records over OCPI and close partner invoices in EN 16931 formats.</p>
         <span class="more">Settlement and roaming →</span>
       </a>
       <a class="aud" href="{{ get_url(path='@/docs/getting-started.md') | safe }}">
         <span class="aud-icon" aria-hidden="true">🦀</span>
         <h3>Developers and integrators</h3>
-        <p>Fifteen sans-I/O Rust crates with exact decimals, no clock and no floats. Embed the one that answers your question, or run the nine daemons around them with <code>just demo</code>.</p>
+        <p>Embed a Rust crate or exercise the standalone estate with simulated stations and the Python test toolkit.</p>
         <span class="more">Get started →</span>
       </a>
     </div>
@@ -103,12 +100,4 @@
   {% endfor %}
 </section>
 
-<section class="closing">
-  <h2>See it for yourself</h2>
-  <p>Run <code>just demo</code>: three simulated stations, a roaming partner and a morning of sessions on your machine — then open Heute and a driver's receipt. Or read how one charging session travels from a signed meter reading to an e-invoice.</p>
-  <div class="hero-cta">
-    <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started.md') | safe }}">Get started</a>
-    <a class="btn btn-ghost" href="{{ config.extra.repository }}" rel="noopener">Star on GitHub ↗</a>
-  </div>
-</section>
 {% endblock content %}

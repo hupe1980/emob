@@ -30,6 +30,13 @@ pub fn render(
             .find('\n')
             .map_or(text.len(), |i| span.start + i);
         let line_no = text[..span.start].matches('\n').count() + 1;
+        // An inventory diagnostic stays useful with a file and line number.
+        // A TOML message or excerpt can contain the entire private card value.
+        if private_card_section(&text[..line_end]) {
+            return format!(
+                "error: invalid card configuration at {path}:{line_no}; check the inventory code and UID fields"
+            );
+        }
         let column = text[line_start..span.start].chars().count() + 1;
         let width = line_no.to_string().len();
         let pad = " ".repeat(width);
@@ -58,6 +65,30 @@ pub fn render(
         }
     }
     out
+}
+
+fn private_card_section(prefix: &str) -> bool {
+    for line in prefix.lines().rev().map(str::trim_start) {
+        // Also protect inventory written as an inline or multiline TOML array.
+        let key = line
+            .split_once('=')
+            .map(|(key, _)| key.trim().trim_matches(['\'', '"']));
+        if matches!(key, Some("card_stock" | "contracts" | "uid")) {
+            return true;
+        }
+        if line.starts_with('[') {
+            let table = line
+                .trim_start_matches('[')
+                .split([']', '.'])
+                .next()
+                .unwrap_or_default();
+            return matches!(
+                table.trim().trim_matches(['\'', '"']),
+                "card_stock" | "contracts"
+            );
+        }
+    }
+    false
 }
 
 /// `serde`'s "unknown field `x`, expected one of `a`, `b`" into the headline

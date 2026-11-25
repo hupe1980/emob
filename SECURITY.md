@@ -26,19 +26,11 @@ otherwise. If the 90 days cannot be met, the reporter hears why and when.
 
 ## Supported versions
 
-Fixes target the latest published minor. Before 1.0 the minor version is the
-breaking one, so a fix ships as a patch of the current minor.
-
-| Version | Supported |
-|---|---|
-| 0.2.x | yes |
-| < 0.2 | no |
+Report issues against the current development branch. The project accepts breaking changes during development.
 
 ## Scope
 
-In scope: everything the fifteen `emob-*` crates parse, verify, price or decide,
-and the eight daemons (`csmsd`, `roamd`, `billd`, `empd`, `poid`, `tarifd`,
-`sited`, `agentd`) as built from this repository's `Dockerfile`. The known
+Report issues in the workspace crates, the operator and driver interfaces, the Python test client and the nine services built here. These are `csmsd`, `roamd`, `billd`, `empd`, `poid`, `tarifd`, `sited`, `deskd` and `agentd`. The known
 threats, their status and the open risks are in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 Defects in a protocol kit this workspace stands on (`ocpp-kit`, `ocpi-kit`,

@@ -14,6 +14,7 @@ operator = "DE*ABC"   # the CPO: stations, CDRs and invoices are issued under it
 provider = "DE*MSP"   # the e-mobility provider empd runs
 
 [[stations]]
+publicly_accessible = true
 identity = "CP-1"
 ocpp = "1.6"
 # Security profile 2: HTTP Basic over TLS. The hash is of the demo station's
@@ -54,17 +55,27 @@ series = "R"
 vat_rate = "19"
 seller = { name = "ABC Charging GmbH", street = "Invalidenstrasse 1", post_code = "10115", city = "Berlin", country = "DE", vat_id = "DE987654321" }
 
+# Unissued RFID for the standalone driver-enrolment walkthrough.
+[[card_stock]]
+code = "STOCK-1004"
+uid = "04AB0000000004"
+
 [[contracts]]
 id = "DE-MSP-C00000001-W"
 from = "2026-01-01"
 tokens = [
-  { uid = "04A1B2C3D4E5F6", type = "RFID", whitelist = "ALLOWED" },
-  { uid = "04DEADBEEF0001", type = "RFID", whitelist = "ALLOWED", blocked = true },
+  { uid = "04A1B2C3D4E5F6", visual_number = "MOB-1001", type = "RFID", whitelist = "ALLOWED" },
+  { uid = "04DEADBEEF0001", visual_number = "MOB-1003", type = "RFID", whitelist = "ALLOWED", blocked = true },
 ]
 
 [[operators]]
 name = "demo operator"
 token_env = "EMOB_OPERATOR_TOKEN"
+write = true
+
+[[operators]]
+name = "desk reader"
+token_env = "EMOB_DESK_READ_TOKEN"
 
 # How csmsd's OCPP listener is exposed. Throwaway loopback certificates —
 # `just up` mints them with `just dev-ca` and mounts target/dev-tls at /tls. A production estate names its own.
@@ -79,8 +90,9 @@ idle_timeout_secs = 900
 # What the operator page (deskd) reads, with which of the operator tokens. billd
 # and roamd are read at their [services] addresses.
 [desk]
+poid = "http://poid:9582"
 csmsd = "http://csmsd:8080"
-token_env = "EMOB_OPERATOR_TOKEN"
+token_env = "EMOB_DESK_READ_TOKEN"
 time_zone = "Europe/Berlin"   # the page's "today" and its clock
 
 [receipts]

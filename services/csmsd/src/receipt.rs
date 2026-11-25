@@ -927,8 +927,8 @@ fn render(
             b,
             "<p>{}</p><p class=\"key num\" translate=\"no\">{}</p><p class=\"muted\">{} {}</p>",
             lang.pick(
-                "Vergleichen Sie diesen Schlüssel mit dem Schlüssel, der am Ladepunkt aufgedruckt ist. Stimmen beide überein, stammen die Messwerte von genau diesem Zähler.",
-                "Compare this key with the key printed on the charge point. If the two match, the values come from exactly this meter."
+                "Vergleichen Sie den vollständigen Schlüssel mit dem Schlüssel, der am Ladepunkt aufgedruckt ist. Das Prüfergebnis für die Signaturen steht bei den Messwerten.",
+                "Compare the complete key with the one printed on the charge point. Each signed reading shows its own verification result."
             ),
             escape(&grouped(key)),
             lang.pick("Kurve", "Curve"),
@@ -1032,6 +1032,7 @@ mod tests {
         fn ask<'a>(
             &'a self,
             _uid: &'a str,
+            _evse: Option<&'a emob_core::EvseId>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::Answer> + Send + 'a>>
         {
             Box::pin(async { unreachable!("no station connects in these tests") })

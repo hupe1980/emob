@@ -181,10 +181,10 @@ impl Published {
 /// produce the same bytes `[MessEG §33]`. It becomes both `publicationTime` and
 /// every object's `lastUpdated`.
 ///
-/// `rate_for` supplies the published prices for a point. Returning `None` is
-/// admissible — a point behind a contract-only site has no ad-hoc rate to
-/// publish — but a **publicly accessible** point without one is a point whose
-/// ad-hoc price `[AFIR Art. 20(2)(c)]` requires and this feed does not carry.
+/// `rate_for` supplies the published prices for a point. A missing rate
+/// omits the rate from this table. A public point with a genuinely free
+/// service needs an explicit zero tariff to communicate that fact under
+/// `[AFIR Art. 20(2)(f)]`. The absence of a rate cannot establish its price.
 #[must_use]
 pub fn publication(
     publisher: &Publisher,
@@ -419,16 +419,20 @@ fn point_of(
         number_of_connectors: Some(point.connectors.len() as u64),
         available_charging_power: watts(point.max_power_kw).into_iter().collect(),
         connector: point.connectors.iter().map(connector_of).collect(),
-        energy_product: rate_for(point)
-            .map(|rate| {
+        energy_product: {
+            let rate = rate_for(point);
+            if point.fully_renewable.is_some() || rate.is_some() {
                 vec![AnyEnergyProduct::ElectricEnergy(Box::new(
                     aegi::ElectricEnergy {
-                        energy_rate: vec![rate_of(&rate, lang, now)],
+                        is_green_energy: point.fully_renewable,
+                        energy_rate: rate.iter().map(|r| rate_of(r, lang, now)).collect(),
                         ..aegi::ElectricEnergy::default()
                     },
                 ))]
-            })
-            .unwrap_or_default(),
+            } else {
+                Vec::new()
+            }
+        },
         ..aegi::ElectricChargingPoint::default()
     }
 }

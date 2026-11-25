@@ -42,7 +42,9 @@ pub enum Refused {
     #[error("the Mobilithek knows no publication at [mobilithek] url (404)")]
     UnknownPublication,
     /// No answer, or one a retry may change.
-    #[error("the Mobilithek did not take the table ({0}); it is sent again on the next round")]
+    #[error(
+        "the Mobilithek did not take the publication ({0}); it is sent again on the next round"
+    )]
     Unavailable(String),
 }
 
@@ -66,19 +68,47 @@ pub fn client(mobilithek: &Mobilithek) -> Result<reqwest::Client, EstateError> {
         key: format!("mobilithek.{key}"),
         reason,
     };
-    let loopback = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-        .iter()
-        .any(|prefix| mobilithek.url.starts_with(prefix));
-    if !mobilithek.url.starts_with("https://") && !loopback {
+    if mobilithek.status_max_age_secs == 0 {
         return Err(invalid(
-            "url",
-            format!(
-                "{} is not https:// — the Mobilithek is reached over mutual TLS",
-                mobilithek.url
-            ),
+            "status_max_age_secs",
+            "a positive source freshness window is required".to_owned(),
         ));
     }
-    let mut builder = reqwest::Client::builder().timeout(TIMEOUT);
+    let destination = |key: &str, raw: &str| {
+        let url = reqwest::Url::parse(raw)
+            .map_err(|_| invalid(key, "expected an absolute publication URL".to_owned()))?;
+        let loopback = url.scheme() == "http"
+            && url.host_str().is_some_and(|host| {
+                host == "localhost"
+                    || host
+                        .trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+            || (url.scheme() != "https" && !loopback)
+        {
+            return Err(invalid(
+                key,
+                "use HTTPS or loopback HTTP, without embedded credentials or fragments".to_owned(),
+            ));
+        }
+        Ok((url, loopback))
+    };
+    let (table, local) = destination("url", &mobilithek.url)?;
+    let (dynamic, local_dynamic) = destination("dynamic_url", &mobilithek.dynamic_url)?;
+    if table == dynamic {
+        return Err(invalid(
+            "dynamic_url",
+            "static and dynamic offers need distinct addresses".to_owned(),
+        ));
+    }
+    let loopback = local && local_dynamic;
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(TIMEOUT);
     match (&mobilithek.client_cert, &mobilithek.client_key) {
         (Some(cert), Some(key)) => {
             let read = |key_name: &str, path: &str| {
@@ -119,25 +149,26 @@ pub async fn push(
     let body = publication
         .to_json()
         .map_err(|e| Refused::Invalid(e.to_string()))?;
+    post(client, url, body).await
+}
+
+/// Send a validated publication and require a direct 2xx acknowledgement.
+///
+/// # Errors
+/// Returns the receiver or transport refusal.
+pub async fn post(client: &reqwest::Client, url: &str, body: String) -> Result<(), Refused> {
     let answer = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body)
         .send()
         .await
-        .map_err(|e| Refused::Unavailable(e.to_string()))?;
+        .map_err(|e| Refused::Unavailable(e.without_url().to_string()))?;
     let status = answer.status().as_u16();
     match status {
         200..=299 => Ok(()),
         400 => Err(Refused::Rejected(
-            answer
-                .text()
-                .await
-                .unwrap_or_default()
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(300)
-                .collect(),
+            "check the publication against the registered profile".to_owned(),
         )),
         401 | 403 => Err(Refused::NotAuthorised(status)),
         404 => Err(Refused::UnknownPublication),

@@ -1,7 +1,7 @@
-//! `emob demo` — the whole estate on loopback, in one command.
+//! `emob demo` — five services, simulated stations and a roaming peer on loopback.
 //!
-//! One process plays every party the estate talks to and starts every daemon
-//! the estate is made of. It writes a seeded `estate.toml` for **Stadtwerke
+//! One process runs the CSMS, provider, roaming, billing and desk services.
+//! It writes a seeded `estate.toml` for **Stadtwerke
 //! Musterstadt eMobility** (one site, three charge points on OCPP 1.6, 2.0.1
 //! and 2.1, one `emob-sim` meter each, security profile 2 over `just dev-ca`'s
 //! throwaway TLS); starts `empd`, `billd`, `roamd`, `csmsd` and `deskd` through
@@ -178,6 +178,7 @@ fn random_hex(bytes: usize) -> String {
 /// Everything secret this run holds, minted now.
 struct Secrets {
     operator: String,
+    desk_read: String,
     service: String,
     webhook: String,
     token_a: String,
@@ -193,6 +194,7 @@ impl Secrets {
         getrandom::fill(&mut webhook).expect("the OS random number generator");
         Self {
             operator: random_hex(16),
+            desk_read: random_hex(16),
             service: random_hex(16),
             webhook: format!(
                 "whsec_{}",
@@ -209,6 +211,7 @@ impl Secrets {
     fn env(&self) -> Env {
         let mut values: BTreeMap<&'static str, String> = [
             (estate::env::OPERATOR, self.operator.clone()),
+            (estate::env::DESK_READ, self.desk_read.clone()),
             (estate::env::SERVICE, self.service.clone()),
             (estate::env::WEBHOOK, self.webhook.clone()),
             (estate::env::TOKEN_A, self.token_a.clone()),
@@ -227,6 +230,7 @@ impl Secrets {
     /// Every secret but the operator token, which the Heute link carries.
     fn never_printed(&self) -> Vec<&str> {
         let mut all = vec![
+            self.desk_read.as_str(),
             self.service.as_str(),
             self.webhook.as_str(),
             self.token_a.as_str(),
@@ -410,12 +414,12 @@ struct Estate {
 }
 
 impl Estate {
-    fn stop(self) {
-        self.deskd.kill();
-        self.csmsd.kill();
-        self.roamd.kill();
-        self.billd.kill();
-        self.empd.kill();
+    async fn stop(self) {
+        self.deskd.kill().await;
+        self.csmsd.kill().await;
+        self.roamd.kill().await;
+        self.billd.kill().await;
+        self.empd.kill().await;
     }
 }
 
@@ -570,14 +574,21 @@ async fn demo(
         berlin(start),
     ));
 
-    let empd = empd::daemon::run(empd::daemon::Options {
-        http: ports.empd,
-        journal: journal("empd"),
-        estate: emob_service::estate::from_str(&text)?,
-        env: env.clone(),
-        shutdown: Shutdown::new(),
-        identity: me("empd"),
-    })
+    let business_clock: emob_service::Clock = {
+        let clock = Arc::clone(&clock);
+        Arc::new(move || clock.now())
+    };
+    let empd = empd::daemon::run_with_clock(
+        empd::daemon::Options {
+            http: ports.empd,
+            journal: journal("empd"),
+            estate: emob_service::estate::from_str(&text)?,
+            env: env.clone(),
+            shutdown: Shutdown::new(),
+            identity: me("empd"),
+        },
+        Arc::clone(&business_clock),
+    )
     .await
     .context("empd")?;
     let billd = billd::daemon::run(billd::daemon::Options {
@@ -618,21 +629,17 @@ async fn demo(
         shutdown: Shutdown::new(),
         identity: me("csmsd"),
         // The morning's clock, so a session is counted on the day Heute shows.
-        clock: {
-            let clock = Arc::clone(&clock);
-            Arc::new(move || clock.now())
-        },
+        clock: Arc::clone(&business_clock),
     })
     .await
     .context("csmsd")?;
-    let page_clock = Arc::clone(&clock);
     let deskd = deskd::run(deskd::Options {
         http: ports.deskd,
         estate: emob_service::estate::from_str(&text)?,
         env,
         shutdown: Shutdown::new(),
         identity: me("deskd"),
-        clock: Arc::new(move || page_clock.now()),
+        clock: business_clock,
         witness: scratch.0.join("witness.ndjson"),
     })
     .await
@@ -995,7 +1002,7 @@ async fn demo(
         for (number, ..) in &invoices {
             out.say(format!("  invoice  {number}"));
         }
-        estate.stop();
+        estate.stop().await;
         return Ok(Ending::Checked(failures, tokens));
     }
 

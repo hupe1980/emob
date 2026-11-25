@@ -142,6 +142,7 @@ fn sc_001_the_bounded_view_is_small_and_fast_at_a_million_sessions() {
         zone: TimeZone::new("Europe/Berlin").unwrap(),
         at: deskd::heute::Cursors::default(),
         journals: Vec::new(),
+        publication: None,
     };
     let started = Instant::now();
     let page = deskd::heute::render(&snapshot, emob_service::ui::Lang::De);

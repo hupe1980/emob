@@ -45,6 +45,10 @@ Money and energy are never floats: `Tariff(energy=0.59)` is a `ValueError`.
 `AssertionError` means the system under test is wrong; `ValueError` means the
 test is.
 
+## Run the external suite against emob
+
+From the workspace root, `just e2e` builds the daemons and starts a private example estate on ephemeral loopback ports with fresh credentials and journals. The suite checks successful and refused charges, point prices, reservations, provider quotes and station tariff delivery. It also reviews, confirms and reverses card restrictions from the actual desk forms, restarts the provider on its original journal, then checks card history and charging again. These mutations run only in the runner’s disposable estate. The OCPP 2.x simulator issues a fresh transaction ID across reconnects. The suite checks the recorded decision for that exact ID. The suite also issues the unassigned fixture card through the desk, charges at its enrolled point, reopens the original agreement after provider restart and withdraws the point’s offer to check the next authorization. The runner stops its own estate on exit. It can run alongside a local demo.
+
 ## Driving a CSMS
 
 ```python

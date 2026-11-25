@@ -133,10 +133,30 @@ td > a:first-child { display: inline-block; padding: .3rem 0; margin: -.3rem 0; 
 .calm { font-size: 1.15rem; padding: 1.4rem 1.2rem; border-radius: var(--radius); }
 .sources { display: inline-flex; flex-wrap: wrap; gap: .6rem; list-style: none; padding: 0; margin: 0; }
 
+/* A recorded decision, including long station-supplied references and diagnostics. */
+.investigation { overflow-wrap: anywhere; }
+.investigation summary { cursor: pointer; min-height: 24px; }
+.timeline { list-style-type: decimal; margin: 0; padding-inline-start: 1.6rem; }
+.timeline li { padding: .45rem 0 .6rem .2rem; border-bottom: 1px solid var(--line); }
+.timeline li:last-child { border-bottom: 0; }
+.card-controls { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+.timeline time { display: block; }
+.timeline .muted { font-size: .88rem; }
+@media print {
+  .investigation .card { background: transparent; }
+  .timeline li { break-inside: avoid; }
+}
+
 /* The receipt (csmsd /r/{token}, spec 003): a big verdict, the key in groups a
    person can compare with a printed label, one line per signed value. */
 .verdict .icon { font-size: 1.6rem; line-height: 1; font-weight: 700; }
 .receipt-stats { margin: 0 0 1rem; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); }
+/* On a small receipt keep the measured quantity and its unit on one line. */
+.receipt-stats .value { white-space: nowrap; }
+@media (max-width: 27rem) {
+  .receipt-stats { grid-template-columns: 1fr; gap: .4rem; }
+  .receipt-stats .stat { display: flex; flex-flow: row wrap; align-items: baseline; justify-content: space-between; gap: .4rem; }
+}
 ol.values .reading { white-space: nowrap; margin-right: .6rem; }
 .key { font: 600 1rem/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .04em;
   word-spacing: .35em; padding: .8rem 1rem; border: 1px dashed var(--line); border-radius: 8px; overflow-wrap: anywhere; }

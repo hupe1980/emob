@@ -43,6 +43,9 @@ def test_one_seed_signs_the_same_bytes():
 
 def test_the_price_is_the_billing_functions_and_floats_are_refused():
     tariff = et.Tariff(energy="0.59", session_fee="0.50")
+    occupied = et.Tariff(energy="0.59", occupancy_per_minute="0.10")
+    assert occupied.fingerprint != et.Tariff(energy="0.59").fingerprint
+    assert any(line.startswith("0.10 EUR / ") for line in occupied.lines(START))
     assert tariff.total(kwh=30, power_kw=150, at=START) == Decimal("18.20")
     assert tariff.lines(START) == ["0.59 EUR / kWh", "0.50 EUR / session"]
     assert len(tariff.preisstand) == 4 and tariff.fingerprint.startswith(tariff.preisstand.lower())

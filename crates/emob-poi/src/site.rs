@@ -114,6 +114,8 @@ impl Connector {
 /// availability for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChargingPoint {
+    /// Operator declaration that the electricity supplied is 100% renewable.
+    pub fully_renewable: Option<bool>,
     /// How the publication addresses it.
     pub facility: Facility,
     /// The EVSE id, published as an `externalIdentifier` of type `evseId`.
@@ -153,6 +155,7 @@ impl ChargingPoint {
             connectors: vec![connector],
             ad_hoc_payment: AdHocPayment::CardReader,
             v2g: V2gCommunication::pwm_only(),
+            fully_renewable: None,
             lifecycle: Lifecycle::Operating,
         }
     }

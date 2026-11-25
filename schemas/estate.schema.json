@@ -30,6 +30,14 @@
         "$ref": "#/$defs/TariffSpec"
       }
     },
+    "public_plans": {
+      "description": "Explicitly approved public provider plans (AFIR Art. 5(5)).",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PublicPlan"
+      },
+      "default": []
+    },
     "partners": {
       "description": "The roaming partners.",
       "type": "array",
@@ -53,6 +61,13 @@
       "type": "array",
       "items": {
         "$ref": "#/$defs/ContractSeed"
+      }
+    },
+    "card_stock": {
+      "description": "Unassigned provider RFID cards available for native enrolment.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CardStock"
       }
     },
     "operators": {
@@ -129,7 +144,7 @@
       }
     },
     "mobilithek": {
-      "description": "Where `poid` delivers the DATEX II table (spec 016).",
+      "description": "Registered Mobilithek offers for the static DATEX II table and dynamic updates.",
       "anyOf": [
         {
           "$ref": "#/$defs/Mobilithek"
@@ -170,6 +185,18 @@
       "description": "`[[stations]]` — one charging station and the point it is.",
       "type": "object",
       "properties": {
+        "publicly_accessible": {
+          "description": "Whether this point may appear in public price and infrastructure publications.",
+          "type": "boolean",
+          "default": false
+        },
+        "fully_renewable": {
+          "description": "Operator declaration that the electricity supplied is 100% renewable.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "identity": {
           "description": "The OCPP identity it connects under.",
           "type": "string"
@@ -426,6 +453,15 @@
           "pattern": "^\\d+(\\.\\d+)?$",
           "default": null
         },
+        "occupancy_per_minute": {
+          "description": "Gross fee per minute connected while the vehicle is not requesting energy.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^\\d+(\\.\\d+)?$",
+          "default": null
+        },
         "session_fee": {
           "description": "Gross price per session, when the tariff has one.",
           "type": [
@@ -451,6 +487,108 @@
         "time_zone",
         "energy",
         "vat"
+      ]
+    },
+    "PublicPlan": {
+      "description": "One retail product. A public code denotes identical fees at all of its eligible points.",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "description": "Public provider party id.",
+          "type": "string"
+        },
+        "code": {
+          "description": "Stable plan identifier.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Public name printed on the contract.",
+          "type": "string"
+        },
+        "uniform_public_terms": {
+          "description": "Provider approval that every contract with this code has these terms.",
+          "type": "boolean"
+        },
+        "points": {
+          "description": "Opted-in points whose publicly stated price the retail plan passes through.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "schedules": {
+          "description": "Explicit immutable fee versions.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PublicSchedule"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "code",
+        "name",
+        "uniform_public_terms",
+        "points",
+        "schedules"
+      ]
+    },
+    "PublicSchedule": {
+      "description": "A half-open interval of public provider terms. All amounts include VAT.",
+      "type": "object",
+      "properties": {
+        "version": {
+          "description": "Immutable issuer-assigned version.",
+          "type": "string"
+        },
+        "from": {
+          "description": "First instant included.",
+          "type": "string"
+        },
+        "until": {
+          "description": "First instant excluded, when known.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "currency": {
+          "description": "Currency of all charges.",
+          "type": "string"
+        },
+        "vat": {
+          "description": "Percentage VAT included in all fees.",
+          "type": "string"
+        },
+        "energy": {
+          "description": "Gross fee per kWh.",
+          "type": "string"
+        },
+        "session": {
+          "description": "Gross fee per session.",
+          "type": "string"
+        },
+        "roaming": {
+          "description": "Gross e-roaming charge per session.",
+          "type": "string"
+        },
+        "monthly": {
+          "description": "Gross recurring EUR per month, explicitly zero for no subscription.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "from",
+        "currency",
+        "vat",
+        "energy",
+        "session",
+        "roaming",
+        "monthly"
       ]
     },
     "Partner": {
@@ -766,6 +904,16 @@
       "description": "One token on a seeded contract.",
       "type": "object",
       "properties": {
+        "visual_number": {
+          "description": "Optional printed number for an operator's exact card lookup (1–64 characters).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 64,
+          "default": null
+        },
         "uid": {
           "description": "The uid the card or app presents.",
           "type": "string"
@@ -791,17 +939,43 @@
         "whitelist"
       ]
     },
+    "CardStock": {
+      "description": "An unissued physical card. Staff enter the inventory code printed on its sleeve.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Case-sensitive inventory code, unique within this estate.",
+          "type": "string",
+          "pattern": "^[A-Z0-9][A-Z0-9-]{0,31}$"
+        },
+        "uid": {
+          "description": "Canonical uppercase hexadecimal RFID UID (4, 7 or 10 bytes).",
+          "type": "string",
+          "pattern": "^([A-F0-9]{8}|[A-F0-9]{14}|[A-F0-9]{20})$"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "uid"
+      ]
+    },
     "Operator": {
-      "description": "`[[operators]]` — who may read the read models.",
+      "description": "`[[operators]]` — a named credential for estate reads and optional writes.",
       "type": "object",
       "properties": {
         "name": {
-          "description": "Who this is: the name every journal record and log line this operator\ncauses carries (`operator:<name>`), 1 to 64 of `[A-Za-z0-9*._:=+|@ -]`.",
+          "description": "Who this is: the name every journal record and log line this operator\ncauses carries (`operator:<name>`), 1 to 64 of `[A-Za-z0-9*._:=+|@ -]`\nwith no surrounding spaces.",
           "type": "string"
         },
         "token_env": {
           "description": "The variable holding the bearer token.",
           "$ref": "#/$defs/EnvRef"
+        },
+        "write": {
+          "description": "Permit named operator actions. Omit for read-only access.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -868,12 +1042,19 @@
       "description": "`billd` and `roamd` are reached at their `[services]` addresses; `csmsd`'s\nshell is named here because no other daemon calls it.",
       "type": "object",
       "properties": {
+        "poid": {
+          "description": "Optional POI publication service for the operator delivery view.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "csmsd": {
           "description": "`csmsd`'s shell base URL (its read model, not its OCPP socket).",
           "type": "string"
         },
         "token_env": {
-          "description": "The variable holding the operator token `deskd` reads the read models\nwith — one of the `[[operators]]` tokens.",
+          "description": "The variable holding the operator token `deskd` reads the read models\nwith — a read-only `[[operators]]` credential.",
           "$ref": "#/$defs/EnvRef"
         },
         "time_zone": {
@@ -1028,9 +1209,20 @@
       ]
     },
     "Mobilithek": {
-      "description": "`[mobilithek]` — read by `poid`: the national access point's publication\nthe static table is posted to `[AFIR Art. 20(2)]` (spec 016).",
+      "description": "`[mobilithek]` configures the separate static and dynamic offers that\n`poid` delivers to the national access point. See `[AFIR Art. 20(2)]`.",
       "type": "object",
       "properties": {
+        "status_max_age_secs": {
+          "description": "Maximum age of a connector report before the feed marks availability unknown.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 86400
+        },
+        "dynamic_url": {
+          "description": "Push URL of the separately registered dynamic offer, linked to the static offer.",
+          "type": "string"
+        },
         "url": {
           "description": "The publication's push address the Mobilithek issued — `https://`,\nor `http://` on loopback for a mock.",
           "type": "string"
@@ -1054,6 +1246,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "dynamic_url",
         "url"
       ]
     }

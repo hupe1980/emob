@@ -136,8 +136,6 @@ pub struct NativeStation {
     version: Version,
     meter: VirtualStation,
     answers: Answers,
-    /// Sessions played, for a transaction id no earlier session had.
-    sessions: std::sync::atomic::AtomicU32,
 }
 
 /// One session as the station played it.
@@ -283,13 +281,12 @@ impl NativeStation {
 
     #[allow(clippy::too_many_lines)] // One session, in the order a station plays it.
     fn play(&self, card: &str, ev: Ev, minutes: u32, fault: Fault) -> Result<Played, String> {
-        let own_id = format!(
-            "ET-{:x}-{}",
-            time::OffsetDateTime::now_utc().unix_timestamp(),
-            self.sessions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                .saturating_add(1)
-        );
+        // OCPP 2.x stations assign their transaction IDs. Reconnecting twice in
+        // one second must still create two distinct sessions at the CSMS.
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce)
+            .map_err(|e| format!("generating station transaction ID: {e}"))?;
+        let own_id = format!("ET-{}", hex::encode(nonce));
         let start =
             time::OffsetDateTime::now_utc() - time::Duration::minutes(i64::from(minutes) + 1);
         let start = start.replace_nanosecond(0).unwrap_or(start);
@@ -526,7 +523,6 @@ impl NativeStation {
             version,
             meter,
             answers,
-            sessions: std::sync::atomic::AtomicU32::new(0),
         };
         let boot = match version {
             Version::V1_6 => json!({

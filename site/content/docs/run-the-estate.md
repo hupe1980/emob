@@ -7,12 +7,7 @@ description = "Run the emob EV charging estate: just demo, one estate.toml, OCPP
 nav = "Run the estate"
 +++
 
-`just demo` runs the whole emob estate on your machine in one command: every
-daemon, three simulated charge points on OCPP 1.6, 2.0.1 and 2.1 over TLS, an
-OCPI roaming partner and a seeded morning of charging sessions. This page shows
-what it starts, the operator page **Heute** and the **driver receipt** it
-prints links to, and how to run the same daemons yourself from one
-`estate.toml`. ✅ Everything here is built in release 0.3.
+The standalone demo starts five services, three simulated charging stations and a loopback OCPI peer. Its seeded morning includes a signed meter record that billing refuses. You can investigate that refusal with the same operator desk and receipt pages used on a persistent estate. Use `just run` to run all nine services from one estate file.
 
 ## Try it: `just demo`
 
@@ -63,7 +58,48 @@ a token, key, password, card UID or receipt token. `emob demo` starts each daemo
 `daemon::run` function its own `main` calls — configured, not forked — so the
 demo exercises the code you deploy.
 
-### Without Rust: the `emob` image
+### Investigate a refused session
+
+1. Open **Heute** from the demo output. In the refused row, select the transaction. **Vorgangsnachweis** shows the station, the billing decision and the observations the station supplied. Select English on Heute before opening the row to read the English view.
+2. Follow the station link to its asset card or open the driver's receipt. A session with missing messages shows the gap. A station may decline a card before a session exists.
+3. Open the card action to see the provider's current card status. To look up the sample separately, use the private lookup form and choose the printed card number `MOB-1001`. The result shows the same emob reference. A current block and a historical billing refusal answer different questions.
+
+4. For a transaction someone reported by phone, search its exact reference. When several stations have used it, choose by station and decision time.
+
+<figure class="shot">
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/session-evidence-dark.webp"><img src="../../img/session-evidence-light.webp" width="1280" height="800" loading="lazy" alt="The refused demo session, its station, the signature finding and the timeline of recorded observations"></picture>
+<figcaption>The station supplies the transaction times. The CSMS records when it makes the billing decision.</figcaption>
+</figure>
+
+The timeline and search work with JavaScript disabled. Printing the timeline preserves the station, decision and recorded times. A station's evidence stays readable if the operator later retires it.
+
+### Block a lost card and reverse the decision
+
+1. Sign in with a named operator whose estate entry grants `write = true`. Open the exact card from the investigation or search for the example printed number `MOB-1001` and open its result. A read-only operator can see its state and recent history.
+2. Select **Reported lost** and choose **Review block**. Check the card label, reason, expiry and effect. Going back leaves the card as it was.
+3. Choose **Confirm block**. The provider records the reason, operator and time. The next online authorization for that card is refused. Offline stations may still accept a cached authorization, and a charge already in progress continues.
+4. When the card is found, select **Card recovered**, review and confirm the unblock. The provider resumes checking contract standing and credit on the next request. The card history shows the ten most recent actions, newest first. If confirmation times out, reopen history and match the operation reference before trying again.
+
+<figure class="shot">
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/card-review-dark.webp"><img src="../../img/card-review-light.webp" width="1280" height="800" loading="lazy" alt="Review block shows the card, reason, expiry and effect before the operator confirms"></picture>
+<figcaption>The provider applies the change only after confirmation.</figcaption>
+</figure>
+
+### Enrol a driver and issue a card
+
+1. In **Heute**, open **Driver contracts** with the example writer. Choose the **standard** offer at the demo point and enter the sleeve code `STOCK-1004`. The persistent example and the disposable demo each include one unissued card with that code.
+2. Select **Review contract**. Check the charging point, provider, gross component prices, monthly fee, validity and offer reference. The card is still unissued at this stage.
+3. Select **Confirm enrolment**. Keep the agreement reference from the receipt. It reopens the original terms, eMAID, masked card label and issuing operator. If the provider’s reply is lost, use the same operation or reopen the agreement.
+4. The new card can now start an online charge at the selected point while that offer remains current. A different point or a withdrawn offer refuses the card. The existing card controls let a writer block it later. A read-only operator can use **Open agreement**.
+
+The agreement receipt documents card issuance and the agreed price. The driver's charging receipt reports the station-side meter and price evidence. To replay the issuance and charge using simulated equipment, run `just e2e`. To provision your own unissued card, add a unique uppercase inventory code and its hexadecimal RFID UID to `[[card_stock]]`. Protect the estate file containing those identifiers.
+
+<figure class="shot">
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/enrolment-review-dark.webp"><img src="../../img/enrolment-review-light.webp" width="1280" height="800" loading="lazy" alt="Driver contract review showing the selected charging point, gross price components and provider terms"></picture>
+<figcaption>The price reference identifies the exact offer staff reviewed.</figcaption>
+</figure>
+
+## Without Rust: the `emob` image
 
 On a machine without `cargo`, `just demo` runs the released
 `ghcr.io/hupe1980/emob` image instead, on the host's network (the demo binds
@@ -114,6 +150,7 @@ flowchart LR
     CSMS & BILL -.->|"CloudEvents"| SUB["your subscribers"]
     ROAM <-->|"OCPI 2.3.0"| P["roaming partner"]
     DESK["deskd · Heute"] -.->|"read models"| CSMS & BILL & ROAM
+    DESK -->|"named card decisions"| EMP
     DRV["driver's phone"] -->|"/r/token"| CSMS
 ```
 
@@ -156,10 +193,11 @@ complete keys, show what each means and flag a typo as you type.
 | `[[tariffs]]` | `csmsd`, `tarifd` | the tariff that rates and the one that is published, built by one function |
 | `[[partners]]`, `[billing]` | `billd`, `roamd` | roaming partners, their Token A, billing address, invoice `specification`, `buyer_reference` and `mandate`; the invoice series, seller, `iban`, `creditor_id`, `contact`, `public_url` and `[billing.delivery]` |
 | `[[contracts]]` | `empd` | contracts and their tokens, seeded once |
-| `[[operators]]` | all | who may read the read models and sign in to Heute; `name` is the actor every fact they cause carries |
+| `[[card_stock]]` | `empd` | unissued RFID inventory. Enrolling one creates the agreement and activates the card together. |
+| `[[operators]]` | all | named accounts that may read the desk. Set `write = true` to grant card and station actions. Every resulting operator fact records the account name |
 | `[csms]` | `csmsd` | TLS certificate, key and client CA; `max_connections`, `messages_per_minute`, `idle_timeout_secs` |
 | `[receipts]` | `csmsd` | `public_url`, where a driver's phone reaches the receipts |
-| `[desk]` | `deskd` | `csmsd`'s address, the operator token variable, the page's time zone |
+| `[desk]` | `deskd` | the CSMS address, the dedicated read-only token variable and the page’s time zone |
 | `[witness]` | `deskd` | optional `keys = { <daemon> = "<verifier key>" }`; a daemon not named is pinned at first sight |
 | `[services]`, `[roaming]` | several | the daemons' addresses, the secrets' variable names, retry timing; OCPI `public_url` and `reach_back_allow` |
 
@@ -170,7 +208,8 @@ variable:
 |---|---|
 | `EMOB_WEBHOOK_SECRET` | `whsec_<base64>`: signs the deliveries between daemons |
 | `EMOB_SERVICE_TOKEN` | the bearer `csmsd` presents to `empd` |
-| `EMOB_OPERATOR_TOKEN` | the operators' bearer for the read models, and Heute's password |
+| `EMOB_OPERATOR_TOKEN` | the example named writer’s password for Heute and bearer for authorized owner APIs |
+| `EMOB_DESK_READ_TOKEN` | the dedicated read-only credential for background queries |
 | `EMOB_PARTNER_DE_MSP_TOKEN_A` | the Token A the example partner registers with |
 | `CSMSD_DATA_KEY`, `ROAMD_DATA_KEY`, `EMPD_DATA_KEY`, `BILLD_DATA_KEY` | 32 random bytes, base64: each daemon's data key |
 | `CSMSD_SIGNING_KEY`, `ROAMD_SIGNING_KEY`, `EMPD_SIGNING_KEY`, `BILLD_SIGNING_KEY`, `POID_SIGNING_KEY` | 32 random bytes, base64: the Ed25519 seed that signs where each journal ends |
@@ -409,7 +448,7 @@ sessions with their receipts.
 A daemon that does not answer is named in its section with since when, and the
 rest of the page renders. Sign in with HTTP Basic: any user name, an
 `[[operators]]` token as the password. The page works without JavaScript; a
-small script refreshes it while it is visible. Run it on its own with `just
+small script refreshes it while it is visible. Keep the example’s HTTP desk on loopback. A remote browser needs HTTPS because Basic carries the credential on each request. Keep the public Host and browser Fetch Metadata headers intact through a reverse proxy. [HTTP Basic authentication](https://www.rfc-editor.org/rfc/rfc7617#section-4) Run it on its own with `just
 desk` (or `cargo run -p deskd`) on `127.0.0.1:9587`.
 
 ## The price page
@@ -451,8 +490,7 @@ sticker.svg` prints the code for a sign.
 </div>
 
 German calibration law lets an operator bill a measured value only if the
-customer can check it `[MessEG §33]`. Every session `csmsd` settles or refuses
-therefore has a receipt at `<public_url>/r/<token>`, readable on a phone:
+customer can check it `[MessEG §33]`. With receipts enabled, the driver opens a session’s receipt at `<public_url>/r/<token>`. If a station reuses a closed transaction ID, the original link keeps its evidence. An investigation without its own receipt shows that it is unavailable. The receipt includes the following information.
 
 1. **The verdict first** — *Gemessen, signiert, geprüft* (measured, signed,
    verified) or *Nicht abgerechnet* (not billed) with the paragraph that refused
@@ -610,7 +648,7 @@ just run                 # checks the estate, starts all nine, waits until each 
 
 `just run` prints where Heute is (user `demo operator`, password
 `EMOB_OPERATOR_TOKEN` from `.env`), writes each daemon's log to `var/`, and
-stops them all on Ctrl-C. The read models answer the same token:
+stops them all on Ctrl-C. The desk reads with its own `EMOB_DESK_READ_TOKEN`. With the example writer you can query the read models directly:
 
 ```console
 curl -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" http://127.0.0.1:9001/v1/csmsd/today
@@ -634,10 +672,34 @@ build provenance.
 
 ## What the daemons do not do
 
-⏳ The OICP (Hubject) push client, the Mobilithek's dynamic delta, SEPA runs
+⏳ The OICP (Hubject) push client, SEPA runs
 from `billd`, the OCPI tokens endpoint, and the SHIP/EEBUS session for § 14a. The
 libraries do each of these and are tested; no daemon calls them.
 
 **Related:** [Getting started](@/docs/getting-started.md) ·
 [The Eichrecht chain](@/docs/eichrecht.md) · [OCPP](@/docs/ocpp.md) ·
 [Architecture](@/docs/architecture.md)
+
+## Rehearse a recovery
+
+Rehearse a cold restore of the standalone estate with the included synthetic records and local receiver. Use physical directory paths for the inputs and the new report. On macOS, use `pwd -P` inside the report directory to resolve the system’s `/var` or `/tmp` symlink. The drill compares the five signed journal heads belonging to csmsd, billd, roamd, empd and poid with a separately held witness history. It then checks a settled session, a refusal, the issued invoice, two card decisions, a roaming consignment and the accepted facility versions. Finally, a receiver that already booked a delivery receives the original event twice inside the isolated worker. Its financial effect must stay at one.
+
+Run from a checkout with Python 3 and a local Linux Docker engine connected by Unix socket, including Docker Desktop on macOS. The launcher refuses remote Docker contexts. Use one CLI image for both capture and recovery. The build digest is part of the cut. The temporary directory below contains private synthetic material and the report is created exclusively.
+
+```bash
+docker build --build-arg DAEMON=emob-cli --build-arg BIN=emob -t emob-recovery:pilot .
+drill_dir=$(mktemp -d)
+drill_dir=$(cd "$drill_dir" && pwd -P)
+docker run --rm --read-only --network=none --user "$(id -u):$(id -g)" \
+  --mount "type=bind,src=$drill_dir,dst=/fixture" \
+  emob-recovery:pilot recovery-fixture /fixture/capture
+python3 deploy/recovery-drill.py --image emob-recovery:pilot \
+  --copy "$drill_dir/capture/copy" --evidence "$drill_dir/capture/evidence" \
+  --keys "$drill_dir/capture/keys" --report "$drill_dir/run.json"
+```
+
+An installed host CLI accepts the same arguments with `emob recovery-drill`. It includes the launcher. Use `--scratch` to supply a fresh private scratch directory, or let the launcher allocate a disposable memory filesystem.
+
+The fixture writer stops all five writers before capturing the cut. For the custody rehearsal, place the copy, independent witness and expectations, and escrowed keys in separately controlled locations and supply their real directory paths to the launcher. Three sibling folders on a single disk only exercise the mechanics. The launcher mounts inputs read-only and uses a private, network-isolated container. The replay and both retries run entirely in memory. A receipt-link key, invoice-page key, external partner state, station TLS configuration and access to real card or payment systems are outside the five-ledger result.
+
+Exit 0 means every check passed, 1 means a contradiction or unsafe input, and 2 means evidence, isolation or a completed run is missing. A fresh output path is required for each attempt. Share only the redacted report. It records the measured duration and the witnessed cutoff. To set recovery objectives for an installation, measure restore time on its hardware using a representative backup and record the age of its last independently held witness.

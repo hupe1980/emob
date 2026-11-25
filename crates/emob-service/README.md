@@ -217,9 +217,13 @@ others a refusal to start.
 
 ### Operator access and inter-daemon deliveries
 
-- `authority::Operators` is the estate's operator bearer tokens, compared in
-  constant time; an empty set admits nobody. `serve::operator_only` puts a
-  router behind it — every `GET /v1/<daemon>` read model sits there.
+- `serve::operator_only` accepts a named estate credential for private reads.
+  `serve::operator_write` also requires `write = true` on that operator. The
+  handler receives the authenticated actor for attribution. An unknown bearer
+  receives HTTP 401 and a read-only bearer attempting a write receives HTTP 403.
+- The desk's background requests use a separate read-only credential. The
+  station authorization service bearer must differ from every operator bearer.
+  Each operator needs a unique name and secret.
 - `webhook::receive` checks a delivery's headers, its 300-second freshness and
   its Standard-Webhooks signature, and answers the delivery id or a
   `webhook::Refusal`. `serve::read_bounded` caps a request body before it is
@@ -379,7 +383,7 @@ holds a process's lines so a test (and `emob demo --check`) can search them.
 | `estate::load`, `estate::from_str`, `estate::path`, `EnvRef`, `Env`, `TariffSpec::to_tariff`, `estate::webhook_secret`, `estate::operator_tokens` | the one estate file and the variables it names |
 | `InvoiceSpecification`, `InvoiceSyntax`, `InvoiceDelivery`, `InvoiceContact`, `MandateSeed` | the estate's invoicing keys |
 | `vault::DataKey`, `vault::Digest`, `vault::Sealed`, `vault::Sealing` | data keys, keyed digests, sealed records and journals |
-| `Operators`, `serve::operator_only`, `serve::read_bounded`, `Server::serve_on` | operator read models, bounded bodies, a caller-bound listener |
+| `Operators`, `serve::operator_only`, `serve::operator_write`, `serve::read_bounded`, `Server::serve_on` | operator read models, bounded bodies, a caller-bound listener |
 | `webhook::receive`, `webhook::Refusal` | a signed, fresh inter-daemon delivery, or why not |
 | `ui::page`, `ui::operator_page`, `ui::script`, `ui::hardened`, `Lang` | server-rendered pages |
 | `policy::Gate`, `policy::Policies` | Cedar policies (feature `policy`) |

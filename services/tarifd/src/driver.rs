@@ -6,10 +6,9 @@
 //! price. So each version is one JSON document at a stable, versioned
 //! address:
 //!
-//! - `GET /v1/driver-tariffs/{id}`: the version in force now; cacheable for a
-//!   minute.
-//! - `GET /v1/driver-tariffs/{id}/{version}`: that version for ever, because a
-//!   contract sold on it still refers to it.
+//! - `GET /v1/driver-tariffs/{id}`: the version in force at request time.
+//! - `GET /v1/driver-tariffs/{id}/{version}`: that version while it is retained in the history. A
+//!   contract sold on it refers to its exact fingerprint.
 //!
 //! Every figure in it is `emob-tariff`'s: the components with their unit and
 //! basis, the lines a driver must be shown, worked totals rated by the
@@ -154,30 +153,36 @@ fn lock<T>(held: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn answer(tariff: &Tariff, cache: &'static str) -> Response {
-    let mut response = Json(document(tariff)).into_response();
+async fn fresh(mut response: Response) -> Response {
     response
         .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
 }
 
 /// The public routes. Nothing in them is personal; an unknown id or version
 /// is an empty 404.
 pub fn router(service: Arc<Mutex<Tarifd>>) -> axum::Router {
+    router_with_clock(service, emob_service::system_clock())
+}
+
+/// Serve seller reads on the estate clock, including simulated tariff cutovers.
+pub fn router_with_clock(service: Arc<Mutex<Tarifd>>, clock: emob_service::Clock) -> axum::Router {
     axum::Router::new()
         .route(
             "/v1/driver-tariffs/{id}",
             get(
-                |State(service): State<Arc<Mutex<Tarifd>>>, Path(id): Path<String>| async move {
-                    let now = time::OffsetDateTime::now_utc();
-                    let held = lock(&service);
-                    match held
-                        .history(&id)
-                        .and_then(|history| history.in_force_at(now))
-                    {
-                        Some(tariff) => answer(tariff, "public, max-age=60"),
-                        None => StatusCode::NOT_FOUND.into_response(),
+                move |State(service): State<Arc<Mutex<Tarifd>>>, Path(id): Path<String>| {
+                    let now = clock();
+                    async move {
+                        let held = lock(&service);
+                        match held
+                            .history(&id)
+                            .and_then(|history| history.in_force_at(now))
+                        {
+                            Some(tariff) => Json(document(tariff)).into_response(),
+                            None => StatusCode::NOT_FOUND.into_response(),
+                        }
                     }
                 },
             ),
@@ -192,13 +197,13 @@ pub fn router(service: Arc<Mutex<Tarifd>>) -> axum::Router {
                         .history(&id)
                         .and_then(|history| find(history, &version))
                     {
-                        // A version never changes.
-                        Some(tariff) => answer(tariff, "public, max-age=31536000, immutable"),
+                        Some(tariff) => Json(document(tariff)).into_response(),
                         None => StatusCode::NOT_FOUND.into_response(),
                     }
                 },
             ),
         )
+        .layer(axum::middleware::map_response(fresh))
         .with_state(service)
 }
 

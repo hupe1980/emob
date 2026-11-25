@@ -30,6 +30,9 @@ pub struct Estate {
     pub meter_keys: Vec<MeterKey>,
     /// The tariffs stations name.
     pub tariffs: Vec<TariffSpec>,
+    /// Explicitly approved public provider plans (AFIR Art. 5(5)).
+    #[serde(default)]
+    pub public_plans: Vec<emob_service::estate::PublicPlan>,
     /// Who may read the read model.
     #[serde(default)]
     pub operators: Vec<Operator>,

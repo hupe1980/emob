@@ -276,11 +276,15 @@ pub fn router<J: Journal>(shared: Shared<J>, head: Latest, operators: Operators)
         .route("/v1/billd/today", get(today::<J>))
         .with_state(shared.clone())
         .merge(emob_service::head::router("billd", head));
+    delivery_router(shared).merge(emob_service::serve::operator_only(view, operators))
+}
+
+/// The signed delivery endpoint alone, also exercised in process during recovery.
+pub fn delivery_router<J: Journal>(shared: Shared<J>) -> axum::Router {
     axum::Router::new()
         .route(
             "/v1/deliveries",
             post(deliveries::<J>).layer(DefaultBodyLimit::disable()),
         )
         .with_state(shared)
-        .merge(emob_service::serve::operator_only(view, operators))
 }

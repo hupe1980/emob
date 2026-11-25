@@ -50,8 +50,10 @@ pub const BLOCKED_CARD: &str = "04DEADBEEF0001";
 /// The variable names the estate refers to. Their values live only in the
 /// demo's process.
 pub mod env {
-    /// The operator page's and read models' token.
+    /// The named operator's write credential.
     pub const OPERATOR: &str = "EMOB_OPERATOR_TOKEN";
+    /// The desk's background read credential.
+    pub const DESK_READ: &str = "EMOB_DESK_READ_TOKEN";
     /// Service-to-service bearer.
     pub const SERVICE: &str = "EMOB_SERVICE_TOKEN";
     /// The deliveries' webhook secret.
@@ -124,7 +126,7 @@ pub fn text(
     );
     for ((point, meter), hash) in CHARGE_POINTS.iter().zip(&meters).zip(hashes) {
         out.push_str(&format!(
-            "[[stations]]\nidentity = \"{identity}\"\nocpp = \"{ocpp}\"\nsecurity_profile = 2\n\
+            "[[stations]]\npublicly_accessible = true\nidentity = \"{identity}\"\nocpp = \"{ocpp}\"\nsecurity_profile = 2\n\
              password_hash = \"{hash}\"\nevse = \"{evse}\"\nrated_power_kw = \"{power}\"\n\
              tariff = \"ad-hoc\"\nconnector = \"{connector}\"\n{display}{price}\
              location = {{ id = \"LOC-MUS-1\", name = \"Betriebshof Musterstadt\", \
@@ -183,6 +185,23 @@ session_fee = "0.50"
 vat = "19"
 valid_from = "{price_change}"
 
+[[public_plans]]
+provider = "DE*MSP"
+code = "standard"
+name = "MSP Standard"
+uniform_public_terms = true
+points = ["DE*MUS*E00001"]
+
+[[public_plans.schedules]]
+version = "v1"
+from = "2020-01-01T00:00:00Z"
+currency = "EUR"
+vat = "19"
+energy = "0.11"
+session = "0"
+roaming = "0.30"
+monthly = "0"
+
 [[partners]]
 party = "DE*MSP"
 token_a_env = "{token_a}"
@@ -200,17 +219,27 @@ seller = {{ name = "Stadtwerke Musterstadt eMobility GmbH", street = "Am Stadtwe
 creditor_id = "DE98ZZZ09999999999"
 contact = {{ name = "Rechnungswesen", phone = "+49 3601 4711-0", email = "rechnung@stadtwerke-musterstadt.example" }}
 
+# Unissued RFID for the standalone driver-enrolment walkthrough.
+[[card_stock]]
+code = "STOCK-1004"
+uid = "04AB0000000004"
+
 [[contracts]]
 id = "DE-MSP-C00000001-W"
 from = "2026-01-01"
 tokens = [
-  {{ uid = "{good}", type = "RFID", whitelist = "ALLOWED" }},
-  {{ uid = "{blocked}", type = "RFID", whitelist = "ALLOWED", blocked = true }},
+  {{ uid = "{good}", visual_number = "MOB-1001", type = "RFID", whitelist = "ALLOWED" }},
+  {{ uid = "{blocked}", visual_number = "MOB-1003", type = "RFID", whitelist = "ALLOWED", blocked = true }},
 ]
 
 [[operators]]
 name = "demo operator"
 token_env = "{operator}"
+write = true
+
+[[operators]]
+name = "desk reader"
+token_env = "{desk_read}"
 
 [csms]
 tls_cert = "{cert}"
@@ -222,7 +251,7 @@ idle_timeout_secs = 900
 
 [desk]
 csmsd = "http://{csmsd}"
-token_env = "{operator}"
+token_env = "{desk_read}"
 time_zone = "Europe/Berlin"
 
 [receipts]
@@ -251,6 +280,7 @@ reach_back_allow = ["127.0.0.1", "::1", "localhost"]
         good = GOOD_CARD,
         blocked = BLOCKED_CARD,
         operator = env::OPERATOR,
+        desk_read = env::DESK_READ,
         webhook = env::WEBHOOK,
         service = env::SERVICE,
         cert = tls("server.pem"),

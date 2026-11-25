@@ -33,7 +33,7 @@ members = [
 exclude = ["emobtest"]
 
 [workspace.package]
-version      = "0.6.1"
+version      = "0.7.0"
 authors      = ["hupe1980"]
 edition      = "2024"
 license      = "MIT OR Apache-2.0"
@@ -44,161 +44,55 @@ rust-version = "1.94"
 # ── External ────────────────────────────────────────────────────────────────
 thiserror  = "2"
 serde      = { version = "1", features = ["derive"] }
-# `preserve_order` so a re-emitted document does not reorder what a peer sent.
-# Never `arbitrary_precision`: it changes how `serde_json` presents every number
-# to every deserialiser in the build, so a type with a numeric visitor sees a
-# map and a partner's OCPI document stops parsing from bytes (D331).
+# Preserve key order on replay. OCPI decimal visitors require native number tokens.
 serde_json = { version = "1", features = ["preserve_order"] }
 time       = { version = "0.3", features = ["std", "macros", "parsing", "formatting"] }
 
-# A tariff's "0.30 from 22:00" is local civil time at the charge point, and an
-# offset is not a zone: judged against whatever offset a timestamp carried, the
-# same session costs a different amount (D175). `jiff` resolves an instant into a
-# named IANA zone and does nothing else here. `tzdb-bundle-always` compiles the
-# database in; the platform and zoneinfo lookups that would read the filesystem
-# or `TZ` are off, so `just purity` holds and `Cargo.lock` pins what a replay
-# replays against.
+# Pin IANA zone data for reproducible local tariff calculations without host filesystem access.
 jiff       = { version = "1", default-features = false, features = ["std", "tzdb-bundle-always"] }
 anyhow     = "1"
 
-# The estate's JSON Schema, derived from the section types so the file an
-# editor checks and the file a daemon reads cannot differ (spec 012). Only
-# `emob-service`'s `schema` feature takes it.
-# Holds the published event schemas to what the daemons send (tests only).
+# Validate published event schemas against daemon payloads in tests.
 jsonschema = { version = "0.61", default-features = false }
 schemars   = { version = "1", default-features = false, features = ["std", "derive"] }
 
-# DATEX II v3 for the Mobilithek's AFIR Recharging profile, in `emob-poi`. It
-# spells the profile's JSON and refuses what its schemas would reject; prices
-# stay decimal text, so no float carries money. Its one dependency is
-# `quick-xml`, and it does no I/O of its own.
+# DATEX II wire types for the Mobilithek recharging profile.
 datex2     = "0.3"
 
-# Every quantity in this workspace either *is* money or *becomes* money. A
-# binary float cannot represent 0.10, and `10.1 - 0.1` is 10.000000000000002 —
-# which is precisely the subtraction OCMF prescribes for a session's energy.
-# `cargo xtask no-floats` fails the build on an `f32`/`f64` in any public API.
+# Preserve meter precision and round once at the currency boundary.
 rust_decimal = { version = "1", features = ["macros", "serde-with-str"] }
 
-# ── The OCPP wire ───────────────────────────────────────────────────────────
-# Only `emob-ocpp` and `csmsd` see these types. The seam's own vocabulary has no
-# OCPP in it, deliberately: OCPP's model of a meter value is the wrong model for
-# money, and a crate that imported it in order to convert away from it would
-# have the wrong types in scope exactly where it matters.
-#
-# Every OCPP `number` is an exact decimal rather than an `f64`, and `metering`
-# reads the signed meter record — the value §33 MessEG lets a customer check —
-# out of both the 2.x field and the 1.6 `SignedData` string that holds the same
-# object. Every verdict type is `#[must_use]`, which is the compiler reaching
-# across a repository boundary that no guard here can (D306, D327).
+# Station protocol types and signed meter values for OCPP 1.6 and 2.x.
 ocpp-kit = { version = "0.8", default-features = false }
 
-# ── The OCPI wire ───────────────────────────────────────────────────────────
-# The wire *model* for `emob-roam`; `roamd` adds `client` on top, because the
-# socket is a daemon's and the crossing is a crate's.
-#
-# `convert` is not an extra: a partner on 2.2.1 is the ordinary case, and the
-# point of the crossing is that the downgrade's cost is reported rather than
-# decided silently. `payments` is deliberately absent — a pre-authorisation hold
-# is the acquirer's, and `Tariff.preauthorize_amount` decides nothing
-# `emob-tariff` computes.
+# Enable explicit version conversion and exact JSON prices. The daemon adds transport.
 ocpi-kit = { version = "0.5", default-features = false, features = ["v2_3_0", "v2_2_1", "convert", "exact-json"] }
 
-# ── The OICP wire ───────────────────────────────────────────────────────────
-# The wire model only: `cpo` and `emp` for the crossing, `eichrecht` for the CDR
-# pre-flight Hubject and an EMP each run before a record is billed. The
-# transport is a broker behind mutual TLS and belongs to the daemon.
-#
-# Every OICP `number` is an exact decimal here, which is what lets
-# `ConsumedEnergy` be the difference between two register readings rather than
-# nearly it — the promise `no-floats` makes on this side of the seam.
+# Hubject CPO and EMP wire models with Eichrecht CDR checks.
 oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp", "eichrecht"] }
 
-# ── The vehicle wire ────────────────────────────────────────────────────────
-# Two consumers, and they take different things.
-#
-# `emob-core` takes it as a **dev**-dependency and nothing more: that crate
-# decides money and carries no protocol implementation in its tree, but the two
-# name the same generations, and a `FromStr` that refuses a bare `iso15118` is
-# the spelling this workspace has to share. `the_kits_agree.rs` asserts it.
-#
-# `emob-pnc` takes it for real, with **`pnc` and nothing else**: the Annex F
-# certificate profiles and the path validation behind them. That feature pulls
-# no cryptography — the curve and the hash are traits a caller implements — which
-# is what lets ISO 15118 chain validation live in a domain crate without a second
-# RustCrypto generation beside `ocmf`'s (D304). The EXI codec, the message sets
-# and the session engines are a station's and a vehicle's; nothing speaks to a
-# car.
+# The certificate validator enables pnc. Message codecs and station runtimes stay optional.
 iso15118 = { version = "0.9", default-features = false }
 
-# ── The § 14a wire ──────────────────────────────────────────────────────────
-# SHIP, SPINE and the use-case descriptors, **without `runtime`**: no tokio, no
-# rustls, no mDNS. `emob-eebus` is a domain crate and `cargo xtask check-graph`
-# is what keeps it one — the sockets belong to `sited`.
-#
-# What this workspace takes is the *protocol*. The **rule** — what a site draws
-# while nobody is telling it anything — is `emob-smart`'s, read from
-# `[LPC §2.3.2]` and decided there (D302).
+# SHIP and SPINE types for site controls. Domain crates use the protocol without its network runtime.
 eebus = { version = "0.13", default-features = false, features = ["std"] }
 
-# ── The money leaves the platform ───────────────────────────────────────────
-# Only `emob-billing` sees these. Three standards this workspace has no business
-# re-reading — EN 16931 and its two mandatory syntaxes, ISO 20022's SEPA
-# messages, and double-entry bookkeeping — each already owned by a sibling crate
-# that carries the rules as well as the shapes.
-#
-# `en16931` is taken **without** its `billing` adapter: the arithmetic that
-# decides what a session costs is `emob-tariff`'s, and a second engine that could
-# produce a different number for the same session is the drift this workspace
-# exists to make unrepresentable. `time` rather than `chrono`, because every
-# instant here is a `time::OffsetDateTime`.
+# Use emob-tariff for rating and EN 16931 for invoice validation.
 en16931 = { version = "0.10", default-features = false, features = ["time"] }
 
-# The syntax half: **both** the formats CEN/TS 16931-2 makes mandatory. UBL is
-# what the German platforms take by default and CII is what a partner may
-# require instead — and every ZUGFeRD payload is a CII document, so the one
-# binding serves the next consumer too. `zugferd` itself is the hybrid PDF and
-# stays off: `en16931-formats` reads those and does not write them, and `lopdf`
-# takes the graph from thirteen crates to fifty-seven.
+# Support both mandatory invoice syntaxes, UBL and CII.
 en16931-formats = { version = "0.10", default-features = false, features = ["ubl", "cii"] }
 
-# pain.008 for the collection, and the IBAN/BIC/Creditor-Id validation that
-# stops an unpayable instruction being written in the first place. Its `time`
-# feature so a date crosses as a date.
-#
-# The two values a replay cannot tolerate — the collection date and the message
-# id's timestamp — are constructor arguments rather than defaults, because a
-# domain crate that reads a clock cannot be replayed and a collection file that
-# differs between two runs of one billing job is a file no bank reconciles
-# (D304). `created_at` is the one that stays optional; `emob-billing` passes it,
-# and `just purity` keeps it passing.
+# Ledger postings and SEPA collection files take dates and timestamps from the caller.
 doubleentry = { version = "0.9", default-features = false }
 sepa = { version = "0.10", default-features = false, features = ["time"] }
 
-# ── Eichrecht: the OCMF format ──────────────────────────────────────────────
-# The format is `ocmf`'s and the law is `emob-eichrecht`'s: that crate keeps only
-# the question `ocmf` refuses, which quantity a finding takes away (D184).
-#
-# `session` is the sequence half `[OCMF §Signing and Verification Process]`
-# assigns to a check component; `xml` is the S.A.F.E. transparency container.
-# The four curves with audited pure-Rust arithmetic, named one by one rather
-# than as `curves-pure` — which since `ocmf` 0.2 also brings the brainpool pair
-# on RustCrypto's unaudited `bp256`/`bp384` (R18). secp192r1 is included because
-# the eBZ LD3 sample the Transparenzsoftware ships is signed with it. The other
-# three of `[OCMF Tab. 22]` are refused by name.
+# Enable session checking, S.A.F.E. XML, and the supported verification curves individually.
 ocmf = { version = "0.2", default-features = false, features = [
     "std", "verify", "curve-p192", "curve-p256", "curve-p384", "curve-k256", "session", "xml",
 ] }
 
-# Signing, for the simulator's virtual meters and for test fixtures only.
-# Nothing on the billing path signs anything: `ocmf` verifies.
-#
-# **One RustCrypto generation here, and it is `ocmf`'s (D304)** — 0.14 since
-# `ocmf` 0.2: `sha2` 0.11, `ecdsa` 0.17. Two implementations of SHA-256 in one
-# binary would compile, because the boundary is SEC1 bytes, and that is the
-# problem: the simulator is only worth something if the signature it writes and
-# the signature `ocmf` checks go through the same code. When `ocmf` moves, this
-# moves.
+# Keep the simulator signing and OCMF verification on the same RustCrypto generation.
 sha2      = "0.11"
 p256      = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 # The other curve `[V2G2-884]`'s Annex F admits, and the one ISO 15118-20 raises
@@ -210,21 +104,21 @@ hex       = "0.4"
 base64    = "0.23"
 
 # ── Internal (path + version so the domain crates can be published) ─────────
-emob-core      = { path = "crates/emob-core",      version = "0.6" }
-emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.6" }
-emob-session   = { path = "crates/emob-session",   version = "0.6" }
-emob-cdr       = { path = "crates/emob-cdr",       version = "0.6" }
-emob-tariff    = { path = "crates/emob-tariff",    version = "0.6" }
-emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.6" }
-emob-eebus     = { path = "crates/emob-eebus",     version = "0.6" }
-emob-pnc       = { path = "crates/emob-pnc",       version = "0.6" }
-emob-poi       = { path = "crates/emob-poi",       version = "0.6" }
-emob-sim       = { path = "crates/emob-sim",       version = "0.6" }
-emob-smart     = { path = "crates/emob-smart",     version = "0.6" }
-emob-roam      = { path = "crates/emob-roam",      version = "0.6" }
-emob-billing   = { path = "crates/emob-billing",   version = "0.6" }
-emob-thg       = { path = "crates/emob-thg",       version = "0.6" }
-emob-service   = { path = "crates/emob-service",   version = "0.6" }
+emob-core      = { path = "crates/emob-core",      version = "0.7" }
+emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.7" }
+emob-session   = { path = "crates/emob-session",   version = "0.7" }
+emob-cdr       = { path = "crates/emob-cdr",       version = "0.7" }
+emob-tariff    = { path = "crates/emob-tariff",    version = "0.7" }
+emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.7" }
+emob-eebus     = { path = "crates/emob-eebus",     version = "0.7" }
+emob-pnc       = { path = "crates/emob-pnc",       version = "0.7" }
+emob-poi       = { path = "crates/emob-poi",       version = "0.7" }
+emob-sim       = { path = "crates/emob-sim",       version = "0.7" }
+emob-smart     = { path = "crates/emob-smart",     version = "0.7" }
+emob-roam      = { path = "crates/emob-roam",      version = "0.7" }
+emob-billing   = { path = "crates/emob-billing",   version = "0.7" }
+emob-thg       = { path = "crates/emob-thg",       version = "0.7" }
+emob-service   = { path = "crates/emob-service",   version = "0.7" }
 
 # ── The daemon shell ────────────────────────────────────────────────────────
 # Only `emob-service` and the daemons above it see these. Every domain crate
@@ -249,9 +143,7 @@ subtle = { version = "2", default-features = false }
 # token adds no crate, and it is not RustCrypto, so D304's one-generation rule is
 # untouched. The keyed digests stay on `hmac`/`sha2` above.
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
-# Station passwords are stored as Argon2id hashes. 0.5, not 0.6: 0.5 takes
-# `blake2` 0.10 / `digest` 0.10, the generation `ocmf` pins (D304); 0.6 would be
-# a second SHA/digest implementation in the binary.
+# Station passwords use Argon2id hashes.
 argon2    = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 
 # ── The policy an operator writes ───────────────────────────────────────────

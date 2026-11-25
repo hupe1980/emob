@@ -363,19 +363,30 @@ fn every_path_the_status_publication_emits_is_one_the_reference_instance_contain
             site: Facility::new("21F02723-SITE"),
             station: Facility::new("21F02723-STATION"),
             point: Facility::new("21F02723-POINT-1"),
+            changed_at: time::OffsetDateTime::UNIX_EPOCH,
             report: points[0]
                 .report(PointStatus::Charging)
                 .expect("an operating point may report `charging`"),
             price: Some(emob_poi::datex::PriceUpdate {
                 rate_id: "74034E3E-RATE".to_owned(),
-                price_type: emob_poi::rate::PriceType::PricePerKwh,
-                value: dec("0.37"),
+                changed_at: time::OffsetDateTime::UNIX_EPOCH,
+                prices: vec![emob_poi::rate::Price {
+                    price_type: emob_poi::rate::PriceType::PricePerKwh,
+                    value: dec("0.37"),
+                    tax_rate: None,
+                    tax_included: None,
+                    additional_information: None,
+                    period: None,
+                    energy_applicability: None,
+                    time_applicability: None,
+                }],
             }),
         },
         PointUpdate {
             site: Facility::new("21F02723-SITE"),
             station: Facility::new("21F02723-STATION"),
             point: Facility::new("21F02723-POINT-2"),
+            changed_at: time::OffsetDateTime::UNIX_EPOCH,
             report: points[1]
                 .report(PointStatus::Available)
                 .expect("an operating point may report `available`"),
@@ -391,6 +402,7 @@ fn every_path_the_status_publication_emits_is_one_the_reference_instance_contain
     let json = feed
         .status(
             table.published(),
+            emob_poi::datex::Delivery::Delta,
             &updates,
             time::macros::datetime!(2026-04-14 12:00 UTC),
         )
@@ -414,7 +426,7 @@ fn every_path_the_status_publication_emits_is_one_the_reference_instance_contain
 
 #[test]
 fn the_price_in_the_feed_is_the_tariffs_own_decimal_and_not_a_second_computation() {
-    // `[AFIR Art. 5(2)]` and `[AFIR Art. 20(2)(c)]` are two duties about one
+    // `[AFIR Art. 5(4)]` and `[AFIR Art. 20(2)(f)]` are two duties about one
     // number. This is the number: `0.49`, exact, from `emob_tariff::Tariff`
     // straight into the JSON, with 19 % VAT beside it — the same rate the CDR's
     // EN 16931 breakdown uses.
@@ -526,11 +538,17 @@ fn both_publications_read_back_as_the_profile_without_a_warning() {
         site: Facility::new("21F02723-SITE"),
         station: Facility::new("21F02723-STATION"),
         point: point.facility.clone(),
+        changed_at: time::OffsetDateTime::UNIX_EPOCH,
         report: point.report(PointStatus::Available).expect("operating"),
         price: None,
     };
     let status = feed
-        .status(table.published(), &[update], at)
+        .status(
+            table.published(),
+            emob_poi::datex::Delivery::Snapshot,
+            &[update],
+            at,
+        )
         .expect("references that resolve");
     let read = datex2::v3::json::read(status.to_json().expect("written").as_bytes())
         .expect("the status reads back");

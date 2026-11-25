@@ -28,6 +28,7 @@ const DEMO: &str = include_str!("../../../deploy/estate.example.toml");
 const GOOD_CARD: &str = "04A1B2C3D4E5F6";
 const BLOCKED_CARD: &str = "04DEADBEEF0001";
 const OPERATOR: &str = "operator-token";
+const READER: &str = "reader-token";
 const SECRET: &str = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
 
 fn env() -> Env {
@@ -35,6 +36,7 @@ fn env() -> Env {
         ("EMOB_WEBHOOK_SECRET", SECRET),
         ("EMOB_SERVICE_TOKEN", "service-token"),
         ("EMOB_OPERATOR_TOKEN", OPERATOR),
+        ("EMOB_DESK_READ_TOKEN", READER),
         ("EMPD_TOKEN_KEY", "a key nobody outside empd holds"),
         (
             "EMPD_DATA_KEY",
@@ -224,6 +226,280 @@ async fn get(url: &str, authorization: Option<&str>) -> (u16, String) {
     (response.status().as_u16(), response.text().await.unwrap())
 }
 
+/// Exercise the browser's form encoding and the real replacement route. An older
+/// or tampered form must not silently turn off a public station.
+async fn investigate(page: &str, refusal: &serde_json::Value, heute: &str) {
+    let position = refusal["position"].as_u64().unwrap();
+    let path = format!("sessions/{position}?lang=en");
+    assert!(heute.contains(&format!("href=\"/sessions/{position}?lang=de\"")));
+    let url = format!("{page}{path}");
+    assert_eq!(get(&url, None).await.0, 401);
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("authorization", basic(OPERATOR))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("<h1>Session evidence</h1>")
+            && body.contains("Billing decision")
+            && body.contains("<time datetime=")
+    );
+    assert!(body.contains("href=\"/station/CP-1?lang=en\""));
+    assert!(!body.contains(GOOD_CARD) && !body.contains(BLOCKED_CARD));
+    assert!(body.len() < 150_000);
+    let search = format!("{page}lookup?lang=en");
+    let input = format!(
+        "kind=transaction&value={}",
+        refusal["transaction"].as_str().unwrap()
+    );
+    let post = |site: &str| {
+        client
+            .post(&search)
+            .header("authorization", basic(OPERATOR))
+            .header("sec-fetch-site", site)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(input.clone())
+    };
+    assert_eq!(post("cross-site").send().await.unwrap().status(), 403);
+    let response = post("same-origin").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains(&format!("href=\"/{path}\""))
+    );
+}
+
+async fn desk_post(page: &str, path: &str, token: &str, site: &str, body: &str) -> (u16, String) {
+    let response = reqwest::Client::new()
+        .post(format!("{page}{path}?lang=en"))
+        .header("authorization", basic(token))
+        .header("sec-fetch-site", site)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body.to_owned())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    (response.status().as_u16(), response.text().await.unwrap())
+}
+
+fn hidden<'a>(html: &'a str, field: &str) -> &'a str {
+    let prefix = format!("type=\"hidden\" name=\"{field}\" value=\"");
+    html.split_once(&prefix)
+        .unwrap()
+        .1
+        .split_once('"')
+        .unwrap()
+        .0
+}
+
+/// heute-acts/SR-030, heute-acts/SR-032, heute-acts/SR-034: a reader can inspect both owners' evidence. Only a writer
+/// can review and confirm on the same origin; the result names that writer.
+async fn control_card(page: &str) -> String {
+    let site = "same-origin";
+    let (code, results) =
+        desk_post(page, "lookup", READER, site, "kind=visual&value=MOB-1001").await;
+    assert_eq!(code, 200);
+    assert!(results.contains("Open card EM-"));
+    let reference = hidden(&results, "value");
+    let lookup = format!("kind=reference&value={reference}");
+    let (_, card) = desk_post(page, "lookup", READER, site, &lookup).await;
+    assert!(card.contains("read-only access") && card.contains("No operator changes recorded"));
+    assert!(!card.contains("/cards/preview") && !card.contains(GOOD_CARD));
+    let (_, card) = desk_post(page, "lookup", OPERATOR, site, &lookup).await;
+    assert!(card.contains("Review block"));
+
+    let preview = format!("reference={reference}&blocked=true&reason=lost");
+    for (who, origin) in [(READER, site), (OPERATOR, "cross-site")] {
+        assert_eq!(
+            desk_post(page, "cards/preview", who, origin, &preview)
+                .await
+                .0,
+            403
+        );
+    }
+    let (code, review) = desk_post(page, "cards/preview", OPERATOR, site, &preview).await;
+    assert_eq!(code, 200, "{review}");
+    assert!(
+        review.contains("Confirm block")
+            && review.contains("offline station")
+            && review.contains("Reported lost")
+    );
+    let operation = hidden(&review, "operation");
+    let confirm = format!("operation={operation}&reference={reference}");
+    for (who, origin) in [(READER, site), (OPERATOR, "cross-site")] {
+        assert_eq!(
+            desk_post(page, "cards/confirm", who, origin, &confirm)
+                .await
+                .0,
+            403
+        );
+    }
+    let (code, applied) = desk_post(page, "cards/confirm", OPERATOR, site, &confirm).await;
+    assert_eq!(code, 200, "{applied}");
+    let history = applied.split_once("id=\"card-history\"").unwrap().1;
+    assert!(applied.contains("Change confirmed") && applied.contains("Review unblock"));
+    assert!(
+        history.contains(operation)
+            && history.contains("operator:demo operator")
+            && history.contains("Card blocked")
+    );
+    assert!(!applied.contains(GOOD_CARD) && !applied.contains(OPERATOR));
+    let (code, stale) = desk_post(page, "cards/confirm", OPERATOR, site, &confirm).await;
+    assert_eq!(code, 409);
+    assert!(stale.contains(operation) && stale.contains("Check the current history"));
+    let preview = format!("reference={reference}&blocked=false&reason=recovered");
+    let (code, review) = desk_post(page, "cards/preview", OPERATOR, site, &preview).await;
+    assert_eq!(code, 200);
+    assert!(review.contains("Confirm unblock") && review.contains("contract and credit checks"));
+    let confirm = format!(
+        "operation={}&reference={reference}",
+        hidden(&review, "operation")
+    );
+    let (code, applied) = desk_post(page, "cards/confirm", OPERATOR, site, &confirm).await;
+    assert_eq!(code, 200);
+    assert!(applied.contains("Change confirmed") && applied.contains("Review block"));
+    let (_, card) = desk_post(page, "lookup", READER, site, &lookup).await;
+    let history = card.split_once("id=\"card-history\"").unwrap().1;
+    assert!(history.find("Card recovered").unwrap() < history.find("Reported lost").unwrap());
+    confirm
+}
+
+/// native-driver-enrolment/SR-303 and native-driver-enrolment/SR-305.
+/// The signed-in writer reviews the owner's rates, confirms once, and a reader
+/// can reconcile the accepted agreement with the original point and fee version.
+async fn enrol_card(page: &str) -> String {
+    let url = format!("{page}contracts?lang=en");
+    let (code, catalogue) = get(&url, Some(&basic(OPERATOR))).await;
+    assert_eq!(code, 200, "{catalogue}");
+    assert!(
+        catalogue.contains("/contracts/preview") && catalogue.contains("DE*ABC*E00001|standard")
+    );
+    let (code, reader) = get(&url, Some(&basic(READER))).await;
+    assert_eq!(code, 200);
+    assert!(reader.contains("/contracts/lookup") && !reader.contains("/contracts/preview"));
+
+    let site = "same-origin";
+    let intake = "selection=DE*ABC*E00001%7Cstandard&stock=STOCK-1004";
+    for (who, origin) in [(READER, site), (OPERATOR, "cross-site")] {
+        assert_eq!(
+            desk_post(page, "contracts/preview", who, origin, intake)
+                .await
+                .0,
+            403
+        );
+    }
+    let (code, review) = desk_post(page, "contracts/preview", OPERATOR, site, intake).await;
+    assert_eq!(code, 200, "{review}");
+    for term in [
+        "Review driver contract",
+        "Confirm enrolment",
+        "MSP Standard",
+        "DE*ABC*E00001",
+        "0.60 EUR/kWh",
+        "Monthly subscription",
+        "Provider fee version",
+    ] {
+        assert!(review.contains(term), "review missing {term}");
+    }
+    let id = hidden(&review, "operation");
+    let confirm = format!("operation={id}");
+    let lookup = format!("agreement={id}");
+    assert_eq!(
+        desk_post(page, "contracts/lookup", READER, site, &lookup)
+            .await
+            .0,
+        404
+    );
+    for (who, origin) in [(READER, site), (OPERATOR, "cross-site")] {
+        assert_eq!(
+            desk_post(page, "contracts/confirm", who, origin, &confirm)
+                .await
+                .0,
+            403
+        );
+    }
+    let (code, issued) = desk_post(page, "contracts/confirm", OPERATOR, site, &confirm).await;
+    assert_eq!(code, 200, "{issued}");
+    assert!(
+        issued.contains("Agreement issued")
+            && issued.contains("operator:demo operator")
+            && issued.contains(id)
+    );
+    assert_eq!(
+        desk_post(page, "contracts/confirm", OPERATOR, site, &confirm)
+            .await
+            .1,
+        issued
+    );
+    assert_eq!(
+        desk_post(page, "contracts/lookup", READER, "cross-site", &lookup)
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        desk_post(page, "contracts/lookup", READER, site, &lookup)
+            .await
+            .1,
+        issued
+    );
+    for html in [&review, &issued] {
+        for private in ["STOCK-1004", "04AB0000000004", OPERATOR, READER] {
+            assert!(!html.contains(private));
+        }
+        assert!(!html.contains("<script") && html.len() < 150_000);
+    }
+    confirm
+}
+
+async fn edit_publication_settings(page: &str, csmsd: SocketAddr) {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let fields = "identity=CP-1&ocpp=1.6&security_profile=1&evse=DE%2AABC%2AE00001&rated_power_kw=150&tariff=ad-hoc&connector=iec62196_t2_combo&location_id=LOC-1&location_name=Depot+Mitte&street=Invalidenstrasse&house_number=1&postal_code=10115&city=Berlin&country=DE&latitude=52.5318&longitude=13.3849&time_zone=Europe%2FBerlin&reason=Verify+electricity+declaration";
+    let url = format!("{page}station/CP-1/edit");
+    let send = |choices| {
+        client
+            .post(&url)
+            .header("authorization", basic(OPERATOR))
+            .header("sec-fetch-site", "same-origin")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(format!("{fields}&{choices}"))
+            .send()
+    };
+    let missing_choice = send("show_price=false&fully_renewable=false")
+        .await
+        .unwrap();
+    assert_eq!(missing_choice.status().as_u16(), 422);
+    let updated = send("publicly_accessible=true&show_price=false&fully_renewable=false")
+        .await
+        .unwrap();
+    let status = updated.status().as_u16();
+    assert_eq!(status, 303, "{}", updated.text().await.unwrap());
+    let (_, view) = get(
+        &format!("http://{csmsd}/v1/csmsd/stations/CP-1"),
+        Some(&format!("Bearer {OPERATOR}")),
+    )
+    .await;
+    let station: deskd::station::StationPage = serde_json::from_str(&view).unwrap();
+    assert!(station.publicly_accessible);
+    assert_eq!(station.fully_renewable, Some(false));
+    assert!(!station.show_price);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_rate_heute_shows_is_the_count_billd_received() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -270,9 +546,28 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         })
         .await
         .expect("csmsd starts");
+        // The publisher fixture serves only its bounded evidence route. Heute must
+        // use the configured origin and its operator token.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let publisher = listener.local_addr().unwrap();
+        let routes = axum::Router::new().route(
+            "/v1/poid/dynamic",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                assert_eq!(headers["authorization"], format!("Bearer {READER}"));
+                axum::Json(serde_json::json!({
+                    "accepted_at": "2026-11-25T09:10:33Z", "snapshot_at": "2026-11-25T09:00:00Z",
+                    "static_attempts": 4, "static_last_attempt": "2026-11-25T08:51:00Z", "static_accepted_at": "2026-11-25T08:51:12Z",
+                    "attempts": 13, "last_attempt": "2026-11-25T09:10:31Z",
+                    "changes": 12, "missed_deadlines": 1, "problem": null,
+                }))
+            }),
+        );
+        let serving = tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
+        let mut desk_estate: deskd::Estate = estate.sections();
+        desk_estate.desk.poid = Some(format!("http://{publisher}"));
         let desk = deskd::run(deskd::Options {
             http: "127.0.0.1:0".parse().unwrap(),
-            estate: estate.sections(),
+            estate: desk_estate,
             env: env(),
             shutdown: Shutdown::new(),
             identity: Identity::new("deskd", "test"),
@@ -369,9 +664,46 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         assert!(heute.contains("Autorisierung <span class=\"num\">1</span>"));
         // The tampered session leads the queue, with its reason and paragraph.
         let first_row = heute
-            .find("<li id=\"s-CP-1-")
+            .find("<li id=\"s-")
             .expect("a refused session row");
         assert!(first_row < heute.find("id=\"duties\"").unwrap());
+        investigate(&page, &csmsd_view["refused"]["items"][0], &heute).await;
+        assert!(
+            heute.contains("2026-11-25T09:10:33Z") && heute.contains("Letzte Empfangsbestätigung")
+        );
+        let (status, asset) = get(
+            &format!("{page}station/CP-1?lang=en"),
+            Some(&basic(OPERATOR)),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(asset.contains("On-site visibility unverified"));
+        let (status, edit) = get(
+            &format!("{page}station/CP-1/edit?lang=en"),
+            Some(&basic(OPERATOR)),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(edit.contains("value=\"true\" selected>Public"));
+        assert!(edit.contains("value=\"unknown\" selected>Undeclared"));
+        let (status, station_read) = get(&format!("{page}station/CP-1?lang=en"), Some(&basic(READER))).await;
+        assert_eq!(status, 200);
+        assert!(station_read.contains("read-only access") && !station_read.contains("<form method=\"post\""));
+        let (status, index) = get(&format!("{page}stations?lang=en"), Some(&basic(READER))).await;
+        assert_eq!(status, 200);
+        assert!(index.contains("read-only access") && !index.contains("/stations/new"));
+        for path in ["station/CP-1/edit", "stations/new"] {
+            assert_eq!(get(&format!("{page}{path}?lang=en"), Some(&basic(READER))).await.0, 403);
+        }
+        let confirmation = control_card(&page).await;
+        let enrolment = enrol_card(&page).await;
+        edit_publication_settings(&page, estate.csmsd).await;
+        serving.abort();
+        assert!(
+            heute.contains("2026-11-25T09:10:31Z")
+                && heute.contains("Dynamische Übertragungsversuche einschließlich Wiederholungen")
+                && heute.contains("Statische Tabelle</dt><dd>Versuche 4")
+        );
         assert!(heute.contains("Eine Signatur passt nicht"));
         assert!(heute.contains("[MessEG §33]"));
         // SR-057: no card, no contract on the page.
@@ -382,11 +714,12 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         // SR-054: a billd nobody answers for — a deskd reading it at a port
         // nothing listens on — is named; the rest still renders.
         let nobody = free_port();
-        let blind: deskd::Estate = estate::from_str(&estate.text.replace(
+        let mut blind: deskd::Estate = estate::from_str(&estate.text.replace(
             &format!("http://{}", estate.billd),
             &format!("http://{nobody}"),
         ))
         .unwrap();
+        blind.services.empd = format!("http://{nobody}");
         let blind = deskd::run(deskd::Options {
             http: "127.0.0.1:0".parse().unwrap(),
             estate: blind,
@@ -411,14 +744,22 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
                 && heute.contains("datetime=\"2026-06-01T08:00:00Z\""),
             "the page's today is its clock's: {heute}"
         );
-        blind.kill();
-
+        let (code, unknown) = desk_post(&format!("http://{}/", blind.http), "cards/confirm", OPERATOR, "same-origin", &confirmation).await;
+        assert_eq!(code, 502);
+        assert!(unknown.contains("may have taken effect") && unknown.contains("Check card history"));
+        assert!(unknown.contains(&format!("<code>{}</code>", hidden(&unknown, "operation"))));
+        assert!(unknown.contains("Retry this confirmation"));
+        let (code, unknown) = desk_post(&format!("http://{}/", blind.http), "contracts/confirm", OPERATOR, "same-origin", &enrolment).await;
+        assert_eq!(code,502);
+        assert!(unknown.contains("may already exist") && unknown.contains("Check agreement") && unknown.contains("Retry this confirmation"));
+        assert_eq!(hidden(&unknown,"operation"),hidden(&unknown,"agreement"));
+        blind.kill().await;
         station.shutdown(Duration::from_secs(1)).await;
-        desk.kill();
-        billd.kill();
-        csmsd.kill();
-        roamd.kill();
-        empd.kill();
+        empd.kill().await;
+        desk.kill().await;
+        billd.kill().await;
+        csmsd.kill().await;
+        roamd.kill().await;
     })
     .await
     .expect("the story ran in under thirty seconds");

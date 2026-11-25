@@ -10,6 +10,25 @@ renames something says so under **Removed** or **Changed** instead.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-25
+
+### Changed
+
+- Operator accounts need an explicit `write = true` grant to change cards. The example uses a separate reader for the desk.
+- Public registry publication requires `publicly_accessible`. Configure separate Mobilithek static and dynamic offer URLs. Public-data assessments cover free and paid public charging.
+- Embedded services now require `kill().await` to complete shutdown before rebinding the listener.
+
+### Added
+
+- Heute can issue a stocked driver card against a published offer, reopen the agreement, block or restore a card, and investigate refusals. Charging and reservations enforce the enrolled point and price.
+- Drivers can compare gross provider prices and reopen archived offers. Station price messages include applicable occupancy charges.
+- The Mobilithek publisher preserves source timestamps, reports delivery outcomes and supports the operator's optional renewable-electricity declaration.
+- An isolated recovery drill checks five journals, replayed business outcomes and a lost delivery acknowledgement.
+
+### Fixed
+
+- Reused station transaction IDs preserve the original receipt. The test station issues distinct IDs across rapid reconnects, and end-to-end runs use isolated ports and journals.
+
 ## [0.6.1] - 2026-11-21
 
 A point is held for a driver.
@@ -453,7 +472,8 @@ could not.
 First release: fifteen crates from the signed meter value to the ledger posting,
 and eight daemons.
 
-[Unreleased]: https://github.com/hupe1980/emob/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/hupe1980/emob/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/hupe1980/emob/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/hupe1980/emob/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hupe1980/emob/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hupe1980/emob/compare/v0.4.0...v0.5.0

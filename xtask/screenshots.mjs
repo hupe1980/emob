@@ -96,6 +96,7 @@ const js = async (expression) => (await send("Runtime.evaluate", { expression, a
 const done = () => { ws.close(); proc.kill(); try { rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch {} };
 
 await send("Page.enable");
+await send("Page.bringToFront");
 await send("Network.enable");
 await send("DOM.enable");
 await send("Accessibility.enable");
@@ -106,15 +107,25 @@ await send("Emulation.setLocaleOverride", { locale: "de-DE" });
 const problems = [];
 const basic = { Authorization: `Basic ${Buffer.from(`demo:${links.token}`).toString("base64")}` };
 
+async function within(promise, label, milliseconds = 20000) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), milliseconds);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 async function open(url, metrics, scheme = "light", headers = {}) {
   await send("Network.setExtraHTTPHeaders", { headers });
   await send("Emulation.setDeviceMetricsOverride", metrics);
   await send("Emulation.setEmulatedMedia", { features: [
     { name: "prefers-color-scheme", value: scheme }, { name: "prefers-reduced-motion", value: "reduce" }] });
   const loaded = event("Page.loadEventFired");
-  await send("Page.navigate", { url });
-  await loaded;
-  await js("document.fonts.ready.then(() => true)");
+  const navigation = await within(send("Page.navigate", { url }), "browser navigation");
+  if (navigation.errorText) throw new Error(`Navigation failed: ${navigation.errorText}`);
+  if (navigation.loaderId) await within(loaded, "document load");
+  await within(js("document.fonts.ready.then(() => true)"), "document fonts");
   await sleep(300);
 }
 
@@ -166,7 +177,14 @@ async function inspect(name, url, headers = {}) {
 
 async function shot(file, { url, metrics, scheme = "light", headers = {}, then }) {
   await open(url, metrics, scheme, headers);
-  if (then) { await js(then); await sleep(600); }
+  if (then) {
+    if (typeof then === "function") {
+      for (const problem of await then()) problems.push(`${file}: ${problem}`);
+    } else {
+      await js(then);
+    }
+    await sleep(600);
+  }
   // The largest quality that fits the budget: deterministic for one page.
   for (const quality of [90, 82, 74, 66, 58, 50]) {
     const { data } = await send("Page.captureScreenshot", { format: "webp", quality });
@@ -354,8 +372,10 @@ async function treeFindings() {
 async function accessible(url, metrics, scheme, headers, then) {
   await open(url, { ...metrics, deviceScaleFactor: 1 }, scheme, headers);
   // A step to take first; when it answers with findings, they count too.
-  const said = then ? await js(then) : null;
+  const said = typeof then === "function" ? await then() : then ? await js(then) : null;
   if (then) await sleep(300);
+  if (typeof then === "function") await send("Emulation.setEmulatedMedia", { media: "screen", features: [
+    { name: "prefers-color-scheme", value: scheme }, { name: "prefers-reduced-motion", value: "reduce" }] });
   const found = [...(Array.isArray(said) ? said : []), ...await js(PAGE_CHECKS), ...await treeFindings()];
   if (metrics.width <= 320) {
     const overflow = await js("document.documentElement.scrollWidth - document.documentElement.clientWidth");
@@ -409,16 +429,128 @@ const VERIFY_EXAMPLE = `(async () => {
   return found;
 })()`;
 
+// Follow the refusal that this demo actually recorded. Never send the desk's
+// Authorization header to an origin supplied by the page.
+await open(heute, DESKTOP, "light", basic);
+const sessionPath = await js(`document.querySelector('a[href^="/sessions/"]')?.getAttribute("href")`);
+if (!/^\/sessions\/\d+(?:\?lang=(?:de|en))?$/.test(sessionPath ?? "")) {
+  done();
+  throw new Error("Heute has no link to the recorded refusal");
+}
+const session = new URL(sessionPath, heute);
+session.searchParams.set("lang", "en");
+
+// Exercise the same native, body-only forms as an operator. Only the disposable
+// a11y estate runs confirmations. Each result alternates the card's state.
+async function submitDeskForm(path, fields) {
+  const submitted = await js(`(() => {
+    const form = [...document.forms].find(el => el.method === "post" &&
+      new URL(el.action).origin === location.origin && new URL(el.action).pathname === ${JSON.stringify(path)} &&
+      (${JSON.stringify(path)} !== "/lookup" || el.elements.kind?.value === "reference"));
+    if (!form) return false;
+    if (form.elements.reason) {
+      form.elements.reason.value = form.elements.blocked.value === "true" ? "lost" : "recovered";
+    }
+    for (const [name, value] of Object.entries(${JSON.stringify(fields)})) {
+      if (!form.elements[name]) return false;
+      form.elements[name].value = value;
+    }
+    if (!form.checkValidity()) return false;
+    setTimeout(() => form.requestSubmit(), 0);
+    return true;
+  })()`);
+  if (!submitted) throw new Error(`Missing or invalid desk form for ${path}`);
+}
+async function deskStep(path, fields = {}) {
+  const loaded = event("Page.loadEventFired");
+  await submitDeskForm(path, fields);
+  await within(loaded, `desk form ${path}`);
+}
+async function cardJourney(stage) {
+  await deskStep("/lookup");
+  if (!await js('!!document.querySelector("#card-history")')) return ["missing card history"];
+  if (stage === "detail") {
+    await send("Emulation.setEmulatedMedia", { media: "print" });
+    const printed = await js(`document.querySelector("#card-history").getClientRects().length > 0 &&
+      ![...document.querySelectorAll("main form")].some(el => el.getClientRects().length)`);
+    await send("Emulation.setEmulatedMedia", { media: "" });
+    return printed ? [] : ["printed card must show history and hide forms"];
+  }
+  await deskStep("/cards/preview");
+  if (!await js(`!!document.querySelector('form[action^="/cards/confirm"]')`)) return ["missing reviewed confirmation"];
+  if (stage === "review") return [];
+  await deskStep("/cards/confirm");
+  return await js('!!document.querySelector("#card-history") && document.body.innerText.includes("Change confirmed")')
+    ? [] : ["missing applied decision or history"];
+}
+
+const contracts = new URL("/contracts?lang=en", heute);
+let issuedAgreement;
+async function enrolmentJourney(stage) {
+  if (stage === "receipt" && issuedAgreement) {
+    await deskStep("/contracts/lookup", { agreement: issuedAgreement });
+  } else {
+    const selection = await js(`[...document.querySelectorAll("select[name=selection] option")]
+      .find(option => option.value.endsWith("|standard"))?.value`);
+    if (!selection) return ["missing eligible provider offer"];
+    await deskStep("/contracts/preview", { selection, stock: "STOCK-1004" });
+    const operation = await js('document.querySelector("input[name=operation]")?.value');
+    if (!operation || !await js('document.body.innerText.includes("Gross contract prices")')) {
+      return ["missing reviewed price or confirmation"];
+    }
+    if (stage === "review") return [];
+    await deskStep("/contracts/confirm");
+    issuedAgreement = operation;
+  }
+  return await js('document.body.innerText.includes("Agreement issued")')
+    ? [] : ["missing issued agreement"];
+}
+
 if (A11Y) {
+  await open(session.href, DESKTOP, "light", basic);
+  await send("Emulation.setEmulatedMedia", { media: "print" });
+  const printable = await js(`(() => {
+    const timeline = document.querySelector(".timeline");
+    return timeline?.getClientRects().length && timeline.querySelector("time") &&
+      ![...document.querySelectorAll("main nav, main form")].some(el => el.getClientRects().length);
+  })()`);
+  if (!printable) problems.push("printed session: missing timeline or visible navigation/actions");
+  await send("Emulation.setEmulatedMedia", { media: "" });
+  const lookup = new URL("/lookup?lang=de", heute);
   const pages = [
     ["Heute", heute, basic],
+    ["session evidence", session.href, basic,
+      `(() => document.querySelector("h1")?.textContent === "Session evidence" &&
+        document.querySelector("main time") && document.querySelector('form[method="post"]')
+        ? [] : ["missing recorded evidence or card action"])()`],
+    ...["detail", "review", "result"].map(stage => [
+      `card ${stage}`, session.href, basic, () => cardJourney(stage),
+    ]),
+    ["driver contracts", contracts.href, basic],
+    ...["review", "receipt"].map(stage => [
+      `enrolment ${stage}`, contracts.href, basic, () => enrolmentJourney(stage),
+    ]),
+    ["operator lookup", lookup.href, basic,
+      `(() => document.querySelector('form[method="post"] input[name="value"]')
+        ? [] : ["missing private lookup form"])()`],
     ["station", station, basic],
     ["stations", stationList, basic],
     ["new station", stationNew, basic],
     ["change station", stationEdit, basic],
     ["price", price, {}, PRICE_FIRST],
+    ["provider price", new URL("/p/DE*MUS*E00001/providers/DE*MSP/standard?lang=en", price).href, {},
+      `(() => document.querySelector("h1")?.textContent === "Contract price" &&
+        document.body.textContent.includes("6.30 EUR") && document.querySelector('a[href^="/p/offers/"]')
+        ? [] : ["provider price: the gross example or historical reference is missing"])()`],
     ...(verifyPage ? [["verifier (site)", verifyPage, {}, VERIFY_EXAMPLE]] : []),
-    ["receipt (billed)", receipt],
+    ["receipt (billed)", receipt, {},
+      `(() => {
+        const value = document.querySelector(".receipt-stats .value");
+        if (!value?.textContent.includes("kWh")) return ["missing measured energy"];
+        const range = document.createRange();
+        range.selectNodeContents(value);
+        return range.getClientRects().length === 1 ? [] : ["energy and unit occupy different lines"];
+      })()`],
     ["receipt (refused)", refused],
     ["receipt (checked)", receipt, {}, SELF_CHECK],
     ...(links.invoice ? [["invoice", `${links.invoice}?lang=de`]] : []),
@@ -428,7 +560,14 @@ if (A11Y) {
     for (const scheme of ["light", "dark"]) {
       for (const metrics of [{ ...PHONE, width: 320 }, DESKTOP]) {
         const where = `${name} (${scheme}, ${metrics.width} px)`;
-        for (const found of await accessible(url, metrics, scheme, headers, then)) problems.push(`${where}: ${found}`);
+        try {
+          for (const found of await within(accessible(url, metrics, scheme, headers, then), where, 45000)) {
+            problems.push(`${where}: ${found}`);
+          }
+        } catch (error) {
+          done();
+          throw new Error(`${where}: ${error.message}`);
+        }
         checked++;
       }
     }
@@ -450,6 +589,12 @@ await shot("heute-light.webp", { url: heute, metrics: DESKTOP, headers: basic })
 await shot("heute-dark.webp", { url: heute, metrics: DESKTOP, scheme: "dark", headers: basic });
 await shot("heute-mobile-light.webp", { url: heute, metrics: PHONE, headers: basic });
 await shot("heute-mobile-dark.webp", { url: heute, metrics: PHONE, scheme: "dark", headers: basic });
+await shot("session-evidence-light.webp", { url: session.href, metrics: DESKTOP, headers: basic });
+await shot("session-evidence-dark.webp", { url: session.href, metrics: DESKTOP, scheme: "dark", headers: basic });
+await shot("enrolment-review-light.webp", { url: contracts.href, metrics: DESKTOP, headers: basic, then: () => enrolmentJourney("review") });
+await shot("enrolment-review-dark.webp", { url: contracts.href, metrics: DESKTOP, scheme: "dark", headers: basic, then: () => enrolmentJourney("review") });
+await shot("card-review-light.webp", { url: session.href, metrics: DESKTOP, headers: basic, then: () => cardJourney("review") });
+await shot("card-review-dark.webp", { url: session.href, metrics: DESKTOP, scheme: "dark", headers: basic, then: () => cardJourney("review") });
 await shot("station-light.webp", { url: station, metrics: DESKTOP, headers: basic });
 await shot("station-dark.webp", { url: station, metrics: DESKTOP, scheme: "dark", headers: basic });
 await shot("stations-light.webp", { url: stationList, metrics: DESKTOP, headers: basic });

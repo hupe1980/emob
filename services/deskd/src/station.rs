@@ -29,6 +29,16 @@ pub struct StationPage {
     pub rated_power_kw: String,
     /// In service since.
     pub commissioned: Option<String>,
+    /// The registry makes the point publicly accessible.
+    #[serde(default)]
+    pub publicly_accessible: bool,
+    /// The operator's declaration about 100% renewable electricity.
+    pub fully_renewable: Option<bool>,
+    /// The operator has enabled station price delivery.
+    #[serde(default)]
+    pub show_price: bool,
+    /// Current registration and boot's most recent tariff installation attempt.
+    pub station_tariff: Option<StationTariff>,
     /// Its tariff.
     #[serde(default)]
     pub tariff: String,
@@ -107,6 +117,25 @@ pub struct Price {
     pub preisstand: String,
     /// `/p/{evse}` on the public shell.
     pub path: String,
+}
+
+/// The result of trying to install the OCPP 2.1 default tariff.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StationTariff {
+    /// Full tariff fingerprint attempted.
+    pub version: String,
+    /// The station registration version attempted.
+    pub facility_version: u32,
+    /// Boot of the station session this result belongs to.
+    #[serde(with = "time::serde::rfc3339")]
+    pub boot: time::OffsetDateTime,
+    /// When the request ended.
+    #[serde(with = "time::serde::rfc3339")]
+    pub at: time::OffsetDateTime,
+    /// Protocol response, transport or tariff conversion error.
+    pub outcome: String,
+    /// The CSMS may retry a transport failure.
+    pub retry: bool,
 }
 
 /// A reservation holding the point.
@@ -206,6 +235,17 @@ pub struct Meter {
     pub since: time::OffsetDateTime,
     /// Whether the registry holds its key.
     pub key_registered: bool,
+    /// The complete registry value in the encoding used for verification.
+    pub registered_key: Option<RegisteredKey>,
+}
+
+/// A registered meter key as received from its owner.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisteredKey {
+    /// The named curve.
+    pub curve: String,
+    /// Unmodified SEC1 point, as hex.
+    pub sec1: String,
 }
 
 /// A report.
@@ -236,6 +276,8 @@ pub struct Success {
 /// A session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Recent {
+    /// Stable outcome position for the investigation.
+    pub position: u64,
     /// The transaction.
     pub transaction: String,
     /// When.
@@ -252,6 +294,7 @@ struct Ctx<'a> {
     lang: Lang,
     zone: &'a TimeZone,
     now: time::OffsetDateTime,
+    can_write: bool,
 }
 
 impl Ctx<'_> {
@@ -286,9 +329,18 @@ pub fn render(
     zone: &TimeZone,
     now: time::OffsetDateTime,
     receipts: &str,
+    can_write: bool,
 ) -> String {
-    let ctx = Ctx { lang, zone, now };
+    let ctx = Ctx {
+        lang,
+        zone,
+        now,
+        can_write,
+    };
     let mut body = verdict(page, &ctx);
+    if !can_write {
+        let _ = write!(body, "<p>{}</p>", crate::read_only(lang));
+    }
     // Whether the point is held, then what the next person needs to know,
     // before the numbers.
     body.push_str(&reservation(page, &ctx));
@@ -300,7 +352,9 @@ pub fn render(
     body.push_str(&firmware(page, &ctx));
     body.push_str(&reports(page, &ctx));
     body.push_str(&recent(page, &ctx, receipts));
-    body.push_str(&manage(page, &ctx));
+    if can_write {
+        body.push_str(&manage(page, &ctx));
+    }
     ui::page(
         &ui::Shell {
             title: &page.identity,
@@ -325,26 +379,37 @@ fn reservation(page: &StationPage, ctx: &Ctx<'_>) -> String {
     if let Some(held) = &page.reservation {
         let _ = write!(
             out,
-            "<p class=\"why tone-warn\"><strong>{held_until} {until}</strong> · {left} · {for_card} <code>{card}</code> · {by}</p>\
-             <form method=\"post\" action=\"{station}/reservations/{number}/cancel\" class=\"noprint\">\
-             <button class=\"btn ghost\" type=\"submit\">{cancel}</button></form></section>",
+            "<p class=\"why tone-warn\"><strong>{held_until} {until}</strong> · {left} · {for_card} <code>{card}</code> · {by}</p>",
             held_until = lang.pick("Reserviert bis", "Held until"),
             until = ctx.when(held.until),
             left = left(held.until - ctx.now, lang),
             for_card = lang.pick("für Karte", "for card"),
             card = escape(&held.card),
             by = escape(held.by.strip_prefix("operator:").unwrap_or(&held.by)),
-            number = held.number,
-            cancel = lang.pick("Reservierung aufheben", "Cancel the reservation"),
         );
-        return out;
+        if ctx.can_write {
+            let _ = write!(
+                out,
+                "<form method=\"post\" action=\"{station}/reservations/{}/cancel\" class=\"noprint\"><button class=\"btn ghost\" type=\"submit\">{}</button></form>",
+                held.number,
+                lang.pick("Reservierung aufheben", "Cancel the reservation")
+            );
+        }
+    } else if ctx.can_write {
+        let _ = write!(
+            out,
+            "<details class=\"noprint\"><summary>{add}</summary>{form}</details>",
+            add = lang.pick("+ Für eine Karte reservieren", "+ Hold for a card"),
+            form = reserve_form(&page.identity, None, lang),
+        );
+    } else {
+        let _ = write!(
+            out,
+            "<p>{}</p>",
+            lang.pick("Keine Reservierung.", "No reservation.")
+        );
     }
-    let _ = write!(
-        out,
-        "<details class=\"noprint\"><summary>{add}</summary>{form}</details></section>",
-        add = lang.pick("+ Für eine Karte reservieren", "+ Hold for a card"),
-        form = reserve_form(&page.identity, None, lang),
-    );
+    out.push_str("</section>");
     out
 }
 
@@ -499,21 +564,30 @@ fn notes(page: &StationPage, ctx: &Ctx<'_>) -> String {
         for note in &page.notes {
             let _ = write!(
                 out,
-                "<li><p class=\"text\">{text}</p><span class=\"muted\">{by} · {at}</span>\
-                 <form method=\"post\" action=\"{station}/notes/{number}/remove\" class=\"noprint\">\
-                 <button class=\"btn ghost\" type=\"submit\" aria-label=\"{remove_label}\">{remove}</button></form></li>",
+                "<li><p class=\"text\">{text}</p><span class=\"muted\">{by} · {at}</span>",
                 text = escape(&note.text),
                 by = escape(note.by.strip_prefix("operator:").unwrap_or(&note.by)),
                 at = ctx.when(note.at),
-                number = note.number,
-                remove = lang.pick("Entfernen", "Remove"),
-                remove_label = escape(&match lang {
-                    Lang::De => format!("Notiz vom {} entfernen", ctx.when(note.at)),
-                    Lang::En => format!("Remove the note of {}", ctx.when(note.at)),
-                }),
             );
+            if ctx.can_write {
+                let _ = write!(
+                    out,
+                    "<form method=\"post\" action=\"{station}/notes/{number}/remove\" class=\"noprint\"><button class=\"btn ghost\" type=\"submit\" aria-label=\"{remove_label} {number}\">{remove}</button></form>",
+                    number = note.number,
+                    remove = lang.pick("Entfernen", "Remove"),
+                    remove_label = lang.pick("Notiz entfernen", "Remove note"),
+                );
+            }
+            out.push_str("</li>");
         }
         out.push_str("</ol>");
+    }
+    if !ctx.can_write {
+        if page.notes.is_empty() {
+            let _ = write!(out, "<p>{}</p>", lang.pick("Keine Notizen.", "No notes."));
+        }
+        out.push_str("</section>");
+        return out;
     }
     let _ = write!(
         out,
@@ -606,6 +680,101 @@ fn rate(page: &StationPage, ctx: &Ctx<'_>) -> String {
     )
 }
 
+/// A station response records an installation attempt at a particular boot and version.
+fn station_tariff(page: &StationPage, ctx: &Ctx<'_>) -> String {
+    let lang = ctx.lang;
+    let Some(attempt) = &page.station_tariff else {
+        return if page.ocpp != "2.1" {
+            lang.pick(
+                "Bei dieser OCPP-Version gibt es keine Bestätigung für SetDefaultTariff.",
+                "This OCPP version has no SetDefaultTariff acknowledgement.",
+            )
+        } else if !page.show_price {
+            lang.pick(
+                "Preisübertragung ist ausgeschaltet.",
+                "Station price delivery is disabled.",
+            )
+        } else {
+            lang.pick(
+                "Kein Ergebnis für den aktuellen Start. Verbindung und gültigen Tarif prüfen.",
+                "No result for the current boot. Check the connection and the effective tariff.",
+            )
+        }
+        .to_owned();
+    };
+    let next = if attempt.retry {
+        lang.pick(
+            "Erneuter Versuch möglich. Verbindung prüfen.",
+            "A retry is possible. Check the connection.",
+        )
+    } else if attempt.outcome != "Accepted" {
+        lang.pick(
+            "Antwort und Tarifdarstellung prüfen.",
+            "Check the response and how the tariff is represented.",
+        )
+    } else {
+        ""
+    };
+    format!(
+        "<strong>{}</strong> · {} · {} {} · {} {} · {} <code>{}</code> {}",
+        escape(&attempt.outcome),
+        ctx.when(attempt.at),
+        lang.pick("Start", "Boot"),
+        ctx.when(attempt.boot),
+        lang.pick("Stationsversion", "Registration version"),
+        attempt.facility_version,
+        lang.pick("Tarifversion", "Tariff version"),
+        escape(&attempt.version),
+        next,
+    )
+}
+
+/// The public price page, station delivery and on-site evidence on the asset card.
+fn pricing(page: &StationPage, ctx: &Ctx<'_>, public: &str) -> String {
+    let lang = ctx.lang;
+    let row = |dt: &str, dd: String| format!("<dt>{dt}</dt><dd>{dd}</dd>");
+    let mut card = String::new();
+    if let Some(price) = &page.price {
+        let mut value = format!(
+            "{} <span class=\"muted\">· Preisstand <strong>{}</strong></span>",
+            escape(&price.line),
+            escape(&price.preisstand)
+        );
+        if page.publicly_accessible && !public.is_empty() {
+            let _ = write!(
+                value,
+                " · <a href=\"{}\">{}</a>",
+                escape(&format!("{}{}", public.trim_end_matches('/'), price.path)),
+                lang.pick("Preisseite", "Price page")
+            );
+        }
+        card.push_str(&row(lang.pick("Preis", "Price"), value));
+    } else if page.publicly_accessible {
+        card.push_str(&row(
+            lang.pick("Preis", "Price"),
+            lang.pick(
+                "Kein aktueller Preis gemeldet. Tarif und Gültigkeitszeitraum prüfen.",
+                "No current price reported. Check the tariff and its validity period.",
+            )
+            .to_owned(),
+        ));
+    }
+    if page.publicly_accessible || page.station_tariff.is_some() {
+        card.push_str(&row(
+            lang.pick(
+                "Letzter Tarifversuch an der Station",
+                "Last station tariff installation attempt",
+            ),
+            station_tariff(page, ctx),
+        ));
+        card.push_str(&row(lang.pick("Preisanzeige vor Ort", "Price visible on site"), lang.pick(
+            "Sichtprüfung offen. Vor dem Laden Energiepreis und ggf. Blockiergebühr auf Anzeige oder Schild prüfen. EVSE, Preisstand und Uhrzeit als <a href=\"#notes\">Stationsnotiz</a> festhalten.",
+            "On-site visibility unverified. Before charging, check the energy price and any occupancy fee on the display or sign. Record the EVSE, price version and time in a <a href=\"#notes\">station note</a>."
+        ).to_owned()));
+    }
+    card
+}
+
 /// What the estate and the station say it is.
 fn asset(page: &StationPage, ctx: &Ctx<'_>, public: &str) -> String {
     let lang = ctx.lang;
@@ -614,23 +783,9 @@ fn asset(page: &StationPage, ctx: &Ctx<'_>, public: &str) -> String {
     card.push_str(&row("EVSE", escape(&page.evse)));
     card.push_str(&row(
         lang.pick("Leistung", "Power"),
-        format!("{} kW", escape(&page.rated_power_kw)),
+        format!("{}&#8239;kW", escape(&page.rated_power_kw)),
     ));
-    if let Some(price) = &page.price {
-        // The public page lives on the public shell; the card says where by
-        // its path and names the code a driver compares (spec 015).
-        card.push_str(&row(
-            lang.pick("Preis", "Price"),
-            format!(
-                "{line} <span class=\"muted\">· Preisstand <strong>{code}</strong> · \
-                 <a href=\"{href}\">{page_word}</a></span>",
-                line = escape(&price.line),
-                code = escape(&price.preisstand),
-                href = escape(&format!("{}{}", public.trim_end_matches('/'), price.path)),
-                page_word = lang.pick("Preisseite", "Price page"),
-            ),
-        ));
-    }
+    card.push_str(&pricing(page, ctx, public));
     card.push_str(&row(
         "OCPP",
         format!(
@@ -742,7 +897,7 @@ fn place(page: &StationPage, ctx: &Ctx<'_>) -> String {
                 crate::map::lies(&place.country, lon, lat),
                 &place.country,
                 &href(&page.identity),
-                lang,
+                ctx,
             ),
         ),
         _ => (String::new(), String::new()),
@@ -770,7 +925,8 @@ fn place(page: &StationPage, ctx: &Ctx<'_>) -> String {
 
 /// Coordinates that lie outside the station's country say so, and say how to
 /// fix them (spec 022). A warning, never a refusal: the outline is simplified.
-fn misplaced(lies: crate::map::Lies, country: &str, station: &str, lang: Lang) -> String {
+fn misplaced(lies: crate::map::Lies, country: &str, station: &str, ctx: &Ctx<'_>) -> String {
+    let lang = ctx.lang;
     let crate::map::Lies::Outside { swapped } = lies else {
         return String::new();
     };
@@ -797,12 +953,18 @@ fn misplaced(lies: crate::map::Lies, country: &str, station: &str, lang: Lang) -
             ),
         )
     };
+    let edit = if ctx.can_write {
+        format!(
+            "<a class=\"noprint\" href=\"{}/edit\">{}</a>",
+            escape(station),
+            lang.pick("Koordinaten ändern", "Change the coordinates")
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "<p class=\"callout tone-warn\" role=\"note\"><span aria-hidden=\"true\">⚠</span> <strong>{what} ({country}).</strong> {next} \
-         <a class=\"noprint\" href=\"{station}/edit\">{fix}</a></p>",
+        "<p class=\"callout tone-warn\" role=\"note\"><span aria-hidden=\"true\">⚠</span> <strong>{what} ({country}).</strong> {next} {edit}</p>",
         country = escape(country),
-        station = escape(station),
-        fix = lang.pick("Koordinaten ändern", "Change the coordinates"),
     )
 }
 
@@ -822,16 +984,20 @@ fn meters(page: &StationPage, ctx: &Ctx<'_>) -> String {
             model = text(meter.model.as_ref()),
             serial = text(meter.serial.as_ref()),
             firmware = text(meter.firmware.as_ref().or(meter.gateway_version.as_ref())),
-            key = if meter.key_registered {
+            key = if let Some(key) = &meter.registered_key {
                 format!(
-                    "<span class=\"badge tone-good\">✓ {}</span>",
-                    lang.pick("registriert", "registered")
+                    "<details><summary>{}</summary><p>{} · SEC1 (hex)</p><code class=\"key\">{}</code></details>",
+                    lang.pick(
+                        "Registrierten Schlüssel vergleichen",
+                        "Compare registered key"
+                    ),
+                    escape(&key.curve),
+                    escape(&key.sec1)
                 )
+            } else if meter.key_registered {
+                lang.pick("registriert", "registered").into()
             } else {
-                format!(
-                    "<span class=\"badge tone-bad\">✕ {}</span>",
-                    lang.pick("kein Schlüssel", "no key")
-                )
+                lang.pick("kein Schlüssel", "no key").into()
             },
         );
     }
@@ -992,18 +1158,20 @@ fn recent(page: &StationPage, ctx: &Ctx<'_>, receipts: &str) -> String {
             let receipt = session
                 .receipt
                 .as_deref()
-                .filter(|_| !receipts.is_empty())
-                .map_or_else(String::new, |path| {
+                .and_then(|path| crate::investigation::receipt_url(receipts, path))
+                .map_or_else(String::new, |href| {
                     format!(
-                        " <a href=\"{}{}\">{}</a>",
-                        escape(receipts.trim_end_matches('/')),
-                        escape(path),
+                        " <a href=\"{}\">{}</a>",
+                        escape(&href),
                         lang.pick("Beleg", "Receipt")
                     )
                 });
             let _ = write!(
                 out,
-                "<li>{badge} <span class=\"what\">{tx}</span> {at}{receipt}</li>",
+                "<li>{badge} <a class=\"what\" href=\"/sessions/{position}?lang={tag}\">{word} {tx}</a> {at}{receipt}</li>",
+                word = lang.pick("Vorgang", "Session"),
+                position = session.position,
+                tag = lang.tag(),
                 tx = escape(&session.transaction),
                 at = ctx.when(session.at),
             );
@@ -1053,6 +1221,35 @@ mod tests {
     }
 
     #[test]
+    fn meter_keys_with_the_same_ends_retain_their_distinct_complete_sec1_point() {
+        let mut station = page();
+        let points = [
+            format!("03{}ff", "00".repeat(31)),
+            format!("03{}ff", "11".repeat(31)),
+        ];
+        for sec1 in &points {
+            station.meters.push(
+                serde_json::from_value(serde_json::json!({
+                    "evse":"DE*ABC*E00001","since":"2026-11-20T07:00:00Z","key_registered":true,
+                    "registered_key":{"curve":"secp256r1","sec1":sec1}
+                }))
+                .unwrap(),
+            );
+        }
+        let html = render(
+            &station,
+            Lang::En,
+            &TimeZone::new("Europe/Berlin").unwrap(),
+            time::macros::datetime!(2026-11-20 12:00 UTC),
+            "",
+            true,
+        );
+        for sec1 in &points {
+            assert!(html.contains(&format!(">{sec1}</code>")));
+        }
+    }
+
+    #[test]
     fn sr_137_what_a_station_says_is_shown_and_never_run() {
         let html = render(
             &page(),
@@ -1060,6 +1257,7 @@ mod tests {
             &TimeZone::new("Europe/Berlin").unwrap(),
             time::macros::datetime!(2026-11-20 12:00 UTC),
             "https://estate.example",
+            true,
         );
         assert!(!html.contains("<script>alert"), "escaped");
         assert!(html.contains("&lt;script&gt;"), "and still visible");
@@ -1083,6 +1281,7 @@ mod tests {
             &TimeZone::new("Europe/Berlin").unwrap(),
             time::macros::datetime!(2026-11-20 12:00 UTC),
             "",
+            true,
         );
         assert!(html.contains("&lt;i&gt;Schlüssel&lt;/i&gt;"), "{html}");
         assert!(!html.contains("<i>Schlüssel</i>"));
@@ -1100,7 +1299,7 @@ mod tests {
     fn a_held_point_says_until_when_for_which_card_and_can_be_cancelled() {
         let ber = TimeZone::new("Europe/Berlin").unwrap();
         let noon = time::macros::datetime!(2026-11-20 12:00 UTC);
-        let free = render(&page(), Lang::De, &ber, noon, "");
+        let free = render(&page(), Lang::De, &ber, noon, "", true);
         assert!(
             free.contains("action=\"/station/CP-1/reservations\""),
             "a form when free"
@@ -1112,7 +1311,7 @@ mod tests {
             until: time::macros::datetime!(2026-11-20 13:30 UTC),
             by: "operator:anna".to_owned(),
         });
-        let html = render(&held, Lang::De, &ber, noon, "");
+        let html = render(&held, Lang::De, &ber, noon, "", true);
         assert!(
             html.contains(
                 ">14:30</time></strong> · noch 1 h 30 min · für Karte <code>…F6</code> · anna"
@@ -1171,6 +1370,7 @@ mod tests {
             &TimeZone::new("Europe/Berlin").unwrap(),
             time::macros::datetime!(2026-11-20 12:00 UTC),
             "",
+            true,
         );
         assert!(
             html.contains("Breite und Länge sind vermutlich vertauscht"),
@@ -1183,10 +1383,100 @@ mod tests {
                 Lang::De,
                 &TimeZone::new("Europe/Berlin").unwrap(),
                 time::macros::datetime!(2026-11-20 12:00 UTC),
-                ""
+                "",
+                true,
             )
             .contains("vertauscht")
         );
+    }
+
+    #[test]
+    fn current_boot_tariff_response_and_visual_proof_are_separate() {
+        let mut station = page();
+        station.publicly_accessible = true;
+        station.show_price = true;
+        let zone = TimeZone::new("Europe/Berlin").unwrap();
+        let render_en = |page: &StationPage| {
+            render(
+                page,
+                Lang::En,
+                &zone,
+                time::macros::datetime!(2026-11-25 12:00 UTC),
+                "",
+                true,
+            )
+        };
+        assert!(render_en(&station).contains("No result for the current boot"));
+        station.station_tariff = Some(
+            serde_json::from_value(serde_json::json!({
+                "version": "tariff<1>", "facility_version": 3, "boot": "2026-11-25T08:00:00Z",
+                "at": "2026-11-25T08:03:00Z", "outcome": "Accepted", "retry": false,
+            }))
+            .unwrap(),
+        );
+        let html = render_en(&station);
+        for wanted in [
+            "Accepted",
+            "Registration version 3",
+            "tariff&lt;1&gt;",
+            "2026-11-25T08:03:00Z",
+            "On-site visibility unverified",
+            "occupancy fee",
+        ] {
+            assert!(html.contains(wanted), "missing {wanted}");
+        }
+        let attempt = station.station_tariff.as_mut().unwrap();
+        attempt.retry = true;
+        attempt.outcome = "<no answer>".into();
+        let html = render_en(&station);
+        assert!(html.contains("A retry is possible") && html.contains("&lt;no answer&gt;"));
+        station.station_tariff = None;
+        station.ocpp = "1.6".into();
+        assert!(render_en(&station).contains("no SetDefaultTariff acknowledgement"));
+    }
+
+    #[test]
+    fn station_forms_preserve_or_explicitly_change_publication_and_display_choices() {
+        use crate::stations::{Form, Purpose, render_form};
+        let mut station = page();
+        for (public, renewable, display) in [
+            (true, None, true),
+            (true, Some(false), false),
+            (false, Some(true), true),
+        ] {
+            station.publicly_accessible = public;
+            station.fully_renewable = renewable;
+            station.show_price = display;
+            let form = Form::of(&station);
+            let html = render_form(&form, Purpose::Change("CP-1"), None, Lang::En);
+            let choice = renewable.map_or_else(|| "unknown".to_owned(), |r| r.to_string());
+            for (name, value) in [
+                ("publicly_accessible", public.to_string()),
+                ("fully_renewable", choice),
+                ("show_price", display.to_string()),
+            ] {
+                let (_, options) = html.split_once(&format!("name=\"{name}\"")).unwrap();
+                assert!(
+                    options
+                        .split_once("</select>")
+                        .unwrap()
+                        .0
+                        .contains(&format!("value=\"{value}\" selected"))
+                );
+            }
+            let body = form.to_json();
+            assert_eq!(body["publicly_accessible"], public);
+            assert_eq!(body["fully_renewable"], serde_json::json!(renewable));
+            assert_eq!(body["show_price"], display);
+        }
+        for invalid in [
+            serde_json::json!({"show_price": true, "fully_renewable": "unknown"}),
+            serde_json::json!({"show_price": true, "publicly_accessible": true, "fully_renewable": "maybe"}),
+        ] {
+            assert!(serde_json::from_value::<Form>(invalid).is_err());
+        }
+        let form: Form = serde_json::from_value(serde_json::json!({"publicly_accessible": true, "show_price": false, "fully_renewable": "false"})).unwrap();
+        assert_eq!(form.to_json()["fully_renewable"], false);
     }
 
     #[test]

@@ -262,14 +262,13 @@ pub fn operator_page(routes: Router, operators: crate::authority::Operators) -> 
                     .get(header::AUTHORIZATION)
                     .and_then(|value| value.to_str().ok())
                     .and_then(basic_password);
-                let admitted = password.and_then(|password| {
-                    operators
-                        .admit(Some(&format!("Bearer {password}")))
-                        .cloned()
-                });
-                if let Some(actor) = admitted {
+                let admitted = password
+                    .as_deref()
+                    .and_then(|password| operators.identify(password));
+                if let Some((actor, access)) = admitted {
                     let mut request = request;
-                    crate::serve::acting(&mut request, actor);
+                    crate::serve::acting(&mut request, actor.clone());
+                    request.extensions_mut().insert(access);
                     next.run(request).await
                 } else {
                     let mut refused =

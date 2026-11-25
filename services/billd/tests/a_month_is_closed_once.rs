@@ -1295,6 +1295,7 @@ mod sealed {
         let env: emob_service::estate::Env = Arc::new(|name| match name {
             "EMOB_WEBHOOK_SECRET" => Some("whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQ=".to_owned()),
             "EMOB_OPERATOR_TOKEN" => Some("operator".to_owned()),
+            "EMOB_DESK_READ_TOKEN" => Some("reader-token".to_owned()),
             _ => None,
         });
         let refused = billd::daemon::run(billd::daemon::Options {
@@ -1405,6 +1406,7 @@ mod signed {
         let env: emob_service::estate::Env = Arc::new(move |name| match name {
             "EMOB_WEBHOOK_SECRET" => Some("whsec_c2VjcmV0LXNlY3JldC1zZWNyZXQ=".to_owned()),
             "EMOB_OPERATOR_TOKEN" => Some("operator-token-of-the-test".to_owned()),
+            "EMOB_DESK_READ_TOKEN" => Some("reader-token".to_owned()),
             billd::daemon::DATA_KEY => Some(data.clone()),
             "BILLD_SIGNING_KEY" => Some(signing.clone()),
             _ => None,
@@ -1429,7 +1431,7 @@ mod signed {
         })
         .await
         .expect("asked");
-        running.kill();
+        running.kill().await;
 
         assert!(anonymous.starts_with("HTTP/1.1 401"), "{anonymous}");
         assert!(operator.starts_with("HTTP/1.1 200"), "{operator}");

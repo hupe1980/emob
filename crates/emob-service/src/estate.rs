@@ -157,6 +157,9 @@ pub struct Estate {
     /// The tariffs stations name.
     #[serde(default)]
     pub tariffs: Vec<TariffSpec>,
+    /// Explicitly approved public provider plans (AFIR Art. 5(5)).
+    #[serde(default)]
+    pub public_plans: Vec<PublicPlan>,
     /// The roaming partners.
     #[serde(default)]
     pub partners: Vec<Partner>,
@@ -166,6 +169,9 @@ pub struct Estate {
     /// Driver contracts `empd` seeds.
     #[serde(default)]
     pub contracts: Vec<ContractSeed>,
+    /// Unassigned provider RFID cards available for native enrolment.
+    #[serde(default)]
+    pub card_stock: Vec<CardStock>,
     /// Who may read and act.
     #[serde(default)]
     pub operators: Vec<Operator>,
@@ -190,17 +196,22 @@ pub struct Estate {
     /// Systems outside the estate that receive events.
     #[serde(default)]
     pub subscribers: Vec<Subscriber>,
-    /// Where `poid` delivers the DATEX II table (spec 016).
+    /// Registered Mobilithek offers for the static DATEX II table and dynamic updates.
     #[serde(default)]
     pub mobilithek: Option<Mobilithek>,
 }
 
-/// `[mobilithek]` — read by `poid`: the national access point's publication
-/// the static table is posted to `[AFIR Art. 20(2)]` (spec 016).
+/// `[mobilithek]` configures the separate static and dynamic offers that
+/// `poid` delivers to the national access point. See `[AFIR Art. 20(2)]`.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Mobilithek {
+    /// Maximum age of a connector report before the feed marks availability unknown.
+    #[serde(default = "default_status_max_age_secs")]
+    pub status_max_age_secs: u32,
+    /// Push URL of the separately registered dynamic offer, linked to the static offer.
+    pub dynamic_url: String,
     /// The publication's push address the Mobilithek issued — `https://`,
     /// or `http://` on loopback for a mock.
     pub url: String,
@@ -211,6 +222,10 @@ pub struct Mobilithek {
     /// Its private key (PEM).
     #[serde(default)]
     pub client_key: Option<String>,
+}
+
+const fn default_status_max_age_secs() -> u32 {
+    86_400
 }
 
 /// `[receipts]` — read by `csmsd`.
@@ -423,6 +438,11 @@ pub struct Location {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Station {
+    /// Whether this point may appear in public price and infrastructure publications.
+    #[serde(default)]
+    pub publicly_accessible: bool,
+    /// Operator declaration that the electricity supplied is 100% renewable.
+    pub fully_renewable: Option<bool>,
     /// The OCPP identity it connects under.
     pub identity: String,
     /// The security profile it must connect with
@@ -649,6 +669,13 @@ pub struct TariffSpec {
         schemars(with = "Option<String>", regex(pattern = r"^\d+(\.\d+)?$"))
     )]
     pub per_minute: Option<Decimal>,
+    /// Gross fee per minute connected while the vehicle is not requesting energy.
+    #[serde(default)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "Option<String>", regex(pattern = r"^\d+(\.\d+)?$"))
+    )]
+    pub occupancy_per_minute: Option<Decimal>,
     /// Gross price per session, when the tariff has one.
     #[serde(default)]
     #[cfg_attr(
@@ -697,6 +724,11 @@ impl TariffSpec {
                 )
                 .with_vat(self.vat),
             );
+        }
+        if let Some(fee) = self.occupancy_per_minute {
+            let component = emob_tariff::PriceComponent::occupancy_per_minute(fee)
+                .ok_or_else(|| invalid("occupancy_per_minute", "supply a nonnegative rate that converts exactly to the hourly billing unit".into()))?;
+            components.push(component.with_vat(self.vat));
         }
         if let Some(fee) = self.session_fee {
             components.push(
@@ -1040,11 +1072,23 @@ pub struct BillingSection {
     pub delivery: Option<InvoiceDelivery>,
 }
 
+/// The printable number a driver reads from a card, trimmed for exact operator lookup.
+#[must_use]
+pub fn printed_card_number(number: &str) -> Option<&str> {
+    let value = number.trim();
+    (!value.is_empty() && number.chars().count() <= 64 && !number.chars().any(char::is_control))
+        .then_some(value)
+}
+
 /// One token on a seeded contract.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TokenSeed {
+    /// Optional printed number for an operator's exact card lookup (1–64 characters).
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(length(min = 1, max = 64)))]
+    pub visual_number: Option<String>,
     /// The uid the card or app presents.
     pub uid: String,
     /// `RFID`, `APP_USER`, `AD_HOC_USER`, `OTHER`.
@@ -1055,6 +1099,80 @@ pub struct TokenSeed {
     /// Whether it is blocked.
     #[serde(default)]
     pub blocked: bool,
+}
+
+/// An unissued physical card. Staff enter the inventory code printed on its sleeve.
+#[derive(Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CardStock {
+    /// Case-sensitive inventory code, unique within this estate.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(regex(pattern = "^[A-Z0-9][A-Z0-9-]{0,31}$"))
+    )]
+    pub code: String,
+    /// Canonical uppercase hexadecimal RFID UID (4, 7 or 10 bytes).
+    #[cfg_attr(
+        feature = "schema",
+        schemars(regex(pattern = "^([A-F0-9]{8}|[A-F0-9]{14}|[A-F0-9]{20})$"))
+    )]
+    pub uid: String,
+}
+
+impl core::fmt::Debug for CardStock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CardStock").finish_non_exhaustive()
+    }
+}
+
+/// Check inventory shape and uniqueness before issuing against it.
+///
+/// # Errors
+/// Names the conflicting inventory field without printing card identifiers.
+pub fn validate_card_stock(
+    stock: &[CardStock],
+    contracts: &[ContractSeed],
+) -> Result<(), EstateError> {
+    use std::collections::BTreeSet;
+    let mut codes = BTreeSet::new();
+    let mut uids = BTreeSet::new();
+    for token in contracts.iter().flat_map(|seed| &seed.tokens) {
+        uids.insert(token.uid.to_ascii_uppercase());
+        if let Some(number) = &token.visual_number {
+            codes.insert(number.trim().to_ascii_uppercase());
+        }
+    }
+    for (i, card) in stock.iter().enumerate() {
+        let bad = |field, reason: &str| EstateError::Invalid {
+            key: format!("card_stock[{i}].{field}"),
+            reason: reason.to_owned(),
+        };
+        let valid = |c: u8| c.is_ascii_uppercase() || c.is_ascii_digit();
+        if card.code.len() > 32
+            || !card.code.bytes().next().is_some_and(valid)
+            || !card.code.bytes().all(|c| valid(c) || c == b'-')
+            || !codes.insert(card.code.clone())
+        {
+            return Err(bad(
+                "code",
+                "expected a distinct inventory code of 1–32 uppercase letters, digits or hyphens",
+            ));
+        }
+        if !matches!(card.uid.len(), 8 | 14 | 20)
+            || !card
+                .uid
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'A'..=b'F').contains(&c))
+            || !uids.insert(card.uid.clone())
+        {
+            return Err(bad(
+                "uid",
+                "expected a distinct unissued uppercase hexadecimal RFID UID of 4, 7 or 10 bytes",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `[[contracts]]` — a driver contract `empd` seeds once.
@@ -1072,16 +1190,20 @@ pub struct ContractSeed {
     pub tokens: Vec<TokenSeed>,
 }
 
-/// `[[operators]]` — who may read the read models.
+/// `[[operators]]` — a named credential for estate reads and optional writes.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Operator {
     /// Who this is: the name every journal record and log line this operator
-    /// causes carries (`operator:<name>`), 1 to 64 of `[A-Za-z0-9*._:=+|@ -]`.
+    /// causes carries (`operator:<name>`), 1 to 64 of `[A-Za-z0-9*._:=+|@ -]`
+    /// with no surrounding spaces.
     pub name: String,
     /// The variable holding the bearer token.
     pub token_env: EnvRef,
+    /// Permit named operator actions. Omit for read-only access.
+    #[serde(default)]
+    pub write: bool,
 }
 
 /// `[services]` — where the daemons reach each other, and how.
@@ -1138,10 +1260,12 @@ pub struct Witness {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Desk {
+    /// Optional POI publication service for the operator delivery view.
+    pub poid: Option<String>,
     /// `csmsd`'s shell base URL (its read model, not its OCPP socket).
     pub csmsd: String,
     /// The variable holding the operator token `deskd` reads the read models
-    /// with — one of the `[[operators]]` tokens.
+    /// with — a read-only `[[operators]]` credential.
     pub token_env: EnvRef,
     /// The IANA zone the page tells the time and "today" in.
     pub time_zone: String,
@@ -1188,13 +1312,15 @@ pub fn webhook_secret(
 /// # Errors
 ///
 /// [`EstateError::Unset`] for the first operator whose variable is missing,
-/// and [`EstateError::Invalid`] for a name that cannot be an
-/// [`crate::Actor`] — it is what every record the operator causes will say.
+/// and [`EstateError::Invalid`] for an invalid or repeated actor name or a
+/// repeated credential value.
 pub fn operator_tokens(
     operators: &[Operator],
     env: &Env,
 ) -> Result<crate::authority::Operators, EstateError> {
-    let mut tokens = Vec::with_capacity(operators.len());
+    use crate::authority::{OperatorAccess, Token};
+    let mut tokens: Vec<(crate::Actor, Token, OperatorAccess)> =
+        Vec::with_capacity(operators.len());
     for (index, operator) in operators.iter().enumerate() {
         let actor =
             crate::Actor::operator(&operator.name).map_err(|error| EstateError::Invalid {
@@ -1204,9 +1330,76 @@ pub fn operator_tokens(
         let secret = operator
             .token_env
             .resolve_in(&format!("operators[{index}].token_env"), env)?;
-        tokens.push((actor, crate::authority::Token::new(secret.expose())));
+        if operator.name.trim() != operator.name || tokens.iter().any(|(name, _, _)| name == &actor)
+        {
+            return Err(EstateError::Invalid {
+                key: format!("operators[{index}].name"),
+                reason: "every operator needs a distinct name without surrounding spaces"
+                    .to_owned(),
+            });
+        }
+        if tokens
+            .iter()
+            .any(|(_, token, _)| token.verify(secret.expose()))
+        {
+            return Err(EstateError::Invalid {
+                key: format!("operators[{index}].token_env"),
+                reason: "each operator credential must have a distinct value".to_owned(),
+            });
+        }
+        let access = if operator.write {
+            OperatorAccess::Write
+        } else {
+            OperatorAccess::Read
+        };
+        tokens.push((actor, Token::new(secret.expose()), access));
     }
-    Ok(crate::authority::Operators::new(tokens))
+    Ok(crate::authority::Operators::from_grants(tokens))
+}
+
+/// The read-only credential used for background requests by the operator desk.
+///
+/// # Errors
+///
+/// Returns an estate error if the secret is missing, unknown or write-enabled.
+pub fn desk_read_credential(
+    desk: &Desk,
+    env: &Env,
+    operators: &crate::Operators,
+) -> Result<Secret, EstateError> {
+    let key = "desk.token_env";
+    let secret = desk.token_env.resolve_in(key, env)?;
+    if !matches!(
+        operators.identify(secret.expose()),
+        Some((_, crate::authority::OperatorAccess::Read))
+    ) {
+        return Err(EstateError::Invalid {
+            key: key.to_owned(),
+            reason: "the desk needs a configured read-only operator credential".to_owned(),
+        });
+    }
+    Ok(secret)
+}
+
+/// The station authorization service credential, separately held from operator bearers.
+///
+/// # Errors
+///
+/// Returns an estate error if the secret is missing or belongs to an operator.
+pub fn service_credential(
+    services: &Services,
+    env: &Env,
+    operators: &crate::Operators,
+) -> Result<Secret, EstateError> {
+    let key = "services.service_token_env";
+    let secret = services.service_token_env.resolve_in(key, env)?;
+    if operators.identify(secret.expose()).is_some() {
+        return Err(EstateError::Invalid {
+            key: key.to_owned(),
+            reason: "the service token must differ from every operator credential".to_owned(),
+        });
+    }
+    Ok(secret)
 }
 
 #[cfg(test)]
@@ -1323,6 +1516,83 @@ service_token_env = "EMOB_SERVICE_TOKEN"
             .resolve_from("k", |_| Some("whsec_c2VjcmV0".to_owned()))
             .unwrap();
         assert_eq!(format!("{secret:?}"), "Secret(…)", "and it never prints");
+    }
+
+    // heute-acts/SR-037: validation runs on the resolved secrets.
+    #[test]
+    fn the_desk_and_service_credentials_cannot_impersonate_a_writer() {
+        let mut estate: Estate =
+            from_str(include_str!("../../../deploy/estate.example.toml")).unwrap();
+        let env: Env = std::sync::Arc::new(|name| Some(name.to_owned()));
+        let operators = operator_tokens(&estate.operators, &env).unwrap();
+        let mut desk = estate.desk.unwrap();
+        let mut services = estate.services.unwrap();
+        assert!(desk_read_credential(&desk, &env, &operators).is_ok());
+        assert!(service_credential(&services, &env, &operators).is_ok());
+
+        for operator in &estate.operators {
+            services.service_token_env = operator.token_env.clone();
+            assert!(service_credential(&services, &env, &operators).is_err());
+            desk.token_env = operator.token_env.clone();
+            assert_eq!(
+                desk_read_credential(&desk, &env, &operators).is_ok(),
+                !operator.write
+            );
+        }
+        desk.token_env = EnvRef("UNKNOWN".to_owned());
+        assert!(desk_read_credential(&desk, &env, &operators).is_err());
+
+        let reused: Env = std::sync::Arc::new(|_| Some("shared-test-secret".to_owned()));
+        let error = operator_tokens(&estate.operators, &reused)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("operators[1].token_env") && !error.contains("shared-test-secret"));
+        estate.operators[1].name = " ".to_owned();
+        assert!(operator_tokens(&estate.operators, &env).is_err());
+        estate.operators[1].name = estate.operators[0].name.clone();
+        assert!(
+            operator_tokens(&estate.operators, &env)
+                .unwrap_err()
+                .to_string()
+                .contains("operators[1].name")
+        );
+    }
+
+    #[test]
+    fn unissued_inventory_has_unique_codes_and_canonical_unassigned_uids() {
+        // native-driver-enrolment/SR-301
+        let make = |code: &str, uid: &str| super::CardStock {
+            code: code.into(),
+            uid: uid.into(),
+        };
+        let estate: super::Estate =
+            from_str(include_str!("../../../deploy/estate.example.toml")).unwrap();
+        super::validate_card_stock(&estate.card_stock, &estate.contracts).unwrap();
+        for bad in [
+            make("A-7", "04A1B2C3D4E5F6"), // already seeded
+            make("MOB-1001", "1234ABCD"),  // ambiguous printed label
+            make("-CARD", "1234ABCD"),
+            make("CARD", "1234abcd"),
+            make("CARD", "1234"),
+        ] {
+            assert!(
+                super::validate_card_stock(std::slice::from_ref(&bad), &estate.contracts).is_err()
+            );
+            assert!(!format!("{bad:?}").contains(&bad.uid));
+        }
+        let malformed = include_str!("../../../deploy/estate.example.toml")
+            .replace("uid = \"04AB0000000004\"", "uid = 12345678");
+        let diagnostic = from_str::<super::Estate>(&malformed)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            diagnostic.contains("invalid card configuration") && !diagnostic.contains("12345678")
+        );
+        for conflicting in [make("A", "12345678"), make("B", "11111111")] {
+            assert!(
+                super::validate_card_stock(&[make("A", "11111111"), conflicting], &[]).is_err()
+            );
+        }
     }
 
     #[test]
@@ -1464,6 +1734,12 @@ service_token_env = "EMOB_SERVICE_TOKEN"
 
     #[test]
     fn a_version_off_the_quarter_hour_or_without_a_start_is_named() {
+        for rate in ["-0.01", "79228162514264337593543950335"] {
+            let supplied = format!("occupancy_per_minute = \"{rate}\"\n");
+            let config = TWO_VERSIONS.replace("session_fee =", &(supplied + "session_fee ="));
+            let error = histories(&tariffs(&config)).unwrap_err().to_string();
+            assert!(error.contains("tariffs[1].occupancy_per_minute"), "{error}");
+        }
         let off_grid = TWO_VERSIONS.replace("00:00:00+01:00", "00:07:00+01:00");
         let error = histories(&tariffs(&off_grid)).unwrap_err().to_string();
         assert!(error.contains("tariffs[0]"), "{error}");
@@ -1472,3 +1748,10 @@ service_token_env = "EMOB_SERVICE_TOKEN"
         assert!(error.contains("tariffs[1].valid_from"), "{error}");
     }
 }
+
+mod public_plan;
+mod retail_offer;
+pub use public_plan::{
+    PublicPlan, PublicSchedule, check_public_plans, validate_public_origin, validate_public_plans,
+};
+pub use retail_offer::{RetailOffer, RetailTerms};

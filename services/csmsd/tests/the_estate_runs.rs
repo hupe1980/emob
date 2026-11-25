@@ -38,6 +38,7 @@ const BLOCKED_CARD: &str = "04DEADBEEF0001";
 /// A second driver on the same contract.
 const OTHER_CARD: &str = "04C0FFEE000002";
 const OPERATOR: &str = "operator-token";
+const READER: &str = "reader-token";
 const SECRET: &str = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
 /// The bootstrap token the demo estate hands the partner out of band.
 const TOKEN_A: &str = "token-a-for-de-msp";
@@ -50,6 +51,7 @@ fn env() -> Env {
     let mut values: BTreeMap<&str, String> = [
         ("EMOB_WEBHOOK_SECRET", SECRET),
         ("EMOB_SERVICE_TOKEN", "service-token"),
+        ("EMOB_DESK_READ_TOKEN", READER),
         ("EMOB_OPERATOR_TOKEN", OPERATOR),
         (
             "EMPD_DATA_KEY",
@@ -605,7 +607,7 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
             .replace('.', ",");
         assert!(page.contains(&format!("{gross}\u{a0}€")), "{gross}");
         // Spec 015, SC-002: the receipt names the version that rated it by the
-        // same Preisstand the point's price page shows — public, cacheable,
+        // same Preisstand the point's price page shows — public, always fresh,
         // not indexed — and an EVSE nobody runs is an empty 404.
         let code = cdr.cost.as_ref().unwrap().tariff_fingerprint.code();
         assert!(page.contains(&format!("<strong>{code}</strong>")), "{page}");
@@ -614,7 +616,8 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
             .await
             .unwrap();
         assert_eq!(price.status(), 200);
-        assert_eq!(price.headers()["cache-control"], "public, max-age=60");
+        assert_eq!(price.headers()["cache-control"], "no-store");
+        assert_eq!(price.headers()["vary"], "Accept-Language");
         assert_eq!(price.headers()["x-robots-tag"], "noindex");
         let price = price.text().await.unwrap();
         assert!(
@@ -744,6 +747,32 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
             !view.contains(GOOD_CARD),
             "no uid on the station page: {view}"
         );
+        let station_card: serde_json::Value = serde_json::from_str(&view).unwrap();
+        let key = &station_card["meters"][0]["registered_key"];
+        let estate_key = csmsd
+            .csmsd
+            .registry()
+            .key_at(
+                &emob_eichrecht::ComponentRef::Meter {
+                    serial: station_card["meters"][0]["serial"].as_str().unwrap().into(),
+                },
+                csmsd.csmsd.now(),
+            )
+            .unwrap();
+        let full_point = hex::decode(key["sec1"].as_str().unwrap()).unwrap();
+        assert_eq!(full_point, estate_key.key.sec1_bytes());
+        assert_eq!(key["curve"], estate_key.key.curve().name());
+        let position = station_card["recent"][0]["position"].as_u64().unwrap();
+        let (status, body) = get(
+            &format!("http://{}/v1/csmsd/sessions/{position}", estate.csmsd_http),
+            Some(OPERATOR),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(detail["billed"], true);
+        assert_eq!(detail["receipt"], station_card["recent"][0]["receipt"]);
+        assert_eq!(detail["station_registered"], true);
         let (status, view) = get(
             &format!("http://{}/v1/roamd/today", estate.roamd),
             Some(OPERATOR),
@@ -768,10 +797,10 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
         }
 
         station.shutdown(Duration::from_secs(1)).await;
-        csmsd.kill();
-        roamd.kill();
-        billd.kill();
-        empd.kill();
+        csmsd.kill().await;
+        roamd.kill().await;
+        billd.kill().await;
+        empd.kill().await;
     })
     .await
     .expect("SC-001: the story runs in under thirty seconds");
@@ -799,10 +828,10 @@ async fn sr_031_a_receiver_that_was_down_gets_the_record_once_it_is_up() {
     assert_eq!(received(&billd).len(), 1, "it lands once");
 
     station.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
-    roamd.kill();
-    billd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    roamd.kill().await;
+    billd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -816,7 +845,7 @@ async fn sr_031_a_csmsd_killed_with_a_delivery_owed_delivers_it_after_the_restar
     charge(&station, GOOD_CARD, &[]).await;
     until("roamd's delivery", || delivered(&csmsd, Target::Roamd)).await;
     station.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
+    csmsd.kill().await;
 
     let billd = estate.billd().await;
     let csmsd = estate.csmsd().await;
@@ -832,10 +861,10 @@ async fn sr_031_a_csmsd_killed_with_a_delivery_owed_delivers_it_after_the_restar
         "and roamd was not sent it twice"
     );
 
-    csmsd.kill();
-    roamd.kill();
-    billd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    roamd.kill().await;
+    billd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -851,8 +880,8 @@ async fn sr_030_a_receiver_restarted_after_the_receipt_takes_a_redelivery_as_a_d
         delivered(&csmsd, Target::Billd) && delivered(&csmsd, Target::Roamd)
     })
     .await;
-    billd.kill();
-    roamd.kill();
+    billd.kill().await;
+    roamd.kill().await;
 
     // Both come back from their journals, and the same delivery — signed now,
     // as a retry would be — changes nothing.
@@ -890,10 +919,10 @@ async fn sr_030_a_receiver_restarted_after_the_receipt_takes_a_redelivery_as_a_d
     );
 
     station.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
-    roamd.kill();
-    billd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    roamd.kill().await;
+    billd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -938,8 +967,8 @@ async fn sr_029_a_delivery_signed_with_another_secret_is_refused_and_counted() {
         let (_, view) = get(&format!("http://{daemon}/v1/{name}/today"), Some(OPERATOR)).await;
         assert!(view.contains(r#""refused_deliveries":1"#), "{view}");
     }
-    billd.kill();
-    roamd.kill();
+    billd.kill().await;
+    roamd.kill().await;
 }
 
 /// What an outside subscriber was posted: `webhook-id` and body.
@@ -1054,7 +1083,7 @@ async fn sr_038_an_oversized_delivery_is_refused_before_it_is_read() {
     stream.read_exact(&mut head).await.unwrap();
     assert_eq!(&head, b"HTTP/1.1 413");
     assert!(received(&billd).is_empty());
-    billd.kill();
+    billd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1078,8 +1107,8 @@ async fn a_session_whose_evidence_fails_never_leaves_csmsd_and_says_why() {
         )),
         "the refusal is journalled with its reasons: {outcomes:?}"
     );
-    csmsd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1105,8 +1134,8 @@ async fn a_token_the_provider_blocked_is_answered_blocked_and_opens_no_transacti
                 .all(|(_, answer)| answer.status == Status::Blocked)
         );
     });
-    csmsd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1140,7 +1169,7 @@ async fn sr_032_an_empd_that_does_not_answer_is_an_invalid_with_the_reason_journ
         assert!(answer.reason.contains("empd"), "{}", answer.reason);
     }
     assert!(csmsd.csmsd.with_state(|state| state.inflight.is_empty()));
-    csmsd.kill();
+    csmsd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1154,7 +1183,7 @@ async fn sr_036_an_estate_with_no_meter_keys_is_not_ready_and_says_why() {
     let (status, body) = get(&format!("http://{}/health/ready", estate.csmsd_http), None).await;
     assert_eq!(status, 503);
     assert!(body.contains("key registry is empty"), "{body}");
-    csmsd.kill();
+    csmsd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1187,8 +1216,8 @@ async fn a_second_connection_under_an_identity_already_connected_supersedes_the_
     );
     second.shutdown(Duration::from_secs(1)).await;
     first.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1204,7 +1233,7 @@ async fn a_roamd_restarted_before_the_partner_registered_pushes_the_record_once_
     let station = station(csmsd.ocpp).await;
     charge(&station, GOOD_CARD, &[]).await;
     until("roamd's delivery", || delivered(&csmsd, Target::Roamd)).await;
-    roamd.kill();
+    roamd.kill().await;
 
     let roamd = estate.roamd().await;
     register(estate.roamd, peer_addr).await;
@@ -1223,10 +1252,10 @@ async fn a_roamd_restarted_before_the_partner_registered_pushes_the_record_once_
     );
 
     station.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
-    roamd.kill();
-    billd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    roamd.kill().await;
+    billd.kill().await;
+    empd.kill().await;
 }
 
 /// A station that answers nothing, connecting as `identity` with `password`.
@@ -1327,6 +1356,16 @@ async fn sr_144_sr_147_a_station_is_onboarded_and_retired_without_a_restart() {
     )
     .await;
     assert_eq!(status, 401);
+
+    assert_eq!(get(&base, Some(READER)).await.0, 200);
+    let (status, _) = send(
+        reqwest::Method::POST,
+        &base,
+        Some(READER),
+        new_station("CP-NEW", "DE*ABC*E00099"),
+    )
+    .await;
+    assert_eq!(status, 403, "a background read cannot register a station");
 
     // SR-145: a station a tariff nobody defines is refused, naming the field.
     let mut wrong = new_station("CP-NEW", "DE*ABC*E00099");
@@ -1486,7 +1525,7 @@ async fn sr_144_sr_147_a_station_is_onboarded_and_retired_without_a_restart() {
         !boots_as(csmsd.ocpp, "CP-NEW", &password).await,
         "a retired station is refused"
     );
-    csmsd.kill();
+    csmsd.kill().await;
 }
 
 // ── spec 025: a point is held ───────────────────────────────────────────────
@@ -1591,8 +1630,8 @@ async fn sr_178_a_held_point_charges_only_its_card_and_ends_honoured() {
         "the reserved card's start ends it honoured"
     );
     station.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1628,8 +1667,8 @@ async fn sr_177_a_point_is_not_held_for_a_refused_card_a_refusing_station_or_too
         "nothing journalled"
     );
     station.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    empd.kill().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1682,6 +1721,6 @@ async fn a_held_point_is_cancelled_on_the_station_and_expires_on_time() {
         "and the point is free"
     );
     station.shutdown(Duration::from_secs(1)).await;
-    csmsd.kill();
-    empd.kill();
+    csmsd.kill().await;
+    empd.kill().await;
 }

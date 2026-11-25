@@ -6,7 +6,7 @@
 //! with its own citation: the **driver at the point** before they start
 //! `[AFIR Art. 5(4)]`, over OCPP 2.1's *Tariff and Cost* block; the **roaming
 //! partner** that will settle against it, over OCPI; and the **national access
-//! point** `[AFIR Art. 20(2)(c)]`, over DATEX II.
+//! point** `[AFIR Art. 20(2)(f)]`, over DATEX II.
 //!
 //! Almost every stack computes that price three times, in three systems, and
 //! reconciles none of them against the invoice. This one computes it **none**
@@ -82,7 +82,7 @@ pub enum Audience {
     /// The driver at the point, over OCPP 2.1's *Tariff and Cost* block —
     /// `[AFIR Art. 5(4)]`, the screen the article actually regulates.
     Station,
-    /// The national access point, over DATEX II — `[AFIR Art. 20(2)(c)]`.
+    /// The national access point, over DATEX II — `[AFIR Art. 20(2)(f)]`.
     NationalAccessPoint,
     /// The roaming partner that will settle against it, over OCPI.
     Partner,
@@ -97,7 +97,7 @@ impl Audience {
     pub const fn citation(self) -> &'static str {
         match self {
             Self::Station => "[AFIR Art. 5(4)]",
-            Self::NationalAccessPoint => "[AFIR Art. 20(2)(c)]",
+            Self::NationalAccessPoint => "[AFIR Art. 20(2)(f)]",
             // A settlement obligation between two companies rather than a
             // regulatory one, and the only one of the three with no article.
             Self::Partner => "the contract with the partner",

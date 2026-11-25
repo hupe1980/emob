@@ -15,6 +15,9 @@ fn zone() -> TimeZone {
 
 fn tampered(identity: &str, transaction: &str) -> Refusal {
     Refusal {
+        position: transaction.parse().unwrap_or(0),
+        omitted_findings: 0,
+        omitted_reasons: 0,
         identity: identity.into(),
         transaction: transaction.into(),
         reasons: vec!["record 2: the signature does not verify".into()],
@@ -81,7 +84,9 @@ fn week() -> Tally {
 fn busy() -> Snapshot {
     Snapshot {
         csmsd: Source::Up(Csmsd {
+            station_count: 2,
             success: Windows {
+                days: Vec::new(),
                 today: window(&tally()),
                 week: window(&week()),
             },
@@ -108,6 +113,7 @@ fn busy() -> Snapshot {
         zone: zone(),
         at: Cursors::default(),
         journals: Vec::new(),
+        publication: None,
     }
 }
 
@@ -116,7 +122,9 @@ fn quiet() -> Snapshot {
     tally.record("CP-1", Ending::Billed);
     Snapshot {
         csmsd: Source::Up(Csmsd {
+            station_count: 2,
             success: Windows {
+                days: Vec::new(),
                 today: window(&tally),
                 week: window(&tally),
             },
@@ -130,6 +138,7 @@ fn quiet() -> Snapshot {
         zone: zone(),
         at: Cursors::default(),
         journals: Vec::new(),
+        publication: None,
     }
 }
 
@@ -183,14 +192,14 @@ fn the_queue_is_in_the_order_a_person_works_it() {
 #[test]
 fn a_refused_session_says_why_with_its_paragraph_and_a_stable_link() {
     let page = render(&busy(), Lang::De);
-    assert!(page.contains("id=\"s-CP-1-2\""));
-    assert!(page.contains("href=\"#s-CP-1-2\""));
+    assert!(page.contains("id=\"s-2\""));
+    assert!(page.contains("href=\"#s-2\""));
     assert!(page.contains("Eine Signatur passt nicht"));
     assert!(page.contains("<span class=\"cite\">[MessEG §33]</span>"));
     assert!(page.contains("<summary>Warum?</summary>"));
     assert!(page.contains("Abrechenbar, wenn"));
     // The English link carries its language.
-    assert!(render(&busy(), Lang::En).contains("href=\"?lang=en#s-CP-1-2\""));
+    assert!(render(&busy(), Lang::En).contains("href=\"?lang=en#s-2\""));
 }
 
 #[test]
@@ -233,6 +242,14 @@ fn us2_a_quiet_morning_says_so_rather_than_showing_yesterday() {
     let today = &page[position(&page, "rate-today")..position(&page, "rate-week")];
     assert!(today.contains("Heute noch keine Ladevorgänge."), "{today}");
     assert!(!today.contains("<meter"));
+    assert!(page.contains("10 von 12 Ladevorgängen abgerechnet"));
+    assert!(!page.contains("Erste Station registrieren"));
+    let Source::Up(csmsd) = &mut snapshot.csmsd else {
+        unreachable!()
+    };
+    csmsd.station_count = 0;
+    let page = render(&snapshot, Lang::De);
+    assert!(page.contains("Erste Station registrieren"));
     assert!(page.contains("10 von 12 Ladevorgängen abgerechnet"));
 }
 
@@ -284,7 +301,7 @@ fn sr_054_a_daemon_that_is_down_is_named_with_since_when_and_the_rest_renders() 
     );
     assert!(invoices.contains("10:41"));
     assert!(
-        page.contains("id=\"s-CP-1-2\""),
+        page.contains("id=\"s-2\""),
         "the refused session still renders"
     );
     assert!(
@@ -310,6 +327,9 @@ fn sr_051_text_from_a_read_model_never_becomes_markup() {
     let mut snapshot = busy();
     snapshot.csmsd = Source::Up(Csmsd {
         refused: page(vec![Refusal {
+            position: 1,
+            omitted_findings: 0,
+            omitted_reasons: 0,
             identity: "<script>alert(1)</script>".into(),
             transaction: "\"><img src=x onerror=alert(2)>".into(),
             reasons: vec!["<b>bold</b>".into()],
@@ -370,7 +390,7 @@ fn sr_055_ten_thousand_refusals_render_fifty_newest_first_with_the_count() {
     assert!(refused.contains("<span class=\"count\">10000</span>"));
     assert!(refused.contains("50 von 10000 angezeigt"));
     assert!(
-        position(refused, "s-CP-1-9999") < position(refused, "s-CP-1-9998"),
+        position(refused, "s-9999") < position(refused, "s-9998"),
         "newest first"
     );
     // SC-002: under 30 kB compressed; the markup repeats, so the raw bound is
@@ -403,7 +423,7 @@ fn us3_sr_095_older_is_one_plain_link_built_from_the_cursor_alone() {
     });
     snapshot.at.refused = Some(9_950);
     let page = render(&snapshot, Lang::En);
-    assert!(page.contains("id=\"s-CP-1-9949\""));
+    assert!(page.contains("id=\"s-9949\""));
     assert!(page.contains("href=\"?lang=en#refused\">Show newest</a>"));
     assert!(page.contains("href=\"?lang=en&amp;refused=9900#refused\">Show older</a>"));
     // A station list says "more": it is not history.
@@ -425,7 +445,9 @@ fn sc_001_heute_renders_from_bounded_inputs_in_time() {
     let rows = 200;
     let snapshot = Snapshot {
         csmsd: Source::Up(Csmsd {
+            station_count: 2,
             success: Windows {
+                days: Vec::new(),
                 today: window(&tally()),
                 week: window(&week()),
             },
@@ -569,4 +591,54 @@ fn sr_155_a_silent_row_shows_its_newest_note_as_text() {
         page.contains("Reserviert bis 14:30"),
         "a driver is on the way to a silent station"
     );
+}
+
+#[test]
+fn mobile_data_receipts_keep_failures_history_and_subscriber_evidence_separate() {
+    let mut snapshot = quiet();
+    let delivery = |body| Source::Up(serde_json::from_value(body).unwrap());
+    snapshot.publication = Some(delivery(serde_json::json!({
+        "snapshot_at": "2026-11-25T09:00:02Z", "accepted_at": "2026-11-25T09:20:44Z",
+        "pending_since": "2026-11-25T09:22:51Z", "last_source_change": "2026-11-25T08:59:00Z", "last_measured_at": "2026-11-25T09:00:01.151Z",
+        "static_attempts": 5, "static_last_attempt": "2026-11-25T08:54:00Z", "static_accepted_at": "2026-11-25T08:54:12Z",
+        "attempts": 11, "last_attempt": "2026-11-25T09:22:53Z",
+        "changes": 7, "missed_deadlines": 2, "problem": "missing <metadata>",
+    })));
+    let html = render(&snapshot, Lang::En);
+    for wanted in [
+        "2026-11-25T09:00:02Z",
+        "2026-11-25T09:20:44Z",
+        "Dynamic delivery attempts including retries</dt><dd>11</dd>",
+        "2026-11-25T09:22:53Z",
+        "Static table</dt><dd>Attempts 5",
+        "2026-11-25T08:54:12Z",
+        ">7</dd>",
+        ">2</dd>",
+        "61.151 s",
+        "Overdue. Check the source and receiver.",
+        "missing &lt;metadata&gt;",
+        "what a subscriber sees",
+    ] {
+        assert!(html.contains(wanted), "missing {wanted}");
+    }
+    assert!(!html.contains("Nothing needs you today"));
+    snapshot.publication = Some(delivery(
+        serde_json::json!({"changes": 0, "missed_deadlines": 0}),
+    ));
+    let html = render(&snapshot, Lang::En);
+    assert!(
+        html.contains("No acknowledgement recorded")
+            && html.contains("first delivery")
+            && html.contains("No paired measurement")
+            && html.contains("Static table</dt><dd>Attempts Unknown")
+            && html.contains("Dynamic delivery attempts including retries</dt><dd>Unknown</dd>")
+    );
+    assert!(!html.contains("Nothing needs you today"));
+    snapshot.publication = Some(Source::Down {
+        since: NOW,
+        why: Why::Refused,
+    });
+    assert!(render(&snapshot, Lang::En).contains("does not let deskd read"));
+    snapshot.publication = None;
+    assert!(render(&snapshot, Lang::De).contains("Keine Datenquelle eingerichtet"));
 }

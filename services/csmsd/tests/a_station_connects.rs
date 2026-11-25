@@ -59,6 +59,7 @@ impl Authorize for Provider {
     fn ask<'a>(
         &'a self,
         uid: &'a str,
+        _evse: Option<&'a emob_core::EvseId>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Answer> + Send + 'a>> {
         Box::pin(async move {
             Answer {
@@ -70,6 +71,7 @@ impl Authorize for Provider {
                     token_type: emob_roam::TokenType::Rfid,
                     contract_id: "DE-MSP-C00000001-W".parse().unwrap(),
                 }),
+                retail: None,
                 reference: Some("a".repeat(64)),
             }
         })

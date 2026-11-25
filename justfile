@@ -177,7 +177,7 @@ images *ARGS:
 # 🚀 Bring the estate up locally
 up:
     #!/usr/bin/env bash
-    set -uo pipefail
+    set -euo pipefail
     for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY POID_NAP_IDENTIFIER; do
         if [ -z "${!key:-}" ]; then
             echo "❌ $key is unset — for a local run:  just dev-keys > .env" >&2
@@ -231,7 +231,7 @@ dev-keys estate="deploy/estate.example.toml":
 run estate="":
     #!/usr/bin/env bash
     set -euo pipefail
-    [ -f .env ] || { just dev-keys > .env; echo "🔑 wrote .env (gitignored) — the secrets for this machine"; }
+    [ -f .env ] || { (umask 077; just dev-keys > .env); echo "🔑 wrote .env (gitignored) — the secrets for this machine"; }
     set -a; . ./.env; set +a
     [ -z "{{ estate }}" ] || export EMOB_ESTATE="{{ estate }}"
     [ -f target/dev-tls/server.pem ] || just dev-ca
@@ -254,7 +254,7 @@ run estate="":
     echo "🚀 the estate runs — Heute: http://127.0.0.1:9587 (user: demo operator, password: \$EMOB_OPERATOR_TOKEN in .env) · OCPP: wss://127.0.0.1:9000 · logs: $EMOB_JOURNAL_DIR/*.log · Ctrl-C stops"
     wait
 
-# The whole estate on loopback in one process: the daemons through their own
+# The five demo services on loopback in one process: the daemons through their own
 # `daemon::run`, three simulated stations on OCPP 1.6 / 2.0.1 / 2.1 over wss://
 # (security profile 2), a roaming partner, a seeded morning at 60×. Prints
 # Heute (signed in), a receipt and the partner's inbox, and runs until Ctrl-C.
@@ -375,17 +375,13 @@ a11y:
 
 # deskd alone, against the example estate: it reads csmsd, billd and roamd at
 # the addresses `[desk]` and `[services]` name, so start those (or `just demo`,
-# which runs its own deskd) first. It needs the operator token it signs you in
-# with and nothing else; a missing one refuses to start, naming the variable.
+# which runs its own deskd) first. The example uses separate credentials for
+# signed-in writes and background reads. deskd names any missing variable.
 #
 # 🖥️  Run the operator page (Heute) on http://127.0.0.1:9587/
 desk:
     #!/usr/bin/env bash
     set -uo pipefail
-    if [ -z "${EMOB_OPERATOR_TOKEN:-}" ]; then
-        echo "❌ EMOB_OPERATOR_TOKEN is unset — the page answers nobody without one" >&2
-        exit 1
-    fi
     EMOB_ESTATE=deploy/estate.example.toml cargo run -q -p deskd
 
 # 🛑 Take it down, keeping the journals
@@ -463,12 +459,11 @@ e2e:
     #!/usr/bin/env bash
     set -euo pipefail
     [ -n "${CI:-}" ] || just emobtest
-    scratch=$(mktemp -d) runner=""
-    trap 'kill $runner 2>/dev/null; pkill -P $runner 2>/dev/null; wait 2>/dev/null; rm -rf "$scratch"' EXIT
-    EMOB_JOURNAL_DIR="$scratch" just run > "$scratch/run.log" 2>&1 & runner=$!
-    for _ in $(seq 600); do grep -q "the estate runs" "$scratch/run.log" 2>/dev/null && break; sleep 0.5; done
-    curl -fsS http://127.0.0.1:9001/health/ready >/dev/null 2>&1 || { cat "$scratch/run.log" "$scratch"/csmsd.log 2>/dev/null; exit 1; }
-    set -a; . ./.env; set +a
-    cd emobtest
-    [ -n "${CI:-}" ] || . .venv/bin/activate
-    pytest -q tests/test_against_emob.py --emob-ocpp wss://127.0.0.1:9000/ocpp --emob-ca ../target/dev-tls/ca.pem
+    [ -f target/dev-tls/server.pem ] || just dev-ca
+    cargo build -q --locked --bins
+    keys=$(mktemp)
+    trap 'rm -f "$keys"' EXIT
+    just dev-keys deploy/estate.example.toml > "$keys"
+    source "$keys"
+    [ -n "${CI:-}" ] || . emobtest/.venv/bin/activate
+    python3 emobtest/run_estate.py

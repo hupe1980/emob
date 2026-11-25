@@ -145,7 +145,7 @@ the edge, for leaving records only.
 ### Locations come from the AFIR feed's model
 
 A CPO publishes each location twice: to partners in OCPI and to the national
-access point `[AFIR Art. 20(2)(c)]`. This crate has no location model of its
+access point `[AFIR Art. 20(2)(f)]`. This crate has no location model of its
 own; it reads `emob_poi::site`, the same source as the DATEX II feed, so the two
 cannot drift. OCPI length limits are enforced, not truncated — a truncated
 address names a different building.
@@ -198,7 +198,7 @@ travel.
 
 - OCPI 2.3.0 and 2.2.1 — CDRs, tariffs, locations, invoice reconciliation, via `ocpi-kit`
 - OICP 2.3 (Hubject) — CDRs and pricing products, via `oicp-kit`
-- `[AFIR Art. 5(4)]`, `[AFIR Art. 20(2)(c)]`
+- `[AFIR Art. 5(4)]`, `[AFIR Art. 20(2)(f)]`
 
 Tests: `tests/the_same_session.rs` runs one genuinely signed session over
 self-roaming, OCPI 2.3.0 and OCPI 2.2.1 and asserts the same money, with the

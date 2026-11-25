@@ -163,6 +163,16 @@ impl PriceComponent {
         }
     }
 
+    /// Build the hourly occupancy component from the gross rate quoted per minute.
+    /// Returns `None` if the rate is negative or cannot round-trip exactly.
+    #[must_use]
+    pub fn occupancy_per_minute(rate: Decimal) -> Option<Self> {
+        let sixty = Decimal::from(60);
+        let hourly = rate.checked_mul(sixty)?;
+        (rate >= Decimal::ZERO && hourly.checked_div(sixty) == Some(rate))
+            .then(|| Self::new(Dimension::ParkingTime, hourly))
+    }
+
     /// The same component with a VAT percentage.
     #[must_use]
     pub const fn with_vat(mut self, vat: Decimal) -> Self {

@@ -145,11 +145,11 @@ pub fn sweep(estate: &Estate) -> Proposal {
 
     let advice = failing
         .into_values()
-        .map(|(obligation, points)| advise(&obligation, &points, When::Now))
+        .map(|(obligation, points)| advise(&obligation, &points, When::Now, estate.on))
         .chain(
             forecast
                 .into_values()
-                .map(|(obligation, points)| advise(&obligation, &points, When::From)),
+                .map(|(obligation, points)| advise(&obligation, &points, When::From, estate.on)),
         )
         .collect();
 
@@ -191,7 +191,12 @@ enum When {
 /// queue that says "fail" about it is a queue that teaches its reader to
 /// discount the ones that matter (D219). The calendar carries the distinction
 /// and this is the one place it reaches a human.
-fn advise(obligation: &Obligation, points: &[String], when: When) -> Advice {
+fn advise(
+    obligation: &Obligation,
+    points: &[String],
+    when: When,
+    assessed_on: time::Date,
+) -> Advice {
     let n = points.len();
     let headline = match (obligation.consequence, when) {
         (Consequence::Breach, When::Now) => format!(
@@ -213,7 +218,7 @@ fn advise(obligation: &Obligation, points: &[String], when: When) -> Advice {
     };
     Advice {
         specialist: NAME.to_owned(),
-        headline,
+        headline: format!("{headline} (assessed {assessed_on})"),
         at_risk: AtRisk::Count {
             n: points.len(),
             of: "charge points".to_owned(),
@@ -286,6 +291,50 @@ mod tests {
             on,
             points,
             horizon_days: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn compliance_sweep_groups_declared_dynamic_data_gaps_with_their_date_and_source() {
+        let on = date!(2025 - 04 - 14);
+        let mut paid = compliant("DE*ABC*E00001", date!(2024 - 07 - 01));
+        paid.data.dynamic_data = false;
+        let mut free = compliant("DE*ABC*E00002", date!(2024 - 07 - 01));
+        free.requires_payment = false;
+        free.data.dynamic_data = false;
+        let mut private = compliant("DE*ABC*E00003", date!(2024 - 07 - 01));
+        private.accessibility = emob_core::station::Accessibility::Private;
+        private.data.dynamic_data = false;
+        let mut published = compliant("DE*ABC*E00004", date!(2024 - 07 - 01));
+        published.requires_payment = false;
+        let input = estate(vec![paid, free, private, published], on);
+        let runtime =
+            crate::tests::plane(std::sync::Arc::new(RedbStore::open_in_memory().unwrap()));
+        let outcome = runtime
+            .start(
+                CAPABILITY,
+                Tainted::trusted(serde_json::to_value(&input).unwrap()),
+            )
+            .run()
+            .await
+            .unwrap();
+        let proposal: Proposal =
+            serde_json::from_value(outcome.success().unwrap().peek().clone()).unwrap();
+        assert_eq!(proposal, sweep(&input));
+        let findings: Vec<_> = proposal
+            .advice
+            .iter()
+            .filter(|a| a.headline.contains("afir-dynamic-data"))
+            .collect();
+        assert_eq!(findings.len(), 1);
+        let finding = findings[0];
+        assert_eq!(finding.evidence, ["DE*ABC*E00001", "DE*ABC*E00002"]);
+        assert_eq!(finding.covers, 2);
+        for expected in ["[AFIR Art. 20(2)(f)]", "2025-04-14", "declaration"] {
+            assert!(finding.headline.contains(expected), "{}", finding.headline);
+        }
+        for name in ["operational status", "availability", "ad-hoc price"] {
+            assert!(finding.suggested.contains(name), "{}", finding.suggested);
         }
     }
 

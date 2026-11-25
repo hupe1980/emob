@@ -28,8 +28,8 @@ const fn words(kind: FindingKind) -> Words {
                 "No public key is registered for the meter that signed, at the time it signed — the values cannot be checked.",
             ),
             fix: (
-                "der Schlüssel des Zählers mit seinem Gültigkeitszeitraum im Estate eingetragen gewesen wäre. Der Vorgang wird nachträglich abrechenbar, sobald er es ist — an den Daten selbst hat sich nichts geändert.",
-                "the meter's key had been in the estate with a window covering the session. The session becomes billable once it is — nothing about the records has to change.",
+                "für den Messzeitpunkt ein unabhängig bestätigter Zählerschlüssel vorgelegen hätte. Zum Nachprüfen diesen Schlüssel und seinen Gültigkeitszeitraum beschaffen und die gespeicherten signierten Werte damit prüfen.",
+                "an independently confirmed meter key had covered the measurement time. To review the decision, obtain that key and its validity period and recheck the retained signed readings.",
             ),
         },
         FindingKind::Signature => Words {
@@ -158,23 +158,40 @@ pub fn headline(
         let w = words(first.kind);
         return (escape(pick(lang, w.what)), Some(first.kind.citation()));
     }
-    (
-        reasons.first().map_or_else(
-            || {
-                escape(lang.pick(
-                    "Abgelehnt, ohne genannten Grund.",
-                    "Refused, with no reason given.",
-                ))
-            },
-            |reason| escape(reason),
+    let line = match reasons.first().map(String::as_str) {
+        None => lang.pick("Abgelehnt, ohne genannten Grund.", "Refused, with no reason given."),
+        Some("the station reused the ID of a closed refused transaction; a new charge needs a fresh transaction ID") =>
+            lang.pick("Die Station hat die Nummer eines bereits abgeschlossenen, abgelehnten Vorgangs erneut verwendet. Ein neuer Ladevorgang braucht eine neue Nummer.", "The station reused the ID of a closed, refused session. A new charge needs a new transaction ID."),
+        Some(reason) => match lang {
+            Lang::En => reason,
+            Lang::De => "Die Abrechnung wurde abgelehnt. Die Originalmeldung steht unter „Warum?“.",
+        },
+    };
+    (escape(line), None)
+}
+
+/// Counts of diagnostic entries the owner excluded from the bounded view.
+pub(crate) fn omitted(lang: Lang, findings: usize, reasons: usize) -> String {
+    if findings == 0 && reasons == 0 {
+        return String::new();
+    }
+    format!(
+        "<p class=\"muted\">{} · {} {findings} · {} {reasons}</p>",
+        lang.pick(
+            "Weitere Einträge im Protokoll",
+            "Additional entries in the record"
         ),
-        None,
+        lang.pick("Befunde", "Findings"),
+        lang.pick("Gründe", "Reasons")
     )
 }
 
 /// The "Warum?" disclosure for one refused session, as markup.
 #[must_use]
 pub fn details(lang: Lang, findings: &[Finding], reasons: &[String]) -> String {
+    if findings.is_empty() && reasons.is_empty() {
+        return String::new();
+    }
     let mut items = String::new();
     for finding in findings {
         let w = words(finding.kind);
@@ -191,12 +208,16 @@ pub fn details(lang: Lang, findings: &[Finding], reasons: &[String]) -> String {
             fix = escape(pick(lang, w.fix)),
         );
     }
-    // A refusal from outside the evidence chain has no typed finding; its
-    // sentences are the answer.
-    if findings.is_empty() {
-        for reason in reasons {
-            let _ = write!(items, "<li><p>{}</p></li>", escape(reason));
+    for reason in reasons {
+        if findings.iter().any(|finding| finding.detail == *reason) {
+            continue;
         }
+        let _ = write!(
+            items,
+            "<li><p><strong>{}</strong></p><p class=\"detail\">{}</p></li>",
+            lang.pick("Originalmeldung von csmsd", "Original CSMS diagnostic"),
+            escape(reason)
+        );
     }
     format!(
         "<details><summary>{summary}</summary><ol class=\"findings\">{items}</ol></details>",
@@ -277,5 +298,18 @@ mod tests {
         assert_eq!(cite, None);
         assert!(line.contains("&lt;b&gt;"), "{line}");
         assert!(details(Lang::En, &[], &reasons).contains("&lt;b&gt;unlawful"));
+        assert!(
+            headline(Lang::De, &[], &reasons)
+                .0
+                .contains("Abrechnung wurde abgelehnt")
+        );
+        assert!(details(Lang::De, &[], &reasons).contains("Originalmeldung von csmsd"));
+        let reused = vec!["the station reused the ID of a closed refused transaction; a new charge needs a fresh transaction ID".to_owned()];
+        assert!(
+            headline(Lang::De, &[], &reused)
+                .0
+                .contains("erneut verwendet")
+        );
+        assert!(details(Lang::De, &[], &reused).contains("the station reused the ID"));
     }
 }

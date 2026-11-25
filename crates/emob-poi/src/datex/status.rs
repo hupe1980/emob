@@ -1,6 +1,6 @@
 //! `EnergyInfrastructureStatusPublication` — the dynamic half of the feed.
 //!
-//! `[AFIR Art. 20(2)(c)]` calls it dynamic data: operational status,
+//! `[AFIR Art. 20(2)(f)]` calls it dynamic data: operational status,
 //! availability, and the ad-hoc price. It carries no infrastructure of its own.
 //! Every object it speaks about is a **reference** into the table publication —
 //! `targetClass`, `idG` and `versionG` — which has two consequences worth
@@ -24,8 +24,8 @@ use datex2::v3::message_container::MessageContainer;
 use datex2::v3::{Publication, json};
 
 use super::table::{InformationStatus, Publisher, header};
-use super::wire::{date_time, money};
-use crate::rate::PriceType;
+use super::wire::date_time;
+use crate::rate::Price;
 use crate::site::Facility;
 use crate::status::Report;
 
@@ -40,9 +40,11 @@ pub struct PointUpdate {
     pub point: Facility,
     /// What it is doing, checked against the register.
     pub report: Report,
+    /// When the source last changed the reported facts.
+    pub changed_at: time::OffsetDateTime,
     /// A price change, when there is one.
     ///
-    /// `[AFIR Art. 20(2)(c)]` makes the ad-hoc price dynamic, so a tariff that
+    /// `[AFIR Art. 20(2)(f)]` makes the ad-hoc price dynamic, so a tariff that
     /// changes at noon is a status message and not a republished table. The
     /// rate is addressed by the `idG` the table gave it.
     pub price: Option<PriceUpdate>,
@@ -53,10 +55,19 @@ pub struct PointUpdate {
 pub struct PriceUpdate {
     /// The `idG` of the rate in the table publication.
     pub rate_id: String,
-    /// The new price type.
-    pub price_type: PriceType,
-    /// The new amount.
-    pub value: rust_decimal::Decimal,
+    /// Every component of the referenced rate, including units and conditions.
+    pub prices: Vec<Price>,
+    /// Effective time of the price change.
+    pub changed_at: time::OffsetDateTime,
+}
+
+/// A complete replacement or the changes since an acknowledged delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// Every registered public point.
+    Snapshot,
+    /// Only changed points or prices.
+    Delta,
 }
 
 /// The dynamic publication: a status publication in the message container the
@@ -88,6 +99,7 @@ fn id_of(reference: Option<&VersionedReference>) -> Option<&str> {
 /// documentation opens with, and [`crate::feed::check`] is what catches it.
 #[must_use]
 pub fn publication(
+    delivery: Delivery,
     publisher: &Publisher,
     status: InformationStatus,
     table: &Facility,
@@ -130,21 +142,17 @@ pub fn publication(
             AnyRefillPointStatus::ElectricChargingPointStatus(Box::new(
                 aegi::ElectricChargingPointStatus {
                     reference: Some(Box::new(reference(&update.point))),
-                    last_updated: Some(now),
+                    last_updated: Some(date_time(update.changed_at)),
                     status: Some(super::point_status(update.report.status())),
                     energy_rate_update: update
                         .price
                         .iter()
                         .map(|price| aegi::EnergyRateUpdate {
-                            last_updated: Some(now),
+                            last_updated: Some(date_time(price.changed_at)),
                             energy_rate_reference: Some(Box::new(Reference {
                                 id: Some(price.rate_id.clone()),
                             })),
-                            energy_price: vec![aegi::EnergyPrice {
-                                price_type: Some(super::price_type(price.price_type)),
-                                value: money(price.value),
-                                ..aegi::EnergyPrice::default()
-                            }],
+                            energy_price: price.prices.iter().map(super::table::price_of).collect(),
                             ..aegi::EnergyRateUpdate::default()
                         })
                         .collect(),
@@ -163,11 +171,12 @@ pub fn publication(
         energy_infrastructure_site_status: sites,
         ..EnergyInfrastructureStatusPublication::default()
     };
+    let payload = Publication::AfirEnergyInfrastructureStatus(Box::new(publication));
     StatusPublication {
-        container: json::mobilithek::snapshot(
-            Publication::AfirEnergyInfrastructureStatus(Box::new(publication)),
-            now,
-        ),
+        container: match delivery {
+            Delivery::Snapshot => json::mobilithek::snapshot(payload, now),
+            Delivery::Delta => json::mobilithek::delta(payload, now),
+        },
     }
 }
 

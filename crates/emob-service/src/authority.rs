@@ -423,6 +423,23 @@ pub mod caps {
     ];
 }
 
+/// Access granted to one estate operator credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorAccess {
+    /// Read operator views and submit private searches.
+    Read,
+    /// Read views and perform named operator actions.
+    Write,
+}
+
+impl OperatorAccess {
+    /// Whether this credential may submit an operator action.
+    #[must_use]
+    pub const fn can_write(self) -> bool {
+        matches!(self, Self::Write)
+    }
+}
+
 /// The operators who may read a daemon's read models — a set of bearer
 /// tokens from the estate's `[[operators]]`.
 ///
@@ -436,25 +453,37 @@ pub mod caps {
 /// [`Actor::Operator`] named after the estate's `[[operators]] name`: that name
 /// — never the token — is what a journal record and a log line say did it.
 #[derive(Clone, Default)]
-pub struct Operators(std::sync::Arc<Vec<(Actor, Token)>>);
+pub struct Operators(std::sync::Arc<Vec<(Actor, Token, OperatorAccess)>>);
 
 impl Operators {
-    /// The operators holding these tokens.
+    /// Read-only operators holding these tokens.
     #[must_use]
     pub fn new(tokens: Vec<(Actor, Token)>) -> Self {
-        Self(std::sync::Arc::new(tokens))
+        Self::from_grants(
+            tokens
+                .into_iter()
+                .map(|(actor, token)| (actor, token, OperatorAccess::Read))
+                .collect(),
+        )
     }
 
-    /// Which operator an `Authorization` header value of `Bearer <token>`
-    /// belongs to, if any.
+    pub(crate) fn from_grants(grants: Vec<(Actor, Token, OperatorAccess)>) -> Self {
+        Self(std::sync::Arc::new(grants))
+    }
+
+    /// Resolve an operator bearer header to its named actor and access grant.
     #[must_use]
-    pub fn admit(&self, authorization: Option<&str>) -> Option<&Actor> {
+    pub fn admit(&self, authorization: Option<&str>) -> Option<(&Actor, OperatorAccess)> {
         let offered = authorization.and_then(|value| value.strip_prefix("Bearer "))?;
+        self.identify(offered)
+    }
+
+    pub(crate) fn identify(&self, offered: &str) -> Option<(&Actor, OperatorAccess)> {
         // Every token is compared; the loop does not stop at a match.
         let mut found = None;
-        for (operator, token) in self.0.iter() {
+        for (operator, token, access) in self.0.iter() {
             if token.verify(offered) && found.is_none() {
-                found = Some(operator);
+                found = Some((operator, *access));
             }
         }
         found
@@ -647,7 +676,10 @@ mod tests {
             (two.clone(), Token::new("ops-2")),
         ]);
         // SR-101: the operator's name, never its token.
-        assert_eq!(operators.admit(Some("Bearer ops-2")), Some(&two));
+        assert_eq!(
+            operators.admit(Some("Bearer ops-2")),
+            Some((&two, OperatorAccess::Read))
+        );
         assert_eq!(two.to_string(), "operator:nachtschicht");
         assert!(operators.admit(Some("Bearer ops-3")).is_none());
         assert!(

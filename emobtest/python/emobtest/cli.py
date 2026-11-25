@@ -36,6 +36,7 @@ def _price(args: argparse.Namespace) -> int:
         energy=args.energy,
         vat=args.vat,
         per_minute=args.per_minute,
+        occupancy_per_minute=args.occupancy_per_minute,
         session_fee=args.session_fee,
         currency=args.currency,
     )
@@ -111,6 +112,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--energy", required=True, help="gross price per kWh, e.g. 0.59")
     p.add_argument("--vat", default="19")
     p.add_argument("--per-minute")
+    p.add_argument(
+        "--occupancy-per-minute", help="gross price per minute connected without requesting energy"
+    )
     p.add_argument("--session-fee")
     p.add_argument("--currency", default="EUR")
     p.add_argument("--kwh", nargs="+", default=["10", "30", "50"])

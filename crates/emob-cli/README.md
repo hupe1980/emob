@@ -2,7 +2,7 @@
 
 The `emob` command line: `emob check` refuses an estate before a daemon reads
 it, `emob verify` checks a charging receipt's signed meter values offline,
-`emob demo` runs the whole estate on your machine, `emob witness` keeps an
+`emob demo` runs a five-service charging demo on your machine, `emob witness` keeps an
 independent record of where each daemon's journal ends, and `emob subscribers
 test` proves an event receiver before the first real record reaches it.
 
@@ -47,7 +47,7 @@ emob demo — Stadtwerke Musterstadt eMobility · seed 2026 · 60× · from 2026
   🔏 witness: csmsd ✓ N · billd ✓ N · roamd ✓ N · empd ✓ N
 ```
 
-The whole estate in one process, on loopback: `empd`, `billd`, `roamd`,
+The five demo services run in one process on loopback: `empd`, `billd`, `roamd`,
 `csmsd` and `deskd` started through the `daemon::run` their own `main` calls,
 with a generated estate file; three `ocpp-kit` stations — OCPP 1.6, 2.0.1 and
 2.1 — over `wss://` with Basic auth (security profile 2, `just dev-ca`'s
@@ -93,14 +93,15 @@ Resources → Network).
 
 ```console
 $ emob check deploy/estate.example.toml
-✓ deploy/estate.example.toml: 1 station, 1 tariff, 1 partner, 1 operator — every daemon would start
+✓ deploy/estate.example.toml: 1 station, 2 tariffs, 1 partner, 2 operators — every daemon would start
 ```
 
 Every section against the whole estate (one no daemon reads is refused), then
 each daemon's own checks — `csmsd`'s fleet and keys, `roamd`'s locations,
 `poid`'s sites, `tarifd`'s tariffs, subscribers and operators. A mistake is
 reported like `rustc` reports one, with the line and `= help:`. `--secrets`
-also requires every `*_env` variable to be set (names, never values);
+also checks the resolved operator and service credentials for value reuse. The
+desk needs a named read-only credential. Every `*_env` variable must be set;
 `--schema` prints the estate's JSON Schema. Exit `0` passes, `1` refused, `2`
 unreadable.
 

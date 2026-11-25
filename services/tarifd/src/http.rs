@@ -82,12 +82,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_demo_estates_tariff_is_published() {
+    fn the_example_estates_tariffs_are_published() {
         let estate: Estate =
             emob_service::estate::from_str(include_str!("../../../deploy/estate.example.toml"))
                 .unwrap();
         let service = published(&estate).unwrap();
         let ids: Vec<String> = service.tariffs().map(ToString::to_string).collect();
-        assert_eq!(ids, vec!["ad-hoc".to_owned()]);
+        assert_eq!(ids, ["ad-hoc", "station-display"]);
     }
 }

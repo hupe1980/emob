@@ -30,11 +30,28 @@ pub struct Estate {
     /// The contracts to seed.
     #[serde(default)]
     pub contracts: Vec<ContractSeed>,
+    /// Unissued RFID inventory.
+    #[serde(default)]
+    pub card_stock: Vec<emob_service::estate::CardStock>,
+    /// Public retail selections for signed agreements.
+    #[serde(default)]
+    pub public_plans: Vec<emob_service::estate::PublicPlan>,
+    /// Address of the local CSMS that owns price publication.
+    pub desk: Option<emob_service::estate::Desk>,
     /// Who may read the read model.
     #[serde(default)]
     pub operators: Vec<Operator>,
     /// The service token `csmsd` presents.
     pub services: Services,
+}
+
+/// Validate native stock and its configured point selections before starting the owner.
+///
+/// # Errors
+///
+/// Rejects duplicate or invalid stock, too many selections or missing price source.
+pub fn validate_enrolment(estate: &Estate) -> Result<()> {
+    crate::enrol::Catalog::configuration(estate).map(drop)
 }
 
 /// What an `empd` is started with.
@@ -69,8 +86,9 @@ pub struct Running {
 
 impl Running {
     /// Stop as a crash would.
-    pub fn kill(self) {
+    pub async fn kill(self) {
         self.task.abort();
+        let _ = self.task.await;
     }
 
     /// Wait for the shutdown signal and the drain.
@@ -88,6 +106,15 @@ impl Running {
 /// than or diverged from its signed head, a seed the book refuses, a journal that does not fold, or
 /// an address that cannot be bound.
 pub async fn run(options: Options) -> Result<Running> {
+    run_with_clock(options, emob_service::system_clock()).await
+}
+
+/// Start this provider on the same decision clock as its CSMS.
+///
+/// # Errors
+///
+/// The same configuration, journal and listener errors as [`run`].
+pub async fn run_with_clock(options: Options, clock: emob_service::Clock) -> Result<Running> {
     let Options {
         http,
         journal,
@@ -97,12 +124,10 @@ pub async fn run(options: Options) -> Result<Running> {
         identity,
     } = options;
     let key = emob_service::vault::DataKey::from_env(DATA_KEY, &env)?;
-    let service = estate
-        .services
-        .service_token_env
-        .resolve_in("services.service_token_env", &env)?;
     let operators = emob_service::estate::operator_tokens(&estate.operators, &env)?;
+    let service = emob_service::estate::service_credential(&estate.services, &env, &operators)?;
 
+    let catalog = Arc::new(crate::enrol::Catalog::from_estate(&estate)?);
     let readiness = Readiness::new().expecting(CONTRACTS);
     let signing = SigningKey::for_daemon("empd", &env)?;
     let file = Signing::open(
@@ -132,6 +157,8 @@ pub async fn run(options: Options) -> Result<Running> {
         crate::http::Shared {
             book: Arc::clone(&book),
             service: Token::new(service.expose()),
+            catalog,
+            clock,
         },
         operators.clone(),
     )

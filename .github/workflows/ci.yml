@@ -118,6 +118,27 @@ jobs:
       - name: Drive the estate (just e2e)
         run: just e2e
 
+  recovery:
+    name: Isolated recovery drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 crates/emob-cli/tests/recovery_launcher.py
+      - name: Build the same CLI image used for capture and recovery
+        run: docker build --build-arg DAEMON=emob-cli --build-arg BIN=emob -t emob-recovery:ci .
+      - name: Recover the same synthetic cut twice and refuse two damaged copies
+        run: |
+          python3 crates/emob-cli/tests/recovery_isolated.py --image emob-recovery:ci \
+            --report "$RUNNER_TEMP/recovery-report.json"
+      - name: Retain the redacted verdict
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recovery-drill-report
+          path: ${{ runner.temp }}/recovery-report.json
+          if-no-files-found: warn
+
   guards:
     name: Workspace guards
     runs-on: ubuntu-latest

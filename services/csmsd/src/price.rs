@@ -14,8 +14,7 @@
 //! the station's own code is what fake-QR fraud looks like, so the page says
 //! to scan the screen.
 //!
-//! Public and cacheable for a minute — the one deliberate exception to the
-//! pages' `no-store` — `noindex`, rate-limited, and an EVSE id nobody runs is
+//! Public, served fresh for every request, `noindex`, rate-limited. An EVSE id nobody runs is
 //! the shell's empty 404, never echoed.
 
 use std::fmt::Write as _;
@@ -60,6 +59,7 @@ struct Shared<J: Journal> {
 pub fn router<J: Journal>(csmsd: Arc<Csmsd<J>>, operator: Operator) -> Router {
     Router::new()
         .route("/p/{evse}", get(page::<J>))
+        .layer(axum::middleware::map_response(public_price_headers))
         .with_state(Arc::new(Shared {
             csmsd,
             operator,
@@ -82,6 +82,7 @@ struct Point {
     /// `14:30` while the point is reserved — the time only, never for whom
     /// (SR-176).
     held_until: Option<String>,
+    provider_links: Vec<(String, String)>,
 }
 
 fn find<J: Journal>(csmsd: &Csmsd<J>, evse: &str) -> Option<Point> {
@@ -89,10 +90,11 @@ fn find<J: Journal>(csmsd: &Csmsd<J>, evse: &str) -> Option<Point> {
     let station = csmsd.with_registry(|registry, _| {
         registry
             .values()
-            .find(|station| station.evse == evse)
+            .find(|station| station.publicly_accessible && station.evse == evse)
             .cloned()
     })?;
     Some(Point {
+        provider_links: csmsd.plan_links(&evse),
         held_until: csmsd
             .reservation(&station.identity)
             .map(|held| csmsd.held_until(&station.identity, held.until)),
@@ -128,7 +130,7 @@ async fn page<J: Journal>(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/atom+xml; charset=utf-8"),
         );
-        return cacheable(response);
+        return response;
     }
     let lang = Lang::negotiate(
         query.lang.as_deref(),
@@ -136,20 +138,17 @@ async fn page<J: Journal>(
             .get(header::ACCEPT_LANGUAGE)
             .and_then(|v| v.to_str().ok()),
     );
-    cacheable(ui::hardened(
+    ui::hardened(
         ui::html(render(&point, &shared.operator, public, now, lang)),
         ui::CSP,
-    ))
+    )
 }
 
-/// A minute of caching, and kept out of search engines: a price page is found
-/// at the point, not in an index.
-fn cacheable(mut response: Response) -> Response {
+/// A hold, retirement, tariff boundary or locale change can alter the next response.
+async fn public_price_headers(mut response: Response) -> Response {
     let headers = response.headers_mut();
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=60"),
-    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.append(header::VARY, HeaderValue::from_static("Accept-Language"));
     headers.insert("x-robots-tag", HeaderValue::from_static("noindex"));
     response
 }
@@ -206,21 +205,48 @@ fn rate(price: Decimal, currency: emob_core::Currency, lang: Lang) -> String {
 /// The lines a version shows, components in `[AFIR Art. 5(4)]`'s order.
 fn lines(tariff: &Tariff, at: time::OffsetDateTime, lang: Lang) -> Vec<String> {
     let Ok(shown) = emob_tariff::describe_gross(tariff, at) else {
-        return Vec::new();
+        return vec![
+            lang.pick(
+                "Gesamtpreis derzeit unbekannt",
+                "Total price currently unavailable",
+            )
+            .to_owned(),
+        ];
     };
-    shown
+    let format_line = |line: &emob_tariff::display::DisplayLine| {
+        format!(
+            "{} {} {}",
+            rate(line.price, shown.currency, lang),
+            lang.pick("pro", "per"),
+            unit(line.dimension, lang)
+        )
+    };
+    let mut result: Vec<_> = shown
         .lines
         .iter()
         .filter(|line| !line.price.is_zero())
-        .map(|line| {
-            format!(
-                "{} {} {}",
-                rate(line.price, shown.currency, lang),
-                lang.pick("pro", "per"),
-                unit(line.dimension, lang)
-            )
-        })
-        .collect()
+        .map(format_line)
+        .collect();
+    for tier in &shown.tiers {
+        if !tier.condition.is_empty() {
+            let prices = tier
+                .lines
+                .iter()
+                .map(format_line)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            result.push(format!("{} ({})", prices, tier.condition));
+        }
+    }
+    for (bound, label) in [
+        (shown.min_price, lang.pick("Mindestpreis", "Minimum")),
+        (shown.max_price, lang.pick("Höchstpreis", "Maximum")),
+    ] {
+        if let Some(value) = bound {
+            result.push(format!("{label} {}", rate(value, shown.currency, lang)));
+        }
+    }
+    result
 }
 
 #[allow(clippy::too_many_lines)] // One page, top to bottom, in reading order.
@@ -261,6 +287,21 @@ fn render(
         );
         return shell(&body, point, lang);
     };
+    if emob_tariff::describe_gross(current, now).is_err() {
+        let _ = write!(
+            body,
+            "<h1>{}</h1><p>{}</p>",
+            lang.pick(
+                "Gesamtpreis derzeit unbekannt",
+                "Total price currently unavailable"
+            ),
+            lang.pick(
+                "Bitte vor dem Laden den Betreiber kontaktieren.",
+                "Contact the operator before charging."
+            )
+        );
+        return shell(&body, point, lang);
+    }
     let shown = lines(current, now, lang);
     let mut shown = shown.into_iter();
     match shown.next() {
@@ -337,8 +378,8 @@ fn render(
         title = lang.pick("Ist das der richtige Preis?", "Is this the right price?"),
         code = escape(&preisstand(current)),
         how = lang.pick(
-            "Derselbe Preisstand steht auf dem Display der Ladesäule und später auf deinem Beleg. Scanne den Code auf dem Display, nicht einen Aufkleber.",
-            "The same Preisstand is on the charger's own display and, afterwards, on your receipt. Scan the code on the display, not a sticker.",
+            "Vergleiche Preis und Preisstand am Ladepunkt mit deinem Beleg. Fehlen Preise auf dem Display, prüfe vor dem Laden das Preisschild. Scanne den Code auf dem Display, nicht einen Aufkleber.",
+            "Compare the price and Preisstand shown at the charge point with your receipt. If the screen omits prices, check the price sign before charging. Scan the code on the display, not a sticker.",
         ),
         address = lang.pick("Diese Seite liegt unter", "This page lives at"),
         url = escape(&format!("{public}{}", path(&point.evse))),
@@ -379,6 +420,22 @@ fn render(
         feed = escape(&format!("{}.atom", path(&point.evse))),
         subscribe = lang.pick("Preisänderungen als Feed", "Price changes as a feed"),
     );
+    if !point.provider_links.is_empty() {
+        let _ = write!(
+            body,
+            "<section><h2>{}</h2><ul>",
+            lang.pick("Vertragspreise", "Contract prices")
+        );
+        for (url, label) in &point.provider_links {
+            let _ = write!(
+                body,
+                "<li><a href=\"{}\">{}</a></li>",
+                escape(url),
+                escape(label)
+            );
+        }
+        body.push_str("</ul></section>");
+    }
     shell(&body, point, lang)
 }
 
@@ -468,7 +525,13 @@ fn shown(identity: &str, history: &TariffHistory, now: time::OffsetDateTime) -> 
         .map(|version| {
             let at = version.valid_from.filter(|from| *from > now).unwrap_or(now);
             // A station's display may not know a no-break space.
-            let first = headline(version, at).replace('\u{a0}', " ");
+            let components = lines(version, at, Lang::De);
+            let disclosure = if components.is_empty() {
+                "kostenlos".to_owned()
+            } else {
+                components.join(" · ")
+            };
+            let first = disclosure.replace('\u{a0}', " ");
             let fingerprint = version.fingerprint().to_string();
             Shown {
                 id: crate::display::message_id(identity, &format!("price-{fingerprint}")),
@@ -479,6 +542,24 @@ fn shown(identity: &str, history: &TariffHistory, now: time::OffsetDateTime) -> 
             }
         })
         .collect()
+}
+
+// OCPP 2.0.1 and 2.1 SetDisplayMessageRequest schemas, MessageContentType.content.
+const DISPLAY_LIMIT_201: usize = 512;
+const DISPLAY_LIMIT_21: usize = 1024;
+const CHECK_SIGN: &str = "Vollständigen Preis vor dem Laden auf dem Preisschild prüfen. Fehlt er, Betreiber kontaktieren.";
+
+fn display_text(text: String, link: Option<&str>, limit: usize) -> String {
+    let length = text.chars().count();
+    if length > limit {
+        return CHECK_SIGN.to_owned();
+    }
+    if let Some(url) = link
+        && length + 3 + url.chars().count() <= limit
+    {
+        return format!("{text} · {url}");
+    }
+    text
 }
 
 /// The 2.0.1 messages: the price, the Preisstand and the page's address as
@@ -497,8 +578,11 @@ pub fn messages_v201(
             let mut info = MessageInfo::new(
                 message.id,
                 MessagePriority::NormalCycle,
-                MessageContent::new(MessageFormat::UTF8, format!("{} · {url}", message.text))
-                    .with_language("de"),
+                MessageContent::new(
+                    MessageFormat::UTF8,
+                    display_text(message.text, Some(url), DISPLAY_LIMIT_201),
+                )
+                .with_language("de"),
             );
             info.start_date_time = message.from.and_then(crate::display::until);
             info.end_date_time = message.until.and_then(crate::display::until);
@@ -521,16 +605,29 @@ pub fn messages_v21(
     shown(identity, history, now)
         .into_iter()
         .flat_map(|message| {
-            let text = MessageContent::new(MessageFormat::UTF8, message.text).with_language("de");
-            let code = MessageContent::new(MessageFormat::QRCODE, url.to_owned());
-            let qr_id =
-                crate::display::message_id(identity, &format!("price-{}-qr", message.fingerprint));
-            [(message.id, text), (qr_id, code)].map(|(id, content)| {
-                let mut info = MessageInfo::new(id, MessagePriority::NormalCycle, content);
-                info.start_date_time = message.from.and_then(crate::display::until);
-                info.end_date_time = message.until.and_then(crate::display::until);
-                ocpp_kit::v2_1::SetDisplayMessageRequest::new(info)
-            })
+            let text = MessageContent::new(
+                MessageFormat::UTF8,
+                display_text(message.text, None, DISPLAY_LIMIT_21),
+            )
+            .with_language("de");
+            let qr = (url.chars().count() <= DISPLAY_LIMIT_21).then(|| {
+                let id = crate::display::message_id(
+                    identity,
+                    &format!("price-{}-qr", message.fingerprint),
+                );
+                (
+                    id,
+                    MessageContent::new(MessageFormat::QRCODE, url.to_owned()),
+                )
+            });
+            std::iter::once((message.id, text))
+                .chain(qr)
+                .map(move |(id, content)| {
+                    let mut info = MessageInfo::new(id, MessagePriority::NormalCycle, content);
+                    info.start_date_time = message.from.and_then(crate::display::until);
+                    info.end_date_time = message.until.and_then(crate::display::until);
+                    ocpp_kit::v2_1::SetDisplayMessageRequest::new(info)
+                })
         })
         .collect()
 }
@@ -574,6 +671,7 @@ mod tests {
             ])
             .unwrap(),
             held_until: None,
+            provider_links: Vec::new(),
         }
     }
 
@@ -645,6 +743,79 @@ mod tests {
     }
 
     #[test]
+    fn sr_209_the_station_discloses_the_occupancy_fee_and_an_unknown_gross_price_never_reads_as_free()
+     {
+        let now = datetime!(2026-12-01 10:00 +1);
+        let mut tariff = version("0.59", None, None);
+        tariff.elements[0].components.push(
+            PriceComponent::new(Dimension::ParkingTime, Decimal::from(6))
+                .with_vat(Decimal::from(19)),
+        );
+        let history = TariffHistory::new(vec![tariff.clone()]).unwrap();
+        let shown = messages_v21("CP-2", &history, "https://example.test/p/DE*ABC*E1", now);
+        let text = &shown[0].message.message.content;
+        assert!(
+            text.contains("0,59 € pro kWh") && text.contains("0,10 € pro Minute Belegung"),
+            "{text}"
+        );
+        let en = render(
+            &Point { history, ..point() },
+            &operator(),
+            "",
+            now,
+            Lang::En,
+        );
+        assert!(en.contains("per minute occupied"));
+        // A long URL cannot crowd prices off a screen or create an invalid QR payload.
+        let long_link = format!("https://example.test/{}", "x".repeat(1100));
+        let prices = TariffHistory::single(tariff.clone()).unwrap();
+        let short = messages_v201("CP-2", &prices, &long_link, now);
+        assert!(
+            short[0]
+                .message
+                .message
+                .content
+                .contains("0,10 € pro Minute Belegung")
+        );
+        assert!(!short[0].message.message.content.contains(&long_link));
+        assert_eq!(messages_v21("CP-2", &prices, &long_link, now).len(), 1);
+        // Conditional rates must never be truncated into a partial price.
+        let mut tiered = tariff.clone();
+        let template = tiered.elements[0].clone();
+        for threshold in 1..80 {
+            let mut tier = template.clone();
+            tier.restrictions.min_kwh = Some(Decimal::from(threshold));
+            tiered.elements.push(tier);
+        }
+        let complex = TariffHistory::single(tiered).unwrap();
+        assert_eq!(
+            messages_v201("CP-2", &complex, "https://example.test", now)[0]
+                .message
+                .message
+                .content,
+            CHECK_SIGN
+        );
+        assert_eq!(
+            messages_v21("CP-2", &complex, "https://example.test", now)[0]
+                .message
+                .message
+                .content,
+            CHECK_SIGN
+        );
+        tariff.tax_included = emob_tariff::TaxIncluded::No;
+        tariff.elements[0].components[0].vat = None;
+        let unknown = Point {
+            history: TariffHistory::new(vec![tariff]).unwrap(),
+            ..point()
+        };
+        assert!(
+            render(&unknown, &operator(), "", now, Lang::En)
+                .contains("Total price currently unavailable")
+        );
+        assert!(!atom(&unknown, &operator(), "").contains("kostenlos"));
+    }
+
+    #[test]
     fn the_feed_has_one_entry_per_version_newest_first() {
         let feed = atom(&point(), &operator(), "https://p.example");
         assert_eq!(feed.matches("<entry>").count(), 2);
@@ -670,7 +841,7 @@ mod tests {
             current
                 .message
                 .content
-                .starts_with("0,59 € pro kWh · Preisstand "),
+                .starts_with("0,59 € pro kWh · 0,50 € pro Ladevorgang · Preisstand "),
             "{:?}",
             current.message.content
         );

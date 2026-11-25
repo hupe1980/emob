@@ -1,12 +1,13 @@
 /* Heute refreshes itself. Optional: the page is whole without this file.
    Every 15 s while the tab is visible and motion is welcome, the page is
-   fetched again from its own URL and <main> swapped; open "Warum?" stay open
-   and focus stays on the row it was on. */
+   fetched again from its own URL. Leave the DOM alone while someone reads
+   an open disclosure or has focused a control. */
 const calm = matchMedia("(prefers-reduced-motion: reduce)");
+function reading() {
+  return document.querySelector("details[open]") || document.activeElement?.closest("main a, main summary, main button, main [tabindex]");
+}
 async function refresh() {
-  if (document.visibilityState !== "visible" || calm.matches) return;
-  const open = [...document.querySelectorAll("details[open]")].map((d) => d.closest("li")?.id);
-  const focus = document.activeElement?.closest("li")?.id;
+  if (document.visibilityState !== "visible" || calm.matches || reading()) return;
   let text;
   try {
     const response = await fetch(location.href, { credentials: "same-origin", cache: "no-store" });
@@ -17,10 +18,8 @@ async function refresh() {
   }
   const next = new DOMParser().parseFromString(text, "text/html").querySelector("main");
   const main = document.querySelector("main");
-  if (!next || !main) return;
+  if (!next || !main || reading()) return;
   main.replaceChildren(...next.childNodes);
-  for (const id of open) document.getElementById(id)?.querySelector("details")?.setAttribute("open", "");
-  if (focus) document.getElementById(focus)?.querySelector("a, summary, [tabindex]")?.focus({ preventScroll: true });
 }
 setInterval(refresh, 15000);
 document.addEventListener("visibilitychange", refresh);

@@ -7,14 +7,14 @@ description = "Try emob with just demo, then walk one EV charging session in Rus
 nav = "Getting started"
 +++
 
-The fastest way to see emob is to run it: `just demo` starts the whole estate —
-every daemon, three simulated charge points and a roaming partner — on your
-machine. The rest of this tutorial takes one charging session from the meter to
+Run `just demo` to try the standalone operator workflow. It starts station management, provider authorization, billing, roaming and the operator desk on your machine. Three simulated stations and a local test peer generate the sessions, receipts and invoices. For a persistent estate with all nine services, follow [Run the estate](@/docs/run-the-estate.md).
+
+The rest of this tutorial takes one charging session from the meter to
 the money in library code: you verify the station's signed meter values, split
 the energy into quarter hours, price it with a tariff, build a charge detail
 record (CDR) and close a month into an EN 16931 e-invoice. ✅
 
-## Try the whole estate: `just demo`
+## Try the standalone demo
 
 You need Rust, [`just`](https://just.systems) and `openssl`; `just doctor`
 checks them and prints the command that installs anything missing. Without
@@ -31,7 +31,7 @@ Within a minute it prints three links: **Heute**, the operator page, signed in;
 a driver's **receipt**; and the roaming partner's **inbox** — and after the
 simulated month end, the partner's **invoice** page with its XRechnung files. Open the receipt
 on a phone and tap *Selbst prüfen* to check the signed meter values on the
-device. Ctrl-C ends the run and removes its journals.
+device. From Heute, open the refused transaction to see its recorded timeline and provider card. A writer can review a lost-card block, confirm it and later reverse it from the same card. The history names the operator for each change. Open **Driver contracts**, choose the standard offer and enter `STOCK-1004` to review and issue the demonstration card. Ctrl-C ends the run and removes its journals.
 
 <div class="shot-pair">
 <figure class="shot phone">

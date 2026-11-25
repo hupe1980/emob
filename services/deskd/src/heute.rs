@@ -53,6 +53,8 @@ pub struct Snapshot {
     pub billd: Source<Billd>,
     /// `roamd`'s.
     pub roamd: Source<Roamd>,
+    /// A configured dynamic publisher and its direct receipt evidence.
+    pub publication: Option<Source<crate::model::Publication>>,
     /// Now.
     pub now: time::OffsetDateTime,
     /// The zone the page tells the time in.
@@ -188,6 +190,11 @@ pub fn render(snapshot: &Snapshot, lang: Lang) -> String {
     let all_up = snapshot.csmsd.up().is_some()
         && snapshot.billd.up().is_some()
         && snapshot.roamd.up().is_some()
+        && snapshot.publication.as_ref().is_none_or(|source| {
+            source.up().is_some_and(|p| {
+                p.accepted_at.is_some() && p.problem.is_none() && p.pending_since.is_none()
+            })
+        })
         && snapshot.journals.iter().all(|seen| seen.alarm.is_none());
     let waiting: u64 = groups.iter().map(|(_, _, group)| group.len()).sum();
 
@@ -204,7 +211,7 @@ pub fn render(snapshot: &Snapshot, lang: Lang) -> String {
             String::new()
         },
     );
-    if waiting == 0 && all_up {
+    if waiting == 0 && all_up && snapshot.csmsd.up().is_some_and(|s| s.station_count > 0) {
         let _ = write!(
             body,
             "<p class=\"calm tone-good\"><span aria-hidden=\"true\">✓</span> {}</p>",
@@ -222,6 +229,7 @@ pub fn render(snapshot: &Snapshot, lang: Lang) -> String {
     }
     body.push_str("</section>");
 
+    body.push_str(&publication(snapshot, lang));
     body.push_str(&journals(snapshot, lang));
     body.push_str(&footer(snapshot, lang));
 
@@ -237,6 +245,98 @@ pub fn render(snapshot: &Snapshot, lang: Lang) -> String {
     )
 }
 
+/// Receiver evidence for the dynamic offer, independent of a subscriber observation.
+fn publication(snapshot: &Snapshot, lang: Lang) -> String {
+    let mut out = format!(
+        "<section class=\"card\" id=\"publication\" aria-labelledby=\"publication-h\"><h2 id=\"publication-h\">{}</h2>",
+        lang.pick(
+            "Datenlieferung an die Mobilithek",
+            "Data sent to Mobilithek"
+        )
+    );
+    match &snapshot.publication {
+        None => out.push_str(lang.pick(
+            "<p>Keine Datenquelle eingerichtet. Für die Empfangsnachweise in [desk] die Adresse von poid eintragen.</p>",
+            "<p>No publisher configured. Set the poid address in [desk] to see receiver acknowledgements.</p>",
+        )),
+        Some(Source::Down { since, why }) => out.push_str(&down("poid", *since, *why, lang, &snapshot.zone)),
+        Some(Source::Up(state)) => {
+            let stamp = |instant: Option<time::OffsetDateTime>, missing: &str| instant.map_or_else(
+                || missing.to_owned(),
+                |at| {
+                    let local = snapshot.zone.local(at);
+                    format!("<time datetime=\"{}\">{} {}:{:02}</time>", iso(at), lang.date(local.date), clock(local.time), local.time.second())
+                },
+            );
+            let count = |value: Option<u64>| value.map_or_else(|| lang.pick("Unbekannt", "Unknown").to_owned(), |n| n.to_string());
+            let no_receipt = lang.pick("Kein Empfang bestätigt", "No acknowledgement recorded");
+            let unknown_time = lang.pick("Zeitpunkt unbekannt", "Time unknown");
+            let latency = match (state.last_source_change, state.last_measured_at) {
+                (Some(source), Some(ack)) if ack >= source => {
+                    let elapsed = ack - source;
+                    format!("{}{}{:03} s", elapsed.whole_seconds(), lang.pick(",", "."), elapsed.subsec_milliseconds())
+                }
+                (Some(_), Some(_)) => lang.pick("Zeitstempel widersprechen sich. Uhren prüfen.", "Timestamps disagree. Check the clocks.").to_owned(),
+                _ => lang.pick("Keine vollständige Messung", "No paired measurement").to_owned(),
+            };
+            let _ = write!(
+                out,
+                "<dl><dt>{table}</dt><dd>{static_tries} {total_static} · {start} {static_start} · {receipt} {static_ack}</dd><dt>{tries}</dt><dd>{attempts}</dd><dt>{latest_try}</dt><dd>{last_attempt}</dd><dt>{last}</dt><dd>{ack}</dd><dt>{full}</dt><dd>{snapshot_at}</dd><dt>{change}</dt><dd>{source_at}</dd><dt>{measured}</dt><dd>{measured_at}</dd><dt>{duration}</dt><dd>{latency}</dd><dt>{records}</dt><dd>{changes}</dd><dt>{late}</dt><dd>{missed}</dd></dl>",
+                table = lang.pick("Statische Tabelle", "Static table"),
+                static_tries = lang.pick("Versuche", "Attempts"),
+                total_static = count(state.static_attempts),
+                start = lang.pick("Letzter Beginn", "Last started"),
+                static_start = stamp(state.static_last_attempt, unknown_time),
+                receipt = lang.pick("Empfang", "Acknowledged"),
+                static_ack = stamp(state.static_accepted_at, no_receipt),
+                tries = lang.pick("Dynamische Übertragungsversuche einschließlich Wiederholungen", "Dynamic delivery attempts including retries"),
+                attempts = count(state.attempts),
+                latest_try = lang.pick("Beginn des letzten Versuchs", "Start of the last attempt"),
+                last_attempt = stamp(state.last_attempt, unknown_time),
+                last = lang.pick("Letzte Empfangsbestätigung", "Latest receiver acknowledgement"),
+                ack = stamp(state.accepted_at, no_receipt),
+                full = lang.pick("Letzter bestätigter Gesamtstand", "Last acknowledged full snapshot"),
+                snapshot_at = stamp(state.snapshot_at, no_receipt),
+                change = lang.pick("Älteste Änderung der letzten Messung", "Oldest source change in the last measurement"),
+                source_at = stamp(state.last_source_change, unknown_time),
+                measured = lang.pick("Empfang dieser Änderung", "Receiver acknowledgement for that change"),
+                measured_at = stamp(state.last_measured_at, unknown_time),
+                duration = lang.pick("Von der Änderung bis zum Empfang", "Time from change to receiver acknowledgement"),
+                records = lang.pick("Änderungsmeldungen seit dem Gesamtstand", "Delta messages since the full snapshot"),
+                changes = state.changes,
+                late = lang.pick("Bestätigte Lieferungen mit Änderungen über 60 Sekunden", "Acknowledged deliveries with changes over 60 seconds old"),
+                missed = state.missed_deadlines,
+            );
+            if let Some(pending) = state.pending_since {
+                let age = snapshot.now - pending;
+                let next = if age > time::Duration::minutes(1) {
+                    lang.pick("Überfällig. Quelle und Empfänger prüfen.", "Overdue. Check the source and receiver.")
+                } else if age.is_negative() {
+                    lang.pick("Zeitstempel prüfen.", "Check the source clock.")
+                } else {
+                    lang.pick("Empfangsbestätigung steht aus.", "Awaiting receiver acknowledgement.")
+                };
+                let elapsed = if age.is_negative() { String::new() } else { format!(" ({} s)", age.whole_seconds()) };
+                let _ = write!(out, "<p class=\"tone-warn\">{} {}{elapsed}. {next}</p>",
+                    lang.pick("Älteste offene Änderung", "Oldest unacknowledged change"),
+                    stamp(Some(pending), unknown_time));
+            }
+            if let Some(problem) = &state.problem {
+                let _ = write!(out, "<p class=\"tone-warn\"><strong>{}</strong> {}</p>",
+                    lang.pick("Quelle und Übertragung prüfen.", "Check the source and delivery."), escape(problem));
+            } else if state.accepted_at.is_none() {
+                out.push_str(lang.pick("<p>Registrierung des Angebots und erste Übertragung prüfen.</p>", "<p>Check offer registration and the first delivery.</p>"));
+            }
+            out.push_str(lang.pick(
+                "<p>Für einen Sichtnachweis die veröffentlichten Werte bei einem Abnehmer abrufen und mit Zeit und EVSE dokumentieren.</p>",
+                "<p>To verify what a subscriber sees, read the published values there and record the time and EVSE.</p>",
+            ));
+        }
+    }
+    out.push_str("</section>");
+    out
+}
+
 /// The page's title, its date and clock, and the other language.
 fn head(snapshot: &Snapshot, lang: Lang) -> String {
     let local = snapshot.zone.local(snapshot.now);
@@ -244,8 +344,11 @@ fn head(snapshot: &Snapshot, lang: Lang) -> String {
     format!(
         "<div class=\"head\"><h1>{h1}</h1><p class=\"when\">{date} · {stand} \
          <time datetime=\"{iso}\">{clock}</time> · <a href=\"{other}\" lang=\"{other_lang}\" \
-         hreflang=\"{other_lang}\">{other_name}</a> · <a href=\"/stations\">{stations}</a></p></div>",
+         hreflang=\"{other_lang}\">{other_name}</a> · <a href=\"/stations\">{stations}</a> · <a href=\"/lookup?lang={tag}\">{lookup}</a> · <a href=\"/contracts?lang={tag}\">{contracts}</a></p></div>",
         stations = lang.pick("Stationen", "Stations"),
+        tag = lang.tag(),
+        lookup = lang.pick("Vorgang oder Karte suchen", "Find a session or card"),
+        contracts = lang.pick("Ladeverträge", "Driver contracts"),
         h1 = lang.pick("Heute", "Today"),
         date = escape(&format!(
             "{}, {}",
@@ -417,6 +520,15 @@ fn rate(snapshot: &Snapshot, lang: Lang) -> String {
         out.push_str("</section>");
         return out;
     };
+    if csmsd.station_count == 0 {
+        let _ = write!(
+            out,
+            "<p>{} <a href=\"/stations/new?lang={}\">{}</a></p>",
+            lang.pick("Noch keine Station registriert.", "No stations registered."),
+            lang.tag(),
+            lang.pick("Erste Station registrieren", "Register the first station")
+        );
+    }
     out.push_str(&window(
         lang,
         "today",
@@ -434,6 +546,32 @@ fn rate(snapshot: &Snapshot, lang: Lang) -> String {
             "No sessions in the last 7 days.",
         ),
     ));
+    if !csmsd.success.days.is_empty() {
+        let _ = write!(
+            out,
+            "<details><summary>{}</summary><ol>",
+            lang.pick("Tageswerte", "Daily totals")
+        );
+        for day in &csmsd.success.days {
+            let Ok(date) = time::Date::parse(
+                &day.from,
+                &time::format_description::well_known::Iso8601::DATE,
+            ) else {
+                continue;
+            };
+            let value = if day.estate.attempted == 0 {
+                lang.pick("Keine Ladevorgänge", "No sessions").to_owned()
+            } else {
+                of(lang, &day.estate)
+            };
+            let _ = write!(
+                out,
+                "<li><time datetime=\"{date}\">{}</time> · {value}</li>",
+                lang.date(date)
+            );
+        }
+        out.push_str("</ol></details>");
+    }
     out.push_str("</section>");
     out
 }
@@ -608,23 +746,21 @@ fn refused(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
     };
     // Newest first, as the daemon sent them.
     paged(&csmsd.refused, |refusal| {
-        let id = format!(
-            "s-{}-{}",
-            slug(&refusal.identity),
-            slug(&refusal.transaction)
-        );
+        let id = format!("s-{}", refusal.position);
         let (headline, cite) = why::headline(lang, &refusal.findings, &refusal.reasons);
         let cite = cite.map_or_else(String::new, |cite| {
             format!(" <span class=\"cite\">{}</span>", escape(cite))
         });
         Row {
             body: format!(
-                "<div><p class=\"what\">{badge} <a href=\"{href}\"><strong>{identity}</strong></a> · {tx_word} {transaction}</p>\
-                 <p class=\"why\">{headline}{cite}</p></div>{action}{details}",
+                "<div><p class=\"what\">{badge} <strong>{identity}</strong> · <a href=\"/sessions/{position}?lang={tag}\">{tx_word} {transaction}</a></p>\
+                 <p class=\"why\">{headline}{cite}</p></div>{action}{details}{omitted}",
+                omitted = why::omitted(lang, refusal.omitted_findings, refusal.omitted_reasons),
                 badge = badge(Tone::Bad, "✕", lang.pick("Nicht abgerechnet", "Not billed")),
                 identity = escape(&refusal.identity),
-                href = escape(&crate::station::href(&refusal.identity)),
-                tx_word = lang.pick("Vorgang", "transaction"),
+                tx_word = lang.pick("Vorgang", "Session"),
+                tag = lang.tag(),
+                position = refusal.position,
                 transaction = escape(&refusal.transaction),
                 action = link.to(&id),
                 details = why::details(lang, &refusal.findings, &refusal.reasons),
@@ -1021,12 +1157,19 @@ fn footer(snapshot: &Snapshot, lang: Lang) -> String {
     };
     format!(
         "<footer class=\"foot\"><p>{sources}</p><ul class=\"sources\">\
-         <li>csmsd {a}</li><li>billd {b}</li><li>roamd {c}</li></ul>\
+         <li>csmsd {a}</li><li>billd {b}</li><li>roamd {c}</li>{publisher}</ul>\
          <p class=\"noprint\">{refresh}</p></footer>",
         sources = lang.pick("Gelesen aus", "Read from"),
         a = state(snapshot.csmsd.up().is_some()),
         b = state(snapshot.billd.up().is_some()),
         c = state(snapshot.roamd.up().is_some()),
+        publisher = snapshot
+            .publication
+            .as_ref()
+            .map_or_else(String::new, |source| format!(
+                "<li>poid {}</li>",
+                state(source.up().is_some())
+            )),
         refresh = lang.pick(
             "Die Seite aktualisiert sich alle 15 Sekunden, solange sie sichtbar ist.",
             "This page refreshes every 15 seconds while it is visible.",

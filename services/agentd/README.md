@@ -41,6 +41,12 @@ which duty fails across how many points, and breaches that have not started yet,
 each judged at its own commencement date. The date and horizon are inputs, so a
 run replays to the same answer.
 
+Each headline gives the assessment date. For public points, including those
+offering free charging, the data findings use the operator's static and dynamic
+publication declarations. The dynamic finding names operational status,
+availability and the ad-hoc price and lists affected EVSE IDs as evidence.
+Feed delivery and acknowledgements are recorded by `poid`. [AFIR Art. 20(2)(f)]
+
 ```console
 [compliance-sweep] 400 point(s) fail `afir-digitally-connected` [AFIR Art. 5(7)]
                    → connect the point to a CSMS: without it neither the data
@@ -120,7 +126,7 @@ reads.
 | Variable | Default | Purpose |
 |---|---|---|
 | `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[operators]]` |
-| `EMOB_OPERATOR_TOKEN` | **required** | the variable `[[operators]]` names: the read model's bearer |
+| `EMOB_OPERATOR_TOKEN`, `EMOB_DESK_READ_TOKEN` | **required** | the example estate’s named operator and background read credentials |
 | `AGENTD_HTTP_BIND` | `127.0.0.1:9580` | health/readiness shell |
 | `EMOB_HTTP_BIND` | — | estate-wide shell address, used when `AGENTD_HTTP_BIND` is unset; defaults are loopback, unreachable inside a container |
 | `RUST_LOG` | `info,agentd=debug` | log filter |
@@ -130,7 +136,8 @@ reads.
 ## Running
 
 ```console
-EMOB_ESTATE=deploy/estate.example.toml EMOB_OPERATOR_TOKEN=… cargo run -p agentd
+source .env    # local estate and credentials from `just dev-keys`
+cargo run -p agentd
 ```
 
 Or `just up` for the whole estate (`agentd`'s shell on `localhost:8086`).

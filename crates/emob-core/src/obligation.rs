@@ -1010,34 +1010,32 @@ pub const CALENDAR: &[Obligation] = &[
     Obligation {
         id: ObligationId::AfirStaticData,
         consequence: Consequence::Breach,
-        title: "Static data must be available free of charge",
-        title_de: "Statische Daten kostenlos bereitstellen",
-        citation: "[AFIR Art. 20(2)]",
+        title: "Operator declaration of free access to static data, including whether electricity is 100% renewable",
+        title_de: "Statische Daten als frei gemeldet, inkl. Merkmal „100 % erneuerbar“",
+        citation: "[AFIR Art. 20(2)(a)–(b)]",
         applies_from: AFIR_DATA_AND_CABLES,
         applies_until: None,
         rule: Rule::ChargePoint {
             applicable: |p| p.is_public(),
             satisfied: |p, _| p.data.static_data,
         },
-        remedy: "publish location, connectors, current type, power, opening hours and contact",
+        remedy: "publish the static data, including location, connectors, power, contact details and whether the electricity is 100% renewable, and update the declaration",
     },
     Obligation {
         id: ObligationId::AfirDynamicData,
         consequence: Consequence::Breach,
-        title: "Dynamic data — status, availability, ad-hoc price, renewable share — must be available free of charge",
-        title_de: "Dynamische Daten wie Status und Ad-hoc-Preis kostenlos bereitstellen",
-        citation: "[AFIR Art. 20(2)]",
+        title: "Operator declaration of free access to dynamic data: operational status, availability and ad-hoc price",
+        title_de: "Dynamisch: Betriebsstatus, Verfügbarkeit, Ad-hoc-Preis frei gemeldet",
+        citation: "[AFIR Art. 20(2)(f)]",
         applies_from: AFIR_DATA_AND_CABLES,
         applies_until: None,
         rule: Rule::ChargePoint {
-            // "The requirements laid down in point (c) shall not apply to
-            // publicly accessible recharging points that do not require payment
-            // for the recharging service." The static duty has no such
-            // exemption, which is why the two are separate obligations.
-            applicable: |p| p.is_public() && p.requires_payment,
+            // The replacement Article 20(2) in Regulation (EU) 2025/671
+            // applies to public points, including those offering free charging.
+            applicable: |p| p.is_public(),
             satisfied: |p, _| p.data.dynamic_data,
         },
-        remedy: "publish operational status, availability, the ad-hoc price and the renewable flag",
+        remedy: "publish operational status, availability and the ad-hoc price, including an explicit zero price for free charging, and update the declaration",
     },
     Obligation {
         id: ObligationId::AfirDataApi,
@@ -2344,7 +2342,7 @@ mod tests {
             id: ObligationId::AfirDatex2,
             title: "a duty with both ends",
             title_de: "eine Pflicht mit zwei Enden",
-            citation: "[AFIR Art. 20(2)(c)]",
+            citation: "[AFIR Art. 20(2)(f)]",
             applies_from: date!(2026 - 01 - 01),
             applies_until: Some(date!(2026 - 12 - 31)),
             rule: Rule::ChargePoint {
@@ -2430,39 +2428,98 @@ mod tests {
     }
 
     #[test]
-    fn a_free_charge_point_owes_no_payment_instrument_and_no_dynamic_data() {
-        // "shall not apply to publicly accessible recharging points that do not
-        // require payment for the recharging service" [AFIR Art. 5(1)], and the
-        // same words again for the dynamic data of [AFIR Art. 20(2)(c)].
-        let mut point = ChargePointProfile::bare(evse(), date!(2026 - 06 - 01));
+    fn public_point_data_duties_follow_the_amended_article_on_the_assessment_date() {
+        // Regulation (EU) 2025/671, Arts. 1–2, replaces Article 20(2) from
+        // 14 April 2025. The data and the charging service have separate prices.
+        use Accessibility::{Private, Public};
+        use Status::{Failing, NotApplicable, NotYetInForce, Satisfied};
+        let before = date!(2025 - 04 - 13);
+        let effective = date!(2025 - 04 - 14);
+        let later = date!(2026 - 11 - 24);
+
+        let future = [NotYetInForce; 2];
+        let outside = [NotApplicable; 2];
+        // Pairs are ordered [static, dynamic], just as in the assessment contract.
+        let cases = [
+            (before, Public, false, [false, false], future),
+            (
+                effective,
+                Public,
+                false,
+                [true, false],
+                [Satisfied, Failing],
+            ),
+            (effective, Public, true, [true, false], [Satisfied, Failing]),
+            (
+                effective,
+                Public,
+                false,
+                [false, true],
+                [Failing, Satisfied],
+            ),
+            (later, Public, true, [true, true], [Satisfied, Satisfied]),
+            (later, Private, true, [false, false], outside),
+            (later, Private, false, [false, false], outside),
+        ];
+        for (on, access, paid, [static_data, dynamic_data], [expected_static, expected_dynamic]) in
+            cases
+        {
+            let mut point = ChargePointProfile::bare(evse(), date!(2024 - 07 - 01));
+            point.accessibility = access;
+            point.requires_payment = paid;
+            point.data.static_data = static_data;
+            point.data.dynamic_data = dynamic_data;
+
+            let result = assess(&point, on);
+            assert_eq!(result.on, on);
+            assert_eq!(result.subject, point.evse_id.to_string());
+            assert_eq!(
+                status_of(&result, ObligationId::AfirStaticData),
+                expected_static
+            );
+            assert_eq!(
+                status_of(&result, ObligationId::AfirDynamicData),
+                expected_dynamic
+            );
+        }
+    }
+
+    #[test]
+    fn a_free_public_point_keeps_its_payment_exemption_and_its_data_deadlines() {
+        let mut point = ChargePointProfile::bare(evse(), date!(2024 - 07 - 01));
         point.rated_power_kw = Decimal::from(150);
         point.requires_payment = false;
-
         let report = assess(&point, date!(2027 - 06 - 01));
         for duty in [
             ObligationId::AfirPaymentInstrument,
             ObligationId::AfirPaymentInstrumentRetrofit,
             ObligationId::AfirEnergyBasedAdHocPrice,
             ObligationId::AfirPriceShownAtStation,
-            ObligationId::AfirDynamicData,
         ] {
-            assert_eq!(
-                status_of(&report, duty),
-                Status::NotApplicable,
-                "{duty} must not bind a point that charges nothing"
-            );
+            assert_eq!(status_of(&report, duty), Status::NotApplicable, "{duty}");
         }
-        // …and the ad-hoc *access* duty is satisfied rather than failing: a
-        // free charger is contract-free by construction.
         assert_eq!(
             status_of(&report, ObligationId::AfirAdHocAccess),
             Status::Satisfied
         );
-        // The static-data duty has no such exemption.
-        assert_eq!(
-            status_of(&report, ObligationId::AfirStaticData),
-            Status::Failing
-        );
+        for (id, before, effective) in [
+            (
+                ObligationId::AfirDataApi,
+                date!(2025 - 04 - 13),
+                date!(2025 - 04 - 14),
+            ),
+            (
+                ObligationId::AfirDatex2,
+                date!(2026 - 04 - 13),
+                date!(2026 - 04 - 14),
+            ),
+        ] {
+            assert_eq!(
+                status_of(&assess(&point, before), id),
+                Status::NotYetInForce
+            );
+            assert_eq!(status_of(&assess(&point, effective), id), Status::Failing);
+        }
     }
 
     #[test]

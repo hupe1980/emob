@@ -34,7 +34,9 @@ pub const FORMAT_VARIABLE: &str = "EMOB_LOG_FORMAT";
 /// two daemons must not fall over on the second.
 pub fn init(identity: Identity, default: &str) {
     let json = std::env::var(FORMAT_VARIABLE).map_or(true, |format| format != "text");
-    if start(default, json, std::io::stdout) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
+    if start(filter, json, std::io::stdout) {
         tracing::info!(
             daemon = identity.name,
             version = identity.version,
@@ -43,15 +45,13 @@ pub fn init(identity: Identity, default: &str) {
     }
 }
 
-fn start<W>(default: &str, json: bool, writer: W) -> bool
+fn start<W>(filter: tracing_subscriber::EnvFilter, json: bool, writer: W) -> bool
 where
     W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
 {
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
 
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
     let registry = tracing_subscriber::registry().with(filter);
     if json {
         registry
@@ -88,7 +88,12 @@ impl Captured {
     pub fn start(filter: &str) -> Option<Self> {
         let captured = Self::default();
         let writer = captured.clone();
-        start(filter, true, move || writer.clone()).then_some(captured)
+        start(
+            tracing_subscriber::EnvFilter::new(filter),
+            true,
+            move || writer.clone(),
+        )
+        .then_some(captured)
     }
 
     /// What was logged so far.

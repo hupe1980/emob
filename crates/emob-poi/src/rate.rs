@@ -2,8 +2,8 @@
 //!
 //! # Why this is not a formatting problem
 //!
-//! `[AFIR Art. 20(2)(c)]` makes the ad-hoc price dynamic data an operator must
-//! publish through the national access point, and `[AFIR Art. 5(2)]` makes the
+//! `[AFIR Art. 20(2)(f)]` makes the ad-hoc price dynamic data an operator must
+//! publish through the national access point, and `[AFIR Art. 5(4)]` makes the
 //! price a driver is shown before the session the price they may be charged.
 //! Those are two duties about **one number**, and almost every stack in this
 //! market computes it twice: once in the billing system that rates the CDR, and
@@ -929,7 +929,7 @@ mod tests {
     fn a_condition_the_profile_cannot_carry_is_reported_rather_than_dropped() {
         // A price published without its "only above 30 kW" condition reads as
         // unconditional, which is a price transparency problem and not a
-        // formatting one `[AFIR Art. 5(2)]`.
+        // formatting one `[AFIR Art. 5(4)]`.
         let mut element =
             TariffElement::unrestricted(vec![PriceComponent::new(Dimension::Energy, dec("0.39"))]);
         element.restrictions.min_power_kw = Some(dec("30"));

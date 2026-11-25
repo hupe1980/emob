@@ -8,8 +8,8 @@ The tariff publication daemon: decides when a tariff version must reach the driv
 |---|---|
 | ✅ library | `tarifd::Tarifd` schedules versions by lead time, builds all three payloads at once or none, records confirmed deliveries, and names late versions with the article they breach — tested in `tests/a_version_takes_effect.rs` |
 | ✅ estate | publishes the estate's `[[tariffs]]`, built by the same `TariffSpec::to_tariff` `csmsd` rates with, so the published price and the charged price cannot diverge; the party is the estate's operator |
-| ✅ `driver-tariff.v1` | `GET /v1/driver-tariffs/{id}` (the version in force) and `/v1/driver-tariffs/{id}/{version}` (that version, for ever): public, cacheable, a document per version a seller imports instead of typing a price — components with unit and basis, the display, worked totals and the tariff itself; schema `schemas/driver-tariff.v1.json` |
-| ⏳ not wired | the three push clients: every 60 seconds it asks what is due within a one-hour lead and logs what it would publish — nothing is sent to stations, partners or the access point, and nothing is confirmed. It has no journal |
+| ✅ `driver-tariff.v1` | `GET /v1/driver-tariffs/{id}` (the version in force) and `/v1/driver-tariffs/{id}/{version}` (that fingerprint while retained in history): public, freshly fetched, a document per version a seller imports instead of typing a price — components with unit and basis, the display, worked totals and the tariff itself; schema `schemas/driver-tariff.v1.json` |
+| Delivery | `tarifd` logs due publications. Station delivery belongs to `csmsd` and Mobilithek delivery to `poid`. |
 
 ## What it owns
 
@@ -19,7 +19,7 @@ The tariff publication daemon: decides when a tariff version must reach the driv
 |---|---|---|
 | the driver at the point, **before** they start | OCPP 2.1 `SetDefaultTariff` | `[AFIR Art. 5(4)]` |
 | the roaming partner that settles against it | OCPI 2.3.0 | the roaming contract |
-| the national access point | DATEX II | `[AFIR Art. 20(2)(c)]` |
+| the national access point | DATEX II | `[AFIR Art. 20(2)(f)]` |
 
 `tarifd` computes no price. Each payload comes from the crate that owns that
 crossing — `emob_ocpp::to_ocpp`, `emob_roam::ocpi::tariff::to_ocpi`,
@@ -71,7 +71,7 @@ up in `late` as soon as it takes effect.
 | Variable | Default | Purpose |
 |---|---|---|
 | `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[tariffs]]`, `[[operators]]` |
-| `EMOB_OPERATOR_TOKEN` | **required** | the variable `[[operators]]` names: the read model's bearer |
+| `EMOB_OPERATOR_TOKEN`, `EMOB_DESK_READ_TOKEN` | **required** | the example estate’s named operator and background read credentials |
 | `TARIFD_HTTP_BIND` | `127.0.0.1:9581` | health/readiness shell |
 | `EMOB_HTTP_BIND` | — | estate-wide shell address, used when `TARIFD_HTTP_BIND` is unset; defaults are loopback, unreachable inside a container |
 | `RUST_LOG` | `info,tarifd=debug` | log filter |
@@ -79,7 +79,8 @@ up in `late` as soon as it takes effect.
 ## Running
 
 ```console
-EMOB_ESTATE=deploy/estate.example.toml EMOB_OPERATOR_TOKEN=… cargo run -p tarifd
+source .env    # local estate and credentials from `just dev-keys`
+cargo run -p tarifd
 ```
 
 Or `just up` for the whole estate (`tarifd`'s shell on `localhost:8085`).

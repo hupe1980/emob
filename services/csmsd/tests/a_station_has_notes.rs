@@ -15,6 +15,7 @@ impl Authorize for Nobody {
     fn ask<'a>(
         &'a self,
         _uid: &'a str,
+        _evse: Option<&'a emob_core::EvseId>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Answer> + Send + 'a>> {
         Box::pin(async { Answer::invalid("no provider in this test") })
     }
@@ -52,6 +53,7 @@ fn sr_154_twelve_notes_leave_the_newest_ten_and_numbers_are_never_reused() {
         energy: rust_decimal::Decimal::new(49, 2),
         vat: rust_decimal::Decimal::from(19),
         per_minute: None,
+        occupancy_per_minute: None,
         session_fee: None,
         valid_from: None,
     }

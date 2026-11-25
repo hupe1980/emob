@@ -165,7 +165,7 @@ production: the kit's policy cannot open private addresses for one host only.
 | `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[partners]]`, `[[stations]]`, `[roaming]` (`public_url`, `reach_back_allow`), `[services]`, `[[operators]]` |
 | `ROAMD_DATA_KEY` | **required** | 32 bytes, base64; seals the journal and Token B |
 | `ROAMD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head. A `.head` signed under another key refuses the start |
-| `EMOB_PARTNER_<PARTY>_TOKEN_A`, `EMOB_WEBHOOK_SECRET`, `EMOB_OPERATOR_TOKEN` | **required** | the variables the estate names: each partner's Token A, delivery signatures, the read model's bearer |
+| `EMOB_PARTNER_<PARTY>_TOKEN_A`, `EMOB_WEBHOOK_SECRET`, `EMOB_OPERATOR_TOKEN`, `EMOB_DESK_READ_TOKEN` | **required** | the variables the estate names: each partner's Token A, delivery signatures, the example estate’s named operator and background read credentials |
 | `ROAMD_HTTP_BIND` / `EMOB_HTTP_BIND` | `127.0.0.1:9583` | the shell: probes, OCPI, deliveries, read model |
 | `EMOB_JOURNAL_DIR` | `var` | journal directory — deliberately not a temp directory |
 | `EMOB_LOG_FORMAT` | JSON | `text` for a terminal |

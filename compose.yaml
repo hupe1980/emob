@@ -1,30 +1,8 @@
-# The estate, on one machine.
-#
-# Not a production topology and deliberately not pretending to be one: there is
-# no replica count here, because a service that folds a journal on a local
-# volume is a **single writer** by construction, and two of them behind one
-# volume would interleave two chains into one file. Scaling out is a design
-# question for later; scaling up is `deploy.resources`.
-#
-# Every daemon takes its journal on a named volume. A container without one is a
-# service whose ledger dies with it — the whole failure the journal exists to
-# prevent — so each is declared rather than defaulted.
-
+# Single-host estate. Keep one writer per journal volume and terminate TLS for remote clients.
 name: emob
 
-# Deliberately no `healthcheck:`. Compose runs one by executing a command
-# *inside* the container, and a distroless image has no shell and no HTTP
-# client to run — a check written here would either need a second binary in the
-# image or would be a line that always passes, and a probe that cannot fail is
-# worse than none. The daemons expose `/health/live` and `/health/ready` over
-# HTTP, which is what an orchestrator that probes from outside — a Kubernetes
-# `httpGet`, a load balancer — is given them for. `ready` names what it is
-# waiting for; `live` only says the process is up.
-
-# The variables every daemon shares. A separate anchor, merged **inside** each
-# service's `environment:` with `<<: *env` — YAML's merge key is shallow, so a
-# service that wrote its own `environment:` under `<<: *daemon` replaced this map
-# whole and lost the journal directory and the bind address (found in 0.2).
+# Probe /health/live and /health/ready from outside the distroless containers.
+# Merge shared variables into each environment explicitly because YAML merges are shallow.
 x-env: &env
   EMOB_JOURNAL_DIR: /var/lib/emob
   # The one a container cannot do without. Every daemon defaults to loopback —
@@ -40,7 +18,8 @@ x-env: &env
   # estate with a message rather than leave a container crash-looping.
   EMOB_WEBHOOK_SECRET: ${EMOB_WEBHOOK_SECRET:?set EMOB_WEBHOOK_SECRET (whsec_<base64>) — the daemons sign what they hand each other}
   EMOB_SERVICE_TOKEN: ${EMOB_SERVICE_TOKEN:?set EMOB_SERVICE_TOKEN — csmsd presents it to empd}
-  EMOB_OPERATOR_TOKEN: ${EMOB_OPERATOR_TOKEN:?set EMOB_OPERATOR_TOKEN — the read models answer nobody without one}
+  EMOB_DESK_READ_TOKEN: ${EMOB_DESK_READ_TOKEN:?set the desk background read credential}
+  EMOB_OPERATOR_TOKEN: ${EMOB_OPERATOR_TOKEN:?set the named operator write credential}
   EMOB_PARTNER_DE_MSP_TOKEN_A: ${EMOB_PARTNER_DE_MSP_TOKEN_A:?set EMOB_PARTNER_DE_MSP_TOKEN_A — the Token A the demo partner registers with}
 
 x-daemon: &daemon
@@ -65,7 +44,7 @@ services:
       # (spec 008); a journal shorter than its signed head does not start.
       CSMSD_SIGNING_KEY: ${CSMSD_SIGNING_KEY:?set CSMSD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
     ports:
-      - "8080:8080"   # the shell
+      - "127.0.0.1:8080:8080"   # the shell
       - "9000:9000"   # the OCPP WebSocket a station dials — wss://, profile 2
     # The listener's certificate: a public bind without TLS refuses to start
     # (SR-042). `just up` mints a throwaway one with `just dev-ca`.
@@ -82,7 +61,7 @@ services:
       # The Ed25519 seed roamd signs its journal head with after every append
       # (spec 008); a journal shorter than its signed head does not start.
       ROAMD_SIGNING_KEY: ${ROAMD_SIGNING_KEY:?set ROAMD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
-    ports: ["8081:8080"]
+    ports: ["127.0.0.1:8081:8080"]
     volumes: [roamd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   billd:
@@ -97,7 +76,7 @@ services:
       # The Ed25519 seed billd signs its journal head with after every append
       # (spec 008); a journal shorter than its signed head does not start.
       BILLD_SIGNING_KEY: ${BILLD_SIGNING_KEY:?set BILLD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
-    ports: ["8082:8080"]
+    ports: ["127.0.0.1:8082:8080"]
     volumes: [billd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   empd:
@@ -114,7 +93,7 @@ services:
       # The Ed25519 seed empd signs its journal head with after every append
       # (spec 008); a journal shorter than its signed head does not start.
       EMPD_SIGNING_KEY: ${EMPD_SIGNING_KEY:?set EMPD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
-    ports: ["8083:8080"]
+    ports: ["127.0.0.1:8083:8080"]
     volumes: [empd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   poid:
@@ -129,21 +108,21 @@ services:
       # The identifier the Mobilithek issued this operator; poid refuses to
       # start without one (spec 012).
       POID_NAP_IDENTIFIER: ${POID_NAP_IDENTIFIER:?set POID_NAP_IDENTIFIER — the national access point identifier; `just dev-keys` prints DE-NAP-DEV}
-    ports: ["8084:8080"]
+    ports: ["127.0.0.1:8084:8080"]
     volumes: [poid:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   tarifd:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-tarifd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: tarifd } }
-    ports: ["8085:8080"]
+    ports: ["127.0.0.1:8085:8080"]
     volumes: [tarifd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   agentd:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-agentd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: agentd } }
-    ports: ["8086:8080"]
+    ports: ["127.0.0.1:8086:8080"]
     volumes: [agentd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   # The operator's page. It reads the others' read models and keeps one thing:
@@ -156,7 +135,7 @@ services:
     <<: *daemon
     image: ${REGISTRY:-ghcr.io/hupe1980}/emob-deskd:${VERSION:-dev}
     build: { context: ., args: { DAEMON: deskd } }
-    ports: ["8088:8080"]
+    ports: ["127.0.0.1:8088:8080"]
     volumes: [deskd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   # The one that is not deployed with the others. `sited` runs **at a site**,
@@ -172,7 +151,7 @@ services:
     # No SHIP port: the session `[LPC §3.3]` prescribes is a socket a
     # deployment supplies, and this daemon does not open one yet (M12). A
     # mapping here would be a port with nothing behind it.
-    ports: ["8087:8080"]
+    ports: ["127.0.0.1:8087:8080"]
     volumes: [sited:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
 volumes:

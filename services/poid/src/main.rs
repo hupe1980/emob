@@ -21,17 +21,10 @@ use emob_poi::site::Facility;
 use emob_service::head::{self, Signing, SigningKey};
 use emob_service::journal::Journal as _;
 use emob_service::{Identity, Readiness, Server, Shutdown, estate, identity};
-use poid::{Ledger, Poid};
+use poid::Ledger;
 
 /// What the daemon waits for before it takes traffic.
 const INVENTORY: &str = "inventory";
-
-/// How often the estate is republished, and how long a feed may go unrefreshed
-/// before an operator is told.
-///
-/// A feed nobody refreshed is one route planners read as current, and nothing
-/// about it errors.
-const CADENCE: time::Duration = time::Duration::hours(1);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -75,9 +68,13 @@ async fn main() -> Result<()> {
     let path = estate::path();
     let estate: poid::http::Estate =
         estate::load(&path).with_context(|| format!("reading the estate at {}", path.display()))?;
-    let operators = estate::operator_tokens(&estate.operators, &estate::process_env())?;
+    let env = estate::process_env();
+    let operators = estate::operator_tokens(&estate.operators, &env)?;
     let sites = poid::http::sites(&estate)?;
-    let view = poid::http::View::of(&sites, held.clone());
+    let mut view = poid::http::View::of(&sites, held.clone());
+    if estate.mobilithek.is_none() {
+        view.dynamic.problem = Some("No registered Mobilithek offers configured".to_owned());
+    }
 
     // The identifier the national access point issued (spec 012): refused
     // when absent rather than published as a placeholder nobody at the
@@ -116,74 +113,71 @@ async fn main() -> Result<()> {
     }
     readiness.up(INVENTORY);
 
-    // Spec 016: the table goes out at start and on the cadence, priced with
-    // the version in force at that instant, and is recorded only once the
-    // access point took it. Without [mobilithek] the feed is built and
-    // checked, and the operator is told nothing is sent.
+    // The local view stays available in estates without registered offers.
     let shared = std::sync::Arc::new(std::sync::RwLock::new(view));
-    let (loop_view, loop_shutdown) = (std::sync::Arc::clone(&shared), shutdown.clone());
-    tokio::spawn(async move {
-        let mut ledger = ledger;
-        let mut held = held;
-        let mut ticker = tokio::time::interval(CADENCE.unsigned_abs());
-        loop {
-            tokio::select! {
-                _ = ticker.tick() => {}
-                () = loop_shutdown.wait() => return,
-            }
-            let now = time::OffsetDateTime::now_utc();
-            let Ok(rates) = poid::rates(&estate, now) else {
-                continue;
-            };
-            let rate_for =
-                |point: &emob_poi::site::ChargingPoint| rates.get(&point.evse_id).cloned();
-            let mut service = Poid::new(publisher.clone(), table.clone(), sites.clone(), &rate_for);
-            if let Some(accepted) = &held {
-                service.restore(accepted.clone());
-            }
-            let publication = match service.snapshot(now) {
-                Ok(publication) => publication,
-                Err(error) => {
-                    tracing::error!(%error, "the table cannot be published as it stands");
-                    continue;
-                }
-            };
-            let (Some(client), Some(mobilithek)) = (&client, &estate.mobilithek) else {
-                tracing::info!(
-                    "the table is built and checked; no [mobilithek] is set, so nothing is sent"
-                );
-                continue;
-            };
-            match poid::push::push(client, &mobilithek.url, &publication).await {
-                Ok(()) => {
-                    match ledger.accepted(
-                        &emob_service::Actor::Timer,
-                        &mut service,
-                        &publication,
-                        now,
-                    ) {
-                        Ok(_) => {
-                            held = service.last_accepted().cloned();
-                            let mut view = loop_view
-                                .write()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            view.last_accepted.clone_from(&held);
-                            tracing::info!(published_at = %now, "the Mobilithek took the table");
+    if let Some(receiver) = client {
+        let source = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        let token = estate::desk_read_credential(&estate.desk, &env, &operators)?;
+        let checkpoint = ledger.last_dynamic()?;
+        shared
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dynamic = checkpoint.delivery.clone();
+        let mut worker = poid::live::Worker {
+            ledger,
+            publisher,
+            table,
+            estate,
+            receiver,
+            source,
+            token,
+            held,
+            checkpoint,
+        };
+        let (view, stopping) = (std::sync::Arc::clone(&shared), shutdown.clone());
+        tokio::spawn(async move {
+            let mut delay = 5;
+            loop {
+                match worker.round(&view).await {
+                    Ok(()) => delay = 5,
+                    Err(error) => {
+                        tracing::warn!(%error, "publication incomplete");
+                        let problem = Some(
+                            if error.downcast_ref::<poid::push::Refused>().is_some() {
+                                format!("{error:#}")
+                            } else {
+                                "Source data could not be read consistently or represented in the registered profile".to_owned()
+                            },
+                        );
+                        if worker.checkpoint.delivery.problem != problem {
+                            worker.checkpoint.delivery.problem = problem;
+                            if let Err(error) = worker.ledger.progress(
+                                &worker.checkpoint,
+                                &worker.checkpoint.delivery,
+                                None,
+                            ) {
+                                tracing::error!(%error,"cannot persist publication evidence");
+                                return;
+                            }
                         }
-                        Err(error) => {
-                            tracing::error!(%error, "the Mobilithek took the table and the journal refused the fact")
-                        }
+                        let mut current = view
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        current.dynamic.clone_from(&worker.checkpoint.delivery);
+                        current.last_accepted.clone_from(&worker.held);
+                        delay = (delay * 2).min(30);
                     }
                 }
-                Err(refused) => {
-                    tracing::warn!(%refused, retries = refused.retries(), "the Mobilithek did not take the table")
+                tokio::select! {
+                    () = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {}
+                    () = stopping.wait() => return,
                 }
             }
-            if let Some(stale) = service.stale(now, CADENCE) {
-                tracing::warn!(feed = %stale, "the national access point is behind");
-            }
-        }
-    });
+        });
+    }
 
     let signal = shutdown.clone();
     tokio::spawn(async move { signal.on_signal().await });

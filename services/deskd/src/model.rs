@@ -37,6 +37,8 @@ impl<T> Default for Page<T> {
 /// `GET /v1/csmsd/today`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Csmsd {
+    /// Currently registered stations, including those which have never charged.
+    pub station_count: usize,
     /// The success rate, today and over the week.
     pub success: Windows,
     /// The newest refused sessions.
@@ -65,10 +67,21 @@ pub struct NetworkShare {
 /// The two windows.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Windows {
+    /// Each civil day in the owner's reporting zone, oldest first.
+    pub days: Vec<Daily>,
     /// Today.
     pub today: Window,
     /// The seven days ending today.
     pub week: Window,
+}
+
+/// One of the seven civil-day totals.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Daily {
+    /// Reporting date as YYYY-MM-DD.
+    pub from: String,
+    /// The billed/attempted counts.
+    pub estate: Rate,
 }
 
 /// The rate over a span of days.
@@ -92,6 +105,14 @@ pub struct Point {
 /// One refused session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Refusal {
+    /// Stable outcome position within this estate.
+    pub position: u64,
+    /// Additional findings beyond the owner's display limit.
+    #[serde(default)]
+    pub omitted_findings: usize,
+    /// Additional diagnostic reasons beyond the owner's display limit.
+    #[serde(default)]
+    pub omitted_reasons: usize,
     /// The station.
     pub identity: String,
     /// The transaction.
@@ -179,4 +200,43 @@ pub struct Consignment {
     pub delivery: String,
     /// The refusal's reason.
     pub reason: Option<String>,
+}
+
+/// Direct dynamic-offer receipt and cumulative delivery evidence from poid.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Publication {
+    /// Static table delivery attempts including retries, when counted.
+    pub static_attempts: Option<u64>,
+    /// Start of the latest static table attempt.
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub static_last_attempt: Option<time::OffsetDateTime>,
+    /// Most recent direct static table acknowledgement.
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub static_accepted_at: Option<time::OffsetDateTime>,
+    /// Last acknowledged complete snapshot.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub snapshot_at: Option<time::OffsetDateTime>,
+    /// Last acknowledged dynamic delivery, whether snapshot or delta.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub accepted_at: Option<time::OffsetDateTime>,
+    /// Oldest observed change still awaiting receiver acknowledgement.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub pending_since: Option<time::OffsetDateTime>,
+    /// Oldest changed source fact in the most recent measured delivery.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub last_source_change: Option<time::OffsetDateTime>,
+    /// Receiver acknowledgement paired with that source fact.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub last_measured_at: Option<time::OffsetDateTime>,
+    /// Dynamic delivery attempts including retries, when the publisher counts them.
+    pub attempts: Option<u64>,
+    /// Start of the last dynamic attempt, independent of its outcome.
+    #[serde(with = "time::serde::rfc3339::option", default)]
+    pub last_attempt: Option<time::OffsetDateTime>,
+    /// Delta messages acknowledged since the last complete snapshot.
+    pub changes: usize,
+    /// Deliveries with at least one new source change older than sixty seconds.
+    pub missed_deadlines: u64,
+    /// The publisher's latest source or delivery problem.
+    pub problem: Option<String>,
 }

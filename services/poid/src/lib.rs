@@ -59,6 +59,7 @@
 #![warn(missing_docs, clippy::pedantic)]
 
 pub mod http;
+pub mod live;
 pub mod push;
 pub mod record;
 
@@ -219,7 +220,7 @@ impl<'a> Poid<'a> {
         Ok(self.feed().table(published_at)?)
     }
 
-    /// The dynamic publication — `[AFIR Art. 20(2)(c)]`.
+    /// The dynamic publication — `[AFIR Art. 20(2)(f)]`.
     ///
     /// # Errors
     ///
@@ -229,6 +230,7 @@ impl<'a> Poid<'a> {
     /// not carry at that version.
     pub fn status(
         &self,
+        delivery: emob_poi::datex::Delivery,
         updates: &[PointUpdate],
         published_at: time::OffsetDateTime,
     ) -> Result<StatusPublication, PublishError> {
@@ -237,7 +239,7 @@ impl<'a> Poid<'a> {
         };
         Ok(self
             .feed()
-            .status(&accepted.published, updates, published_at)?)
+            .status(&accepted.published, delivery, updates, published_at)?)
     }
 
     /// Record a snapshot the access point **took**.

@@ -1,6 +1,6 @@
 //! What a point is doing now, and what the register says it is allowed to say.
 //!
-//! `[AFIR Art. 20(2)(c)]` makes operational status and availability **dynamic**
+//! `[AFIR Art. 20(2)(f)]` makes operational status and availability **dynamic**
 //! data: an operator publishes it, free of charge, through the national access
 //! point, and route planners act on it within seconds. It is the half of the
 //! feed that is wrong most often, because it is the half that changes.
@@ -71,12 +71,14 @@ impl Lifecycle {
 
 /// What a point is doing, in the profile's own vocabulary.
 ///
-/// All twelve literals of `[DATEX-II-Profil Tab. B.45]`, because dropping the
+/// The operational literals of `[DATEX-II-Profil Tab. B.45]`, because dropping the
 /// ones that seem redundant is how a feed ends up reporting `outOfOrder` for a
 /// blocked bay and sending a service technician to a working charger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PointStatus {
+    /// No current authoritative status, including an offline source (profile table B.45).
+    Unknown,
     /// Not occupied, energy available, usable.
     Available,
     /// Physically unreachable — a car parked across it.
@@ -108,6 +110,7 @@ impl PointStatus {
     #[must_use]
     pub const fn as_profile_str(self) -> &'static str {
         match self {
+            Self::Unknown => "unknown",
             Self::Available => "available",
             Self::Blocked => "blocked",
             Self::Charging => "charging",

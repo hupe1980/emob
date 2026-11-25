@@ -86,7 +86,7 @@ fn one_version_reaches_three_audiences_at_one_decimal() {
     let net = dec(&station.prices[0].price_kwh.to_string());
     assert_eq!(net.round_dp(6), (dec("0.59") / dec("1.19")).round_dp(6));
 
-    // The national access point `[AFIR Art. 20(2)(c)]`, which carries the gross
+    // The national access point `[AFIR Art. 20(2)(f)]`, which carries the gross
     // figure and the rate beside it.
     let published = &publication.national_access_point.prices[0];
     assert_eq!(published.value, dec("0.59"));

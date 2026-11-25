@@ -70,8 +70,8 @@ duty applies.
 | **Smart-recharging capable** | `[AFIR Art. 5(8)]` | 13.04.2024 | built after 13.04.2024 ∨ renovated after 14.10.2024 |
 | **Fixed cable** on every public DC point | `[AFIR Art. 5(10)]` | 14.04.2025 | public ∧ DC |
 | A **third-party owner** must supply a point whose characteristics let the operator meet 5(2), (7), (8), (10) | `[AFIR Art. 5(11)]` | 13.04.2024 | public ∧ the operator does not own it |
-| Static data free of charge | `[AFIR Art. 20(2)]` | 14.04.2025 | public |
-| Dynamic data free of charge | `[AFIR Art. 20(2)]` | 14.04.2025 | public ∧ **paid** |
+| Static data, including the 100%-renewable electricity indicator | `[AFIR Art. 20(2)(a)–(b)]` | 14.04.2025 | public |
+| Dynamic status, availability and ad-hoc price | `[AFIR Art. 20(2)(f)]` | 14.04.2025 | all public points, including free charging |
 | A free, unrestricted **API registered with the NAP** | `[AFIR Art. 20(3)]` | 14.04.2025 | public |
 | …the German feed in the **DATEX II Recharging profile** | `[DATEX-II-Profil]` | 14.04.2026 | public |
 | EN ISO 15118-1…-5 | `[DA-656 Anh. 2.1.1]` | 08.01.2026 | public ∧ **installed or renovated** ≥ 08.01.2026 |
@@ -149,10 +149,7 @@ report.failing();      // both, for a caller that wants the union
 
 Each of these is modelled as `NotApplicable`, not as a pass:
 
-- **A free charge point owes no payment instrument and no dynamic data.** Both
-  `[AFIR Art. 5(1)]` and `[AFIR Art. 20(2)]` exempt points that do not require
-  payment, which is why static and dynamic data are separate duties. A free
-  point *satisfies* the ad-hoc access duty outright.
+- **Free public charging.** Payment-instrument requirements apply where payment is required. Free public points still owe both static and dynamic data. The calendar assesses the operator's declarations. Independent receiver acknowledgements and source timestamps belong to the publication record. [Amending regulation, Article 1](https://eur-lex.europa.eu/eli/reg_del/2025/671/oj/eng/pdf)
 - **A QR code satisfies the payment duty only below 50 kW.** Art. 5(1)(c)
   restricts internet-connected payment to points below 50 kW.
 - **The 2027 retrofit also reaches safe and secure parking areas**, not only the

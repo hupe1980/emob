@@ -55,7 +55,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
+mod actions;
+pub use actions::CardChange;
 pub mod book;
+mod cards;
+mod enrol;
+pub use enrol::{Agreement, RetailBinding};
 pub mod daemon;
 pub mod http;
 pub mod seed;
@@ -284,12 +289,17 @@ pub struct Token {
     /// sealed under `EMPD_DATA_KEY`, so the journal never holds it in clear and
     /// destroying the key erases it (SR-046).
     pub uid: Sealed,
+    /// Keyed exact-match index of the optional identifier printed on the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    visual_digest: Option<String>,
     /// What the driver holds up.
     pub token_type: TokenType,
     /// How an operator holding it in a list may treat it.
     pub whitelist: Whitelist,
     /// Whether the provider has blocked it — a lost card, a chargeback.
     pub blocked: bool,
+    #[serde(skip)]
+    revision: u64,
 }
 
 /// The answer to `[OCPI 2.3.0 §mod_tokens]`'s real-time question.
@@ -534,7 +544,13 @@ pub enum Counted {
 pub struct Empd {
     me: PartyId,
     contracts: BTreeMap<String, Contract>,
+    account_ids: BTreeSet<emob_core::Emaid>,
     tokens: BTreeMap<String, Token>,
+    cards: cards::Index,
+    agreements: enrol::Agreements,
+    issued_rfids: BTreeSet<TokenRef>,
+    foreign_uid_key: bool,
+    card_history: BTreeMap<TokenRef, std::collections::VecDeque<CardChange>>,
     markups: BTreeMap<String, Markup>,
     /// What each contract has run up that nobody has invoiced yet, **by
     /// session**.
@@ -573,7 +589,13 @@ impl Empd {
         Self {
             me,
             contracts: BTreeMap::new(),
+            account_ids: BTreeSet::new(),
             tokens: BTreeMap::new(),
+            cards: cards::Index::default(),
+            agreements: enrol::Agreements::default(),
+            issued_rfids: BTreeSet::new(),
+            foreign_uid_key: false,
+            card_history: BTreeMap::new(),
             markups: BTreeMap::new(),
             unbilled: BTreeMap::new(),
             key: Arc::new(key),
@@ -602,7 +624,7 @@ impl Empd {
     /// Take on a contract.
     #[must_use]
     pub fn with(mut self, contract: Contract) -> Self {
-        self.contracts.insert(contract.id.to_string(), contract);
+        self.hold(contract);
         self
     }
 
@@ -649,21 +671,30 @@ impl Empd {
             });
         }
         let uid = uid.into();
-        // Refused at the counter rather than at the crossing. `RoamingToken` is
-        // built here and thrown away: what is being kept is its refusal.
-        RoamingToken::new(self.me.clone(), &uid, token_type, contract.clone())?;
         let reference = self.reference_for(&uid);
-        self.tokens.insert(
-            reference.as_str().to_owned(),
-            Token {
-                contract: contract.clone(),
-                uid: self.key.seal_str(UID, &uid),
-                token_type,
-                whitelist,
-                blocked: false,
-            },
-        );
+        let card = self.prepare_card(contract, &uid, token_type, whitelist)?;
+        self.store_card(&reference, card);
         Ok(reference)
+    }
+
+    fn prepare_card(
+        &self,
+        contract: &ContractId,
+        uid: &str,
+        token_type: TokenType,
+        whitelist: Whitelist,
+    ) -> Result<Token, ProviderError> {
+        RoamingToken::new(self.me.clone(), uid, token_type, contract.clone())?;
+        let reference = self.reference_for(uid);
+        Ok(Token {
+            contract: contract.clone(),
+            uid: self.key.seal_str(UID, uid),
+            visual_digest: None,
+            token_type,
+            whitelist,
+            blocked: self.token(&reference).is_some_and(|card| card.blocked),
+            revision: 0,
+        })
     }
 
     /// Block a token — a lost card, a chargeback.
@@ -679,6 +710,7 @@ impl Empd {
                     token: token.as_str().to_owned(),
                 })?;
         stored.blocked = true;
+        stored.revision = stored.revision.saturating_add(1);
         Ok(())
     }
 
@@ -739,6 +771,15 @@ impl Empd {
     /// as `ALWAYS` — see that variant for why a question about it is a report of
     /// a stale list rather than a request.
     pub fn authorize(&self, token: &TokenRef, on: time::Date) -> Result<Allowed, ProviderError> {
+        self.authorize_at(token, on.midnight().assume_utc(), None)
+    }
+
+    fn authorize_at(
+        &self,
+        token: &TokenRef,
+        at: time::OffsetDateTime,
+        evse: Option<&emob_core::EvseId>,
+    ) -> Result<Allowed, ProviderError> {
         let stored =
             self.tokens
                 .get(token.as_str())
@@ -750,7 +791,14 @@ impl Empd {
                 token: token.as_str().to_owned(),
             });
         }
-        Ok(self.decide(stored, on))
+        let standing = self.decide(stored, at.date());
+        if standing.is_allowed()
+            && let Some(agreement) = self.agreements.for_card(token)
+            && !agreement.covers(evse, at)
+        {
+            return Ok(Allowed::NotAllowed);
+        }
+        Ok(standing)
     }
 
     /// Answer for a session an operator started from its own list.
@@ -1098,6 +1146,22 @@ impl Empd {
             .unwrap_or_else(|_| unreachable!("an HMAC-SHA256 is 64 lowercase hex characters"))
     }
 
+    // An RFID UID is bytes. Readers can differ on the case of its hex spelling.
+    // Native inventory is canonical uppercase. Preserve existing seeded token spellings.
+    fn presented_reference(&self, uid: &str) -> TokenRef {
+        let reference = self.reference_for(uid);
+        if self.token(&reference).is_none()
+            && matches!(uid.len(), 8 | 14 | 20)
+            && uid.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            let canonical = self.reference_for(&uid.to_ascii_uppercase());
+            if self.agreements.for_card(&canonical).is_some() {
+                return canonical;
+            }
+        }
+        reference
+    }
+
     /// The id of the key references are derived and UIDs sealed under.
     #[must_use]
     pub fn key_id(&self) -> &KeyId {
@@ -1114,3 +1178,6 @@ fn describe_dimension(dimension: emob_tariff::Dimension) -> &'static str {
         emob_tariff::Dimension::Flat => "session fee",
     }
 }
+
+/// Evaluate the public pass-through terms also used by the point's provider-price page.
+pub use emob_tariff::retail::{Fees as PublicPlanFees, public_retail_tariff};

@@ -43,20 +43,25 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
+use axum::Extension;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use emob_core::TimeZone;
+use emob_service::authority::OperatorAccess;
 use emob_service::estate::{self, Desk, Env, Operator, Services};
 use emob_service::ui::{self, Lang};
 use emob_service::{Identity, Readiness, Server, Shutdown};
 use serde::Deserialize;
 
+mod card;
+mod contracts;
 pub mod europe;
 pub mod fetch;
 pub mod heute;
+mod investigation;
 pub mod map;
 pub mod model;
 pub mod station;
@@ -181,9 +186,11 @@ pub struct Running {
 
 impl Running {
     /// Stop now.
-    pub fn kill(self) {
+    pub async fn kill(self) {
         self.task.abort();
         self.witnessing.abort();
+        let _ = self.task.await;
+        let _ = self.witnessing.await;
     }
 
     /// Wait until the shutdown signal, then stop.
@@ -199,6 +206,8 @@ struct Page {
     csmsd: String,
     billd: String,
     roamd: String,
+    poid: Option<String>,
+    empd: String,
     zone: TimeZone,
     clock: Clock,
     receipts: String,
@@ -217,11 +226,25 @@ struct Params {
     consignments: Option<u64>,
 }
 
-/// The page's routes: `GET /` behind the operators, the shared stylesheet and
-/// the script. GET only — nothing on this surface changes anything (SR-056).
+/// Operator pages share the access boundary. Assets remain accessible without credentials.
 fn router(desk: Arc<Page>, operators: emob_service::Operators) -> axum::Router {
     let page = axum::Router::new()
         .route("/", get(heute_page))
+        .route("/sessions/{position}", get(investigation::session))
+        .route(
+            "/lookup",
+            get(investigation::lookup)
+                .post(investigation::search)
+                .layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/cards/preview",
+            axum::routing::post(card::preview).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route(
+            "/cards/confirm",
+            axum::routing::post(card::confirm).layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
         .route("/station/{identity}", get(station_page))
         .route("/stations", get(stations_page).post(create_station))
         .route("/stations/new", get(new_station_page))
@@ -250,6 +273,7 @@ fn router(desk: Arc<Page>, operators: emob_service::Operators) -> axum::Router {
             "/station/{identity}/password",
             axum::routing::post(new_password),
         )
+        .merge(contracts::routes())
         .with_state(desk);
     ui::operator_page(page, operators)
         .merge(ui::assets())
@@ -285,15 +309,17 @@ async fn heute_page(
     let csmsd_at = [("refused", at.refused), ("silent", at.silent)];
     let billd_at = [("invoices", at.invoices)];
     let roamd_at = [("consignments", at.consignments)];
-    let (csmsd, billd, roamd) = tokio::join!(
+    let (csmsd, billd, roamd, publication) = tokio::join!(
         desk.reader.read("csmsd", &desk.csmsd, rows, &csmsd_at, now),
         desk.reader.read("billd", &desk.billd, rows, &billd_at, now),
         desk.reader.read("roamd", &desk.roamd, rows, &roamd_at, now),
+        desk.reader.publication(desk.poid.as_deref(), now),
     );
     let snapshot = heute::Snapshot {
         csmsd,
         billd,
         roamd,
+        publication,
         now,
         zone: desk.zone.clone(),
         at,
@@ -322,6 +348,7 @@ struct SearchParams {
 
 /// `GET /stations` — the registry, searched (spec 021).
 async fn stations_page(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     params: Result<Query<SearchParams>, QueryRejection>,
     headers: HeaderMap,
@@ -362,6 +389,7 @@ async fn stations_page(
                 limit: heute::ROWS,
             },
             lang,
+            access.can_write(),
         )),
         Err(_) => (
             StatusCode::BAD_GATEWAY,
@@ -373,10 +401,14 @@ async fn stations_page(
 
 /// `GET /stations/new` — the onboarding form.
 async fn new_station_page(
+    Extension(access): Extension<OperatorAccess>,
     params: Result<Query<SearchParams>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
     let lang = language(params.ok().and_then(|Query(p)| p.lang).as_deref(), &headers);
+    if !access.can_write() {
+        return (StatusCode::FORBIDDEN, read_only(lang)).into_response();
+    }
     ui::html(stations::render_form(
         &stations::Form::blank(),
         stations::Purpose::Register,
@@ -385,9 +417,22 @@ async fn new_station_page(
     ))
 }
 
+const fn read_only(lang: Lang) -> &'static str {
+    lang.pick(
+        "Dieser Zugang hat Leserechte.",
+        "This account has read-only access.",
+    )
+}
+
 /// The checks every write passes before anything is forwarded: same origin
 /// (SR-148), and the operator's own token to forward (SR-147).
-fn writer(headers: &HeaderMap) -> Result<String, (StatusCode, &'static str)> {
+fn writer(
+    headers: &HeaderMap,
+    access: OperatorAccess,
+) -> Result<String, (StatusCode, &'static str)> {
+    if !access.can_write() {
+        return Err((StatusCode::FORBIDDEN, read_only(language(None, headers))));
+    }
     if !stations::same_origin(headers) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -399,12 +444,13 @@ fn writer(headers: &HeaderMap) -> Result<String, (StatusCode, &'static str)> {
 
 /// `POST /stations` — register, then the installer sheet.
 async fn create_station(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     headers: HeaderMap,
     axum::Form(form): axum::Form<stations::Form>,
 ) -> Response {
     let lang = language(None, &headers);
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -444,12 +490,16 @@ async fn create_station(
 /// `GET /station/{identity}/edit` — the change form, filled with what the
 /// station is now.
 async fn edit_station_page(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
     params: Result<Query<SearchParams>, QueryRejection>,
     headers: HeaderMap,
 ) -> Response {
     let lang = language(params.ok().and_then(|Query(p)| p.lang).as_deref(), &headers);
+    if !access.can_write() {
+        return (StatusCode::FORBIDDEN, read_only(lang)).into_response();
+    }
     match desk
         .reader
         .station::<station::StationPage>(&desk.csmsd, &identity)
@@ -469,13 +519,14 @@ async fn edit_station_page(
 /// `POST /station/{identity}/edit` — forwarded as `PUT` with the operator's
 /// token and reason (spec 021, US3); back to the card when it is accepted.
 async fn edit_station(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
     headers: HeaderMap,
     axum::Form(mut form): axum::Form<stations::Form>,
 ) -> Response {
     let lang = language(None, &headers);
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -523,12 +574,13 @@ struct Reason {
 
 /// `POST /station/{identity}/retire`.
 async fn retire_station(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
     headers: HeaderMap,
     axum::Form(why): axum::Form<Reason>,
 ) -> Response {
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -567,13 +619,14 @@ struct ReserveForm {
 /// `POST /station/{identity}/reservations` — forwarded with the operator's
 /// own token from this origin only, as a note is (spec 025).
 async fn reserve(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
     headers: HeaderMap,
     axum::Form(form): axum::Form<ReserveForm>,
 ) -> Response {
     let lang = language(None, &headers);
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -598,12 +651,13 @@ async fn reserve(
 
 /// `POST /station/{identity}/reservations/{number}/cancel`.
 async fn cancel_reservation(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
     headers: HeaderMap,
 ) -> Response {
     let lang = language(None, &headers);
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -679,12 +733,13 @@ struct NoteForm {
 /// `POST /station/{identity}/notes` — forwarded with the operator's own token
 /// (SR-156) from this origin only (SR-157); back to the notes.
 async fn write_note(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
     headers: HeaderMap,
     axum::Form(note): axum::Form<NoteForm>,
 ) -> Response {
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -704,11 +759,12 @@ async fn write_note(
 
 /// `POST /station/{identity}/notes/{number}/remove`.
 async fn remove_note(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
     headers: HeaderMap,
 ) -> Response {
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -747,13 +803,14 @@ fn back_to_notes(identity: &str, answer: Result<(u16, serde_json::Value), fetch:
 
 /// `POST /station/{identity}/password` — a new password, on a new sheet.
 async fn new_password(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
     headers: HeaderMap,
     axum::Form(why): axum::Form<Reason>,
 ) -> Response {
     let lang = language(None, &headers);
-    let token = match writer(&headers) {
+    let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
     };
@@ -792,6 +849,7 @@ async fn new_password(
 /// One station (spec 012). An identity the estate does not list is the
 /// shell's plain 404; nothing the browser sent is echoed (SR-139).
 async fn station_page(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
     params: Result<Query<Params>, QueryRejection>,
@@ -814,6 +872,7 @@ async fn station_page(
             &desk.zone,
             (desk.clock)(),
             &desk.receipts,
+            access.can_write(),
         )),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(why) => {
@@ -847,7 +906,7 @@ pub async fn run(options: Options) -> Result<Running> {
         witness,
     } = options;
     let operators = estate::operator_tokens(&estate.operators, &env)?;
-    let token = estate.desk.token_env.resolve_in("desk.token_env", &env)?;
+    let token = estate::desk_read_credential(&estate.desk, &env, &operators)?;
     let zone =
         TimeZone::new(&estate.desk.time_zone).map_err(|error| estate::EstateError::Invalid {
             key: "desk.time_zone".to_owned(),
@@ -872,6 +931,8 @@ pub async fn run(options: Options) -> Result<Running> {
         csmsd: estate.desk.csmsd.clone(),
         billd: estate.services.billd.clone(),
         roamd: estate.services.roamd.clone(),
+        poid: estate.desk.poid.clone(),
+        empd: estate.services.empd.clone(),
         zone,
         clock,
         receipts: estate
@@ -930,10 +991,13 @@ mod tests {
             HeaderValue::from_static("Basic ZGVtbzp0b2tlbg=="),
         );
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
-        assert_eq!(writer(&headers).unwrap_err().0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            writer(&headers, OperatorAccess::Write).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
         headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
         assert_eq!(
-            writer(&headers).unwrap(),
+            writer(&headers, OperatorAccess::Write).unwrap(),
             "token",
             "the operator's own token is forwarded"
         );

@@ -279,9 +279,12 @@ pub struct Running {
 
 impl Running {
     /// Stop as a crash would.
-    pub fn kill(self) {
+    pub async fn kill(self) {
         for task in &self.tasks {
             task.abort();
+        }
+        for task in self.tasks {
+            let _ = task.await;
         }
     }
 

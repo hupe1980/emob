@@ -1,8 +1,8 @@
-//! Reading the three bounded views, and remembering since when one has not
+//! Reading the bounded operator views, and remembering since when one has not
 //! answered.
 //!
-//! Each read has a timeout and a body cap (SR-055): only the `/today` views
-//! are read, whose size is bounded by the page and the estate, so the cap is
+//! Each read has a timeout and a body cap (SR-055): the requested views
+//! are bounded by a page or a fixed set of delivery counters, so the cap is
 //! 1 MiB and a body past it is a fault, not a busy day (SR-092). A read that fails is
 //! described by its **class** — no answer, refused, unreadable — never by the
 //! request, its headers or the body it got back, so the operator token can
@@ -64,7 +64,7 @@ impl<T> Source<T> {
     }
 }
 
-/// The three daemons, and the one piece of memory `deskd` keeps: since when
+/// The daemons, and the one piece of memory `deskd` keeps: since when
 /// each has been down. A restart forgets it, and says "since" the restart.
 pub struct Reader {
     client: reqwest::Client,
@@ -86,7 +86,10 @@ impl Reader {
     /// The HTTP client could not be built.
     pub fn new(token: Secret) -> anyhow::Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder().timeout(TIMEOUT).build()?,
+            client: reqwest::Client::builder()
+                .timeout(TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             token,
             down: Mutex::new(BTreeMap::new()),
         })
@@ -113,7 +116,26 @@ impl Reader {
                 let _ = write!(url, "&{list}={cursor}");
             }
         }
-        match self.fetch(&url).await {
+        self.source(name, &url, now).await
+    }
+
+    /// Read the fixed-size dynamic delivery summary when this estate has a publisher.
+    pub async fn publication(
+        &self,
+        base: Option<&str>,
+        now: time::OffsetDateTime,
+    ) -> Option<Source<crate::model::Publication>> {
+        let url = format!("{}/v1/poid/dynamic", base?.trim_end_matches('/'));
+        Some(self.source("poid", &url, now).await)
+    }
+
+    async fn source<T: DeserializeOwned>(
+        &self,
+        name: &'static str,
+        url: &str,
+        now: time::OffsetDateTime,
+    ) -> Source<T> {
+        match self.fetch(url).await {
             Ok(value) => {
                 self.down
                     .lock()
@@ -287,14 +309,41 @@ impl Reader {
         Ok((body, headers))
     }
 
-    async fn fetch<T: DeserializeOwned>(&self, url: &str) -> Result<T, Why> {
-        let mut response = self
-            .client
-            .get(url)
-            .bearer_auth(self.token.expose())
-            .send()
+    pub(crate) async fn fetch<T: DeserializeOwned>(&self, url: &str) -> Result<T, Why> {
+        self.fetch_request(self.client.get(url).bearer_auth(self.token.expose()))
             .await
-            .map_err(|_| Why::NoAnswer)?;
+    }
+
+    pub(crate) async fn lookup<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<T, Why> {
+        self.fetch_request(
+            self.client
+                .post(url)
+                .bearer_auth(self.token.expose())
+                .json(body),
+        )
+        .await
+    }
+
+    /// Submit an operator action under the signed-in operator's credential.
+    pub(crate) async fn operator_action<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        operator: &str,
+        body: &serde_json::Value,
+    ) -> Result<T, Why> {
+        self.fetch_request(self.client.post(url).bearer_auth(operator).json(body))
+            .await
+    }
+
+    async fn fetch_request<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T, Why> {
+        let mut response = request.send().await.map_err(|_| Why::NoAnswer)?;
         match response.status().as_u16() {
             200 => {}
             401 | 403 => return Err(Why::Refused),

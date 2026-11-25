@@ -263,9 +263,15 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF#refs/tags/}" dist/* \
-            --title "${GITHUB_REF#refs/tags/}" \
-            --generate-notes \
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## [$version]" '
+            /^## / { if (found) exit; found = ($1 " " $2 == heading); next }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             --verify-tag
 
   # The nine daemons and the `emob` CLI, from `docker-bake.hcl` — the list

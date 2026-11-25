@@ -37,6 +37,8 @@ for finding in report.failing() {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+For a public charge point, `data.static_data` and `data.dynamic_data` are independent operator declarations. From 14 April 2025 both apply to paid and free charging. Static data include whether the electricity is 100% renewable. Dynamic data include operational status, availability and ad-hoc price. An unknown tariff cannot establish a free price. The report retains the point, assessment date and applicable Article 20(2) paragraph. [Regulation (EU) 2025/671](https://eur-lex.europa.eu/eli/reg_del/2025/671/oj/eng)
+
 ## What it guarantees
 
 - **Identifiers round-trip verbatim.** Hubject compares the identifier in a URL

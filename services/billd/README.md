@@ -180,7 +180,7 @@ and books.
 | `BILLD_DATA_KEY` | **required** | 32 bytes, base64; seals the journal |
 | `BILLD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head |
 | the variable `[billing.delivery] secret_env` names | with `[billing.delivery]` | `whsec_<base64>`: signs the handover to the operator system |
-| `EMOB_WEBHOOK_SECRET`, `EMOB_OPERATOR_TOKEN` | **required** | the variables the estate names: delivery signatures, the read model's bearer |
+| `EMOB_WEBHOOK_SECRET`, `EMOB_OPERATOR_TOKEN`, `EMOB_DESK_READ_TOKEN` | **required** | the variables the estate names: delivery signatures, the example estate’s named operator and background read credentials |
 | `BILLD_HTTP_BIND` / `EMOB_HTTP_BIND` | `127.0.0.1:9584` | the shell |
 | `EMOB_JOURNAL_DIR` | `var` | journal directory — deliberately not a temp directory, so a reboot does not empty the ledger |
 | `EMOB_LOG_FORMAT` | JSON | `text` for a terminal |

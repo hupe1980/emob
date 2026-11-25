@@ -1,8 +1,6 @@
 # emob
 
-**An open-source e-mobility platform in Rust: CSMS, roaming, Eichrecht and billing
-for charge point operators and e-mobility providers — one workspace that agrees
-with itself about what a kilowatt-hour was worth.**
+**A self-hosted EV charging platform for charge point operators and mobility providers. Manage stations and driver cards, publish prices, verify meter readings and settle partner invoices.**
 
 [![CI](https://github.com/hupe1980/emob/actions/workflows/ci.yml/badge.svg)](https://github.com/hupe1980/emob/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -17,15 +15,7 @@ with itself about what a kilowatt-hour was worth.**
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="site/static/img/heute-dark.webp"><img src="site/static/img/heute-light.webp" alt="Heute: the charging success rate, a refused session with the paragraph that refused it, and an invoice awaiting acceptance" width="1280"></picture>
 
-`just demo` — the whole estate, three stations and a roaming partner on your
-machine, in one command.
-
-Open source mostly stops at the charging station: [CitrineOS] and [SteVe] are
-CSMSs (charging station management systems), [EVerest] is station firmware. emob
-is the other half — the e-mobility service provider, the roaming node, the
-calibration-law evidence chain and the billing — built as one system on
-existing protocol libraries: [`ocpp-kit`], [`ocpi-kit`], [`oicp-kit`],
-[`iso15118`], [`eebus`] and [`ocmf`].
+Run the standalone platform with `just demo`. It starts emob’s services, three simulated stations and a simulated roaming peer on your machine. The demo supplies its own credentials and billing fixtures.
 
 ## Why emob
 
@@ -46,9 +36,8 @@ existing protocol libraries: [`ocpp-kit`], [`ocpi-kit`], [`oicp-kit`],
   `[EnWG §14a]` grid-operator control of charge points, the THG-Quote
   (greenhouse-gas quota) filing, EN 16931 e-invoices with SEPA collections, and
   the DATEX II feed to the national access point.
-- **One price, every audience.** The tariff that rates a session is the one shown
-  on the station (OCPP 2.1), sent to roaming partners (OCPI 2.3.0) and published
-  to the national access point (DATEX II).
+- **A price before plugging in.** Open a public station’s ad-hoc price or choose a published provider plan. Both show gross components. The provider quote identifies the two tariff versions and can be reopened after a price change. [Pricing guide](site/content/docs/pricing.md)
+- **Public charging data with delivery evidence.** The publisher sends the table and changing point data to separate Mobilithek offers. Operators can see the last receiver acknowledgement, stale source data and the result of sending a tariff to the station. [Locations and publication](site/content/docs/locations.md)
 - **A journal you can audit.** Every fact a daemon keeps names who caused it,
   every journal's end is signed, and a witness outside the daemon's volume
   notices a journal cut short or restored from an old backup.
@@ -61,25 +50,7 @@ just demo        # the estate on loopback: Heute, a receipt, the partner's inbox
 just a11y        # every page a person reads, checked for accessibility
 ```
 
-`just demo` starts every daemon in one process with a generated estate for
-*Stadtwerke Musterstadt eMobility* — three simulated stations on OCPP 1.6,
-2.0.1 and 2.1 over `wss://` (security profile 2), an OCPI partner, a seeded
-morning at 60×: seven sessions billed, one signed value tampered with and
-refused with its paragraph, one blocked card, and the month's invoice. It
-prints its links within a minute — Heute (signed in), a driver's receipt, the
-partner's inbox and, after month end, the invoice page — then the witness line
-`🔏 witness: csmsd ✓ N · billd ✓ N · roamd ✓ N · empd ✓ N`, and runs until
-Ctrl-C. CP-3 also shows its receipt link on its display. Loopback only; every
-token, key and password is minted for the run and gone with it. `--clock`,
-`--speed` and `--seed` make it reproducible.
-
-CI runs `emob demo --check` on every push: it fails if an outcome differs, if
-the invoice files do not validate, if a journal record names no actor, if a head
-is not witnessed, or if a log line holds a secret. Then `just a11y` checks Heute,
-the receipts and the invoice page in light and dark at 320 and 1280 px — one h1,
-ordered headings, named controls, alt text, landmarks, a visible focus on every
-Tab stop, 4.5:1 contrast, 24×24 px targets and no sideways scroll — with zero
-violations, through Chrome's accessibility tree and no npm packages.
+The demo runs five services, three simulated OCPP stations and a local OCPI peer. Open the printed links to inspect a refusal in Heute, verify a driver's receipt or view a partner invoice. Ctrl-C removes the disposable estate.
 
 No Rust toolchain? `just demo` runs the published
 `ghcr.io/hupe1980/emob` image with Docker instead (host networking; on Docker
@@ -88,116 +59,24 @@ Desktop enable it under Settings → Resources → Network).
 <picture><source media="(prefers-color-scheme: dark)" srcset="site/static/img/receipt-dark.webp"><img src="site/static/img/receipt-light.webp" alt="A driver receipt on a phone: measured, signed, verified — 26.984 kWh, 22 minutes, 13.22 euros, with the price line" width="390"></picture>
 <img src="site/static/img/receipt-checked.webp" alt="The same receipt after Selbst prüfen: both signed values checked on the phone and unchanged" width="390">
 
-Every session the estate settles or refuses has a **receipt** the driver opens
-on a phone: the verdict first ("Gemessen, signiert, geprüft", or "Nicht
+With receipts enabled, the estate issues a **receipt** for a recorded session. A driver can open it on a phone and see the verdict first ("Gemessen, signiert, geprüft", or "Nicht
 abgerechnet" with the citation), the energy, the price lines from the CDR, the
 meter key in groups of four to compare with the charge-point label, the
 S.A.F.E. transparency file, and **Selbst prüfen** — a WebAssembly build of the
 OCMF verifier that checks every signed value on the phone, offline once loaded.
 `emob verify <transparency-file>` does the same on the command line.
 
-## Status
+## Running services
 
-**The price before the plug, and a kit that proves the platform from outside.**
-The fifteen
-domain crates are built and tested (**1374 tests** across the workspace). The
-nine daemons start from one `estate.toml` and are wired end to end:
+The workspace has **1426 tests**. Nine daemons share one estate configuration. The CSMS accepts OCPP 1.6J, 2.0.1 and 2.1 stations. The mobility provider manages driver agreements and cards. Verified sessions feed partner billing and OCPI roaming. Configured public points supply the Mobilithek static and dynamic feeds. [Architecture](site/content/docs/architecture.md) · [Deployment and security boundaries](THREAT_MODEL.md)
 
-- stations connect to `csmsd` over OCPP 1.6J, 2.0.1 and 2.1 with security
-  profiles 1–3 and TLS;
-- `empd` answers every authorisation, and `csmsd` fails closed when it cannot
-  ask;
-- every ledger is folded from a hash-chained journal sealed under the daemon's
-  own data key, so a restart loses nothing and no card UID is on disk in clear;
-- every journal record names its **actor** — `station:<identity>`,
-  `partner:<party>`, `operator:<name>`, `service:<daemon>`, `timer` or `estate`
-  — inside the digest, readable with `jq -r .actor` without the data key;
-- each journalled daemon signs its **head** (position and hash, Ed25519, a C2SP
-  signed note) after every append, serves it at `GET /v1/<name>/head`, and
-  refuses to start from a journal shorter than it; **Heute** and `emob witness`
-  keep a copy no daemon volume holds and alarm on a regression, fork or rekey;
-- daemons log JSON with a request id and the actor on every request, and no
-  secret;
-- `csmsd` delivers each settled session to `billd` (one EN 16931 invoice per
-  partner and month), `roamd` (OCPI to the partner) and any `[[subscribers]]`
-  as signed CloudEvents through a journalled outbox;
-- every issued invoice has a page at `/i/{token}` with its XRechnung / EN 16931
-  files in UBL and CII, and with `[billing.delivery]` `billd` hands it to the
-  operator's ERP or Peppol provider as a signed CloudEvent;
-- stations are **onboarded** from Heute — one form, an installer sheet with a
-  password shown once, connected without a restart — into `csmsd`'s journalled
-  registry, searched at ten thousand stations as at three; `csmsd` knows each
-  one — online or silent since when, what it said at boot, what its meter
-  signs, every firmware change as an intervention record — and every station
-  opens its **asset card**;
-- the fleet is a **map** drawn by `deskd` from a bundled outline (no tiles, no
-  third party); a station's locator names coordinates that lie outside its
-  country or look swapped, and Heute groups silent stations by **mobile
-  network** (MCC-MNC, never the IMSI);
-- every charge point has a public **price page** with its **Preisstand** — the
-  version's code, also on the receipt and the station's display — and a
-  tariff change is announced ahead; `poid` pushes the AFIR table to the
-  Mobilithek over mutual TLS;
-- any OCMF record can be checked on the site's **verify** page, offline, by
-  the receipt's own WebAssembly module;
-- an operator **holds a point** for one card from its asset card; `csmsd`
-  sends `ReserveNow`, turns every other card away itself, and frees it when
-  the card starts, when cancelled, or on time;
-- `emob check estate.toml` names a mistake by line and key, and editors
-  complete the estate from its published JSON Schema;
-- the operator works from **Heute** (`deskd`), the driver checks a **receipt** —
-  on a phone, or from the link on the station's display;
-- `emob_session::mispel` nets a bidirectional site's month under the
-  Bundesnetzagentur's MiSpeL rules, and `emob-pnc` validates ISO 15118-20
-  contract chains under named roots;
-- releases are signed and attested, with an SBOM.
+### Investigate a refusal
 
-Not wired into a daemon: the OICP push client, the Mobilithek's dynamic delta,
-SEPA runs from `billd`, the SHIP/EEBUS session for § 14a, and MiSpeL on Heute (no
-grid-meter series reaches a daemon). emob has had no external security review and no
-production deployment; see [THREAT_MODEL.md](THREAT_MODEL.md) for what holds and
-what is open.
+Start `just demo`, open **Heute** and select the transaction in the refused row. The timeline shows which messages arrived, when the CSMS made its decision and how to reach the station, provider card and available receipt. Look up the printed number `MOB-1001`, open the matching card and choose **Reported lost** to review a block. Confirming records your name and reason and makes the provider refuse the next online authorization. Open the same card and choose **Card recovered** to restore ordinary contract checks. The review explains what an offline station can still do. [Operator walkthrough](site/content/docs/run-the-estate.md#investigate-a-refused-session)
 
-### What the tests prove
+### Enrol a driver
 
-- **The platform, driven from outside.** `just e2e` (CI too) has
-  [`emobtest`](emobtest)'s stations charge cars on OCPP 1.6, 2.0.1 and 2.1
-  against the running estate and checks what it billed, refused and showed.
-- **A real message, end to end.** The Open Charge Alliance's published OCPP
-  example goes in at the wire and comes out as a taxable amount and a file the
-  driver's own verifier reads.
-- **Meters this workspace did not write.** Records from five real devices in the
-  S.A.F.E. reference data set, including an eBZ LD3 on secp192r1 with the
-  non-canonical DER a real meter emits.
-- **One session, three roaming paths, one amount.** Self-roaming, OCPI 2.3.0 and
-  OICP 2.3 through a broker that refuses what the live one refuses.
-- **A month and a year.** A month closes into a validated EN 16931 invoice, a SEPA
-  collection and balanced postings; a year files its THG-Quote notification with
-  every ineligible point refused by name.
-- **A PKI this workspace does not run.** Hubject's published Plug & Charge test
-  environment validates against ISO 15118-2's Annex F profiles, and a contract
-  from a second ecosystem is refused.
-- **A setpoint over a real wire.** Two SPINE (EEBUS) engines exchange datagrams;
-  the allocation binds exactly and no charge point exceeds the ceiling.
-- **A hundred stations reconcile exactly**: `billed + refused == metered`, with a
-  residual of zero.
-- **A restart in the middle.** Service ledgers are folded from a hash-chained
-  journal: a spent invoice number stays spent, a sealed record stays sealed, a
-  blocked card stays blocked, and an edited journal stops the service.
-- **A removed record is caught twice.** A journal cut at its end refuses to
-  start against its signed head, and a witness reports a restored-from-backup
-  daemon as `regressed`; the head format is checked against the reference vector
-  of Go's `sumdb/note`.
-- **The regulator's own arithmetic.** The MiSpeL month reproduces the
-  Bundesnetzagentur's Beispielrechnungen 1 and 2 and the Pauschaloption's two
-  Rumpfjahre to the digit.
-- **ISO 15118-20 under three roots.** Each of three -20 test roots named for the
-  European ecosystems validates its own contract and refuses the others', a -2
-  chain under -20 rules and the reverse are refused, and Ed448 is refused by
-  name.
-- **Properties over generated input and sequences** — one price however a
-  session is sliced, a month that passes all 317 EN 16931 rules, and invariants
-  checked after every step of generated roaming and bookkeeping sequences.
+To issue a new driver card, open **Driver contracts**, choose a published offer and enter `STOCK-1004`. Review the gross price and point before confirming. The provider issues an eMAID and records the exact offer. A simulated charge and provider restart exercise the full workflow in `just e2e`. [Enrolment walkthrough](site/content/docs/run-the-estate.md#enrol-a-driver-and-issue-a-card)
 
 ## Quick start
 
@@ -246,85 +125,7 @@ flowchart LR
 
 ## Running the estate
 
-Every daemon reads its own sections of one `estate.toml` (`EMOB_ESTATE`,
-default `./estate.toml`): `deploy/estate.example.toml` is the loopback estate,
-`deploy/estate.compose.toml` the compose one. Secrets are environment variables
-the estate names (`*_env`). Three commands take a clone to a running estate
-without the demo:
-
-```console
-just dev-keys > .env        # every secret the estate names, for this machine (gitignored)
-just dev-ca                 # throwaway loopback TLS for csmsd (openssl)
-just run                    # the nine daemons from source; checks the estate, waits until ready
-```
-
-`emob check estate.toml` checks an estate before any daemon reads it — every
-section, then each daemon's own checks, and with `--secrets` every variable —
-and reports a mistake the way `rustc` does:
-
-```console
-error: unknown field `evse_id`
-  --> estate.toml:24:1
-   |
-24 | evse_id = "DE*ABC*E00001"
-   | ^^^^^^^
-   |
-   = help: did you mean `evse`?
-```
-
-The first line of the example, `#:schema ../schemas/estate.schema.json`, lets
-Taplo or Tombi complete and check the file as you type; the schema is published
-at `https://hupe1980.github.io/emob/schemas/estate.schema.json`.
-
-```console
-just doctor                 # check the tools
-just demo                   # everything, in one process, on loopback
-just desk                   # Heute on :9587, against daemons started from the example estate
-just e2e                    # the example estate, driven by emobtest's stations on OCPP 1.6, 2.0.1 and 2.1
-just up                     # all nine in containers; shells on :8080…:8088, OCPP on wss://localhost:9000
-just down                   # stop, keeping the journals
-just images                 # build the nine daemon images and `emob` from one Dockerfile (docker buildx bake)
-```
-
-| Variable | Read by | Meaning |
-|---|---|---|
-| `EMOB_ESTATE` | every daemon | Path of the estate file |
-| `EMOB_WEBHOOK_SECRET` | `csmsd`, `billd`, `roamd` | `whsec_<base64>`: signs the deliveries between daemons |
-| `EMOB_SERVICE_TOKEN` | `csmsd`, `empd` | The bearer `csmsd` presents to `empd` |
-| `EMOB_OPERATOR_TOKEN` | every daemon | The operators' bearer for the read models (`GET /v1/<daemon>/today`), and Heute's password |
-| `EMOB_PARTNER_DE_MSP_TOKEN_A` | `roamd` | The Token A the example partner registers with |
-| `CSMSD_DATA_KEY`, `ROAMD_DATA_KEY`, `EMPD_DATA_KEY`, `BILLD_DATA_KEY` | that daemon | 32 bytes, base64, sealing its journal. Losing `EMPD_DATA_KEY` erases every card UID `empd` journalled (intended crypto-erasure); losing another stops that daemon from starting, naming the key id |
-| `CSMSD_SIGNING_KEY`, `ROAMD_SIGNING_KEY`, `EMPD_SIGNING_KEY`, `BILLD_SIGNING_KEY`, `POID_SIGNING_KEY` | that daemon | 32 random bytes, base64 — an Ed25519 seed that signs where its journal ends. Never defaulted: `just up` and compose refuse without them, and a `.head` signed under another key refuses the start |
-| the variable `[billing.delivery] secret_env` names | `billd` | `whsec_<base64>`: signs each invoice handed to the operator system |
-| `EMOB_JOURNAL_DIR` | every daemon with a ledger, and `deskd` | Where the journal and its `.head` live (`deskd`: `witness.ndjson`). Not a temp directory: a ledger in `/tmp` comes back empty after a reboot |
-| `EMOB_HTTP_BIND`, `<DAEMON>_HTTP_BIND` | every daemon | The shell's bind address. Each daemon defaults to loopback (`127.0.0.1:9580`–`9587`, `csmsd` `127.0.0.1:9001`); compose sets `0.0.0.0:8080` |
-| `CSMSD_BIND` | `csmsd` | The OCPP WebSocket, default `127.0.0.1:9000`; a non-loopback bind without `[csms] tls_cert` refuses to start |
-| `POID_NAP_IDENTIFIER` | `poid` | The identifier the national access point issued; refused when unset (`just dev-keys` prints `DE-NAP-DEV`) |
-| `SITED_FAILSAFE_KW` | `sited` | Site power held when the grid operator goes silent |
-| `EMOB_LOG_FORMAT` | every daemon | JSON lines by default; `text` for a terminal |
-| `RUST_LOG` | every daemon | Log filter |
-
-Optional estate keys:
-
-| Key | Read by | Meaning |
-|---|---|---|
-| `[witness] keys = { <daemon> = "<verifier key>" }` | `deskd` | the key each head must be signed under; a daemon not named is pinned at first sight |
-| `[[operators]] name` | every daemon | the actor on what that operator causes (`operator:<name>`): 1–64 of `[A-Za-z0-9*._:=+\|@ -]`, refused at start otherwise |
-| `[[stations]] receipt_display_minutes` | `csmsd` | 1–15: show `Beleg: <receipt link>` on an OCPP 2.0.1 / 2.1 station's display. Off when absent, because a screen is public |
-| `[billing] iban`, `creditor_id`, `contact`, `public_url` | `billd` | payee account, SEPA creditor id, seller contact, and the origin of `/i/{token}` |
-| `[billing.delivery] url`, `secret_env`, `syntax` | `billd` | where each issued invoice is posted as a signed CloudEvent, in `ubl` or `cii` |
-| `[[subscribers]] name`, `url`, `secret_env`, `types` | `csmsd`, `billd` | a system outside the estate that receives the CloudEvents its `types` take, under its own secret; `emob subscribers test <name>` sends it a signed sample |
-| `[[stations]] commissioned` | `csmsd` | `YYYY-MM-DD`; the station page shows the station's age |
-| `[[partners]] specification`, `buyer_reference`, `mandate` | `billd` | `en16931` or `xrechnung`, the buyer's reference (a Leitweg-ID), a SEPA mandate |
-| `electronic_address` on `seller` and a partner's `billing` | `billd` | the e-invoice address both parties need under XRechnung |
-
-Stations connect to `wss://…:9000/<identity>`. In the example estate `CP-1` is
-profile 2 with the `AuthorizationKey` `6d6f636b2d73746174696f6e2d736563726574`
-(hex of `mock-station-secret`); `csmsd hash-password <1.6|2.0.1|2.1>` reads a
-station's password on stdin and prints its `password_hash`. After an intended
-journal reset, move the `<journal>.head` file aside too.
-[Run the estate](https://hupe1980.github.io/emob/docs/run-the-estate/) has the
-whole walkthrough.
+Start with the [example estate](deploy/estate.example.toml). Validate it with `emob check` and keep private keys and journal data outside version control. The operator guide covers configuration, Docker Compose, credentials, monitoring and recovery. [Run the estate](site/content/docs/run-the-estate.md)
 
 ## The twenty-eight properties that decide quality
 
@@ -424,7 +225,7 @@ Nine daemons, one image each, all started from the one estate file.
 | [`billd`](services/billd) | Receiving CDRs, closing each partner's month once into an EN 16931 invoice, numbering, postings; the invoice page and signed delivery to the operator's system | ✅ · ⏳ SEPA runs |
 | [`deskd`](services/deskd) | The operator's page Heute: the charging success rate, refused sessions with "Warum?", what needs a person today, and the witness of every journal | ✅ |
 | [`tarifd`](services/tarifd) | Publishing the estate's tariff versions to all audiences before they take effect | ✅ read model · ✅ `driver-tariff.v1` · ⏳ push clients |
-| [`poid`](services/poid) | The inventory and snapshots for the national access point `[AFIR Art. 20(2)]` | ✅ inventory, priced · ✅ table push · ⏳ dynamic delta |
+| [`poid`](services/poid) | The inventory and snapshots for the national access point `[AFIR Art. 20(2)]` | public registry, separate static and dynamic offers, receiver acknowledgements |
 | [`sited`](services/sited) | The site controller for § 14a setpoints, with a failsafe when the grid operator goes silent | ⏳ SHIP session, OCPP leg |
 | [`agentd`](services/agentd) | Advisory agents on `agentplane` (evidence triage, tariff and compliance sweeps), run under the read-only advisory principal, that cannot move money | ✅ runtime · ⏳ event feed |
 

@@ -2,8 +2,8 @@
 //!
 //! # One number, two duties
 //!
-//! `[AFIR Art. 5(2)]` makes the price a driver is shown before a session the
-//! price they may be charged for it. `[AFIR Art. 20(2)(c)]` makes that same
+//! `[AFIR Art. 5(4)]` makes the price a driver is shown before a session the
+//! price they may be charged for it. `[AFIR Art. 20(2)(f)]` makes that same
 //! ad-hoc price data an operator must publish, free of charge, through the
 //! national access point — the Mobilithek in Germany, in the DATEX II
 //! Recharging profile, from **14 April 2026** `[DATEX-II-Profil]`.
@@ -42,13 +42,11 @@
 //! point leaves every map, with no error anywhere. [`feed`] is where that is
 //! made to be an error.
 //!
-//! # What this crate is not
+//! # Publication and delivery
 //!
-//! It does not fetch, push or schedule. The Mobilithek's `snapshotPush` is a
-//! service's business; a publication here is a value and a string. `just
-//! purity` fails the build on a domain crate that opens a socket or reads a
-//! clock, which is why [`datex::table::publication`] takes the publication time
-//! as an argument — an export replayed two years later produces the same bytes.
+//! Callers supply the publication time to [`datex::table::publication`] so a
+//! replay produces the same bytes. The `poid` service schedules and delivers
+//! the resulting static and dynamic publications.
 //!
 //! # An example
 //!

@@ -11,18 +11,31 @@ vulnerability is [SECURITY.md](SECURITY.md).
 | | |
 |---|---|
 | **Scope** | The daemons — `csmsd`, `roamd`, `empd`, `billd`, `poid`, `tarifd`, `sited`, `agentd` and `deskd` (the operator page) — configured from one `estate.toml`, their sealed journals and the deliveries between them; the public driver receipt; the domain crates whose decisions they inherit (OCMF verification, the key registry, CDRs, tariffs, invoices, Plug & Charge); the stations, roaming partners and vehicles they face; and the build and release supply chain |
-| **Not yet in scope** | Surfaces that do not exist in code: `sited`'s EEBUS/SHIP socket, `poid`'s Mobilithek push, a Peppol access point (invoices leave through a signed webhook to the operator's system), the OICP mutual-TLS client, and Plug & Charge inside a service. Each is modelled when it is wired |
+| **Not yet in scope** | Surfaces that do not exist in code: `sited`'s EEBUS/SHIP socket, a Peppol access point (invoices leave through a signed webhook to the operator's system), the OICP mutual-TLS client, and Plug & Charge inside a service. Each is modelled when it is wired |
 | **Method** | STRIDE per element, plus the OWASP Top 10 for LLM Applications and for Agentic Applications, through the [ThreatSpec](https://github.com/hupe1980/spec-kit-threatspec) Spec Kit extension (profiles `stride`, `llm`, `agent`). emob runs no language model: every LLM technique carries a recorded not-applicable disposition |
 | **Machine-readable model** | An Open Threat Model 0.2.0 baseline plus one model per feature that extends it. This file is their public summary and follows them |
 | **Severity** | Inherent, before the listed controls: likelihood × impact on ThreatSpec's 3×3 matrix (high × high is critical) |
 | **Status** | **Control** — a mechanism exists and a test proves it. **Partial** — a control exists and a required one is missing. **Open** — no control in the code |
 
-The baseline counts 25 system threats, all controlled, and 28 security
+The historical baseline counts 25 system threats, all controlled, and 28 security
 requirements. The eleven features of releases 0.2 and 0.3 add 107 threats with
 their own requirements (SR-029 to SR-135): 105 are controlled and verified by
 tests or review, one is accepted with an expiry (plain HTTP between daemons on
 one host, until the daemons leave one host) and one is verified only on the
-first tagged release (release provenance). Nothing open is rated critical.
+first tagged release (release provenance). Newer features have separate verification records.
+
+## Operator investigations, public pricing, publication and recovery
+
+| Boundary | Control and evidence |
+|---|---|
+| Browser to operator desk and provider | Authenticated body-only search keeps the card UID, printed lookup value and eMAID out of links and shared caches. The provider resolves the card with a keyed index. The standalone test follows the browser form and audits the desk and provider logs. |
+| Stock enrolment and online charging | The provider resolves the sleeve code from local inventory, checks the writer and current offer, then journals the exact terms and card assignment together. The CSMS checks the native scope against the registered point and current price on charging and reservation. An agreement reference requires operator authentication to reopen. |
+| Named operator to provider card controls | Both browser POSTs check the origin. The provider checks the writer grant and binds each five-minute review to its actor, card and revision. Durable confirmation records the reason and survives provider restart. A read-only token handles background queries. The daemons that validate estate credentials remain trusted. |
+| Station-local transaction ID to public receipt | The decision position identifies the investigation. Reuse preserves an already-issued receipt and its recorded verdict. The desk accepts only an owner receipt path with the expected capability format. |
+| Operator declarations to compliance sweep | A dated public-point finding identifies its source and declaration basis. Free public charging retains its data duties. Treating that finding as proof of network delivery would require independent receiver evidence. |
+| CSMS registry to national access point | Public visibility is explicit. The CSMS exposes a bounded projection with a revision, source times and connector facts. The publisher commits only direct receiver acknowledgements, separately for each offer. A missing report leaves availability unknown. See the subscriber integration test in `services/poid/tests/the_table_reaches_the_access_point.rs`. |
+| Provider schedule to the driver's price page | The public route selects a configured point and plan. Gross components are calculated with exact decimals. An unavailable price and a zero-price offer have distinct outcomes. |
+| Isolated recovery copy to the billing recipient | The drill compares copied journals against independently supplied witness evidence and uses an isolated receiver to count business effects after redelivery. An operator's live backup and restore time require a separate supervised exercise. |
 
 ## Trust boundaries
 
@@ -71,7 +84,7 @@ flowchart LR
 | `csmsd`, `billd` → subscribers | `de.emob.cdr.issued` (card UID, station) and `de.emob.invoice.issued` | Named only in the estate file; `https`, or `http` on loopback; a `whsec_` secret per subscriber; type patterns checked against the catalogue at start; every answer journalled and none of them accepts, books or consigns |
 | Partner ↔ `roamd` | Credentials handshake, CDR push and receipt | Tokens held as keyed digests or sealed; a pushed record authorised as the credential's party; the handshake reach-back allowed only to `https` hosts outside private ranges |
 | Driver → receipt | `/r/{token}`, the transparency file, the verifier | A 128-bit token stored only as its hash; the same 404 for any unknown path; no name, card or contract on the page; a strict content security policy; verification runs on the driver's device |
-| Operator → `deskd` | The estate's refused sessions, stations, invoices, consignments | Operator token over HTTP Basic, loopback by default; read-only; no card UID or contract id on the page; bounded lists; a daemon that is down is named rather than shown as calm |
+| Operator → `deskd` | The estate's refused sessions, stations, invoices, consignments | Operator token over HTTP Basic, loopback by default; named grants permit reads or explicitly authorize mutations; no card UID or contract id on the page; bounded lists; a daemon that is down is named rather than shown as calm |
 | Daemon → journal volume | Every fact a service decided | Each journal sealed under the daemon's data key (AES-256-GCM) and hash-chained over the sealed bytes; a foreign key refuses to start (or, for `empd`, erases the UIDs); an edited record stops the daemon. A truncated tail is invisible without an outside witness |
 | Supply chain → release | Crates, images, Actions | Actions pinned by commit and base images by digest under a guard; `cargo deny`; crates.io trusted publishing without a stored token; an SBOM, checksums and build provenance on every release |
 

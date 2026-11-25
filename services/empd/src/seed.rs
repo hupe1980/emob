@@ -1,10 +1,10 @@
 //! The estate's `[[contracts]]`, journalled once.
 //!
-//! 0.2 adds no write endpoint, so the contracts and tokens a demonstration or
-//! a first deployment starts with come from the estate. Each is applied through
-//! the book's own journalled facts — `Contracted`, `Issued`, `Blocked` — and
-//! only when the journal does not already hold it, so a second start changes
-//! nothing and a token blocked since stays blocked.
+//! The contracts and initial card standing for a first deployment come from
+//! the estate. A restart preserves the standing last recorded by the provider. Each is applied through
+//! the book's journalled facts. A repeated seed leaves the journal unchanged.
+//! Changing or removing a configured printed number updates the keyed search
+//! index while preserving the card's standing.
 
 use emob_roam::TokenType;
 use emob_service::Actor;
@@ -70,6 +70,40 @@ fn whitelist(index: usize, token: usize, text: &str) -> Result<Whitelist, Estate
 ///
 /// [`SeedError`], naming the estate key.
 pub fn apply<J: Journal>(book: &mut Book<J>, seeds: &[ContractSeed]) -> Result<usize, SeedError> {
+    for (index, seed) in seeds.iter().enumerate() {
+        if book.state().agreements.holds_account(&seed.id) {
+            return Err(EstateError::Invalid {
+                key: format!("contracts[{index}].id"),
+                reason: "the signed journal already assigned this native agreement".into(),
+            }
+            .into());
+        }
+        for (t, token) in seed.tokens.iter().enumerate() {
+            if book
+                .state()
+                .agreements
+                .for_card(&book.state().reference_for(&token.uid.to_ascii_uppercase()))
+                .is_some()
+            {
+                return Err(EstateError::Invalid {
+                    key: format!("contracts[{index}].tokens[{t}]"),
+                    reason: "the signed journal already assigned this native card".into(),
+                }
+                .into());
+            }
+            if token
+                .visual_number
+                .as_deref()
+                .is_some_and(|printed| emob_service::estate::printed_card_number(printed).is_none())
+            {
+                return Err(EstateError::Invalid {
+                    key: format!("contracts[{index}].tokens[{t}].visual_number"),
+                    reason: "expected 1 to 64 printable characters".to_owned(),
+                }
+                .into());
+            }
+        }
+    }
     let mut written = 0;
     for (index, seed) in seeds.iter().enumerate() {
         let book_error = |key: String| move |source| SeedError::Book { key, source };
@@ -90,23 +124,25 @@ pub fn apply<J: Journal>(book: &mut Book<J>, seeds: &[ContractSeed]) -> Result<u
             let key = format!("contracts[{index}].tokens[{t}]");
             let reference = book.state().reference_for(&token.uid);
             if book.state().token(&reference).is_none() {
-                book.issue_token(
+                book.issue_with_standing(
                     &Actor::Estate,
                     &seed.id,
                     token.uid.clone(),
                     token_type(index, t, &token.token_type)?,
                     whitelist(index, t, &token.whitelist)?,
+                    token.blocked,
                 )
                 .map_err(book_error(key.clone()))?;
                 written += 1;
             }
-            let blocked = book
-                .state()
-                .token(&reference)
-                .is_some_and(|held| held.blocked);
-            if token.blocked && !blocked {
-                book.block(&Actor::Estate, &reference)
-                    .map_err(book_error(key))?;
+            let digest = token
+                .visual_number
+                .as_deref()
+                .and_then(|printed| book.state().printed_digest(printed));
+            if book
+                .label(&Actor::Estate, &reference, digest)
+                .map_err(book_error(key.clone()))?
+            {
                 written += 1;
             }
         }

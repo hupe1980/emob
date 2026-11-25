@@ -7,11 +7,11 @@
 //! |---|---|---|
 //! | the driver at the point | OCPP 2.1 `SetDefaultTariff` | `[AFIR Art. 5(4)]` — "known to end users **before they initiate**" |
 //! | the roaming partner | OCPI 2.3.0 `Tariff` | the price a partner re-rates and settles against |
-//! | the national access point | DATEX II Recharging | `[AFIR Art. 20(2)(c)]` — published free of charge through the NAP |
+//! | the national access point | DATEX II Recharging | `[AFIR Art. 20(2)(f)]` — published free of charge through the NAP |
 //!
 //! Almost every stack in this market computes that number three times, in
 //! three systems, and reconciles none of them against the invoice. The failure
-//! is asymmetric and it is the one `[PAngV]` and `[AFIR Art. 5(2)]` are about:
+//! is asymmetric and it is the one `[PAngV]` and `[AFIR Art. 5(4)]` are about:
 //! the screen is read by the driver who pays, the feed by route planners, and
 //! the invoice by nobody until it is disputed.
 //!
@@ -312,7 +312,7 @@ fn energy_prices(tariff: &Tariff) -> Vec<Decimal> {
 fn every_lawful_ad_hoc_tariff_reads_one_price_on_all_three_wires() {
     // The claim above, over five hundred generated tariffs rather than one. A
     // crossing that rounds, reorders or drops a tier is a station quoting a
-    // price the invoice does not charge — `[PAngV]` and `[AFIR Art. 5(2)]` are
+    // price the invoice does not charge — `[PAngV]` and `[AFIR Art. 5(4)]` are
     // about exactly that, and it is the failure no single example finds because
     // every example is the shape somebody already thought of.
     //

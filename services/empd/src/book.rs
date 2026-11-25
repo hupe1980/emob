@@ -40,10 +40,29 @@ pub enum Event {
         /// What it carries.
         held: Box<Token>,
     },
+    /// The provider registered a card's printed number for exact support lookup.
+    Labelled {
+        /// Which card.
+        token: TokenRef,
+        /// Keyed lookup digest of the printed number, or absent when removed.
+        digest: Option<String>,
+    },
     /// A token was blocked — a lost card, a chargeback.
     Blocked {
         /// Which token.
         token: TokenRef,
+    },
+    /// A named operator confirmed a change to online card authorization.
+    CardChanged {
+        /// The reviewed request, its confirmation time and resulting state.
+        change: crate::CardChange,
+    },
+    /// One accepted native agreement and its first physical card are indivisible.
+    Enrolled {
+        /// Exact terms, card reference, actor and acceptance time.
+        agreement: Box<crate::Agreement>,
+        /// Sealed UID and online-only standing of the issued card.
+        held: Box<Token>,
     },
     /// A session was counted against a contract.
     RanUp {
@@ -69,7 +88,10 @@ impl Kinded for Event {
         match self {
             Self::Contracted { .. } => "contracted",
             Self::Issued { .. } => "issued",
+            Self::Enrolled { .. } => "enrolled",
+            Self::Labelled { .. } => "labelled",
             Self::Blocked { .. } => "blocked",
+            Self::CardChanged { .. } => "card_changed",
             Self::RanUp { .. } => "ran_up",
             Self::Invoiced { .. } => "invoiced",
         }
@@ -97,12 +119,8 @@ pub enum BookError {
         source: JournalError,
     },
 
-    /// The provider has stopped, because its ledgers are ahead of its journal.
-    #[error(
-        "empd has halted: {why} — the provider decided something its journal could not record. \
-         A credit limit judged against a total this process holds and the journal does not is a \
-         limit nobody can reconstruct. Restarting rebuilds from the journal"
-    )]
+    /// The provider stopped after storage failed to acknowledge a decision.
+    #[error("empd has halted: {why}. Restarting rebuilds the ledgers from the journal")]
     Halted {
         /// What the journal said when it refused.
         why: String,
@@ -119,6 +137,8 @@ impl From<ProviderError> for BookError {
 pub struct Book<J: Journal> {
     folded: Folded<Empd, Event, J>,
     halted: Option<String>,
+    pub(crate) pending: crate::actions::Pending,
+    pub(crate) enrol_reviews: crate::enrol::Reviews,
 }
 
 impl<J: Journal> core::fmt::Debug for Book<J> {
@@ -148,6 +168,8 @@ impl<J: Journal> Book<J> {
         Ok(Self {
             folded: Folded::open(empty, journal, Empd::apply)?,
             halted: None,
+            pending: crate::actions::Pending::new(),
+            enrol_reviews: crate::enrol::Reviews::default(),
         })
     }
 
@@ -169,7 +191,7 @@ impl<J: Journal> Book<J> {
         self.halted.is_some()
     }
 
-    fn guard(&self) -> Result<(), BookError> {
+    pub(crate) fn guard(&self) -> Result<(), BookError> {
         match &self.halted {
             None => Ok(()),
             Some(why) => Err(BookError::Halted { why: why.clone() }),
@@ -187,6 +209,18 @@ impl<J: Journal> Book<J> {
                 })
             }
         }
+    }
+
+    // A standing becomes visible only after storage acknowledges its record.
+    pub(crate) fn record_card_fact(&mut self, by: &Actor, event: Event) -> Result<(), BookError> {
+        self.folded.record(by, event).map_err(|source| {
+            self.halted = Some(source.to_string());
+            BookError::Journal {
+                about: "a card".into(),
+                source,
+            }
+        })?;
+        Ok(())
     }
 
     /// Take a contract on, as `by`.
@@ -225,11 +259,26 @@ impl<J: Journal> Book<J> {
         token_type: TokenType,
         whitelist: Whitelist,
     ) -> Result<TokenRef, BookError> {
+        self.issue_with_standing(by, contract, uid, token_type, whitelist, false)
+    }
+
+    pub(crate) fn issue_with_standing(
+        &mut self,
+        by: &Actor,
+        contract: &ContractId,
+        uid: impl Into<String>,
+        token_type: TokenType,
+        whitelist: Whitelist,
+        blocked: bool,
+    ) -> Result<TokenRef, BookError> {
         self.guard()?;
         let token = self
             .folded
             .state_mut()
             .issue_token(contract, uid, token_type, whitelist)?;
+        if blocked {
+            self.folded.state_mut().block(&token)?;
+        }
         let held = self
             .folded
             .state()
@@ -250,6 +299,34 @@ impl<J: Journal> Book<J> {
         Ok(token)
     }
 
+    pub(crate) fn label(
+        &mut self,
+        by: &Actor,
+        token: &TokenRef,
+        digest: Option<String>,
+    ) -> Result<bool, BookError> {
+        self.guard()?;
+        let held = self
+            .state()
+            .token(token)
+            .ok_or_else(|| ProviderError::UnknownToken {
+                token: token.as_str().to_owned(),
+            })?;
+        if held.visual_digest == digest {
+            return Ok(false);
+        }
+        self.folded.state_mut().set_label(token, digest.clone());
+        self.commit(
+            by,
+            &Event::Labelled {
+                token: token.clone(),
+                digest,
+            },
+            "a card label",
+        )?;
+        Ok(true)
+    }
+
     /// Block a token.
     ///
     /// # Errors
@@ -260,13 +337,16 @@ impl<J: Journal> Book<J> {
     /// lost card that authorises again after a restart.
     pub fn block(&mut self, by: &Actor, token: &TokenRef) -> Result<(), BookError> {
         self.guard()?;
-        self.folded.state_mut().block(token)?;
-        self.commit(
+        self.state()
+            .token(token)
+            .ok_or_else(|| ProviderError::UnknownToken {
+                token: token.as_str().to_owned(),
+            })?;
+        self.record_card_fact(
             by,
-            &Event::Blocked {
+            Event::Blocked {
                 token: token.clone(),
             },
-            "a token",
         )
     }
 
@@ -338,6 +418,7 @@ impl<J: Journal> Book<J> {
     ///
     /// [`BookError::Provider`] for a token this provider never issued.
     pub fn authorize(&self, token: &TokenRef, on: time::Date) -> Result<Allowed, BookError> {
+        self.guard()?;
         Ok(self.folded.state().authorize(token, on)?)
     }
 }
@@ -347,9 +428,12 @@ impl Empd {
     pub(crate) fn apply(&mut self, event: Event) {
         match event {
             Event::Contracted { contract } => self.hold(*contract),
+            Event::Enrolled { agreement, held } => self.apply_agreement(*agreement, *held),
+            Event::CardChanged { change } => self.apply_change(change),
             Event::Issued { token, held, .. } => {
-                self.tokens.insert(token.as_str().to_owned(), *held);
+                self.store_card(&token, *held);
             }
+            Event::Labelled { token, digest } => self.set_label(&token, digest),
             Event::Blocked { token } => {
                 let _ = self.block(&token);
             }
@@ -368,6 +452,9 @@ impl Empd {
 
     /// Hold a contract, replacing whatever was held under its id.
     pub(crate) fn hold(&mut self, contract: Contract) {
+        if let Ok(emaid) = emob_core::Emaid::parse(contract.id.as_str()) {
+            self.account_ids.insert(emaid);
+        }
         self.contracts.insert(contract.id.to_string(), contract);
     }
 }

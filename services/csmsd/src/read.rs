@@ -31,6 +31,7 @@ use emob_service::page::{self, Page, Refused};
 use emob_session::success::{Rate, Tally};
 use serde::{Deserialize, Serialize};
 
+pub use crate::investigation::Explanation;
 use crate::journal::State;
 use crate::{Csmsd, Outcome};
 
@@ -55,6 +56,8 @@ pub struct Params {
 /// The bounded read model.
 #[derive(Debug, Serialize)]
 pub struct Today {
+    /// Stations currently registered in this estate.
+    pub station_count: usize,
     /// The rows per list this answer was cut at.
     pub limit: usize,
     /// How many meter keys verification runs against.
@@ -88,10 +91,21 @@ pub struct NetworkShare {
 /// The two windows the page heads with.
 #[derive(Debug, Serialize)]
 pub struct Windows {
+    /// One window per local calendar day, oldest first.
+    pub days: Vec<DailyRate>,
     /// Today, in the estate's zone.
     pub today: Window,
     /// The seven days ending today.
     pub week: Window,
+}
+
+/// The estate's success rate on a local calendar day.
+#[derive(Debug, Serialize)]
+pub struct DailyRate {
+    /// Civil date, YYYY-MM-DD.
+    pub from: String,
+    /// The estate's recorded attempts that day.
+    pub estate: Rate,
 }
 
 /// The success rate over a span of days.
@@ -119,14 +133,15 @@ pub struct Point {
 /// One refused session.
 #[derive(Debug, Serialize)]
 pub struct Refusal {
+    /// Position of this specific decision, even for a reused local ID.
+    pub position: u64,
     /// The station.
     pub identity: String,
     /// The transaction.
     pub transaction: String,
-    /// The chain's sentences.
-    pub reasons: Vec<String>,
-    /// The chain's typed findings.
-    pub findings: Vec<emob_eichrecht::Finding>,
+    /// A bounded explanation of this refusal.
+    #[serde(flatten)]
+    pub explanation: Explanation,
 }
 
 /// One provisioned station and its link.
@@ -227,7 +242,25 @@ impl Today {
         let today = state.zone.local(now).date;
         let week_from = today.saturating_sub(time::Duration::days(WEEK_DAYS - 1));
         let success = Windows {
-            today: window(&state.success.window(today, today), today, today),
+            days: (0..WEEK_DAYS)
+                .map(|offset| {
+                    let day = week_from.saturating_add(time::Duration::days(offset));
+                    DailyRate {
+                        from: day.to_string(),
+                        estate: state
+                            .success
+                            .on(day)
+                            .map(|tally| &tally.estate)
+                            .cloned()
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect(),
+            today: window(
+                state.success.on(today).unwrap_or(&Tally::default()),
+                today,
+                today,
+            ),
             week: window(&state.success.window(week_from, today), week_from, today),
         };
         let cut = refused.map_or(state.refusals.len(), |before| {
@@ -250,10 +283,10 @@ impl Today {
                 Some((
                     position,
                     Refusal {
+                        position,
                         identity: identity.clone(),
                         transaction: transaction.clone(),
-                        reasons: reasons.clone(),
-                        findings: findings.clone(),
+                        explanation: Explanation::of(reasons, findings),
                     },
                 ))
             }),
@@ -261,6 +294,7 @@ impl Today {
             limit,
         );
         Self {
+            station_count: state.registry.len(),
             limit,
             registry_keys,
             success,
@@ -359,7 +393,7 @@ fn silent<J: Journal>(
 
 /// What the routes read: the CSMS (whose registry holds the stations, spec
 /// 021), and whether a profile-3 station can be admitted here.
-type Shared<J> = (Arc<Csmsd<J>>, bool);
+pub(crate) type Shared<J> = (Arc<Csmsd<J>>, bool);
 
 async fn today<J: Journal>(
     Extract((csmsd, _)): Extract<Shared<J>>,
@@ -388,16 +422,30 @@ pub fn router<J: Journal>(
     operators: Operators,
     certificates: bool,
 ) -> axum::Router {
-    let routes = axum::Router::new()
+    let reads = axum::Router::new()
         .route("/v1/csmsd/today", get(today::<J>))
         .route(
-            "/v1/csmsd/stations",
-            get(search_stations::<J>).post(register_station::<J>),
+            "/v1/csmsd/sessions/{position}",
+            get(crate::investigation::session::<J>),
         )
+        .route(
+            "/v1/csmsd/sessions/search",
+            axum::routing::post(crate::investigation::search::<J>)
+                .layer(axum::extract::DefaultBodyLimit::max(2048)),
+        )
+        .route("/v1/csmsd/public-points", get(public_points::<J>))
+        .route("/v1/csmsd/stations", get(search_stations::<J>))
         .route("/v1/csmsd/map", get(map::<J>))
+        .route("/v1/csmsd/stations/{identity}", get(station::<J>))
+        .with_state((Arc::clone(&csmsd), certificates));
+    let writes = axum::Router::new()
+        .route(
+            "/v1/csmsd/stations",
+            axum::routing::post(register_station::<J>),
+        )
         .route(
             "/v1/csmsd/stations/{identity}",
-            get(station::<J>).put(update_station::<J>),
+            axum::routing::put(update_station::<J>),
         )
         .route(
             "/v1/csmsd/stations/{identity}/retire",
@@ -424,7 +472,93 @@ pub fn router<J: Journal>(
             axum::routing::post(cancel_reservation::<J>),
         )
         .with_state((csmsd, certificates));
-    emob_service::serve::operator_only(routes, operators)
+    emob_service::serve::operator_only(reads, operators.clone())
+        .merge(emob_service::serve::operator_write(writes, operators))
+        .layer(axum::middleware::map_response(
+            |mut response: Response| async move {
+                response.headers_mut().insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("private, no-store"),
+                );
+                response
+            },
+        ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryQuery {
+    revision: Option<u64>,
+    #[serde(default)]
+    offset: usize,
+}
+
+async fn public_points<J: Journal>(
+    Extract((csmsd, _)): Extract<Shared<J>>,
+    Query(query): Query<RegistryQuery>,
+) -> Response {
+    use emob_service::publication::{PublicPoint, RegistryPage};
+    const LIMIT: usize = 100;
+    let now = csmsd.now();
+    csmsd.with_registry(|registry, state| {
+        let expired = state
+            .stations
+            .values()
+            .filter(|s| s.projected_expiry(now).is_some())
+            .count();
+        // Pagination compares an opaque token. A wall-clock expiry and the next durable
+        // update can occur between pages even when their simple counts cancel out.
+        let revision = if expired == 0 {
+            state.publication_revision
+        } else {
+            use sha2::{Digest as _, Sha256};
+            let mut hash = Sha256::new();
+            hash.update(state.publication_revision.to_be_bytes());
+            hash.update((expired as u64).to_be_bytes());
+            u64::from_be_bytes(
+                hash.finalize()[..8]
+                    .try_into()
+                    .expect("SHA-256 has 32 bytes"),
+            )
+        };
+        if query.revision.is_some_and(|rev| rev != revision)
+            || (query.offset > 0 && query.revision.is_none())
+        {
+            return axum::http::StatusCode::CONFLICT.into_response();
+        }
+        let mut rows = registry
+            .values()
+            .filter(|s| s.publicly_accessible)
+            .skip(query.offset);
+        let points = rows
+            .by_ref()
+            .take(LIMIT)
+            .filter_map(|s| {
+                let known = state.stations.get(&s.identity)?;
+                let (observation, status_changed_at) = known.public_status(now);
+                Some(PublicPoint {
+                    fully_renewable: s.fully_renewable,
+                    identity: s.identity.clone(),
+                    evse: s.evse.clone(),
+                    rated_power_kw: s.rated_power_kw,
+                    connector: s.connector,
+                    location: s.location.clone(),
+                    tariff: s.tariff.clone(),
+                    version: known.facility_version,
+                    site_version: *state.site_versions.get(&s.location.id)?,
+                    changed_at: known.registered_at?,
+                    status_changed_at,
+                    observation,
+                })
+            })
+            .collect();
+        Json(RegistryPage {
+            revision,
+            points,
+            next: rows.next().and_then(|_| query.offset.checked_add(LIMIT)),
+        })
+        .into_response()
+    })
 }
 
 /// What a registration answers — the only place a minted password appears
@@ -1121,6 +1255,14 @@ async fn station<J: Journal>(
 /// signs, and what happened there.
 #[derive(Debug, Serialize)]
 pub struct StationPage {
+    /// Whether station tariff presentation is enabled.
+    pub show_price: bool,
+    /// Whether the operator has opted this station in for public disclosure.
+    pub publicly_accessible: bool,
+    /// Declaration of the electricity supply, when known.
+    pub fully_renewable: Option<bool>,
+    /// Latest current-boot tariff installation evidence.
+    pub station_tariff: Option<crate::journal::StationTariff>,
     /// The OCPP identity.
     pub identity: String,
     /// The point.
@@ -1218,6 +1360,8 @@ pub struct ReportedIdentity {
 /// A point's meter, as its signed records name it.
 #[derive(Debug, Serialize)]
 pub struct MeterView {
+    /// Complete key in the key registry wire representation.
+    pub registered_key: Option<RegisteredPoint>,
     /// The point.
     pub evse: String,
     /// What it signs.
@@ -1228,6 +1372,15 @@ pub struct MeterView {
     pub since: time::OffsetDateTime,
     /// Whether the registry holds a key for this meter now.
     pub key_registered: bool,
+}
+
+/// The point as stored in the key registry, preserving compressed encoding.
+#[derive(Debug, Serialize)]
+pub struct RegisteredPoint {
+    /// OCMF curve name.
+    pub curve: &'static str,
+    /// Complete SEC1 bytes in lowercase hex.
+    pub sec1: String,
 }
 
 /// A report on the page.
@@ -1244,6 +1397,8 @@ pub struct ReportView {
 /// One session on the page.
 #[derive(Debug, Serialize)]
 pub struct RecentView {
+    /// Stable decision reference on the operator desk.
+    pub position: u64,
     /// The transaction.
     pub transaction: String,
     /// When it was decided.
@@ -1287,20 +1442,22 @@ impl StationPage {
         let meters = known
             .meters
             .iter()
-            .map(|(evse, (meter, since))| MeterView {
-                evse: evse.clone(),
-                key_registered: meter.serial.as_ref().is_some_and(|serial| {
-                    registry
-                        .key_at(
-                            &emob_eichrecht::ComponentRef::Meter {
-                                serial: serial.clone(),
-                            },
-                            now,
-                        )
-                        .is_some()
-                }),
-                meter: meter.clone(),
-                since: *since,
+            .map(|(evse, (meter, since))| {
+                let registered_key = meter
+                    .component
+                    .as_ref()
+                    .and_then(|component| registry.key_at(component, now))
+                    .map(|key| RegisteredPoint {
+                        curve: key.key.curve().name(),
+                        sec1: hex::encode(key.key.sec1_bytes()),
+                    });
+                MeterView {
+                    evse: evse.clone(),
+                    key_registered: registered_key.is_some(),
+                    registered_key,
+                    meter: meter.clone(),
+                    since: *since,
+                }
             })
             .collect();
         let today = csmsd.with_state(|state| state.zone.local(now).date);
@@ -1316,6 +1473,10 @@ impl StationPage {
         });
         let week_ago = now - time::Duration::days(7);
         Self {
+            station_tariff: known.station_tariff.clone(),
+            publicly_accessible: entry.publicly_accessible,
+            show_price: entry.show_price,
+            fully_renewable: entry.fully_renewable,
             identity: entry.identity.clone(),
             evse: entry.evse.to_string(),
             ocpp: ocpp_name(entry.ocpp),
@@ -1347,8 +1508,13 @@ impl StationPage {
                 .into_iter()
                 .rev()
                 .map(|recent| RecentView {
-                    receipt: csmsd
-                        .receipt_path(&(entry.identity.clone(), recent.transaction.clone())),
+                    position: recent.position,
+                    receipt: csmsd.with_state(|state| {
+                        csmsd.filed_receipt_path(
+                            state,
+                            &state.investigations.receipt(recent.position)?,
+                        )
+                    }),
                     transaction: recent.transaction,
                     at: recent.at,
                     billed: recent.billed,

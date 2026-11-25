@@ -187,6 +187,18 @@ impl core::fmt::Debug for Witness {
 }
 
 impl Witness {
+    /// Read a complete cold copy of the witness without opening or appending
+    /// to its source. Prior alarms remain sticky under the ordinary fold.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for fragments, unreadable observations or a broken chain.
+    pub fn read_cold_cut(bytes: &[u8]) -> Result<Vec<Seen>, WitnessError> {
+        let journal = crate::journal::Memory::from_cold_cut(bytes)?;
+        let folded = Folded::open(State::default(), journal, apply)?;
+        Ok(folded.state().0.values().cloned().collect())
+    }
+
     /// Open, or start, the witness file at `path`, trusting `keys` (daemon →
     /// verifier key) over anything pinned.
     ///

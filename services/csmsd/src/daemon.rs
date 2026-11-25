@@ -79,9 +79,12 @@ pub struct Running {
 
 impl Running {
     /// Stop as a crash would: every task aborted, nothing drained.
-    pub fn kill(self) {
+    pub async fn kill(self) {
         for task in &self.tasks {
             task.abort();
+        }
+        for task in self.tasks {
+            let _ = task.await;
         }
     }
 
@@ -116,6 +119,7 @@ pub async fn run(options: Options) -> Result<Running> {
         .expecting(PROVISIONING)
         .expecting(KEY_REGISTRY);
 
+    estate::validate_public_plans(&estate.public_plans, &estate.receipts.public_url)?;
     let provisioning = crate::estate::provisioning(&estate)?;
     let registry = crate::estate::registry(&estate.meter_keys)?;
     let zone = crate::estate::zone(&estate)?;
@@ -127,10 +131,7 @@ pub async fn run(options: Options) -> Result<Running> {
         .filter(|s| s.takes(emob_service::events::cdr::ISSUED))
         .map(|s| s.name.clone())
         .collect();
-    let service_token = estate
-        .services
-        .service_token_env
-        .resolve_in("services.service_token_env", &env)?;
+    let service_token = estate::service_credential(&estate.services, &env, &operators)?;
 
     if provisioning.is_empty() {
         readiness.set(
@@ -181,6 +182,7 @@ pub async fn run(options: Options) -> Result<Running> {
         .context("folding csmsd's journal")?
         .with_clock(clock)
         .pricing(crate::estate::tariffs(&estate)?)
+        .with_public_plans(&estate.public_plans)
         .delivering_to(issued_to)
         .issuing_receipts(
             crate::receipt::Receipts::open(
@@ -193,6 +195,28 @@ pub async fn run(options: Options) -> Result<Running> {
         ),
     );
     // Spec 021: the estate seeds the registry; afterwards the registry rules.
+    if csmsd.with_state(|state| state.offer_archive.has_terms()) {
+        estate::validate_public_origin(&estate.receipts.public_url)?;
+    }
+    if csmsd.with_state(|state| {
+        state.registry.values().any(|station| {
+            station.publicly_accessible
+                && state
+                    .stations
+                    .get(&station.identity)
+                    .is_some_and(crate::journal::Known::has_connector_report)
+        })
+    }) {
+        csmsd
+            .record(
+                &emob_service::Actor::Timer,
+                crate::journal::Event::PublicationRestarted {
+                    at: csmsd.publication_since,
+                },
+            )
+            .map_err(|error| anyhow::anyhow!("recording the publication restart: {error}"))?;
+    }
+    csmsd.activate_public_plans()?;
     let seeded = csmsd.seed(&estate.stations).map_err(|error| {
         anyhow::anyhow!("seeding the station registry from the estate: {error}")
     })?;
@@ -243,6 +267,26 @@ pub async fn run(options: Options) -> Result<Running> {
     );
 
     let mut tasks = Vec::new();
+    let (tariffs, connected, stopping) = (Arc::clone(&csmsd), csms.handle(), shutdown.clone());
+    tasks.push(tokio::spawn(async move {
+        let run = async {
+            loop {
+                let mut work = tokio::task::JoinSet::new();
+                for id in connected.sessions().await {
+                    if work.len() >= 8 {
+                        work.join_next().await;
+                    }
+                    let (csms, handle) = (Arc::clone(&tariffs), connected.clone());
+                    work.spawn(async move {
+                        crate::display::install_tariff(&csms, &handle, &id).await;
+                    });
+                }
+                while work.join_next().await.is_some() {}
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        };
+        tokio::select! { () = run => {}, () = stopping.wait() => {} }
+    }));
     let (watcher, stopping) = (Arc::clone(&edge).watch(csms.handle()), shutdown.clone());
     tasks.push(tokio::spawn(async move {
         tokio::select! {
@@ -324,6 +368,7 @@ pub async fn run(options: Options) -> Result<Running> {
         ))
         .with(crate::receipt::router(Arc::clone(&csmsd), sites))
         .with(crate::price::router(Arc::clone(&csmsd), estate.operator()))
+        .with(crate::provider_price::router(Arc::clone(&csmsd)))
         // Long enough for an in-progress `StopTransaction` to land.
         .draining_for(Duration::from_secs(15));
     tasks.push(tokio::spawn(async move {

@@ -17,9 +17,6 @@ use std::sync::Arc;
 
 use emob_service::estate::{self, Env, Estate, EstateError};
 
-/// A secret that satisfies every format check and opens nothing.
-const PLACEHOLDER: &str = "whsec_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-
 /// `emob check [--secrets] [--schema] <path>`.
 pub fn main(args: &[String], out: &mut impl Write, err: &mut impl Write) -> u8 {
     let mut secrets = false;
@@ -92,9 +89,15 @@ pub fn main(args: &[String], out: &mut impl Write, err: &mut impl Write) -> u8 {
     }
 }
 
-/// Every variable reads as [`PLACEHOLDER`].
+/// Distinct placeholders exercise credential separation and webhook formatting.
 fn placeholders() -> Env {
-    Arc::new(|_: &str| Some(PLACEHOLDER.to_owned()))
+    use base64::Engine as _;
+    Arc::new(|name: &str| {
+        Some(format!(
+            "whsec_{}",
+            base64::engine::general_purpose::STANDARD.encode(name)
+        ))
+    })
 }
 
 const fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
@@ -109,6 +112,14 @@ const fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
 pub fn check(text: &str, path: &str, env: &Env) -> Result<Estate, EstateError> {
     let whole: Estate = estate::from_str_at(text, path)?;
 
+    estate::check_public_plans(&whole)?;
+    if !whole.card_stock.is_empty() {
+        let provider: empd::daemon::Estate = estate::from_str_at(text, path)?;
+        empd::daemon::validate_enrolment(&provider).map_err(|error| EstateError::Invalid {
+            key: "card_stock".into(),
+            reason: error.to_string(),
+        })?;
+    }
     // csmsd: the fleet, the keys, the zone, the displays.
     if !whole.stations.is_empty() {
         let view: csmsd::estate::Estate = estate::from_str_at(text, path)?;
@@ -135,15 +146,27 @@ pub fn check(text: &str, path: &str, env: &Env) -> Result<Estate, EstateError> {
     if !whole.tariffs.is_empty() {
         tarifd::http::published(&estate::from_str_at(text, path)?)?;
     }
+    for (contract, seed) in whole.contracts.iter().enumerate() {
+        for (index, token) in seed.tokens.iter().enumerate() {
+            if token
+                .visual_number
+                .as_deref()
+                .is_some_and(|number| estate::printed_card_number(number).is_none())
+            {
+                return Err(EstateError::Invalid {
+                    key: format!("contracts[{contract}].tokens[{index}].visual_number"),
+                    reason: "expected 1 to 64 printable characters".to_owned(),
+                });
+            }
+        }
+    }
     // Everyone: the operators are actors, the subscribers are reachable and
     // subscribe to something that is emitted, the secrets are named.
-    estate::operator_tokens(&whole.operators, env)?;
+    let operators = estate::operator_tokens(&whole.operators, env)?;
     estate::subscriptions(&whole.subscribers, env)?;
     if let Some(services) = &whole.services {
         estate::webhook_secret(services, env)?;
-        services
-            .service_token_env
-            .resolve_in("services.service_token_env", env)?;
+        estate::service_credential(services, env, &operators)?;
     }
     for (index, partner) in whole.partners.iter().enumerate() {
         partner
@@ -156,7 +179,7 @@ pub fn check(text: &str, path: &str, env: &Env) -> Result<Estate, EstateError> {
             .resolve_in("billing.delivery.secret_env", env)?;
     }
     if let Some(desk) = &whole.desk {
-        desk.token_env.resolve_in("desk.token_env", env)?;
+        estate::desk_read_credential(desk, env, &operators)?;
     }
     Ok(whole)
 }
@@ -217,10 +240,30 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_printed_card_number_is_refused_without_showing_the_card() {
+        let number = "Private".repeat(10);
+        let (status, _, error) = run(&example().replace("MOB-1001", &number), false);
+        assert_eq!(status, 1);
+        assert!(error.contains("contracts[0].tokens[0].visual_number"));
+        assert!(!error.contains(&number));
+        assert!(!error.contains("04A1B2C3D4E5F6"));
+    }
+
+    #[test]
     fn the_example_estate_passes() {
         let (code, out, err) = run(&example(), false);
         assert_eq!(code, 0, "{err}");
         assert!(out.contains("every daemon would start"), "{out}");
+
+        let text = example();
+        let (before, desk) = text.split_once("[desk]").unwrap();
+        let privileged_desk = format!(
+            "{before}[desk]{}",
+            desk.replacen("EMOB_DESK_READ_TOKEN", "EMOB_OPERATOR_TOKEN", 1)
+        );
+        let (status, _, diagnostic) = run(&privileged_desk, false);
+        assert_eq!(status, 1);
+        assert!(diagnostic.contains("desk.token_env"), "{diagnostic}");
     }
 
     #[test]

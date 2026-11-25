@@ -52,6 +52,7 @@ impl Authorize for Provider {
     fn ask<'a>(
         &'a self,
         uid: &'a str,
+        _evse: Option<&'a emob_core::EvseId>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Answer> + Send + 'a>> {
         Box::pin(async move {
             Answer {
@@ -63,6 +64,7 @@ impl Authorize for Provider {
                     token_type: emob_roam::TokenType::Rfid,
                     contract_id: CONTRACT.parse().unwrap(),
                 }),
+                retail: None,
                 reference: Some("a".repeat(64)),
             }
         })
@@ -86,12 +88,16 @@ fn registry(key_hex: &str) -> KeyRegistry {
 }
 
 fn csmsd(registry: KeyRegistry) -> Arc<Csmsd<Memory>> {
+    with_journal(registry, Memory::new())
+}
+
+fn with_journal(registry: KeyRegistry, journal: Memory) -> Arc<Csmsd<Memory>> {
     Arc::new(
         Csmsd::open(
             PartyId::new("DE", "ABC").unwrap(),
             registry,
             Arc::new(Provider),
-            Memory::new(),
+            journal,
             emob_core::TimeZone::utc(),
         )
         .expect("the journal folds")
@@ -457,6 +463,17 @@ async fn sr_060_sr_062_the_journal_holds_the_digest_and_never_the_token() {
         .with_state(|state| state.receipt_for.get(&delivery.id).cloned())
         .expect("the billed record's receipt is indexed");
     assert_eq!(csmsd.receipt_path(&key), Some(format!("/r/{token}")));
+
+    // An incomplete restore has the facts but a different receipt key.
+    // A freshly minted token under that key cannot open the original receipt.
+    let mut cut = Vec::new();
+    for record in csmsd.with_journal(|journal| journal.records().unwrap()) {
+        serde_json::to_writer(&mut cut, &record).unwrap();
+        cut.push(b'\n');
+    }
+    let restored = with_journal(registry(OCA_KEY_HEX), Memory::from_cold_cut(&cut).unwrap());
+    assert!(restored.receipt_path(&key).is_none());
+    assert!(restored.receipt_url_for_record(&delivery.id).is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -600,6 +617,130 @@ async fn a_session_signed_with_a_key_nobody_registered_says_why_it_was_not_bille
     assert!(csmsd.with_state(|state| state.receipt_for.is_empty()));
     let view = csmsd::read::Today::of(&csmsd, &[], &csmsd::read::Params::default()).unwrap();
     assert_eq!(view.refused.total, 1);
+    let position = view.refused.items[0].position;
+    let operators = emob_service::Operators::new(vec![(
+        emob_service::Actor::operator("desk").unwrap(),
+        emob_service::authority::Token::new("desk-test"),
+    )]);
+    let mut api = csmsd::read::router(csmsd, operators, false);
+    let target = format!("/v1/csmsd/sessions/{position}");
+    // SR-030. Only an operator can follow the immutable reference.
+    let denied = get(&mut api, &target).await;
+    assert_eq!(denied.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(denied.headers["cache-control"], "private, no-store");
+    let response = api
+        .call(
+            Request::builder()
+                .uri(target)
+                .header("authorization", "Bearer desk-test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let bytes = axum::body::to_bytes(response.into_body(), 150_000)
+        .await
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&bytes).contains(UID));
+    let detail: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(detail["position"], position);
+    assert_eq!(detail["receipt"], path);
+    assert_eq!(detail["billed"], false);
+    assert_eq!(detail["card_reference"], "a".repeat(64));
+    assert_eq!(detail["started_at"], "2023-05-19T13:52:39Z");
+    assert_eq!(detail["ended_at"], "2023-05-19T13:55:48Z");
+    assert!(
+        detail["findings"]
+            .as_array()
+            .is_some_and(|findings| !findings.is_empty())
+    );
+    search_for_occurrence(&mut api, detail["transaction"].as_str().unwrap(), position).await;
+}
+
+async fn search_for_occurrence(api: &mut axum::Router, transaction: &str, position: u64) {
+    for (input, operator, expected) in [
+        (
+            serde_json::json!({"transaction": transaction}),
+            true,
+            StatusCode::OK,
+        ),
+        (
+            serde_json::json!({"transaction": transaction}),
+            false,
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            serde_json::json!({"transaction":"", "limit":2}),
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            serde_json::json!({"transaction":"private-search", "limit":201}),
+            true,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/v1/csmsd/sessions/search")
+            .header("content-type", "application/json");
+        if operator {
+            request = request.header("authorization", "Bearer desk-test");
+        }
+        let answer = api
+            .call(request.body(Body::from(input.to_string())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(answer.status(), expected);
+        assert_eq!(answer.headers()["cache-control"], "private, no-store");
+        let body = axum::body::to_bytes(answer.into_body(), 4096)
+            .await
+            .unwrap();
+        if expected == StatusCode::OK {
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result["items"][0]["position"], position);
+            assert_eq!(result["total"], 1);
+        } else {
+            assert!(!String::from_utf8_lossy(&body).contains("private-search"));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sr_032_a_restored_refusal_cannot_bill_another_occurrence_of_its_id() {
+    // An earlier station trial had a refusal before receipts were enabled.
+    // The station supplies complete, normally billable records after restart.
+    let journal = Memory::new();
+    journal
+        .append(
+            "noted",
+            &emob_service::Actor::Timer,
+            &serde_json::to_string(&csmsd::Event::Noted {
+                closes: Some(("CP-1".into(), "1".into())),
+                outcome: csmsd::Outcome::Refused {
+                    identity: "CP-1".into(),
+                    transaction: "1".into(),
+                    reasons: vec!["original refusal".into()],
+                    findings: vec![],
+                },
+                at: time::macros::datetime!(2023-05-18 09:00 UTC),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    let csmsd = with_journal(registry(OCA_KEY_HEX), journal);
+    one_session(&csmsd).await;
+    let view = csmsd::read::Today::of(&csmsd, &[], &csmsd::read::Params::default()).unwrap();
+    assert_eq!(view.refused.total, 2, "{:?}", csmsd.outcomes());
+    assert!(view.refused.items[0].explanation.reasons[0].contains("reused"));
+    assert_eq!(
+        view.refused.items[1].explanation.reasons,
+        ["original refusal"]
+    );
+    assert_eq!(csmsd.settled(), 0);
+    assert!(csmsd.with_state(|state| state.receipts.is_empty() && state.outbox.is_empty()));
 }
 
 fn attr(html: &str, name: &str) -> Option<String> {

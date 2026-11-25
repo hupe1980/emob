@@ -1,19 +1,13 @@
 +++
 title = "Architecture"
 weight = 13
-description = "emob architecture: sans-I/O Rust crates for Eichrecht, OCPP, OCPI and billing; nine journalled daemons wired by APIs and signed CloudEvents."
+description = "emob architecture: sans-I/O Rust crates for Eichrecht, OCPP, OCPI and billing; nine daemons connected by APIs and signed CloudEvents."
 
 [extra]
 nav = "Architecture"
 +++
 
-emob is a Rust workspace of **15 library crates** that hold every rule about
-charging, metering, pricing and settlement, plus **nine daemons** that run
-those rules as services from one estate file: stations connect to `csmsd`,
-`empd` authorises, `billd` invoices and `roamd` roams, each with a journal it
-rebuilds its state from, and the operator page `deskd` reads them all. Every
-journal fact names its actor, and each journal signs where it ends for a
-witness to check. emob does not implement the charging protocols
+Nine services share one estate configuration. Five keep signed journals that an independent witness can check. Stations connect to `csmsd`, `empd` authorises charging, `billd` invoices and `roamd` exchanges roaming records. The fifth journal belongs to `poid`, which records public-feed delivery. A native agreement binds one issued card to the complete price offer at a single point. The provider journals the agreement and the CSMS checks the current offer before online charging or reservation. The operator desk reads those services over their APIs and forwards each card change to the provider under the signed-in operator’s grant. emob does not implement the charging protocols
 itself: it builds on separate protocol libraries (OCPP, OCPI, OICP, ISO 15118,
 EEBUS, OCMF) and adds the business rules on top.
 
@@ -21,45 +15,26 @@ EEBUS, OCMF) and adds the business rules on top.
 
 A German charging business usually plays two roles. As **CPO** (charge point
 operator) it runs the stations; as **EMP/eMSP** (e-mobility service provider) it
-holds the driver's contract and bills them. The law gives each role different
+holds the driver’s contract and decides whether their card can charge. The billing service closes invoices between the operator and mobility provider. The law gives each role different
 duties, so emob models both.
 
 ```mermaid
 flowchart TB
-    EV["vehicle"] -->|"ISO 15118 · PWM"| CS["charging station"]
-
-    subgraph cpo["CPO — operating the points"]
-        CS -->|"OCPP 1.6J · 2.0.1 · 2.1"| CSMS["csmsd"]
-        CSMS --> SES["session"]
-        SES --> EICH["Eichrecht evidence"]
-        SES --> CDR["CDR + rating"]
-        POI["locations · tariffs"]
-        POI -->|"OCPP 2.1 tariff"| CSMS
-        POI -->|"DATEX II"| NAP["national access point"]
-    end
-
-    subgraph roam["roaming — roamd"]
-        P2P["OCPI peers"]
-        HUB["Hubject (OICP)"]
-    end
-
-    subgraph emp["EMP — holding the driver contract"]
-        TOK["empd<br/>contracts · tokens · quotes"]
-        INV["billd<br/>invoices · books"]
-    end
-
-    CDR --> P2P & HUB
-    POI --> P2P & HUB
-    P2P & HUB --> TOK
-    TOK --> INV
-    CSMS <-->|authorize| TOK
-
-    classDef built fill:#0a7d3322,stroke:#0a7d33
-    class CS,CSMS,SES,EICH,CDR,POI,P2P,HUB,TOK,INV built
+    CS["Charging station"] <-->|"OCPP 1.6, 2.0.1 or 2.1"| CSMS["csmsd"]
+    CSMS <-->|"Authorise charging"| EMP["empd"]
+    CSMS -->|"Verified charging record"| ROAM["roamd"]
+    CSMS -->|"Verified charging record"| BILL["billd"]
+    ROAM <-->|"OCPI"| PARTNER["Roaming partner"]
+    BILL -->|"Invoice event"| ERP["Billing recipient"]
+    CSMS -->|"Public registry and observations"| POI["poid"]
+    POI -->|"Static table"| NAP["Mobilithek"]
+    POI -->|"Status and price updates"| NAP
+    DRIVER["Driver"] -->|"Point or provider price"| CSMS
+    DESK["deskd"] -->|"Read operator evidence"| CSMS & BILL & POI
+    DESK -->|"Enrol and manage cards"| EMP
 ```
 
-Every box has its rules built in a library. Two arrows are not wired: `roamd`
-sends no OICP to Hubject, and `poid` pushes nothing to the access point.
+The public-feed worker sends to registered offers when configured. The OICP adapter is available as a library. A Hubject connection requires a partner integration.
 
 When an operator's own EMP charges at its own stations, the session goes through
 the same model as a roaming session — same validation, pricing and evidence — so
@@ -69,9 +44,9 @@ adding partners changes the transport, never the arithmetic.
 
 | Layer | Where | Does I/O? |
 |---|---|---|
-| Domain crates | `crates/emob-*` (14 crates) | No — sans-I/O, no clock, no floats |
+| Domain crates | Under `crates/emob-*` | No — sans-I/O, no clock, no floats |
 | Service shell | `crates/emob-service` | Yes — HTTP, config, journals, shutdown |
-| Daemons | `services/*` (8 binaries) | Yes — sockets, clock, files |
+| Daemons | `services/*` (nine binaries) | Yes — sockets, clock, files |
 | Protocol kits | separate crates on crates.io | the wire formats |
 
 ### Domain crates ✅
@@ -101,9 +76,9 @@ adding partners changes the transport, never the arithmetic.
 | `empd` | Contracts, tokens, authorisation (`POST /v1/authorize`) | ✅ · ⏳ OCPI tokens endpoint, fees |
 | `billd` | Receiving CDRs, closing each partner's month into an invoice, numbering, postings; the invoice page and signed delivery to the operator system | ✅ · ⏳ SEPA runs |
 | `roamd` | OCPI in both directions behind a reach-back guard; who a record goes to | ✅ OCPI · ⏳ OICP transport |
-| `deskd` | The operator page Heute; the witness of every journal's signed head | ✅ |
+| `deskd` | Heute, card investigations and operator actions, and the witness of every journal’s signed head | ✅ |
 | `tarifd` | Publishing the estate's tariff versions | ✅ read model · ✅ `driver-tariff.v1` · ⏳ push clients |
-| `poid` | The inventory for the national access point | ✅ inventory from the estate, priced · ✅ table push · ⏳ dynamic delta |
+| `poid` | The inventory for the national access point | public CSMS register, static and dynamic publication, receiver acknowledgements |
 | `sited` | The § 14a site controller, run **at** the site | ⏳ SHIP session, OCPP leg |
 | `agentd` | Advisory specialists over many records, run under the read-only advisory principal | ✅ runtime · ⏳ nothing triggers a run |
 
@@ -116,7 +91,8 @@ The edges between them:
 | `csmsd` → `billd`, `roamd` | the outbox: each settled session as a `de.emob.cdr.issued` CloudEvent, signed per Standard Webhooks, `POST /v1/deliveries`, retried until a `2xx`, journalled |
 | `roamd` ↔ partner | OCPI 2.3.0 credentials, CDRs |
 | `deskd` → `csmsd`, `billd`, `roamd` | the bounded operator read models, `GET /v1/<daemon>/today` |
-| `deskd` → `csmsd`, `billd`, `roamd`, `empd` | the signed journal heads, `GET /v1/<daemon>/head`, every 30 s |
+| `deskd` → `empd` | private card and agreement lookup with a reader, enrolment and card changes with the signed-in writer |
+| `deskd` → `csmsd`, `billd`, `roamd`, `empd`, `poid` | the signed journal heads, `GET /v1/<daemon>/head`, every 30 s |
 | `billd` → operator system | each issued invoice as a `de.emob.invoice.issued` CloudEvent carrying the UBL or CII file, signed, retried until answered |
 | `csmsd`, `billd` → subscribers | the same events to every `[[subscribers]]` entry whose `types` take them, each signed with its own secret, retried until a `2xx`, journalled |
 
@@ -132,7 +108,7 @@ model behind the operator token. `emob demo` runs the daemons' own
 configured rather than forked — and `deskd` takes its clock as a parameter, so
 the demo can play a morning at 60×. See [Run the estate](@/docs/run-the-estate.md).
 
-**1374 tests** cover the workspace.
+**1426 tests** cover the workspace.
 
 An end-to-end test drives the full chain: OCMF records signed with a real key at
 test time, verified, matched against a session, split into quarter hours, built

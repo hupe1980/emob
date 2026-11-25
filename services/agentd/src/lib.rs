@@ -134,7 +134,7 @@ mod tests {
         .expect("the operator holds every read capability")
     }
 
-    fn plane(store: Arc<dyn JournalStore>) -> Arc<Runtime> {
+    pub(super) fn plane(store: Arc<dyn JournalStore>) -> Arc<Runtime> {
         runtime(store, &agent()).expect("the advisory chain builds")
     }
 

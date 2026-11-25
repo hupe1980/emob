@@ -111,7 +111,7 @@ impl Feed<'_> {
         ))
     }
 
-    /// The dynamic publication `[AFIR Art. 20(2)(c)]`.
+    /// The dynamic publication `[AFIR Art. 20(2)(f)]`.
     ///
     /// # Two inventories, and the update has to resolve against both
     ///
@@ -143,15 +143,19 @@ impl Feed<'_> {
     pub fn status(
         &self,
         accepted: &Published,
+        delivery: crate::datex::Delivery,
         updates: &[PointUpdate],
         published_at: time::OffsetDateTime,
     ) -> Result<StatusPublication> {
         check(&self.sites, updates)?;
         resolves(accepted, updates)?;
         for price in updates.iter().filter_map(|update| update.price.as_ref()) {
-            cents(&price.rate_id, "energyPrice", price.value)?;
+            for component in &price.prices {
+                cents(&price.rate_id, "energyPrice", component.value)?;
+            }
         }
         Ok(status::publication(
+            delivery,
             &self.publisher,
             self.information_status,
             &self.table,
@@ -324,6 +328,7 @@ mod tests {
             site: Facility::new("site"),
             station: Facility::new("station"),
             point,
+            changed_at: time::OffsetDateTime::UNIX_EPOCH,
             report: published
                 .report(PointStatus::Available)
                 .expect("an operating point may report `available`"),

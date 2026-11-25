@@ -8,8 +8,8 @@ state = "built"
 nav = "Locations"
 +++
 
-`[AFIR Art. 20]` requires every charge point operator to publish static and
-dynamic data about its charge points — location, connectors, power,
+`[AFIR Art. 20]` requires operators or owners, according to their arrangement, to publish static and
+dynamic data about publicly accessible charge points — location, connectors, power,
 availability, ad-hoc price — free of charge through the **national access
 point**. In Germany that is the **Mobilithek**, in the DATEX II *Recharging*
 profile, from **14 April 2026**. `emob-poi` builds that feed from one inventory
@@ -38,7 +38,7 @@ inventory with two audiences.
 ## Publishing the ad-hoc price from the tariff itself
 
 `[AFIR Art. 5(2)]` makes the price shown before a session the price that may be
-charged; `[AFIR Art. 20(2)(c)]` makes that same ad-hoc price data an operator
+charged; `[AFIR Art. 20(2)(f)]` makes that same ad-hoc price data an operator
 must publish. Computed twice — once in billing, once in an export job — the two
 drift, and nobody reconciles a feed against an invoice.
 
@@ -174,16 +174,9 @@ the same bytes.
 
 ## The poid daemon
 
-`poid`'s inventory is the estate's `[[stations]]`, one site per `location.id`,
-with coordinates as exact decimals; `GET /v1/poid` shows it to operators. Its
-library decides **when** a snapshot goes out: it records the table the access
-point accepted, refuses updates no consumer could resolve, and reports when the
-feed has gone stale (`Poid::stale`). Its prices are the version of each
-station's tariff in force at the moment of publication. With a `[mobilithek]`
-section — the publication's push address and the operator's client
-certificate — the daemon posts the table at start and hourly, journals only an
-accepted push, and names each documented refusal. ⏳ The dynamic delta is built
-but not yet sent.
+Mark each public station with `publicly_accessible = true`. When publication is configured, `poid` reads a revision-consistent page sequence from the CSMS. It uses a separate HTTP client and operator credential for that read. A disconnected or unreported connector has no fresh availability claim. Private stations stay outside the feed.
+
+Register two linked offers with the Mobilithek. Set `[mobilithek].url` to the static endpoint and `dynamic_url` to the dynamic endpoint. Configure the client certificate and key. The worker delivers the static table before referencing it, then sends complete dynamic snapshots and changes. It preserves the station's reported time and the tariff's effective time. Set `status_max_age_secs` to the maximum age your operator accepts for a connector observation (default 86,400 seconds). A price-only update retains the current status and its original observation time. A missing or expired observation produces the profile’s explicit `unknown` status. Declare `fully_renewable` per station when you know the electricity supply. An absent declaration leaves the static attribute unspecified. Inspect attempts, receiver acknowledgements, missed deadlines and missing data at the operator-authenticated `GET /v1/poid/dynamic`. A real subscriber and a physical inspection are required to document what reached a driver. [German publication guide](https://github.com/MobilithekDE/AFIR-DATEX-II-Recharging-Profil)
 
 `emob check-feed <file>` reads any DATEX II AFIR file — XML or JSON, emob's or
 anyone's — lists what the reader tolerated, and holds every publication to the
@@ -193,3 +186,5 @@ Mobilithek profile with the writer `poid` uses. See
 **Related:** [Tariffs and price transparency](@/docs/pricing.md) ·
 [Roaming](@/docs/roaming.md) · [Compliance](@/docs/compliance.md) ·
 [Glossary](@/docs/glossary.md)
+
+If the last public point retires, the dynamic feed sends an empty snapshot. Withdraw the static offer at the Mobilithek when the operator view prompts you. The profile requires at least one site in a static table.

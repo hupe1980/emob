@@ -120,3 +120,5 @@ pub use tariff::{
     TariffElement, TariffKind, TaxIncluded, VatBasis,
 };
 pub use version::{TariffFingerprint, TariffHistory, TariffHistoryError};
+
+pub mod retail;

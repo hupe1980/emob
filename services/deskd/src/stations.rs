@@ -167,6 +167,13 @@ pub struct Form {
     /// Connector.
     #[serde(default)]
     pub connector: String,
+    /// Explicit publication scope, as selected on the form.
+    pub publicly_accessible: bool,
+    /// Undeclared, 100% renewable, or explicitly not 100% renewable.
+    #[serde(deserialize_with = "renewable_choice")]
+    pub fully_renewable: Option<bool>,
+    /// Opt in to station price delivery.
+    pub show_price: bool,
     /// Tariff id.
     #[serde(default)]
     pub tariff: String,
@@ -211,6 +218,19 @@ pub struct Form {
     pub reason: String,
 }
 
+fn renewable_choice<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    match String::deserialize(deserializer)?.as_str() {
+        "unknown" => Ok(None),
+        "true" => Ok(Some(true)),
+        "false" => Ok(Some(false)),
+        _ => Err(serde::de::Error::custom(
+            "invalid renewable-electricity declaration",
+        )),
+    }
+}
+
 impl Form {
     /// The form's defaults: what most stations of a German operator are.
     #[must_use]
@@ -232,6 +252,9 @@ impl Form {
             "identity": self.identity.trim(),
             "security_profile": self.security_profile.trim().parse::<u8>().unwrap_or(0),
             "ocpp": self.ocpp.trim(),
+            "publicly_accessible": self.publicly_accessible,
+            "fully_renewable": self.fully_renewable,
+            "show_price": self.show_price,
             "evse": self.evse.trim(),
             "rated_power_kw": self.rated_power_kw.trim().replace(',', "."),
             "tariff": self.tariff.trim(),
@@ -270,6 +293,9 @@ impl Form {
             rated_power_kw: page.rated_power_kw.clone(),
             connector: page.connector.clone(),
             tariff: page.tariff.clone(),
+            publicly_accessible: page.publicly_accessible,
+            fully_renewable: page.fully_renewable,
+            show_price: page.show_price,
             location_id: place.id,
             location_name: place.name,
             street: place.street,
@@ -317,26 +343,44 @@ pub fn operator_token(headers: &HeaderMap) -> Option<String> {
         .map(|(_, password)| password.to_owned())
 }
 
-/// Whether a write came from this page (SR-148): `Sec-Fetch-Site:
-/// same-origin`, or, from a browser that does not send it, an `Origin` naming
-/// this host.
+/// Browser form submissions must originate on this desk. Fetch Metadata binds
+/// the public scheme, host and port even behind TLS termination. A proxy must
+/// preserve Host, Origin and Sec-Fetch-Site as sent by the browser.
 #[must_use]
 pub fn same_origin(headers: &HeaderMap) -> bool {
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    match header("sec-fetch-site") {
-        Some(site) => site == "same-origin",
-        None => match (header("origin"), header("host")) {
-            (Some(origin), Some(host)) => {
-                origin == format!("http://{host}") || origin == format!("https://{host}")
-            }
-            _ => false,
-        },
+    let mut sites = headers.get_all("sec-fetch-site").iter();
+    if sites.next().is_none_or(|site| site != "same-origin") || sites.next().is_some() {
+        return false;
     }
+    let mut origins = headers.get_all("origin").iter();
+    let Some(origin) = origins.next() else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    if origins.next().is_some() {
+        return false;
+    }
+    // The desk sends Referrer-Policy: no-referrer. Browsers can therefore
+    // serialize the Origin of a genuine local form as "null". Fetch Metadata
+    // still identifies the initiating origin.
+    if origin == "null" {
+        return true;
+    }
+    let authority = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"));
+    let mut hosts = headers.get_all("host").iter();
+    authority
+        .zip(hosts.next().and_then(|h| h.to_str().ok()))
+        .is_some_and(|(origin, host)| !host.is_empty() && origin.eq_ignore_ascii_case(host))
+        && hosts.next().is_none()
 }
 
 /// `/stations`: the search and the way to add one.
 #[must_use]
-pub fn render_list(listing: &Listing<'_>, lang: Lang) -> String {
+pub fn render_list(listing: &Listing<'_>, lang: Lang, can_write: bool) -> String {
     let Listing {
         found,
         query,
@@ -351,17 +395,24 @@ pub fn render_list(listing: &Listing<'_>, lang: Lang) -> String {
             escape(area)
         )
     });
+    let add = if can_write {
+        format!(
+            "<a class=\"btn\" href=\"/stations/new\">{}</a>",
+            lang.pick("+ Station hinzufügen", "+ Add a station")
+        )
+    } else {
+        format!("<span class=\"muted\">{}</span>", crate::read_only(lang))
+    };
     let mut body = format!(
         "<p class=\"eyebrow back\"><a href=\"/\">{back}</a></p>\
          <div class=\"head\"><h1>{title} <span class=\"count\">{total}</span></h1>\
-         <a class=\"btn\" href=\"/stations/new\">{add}</a></div>\
+         {add}</div>\
          <form class=\"search\" method=\"get\" action=\"/stations\" role=\"search\">\
          <label for=\"q\">{label}</label> <input id=\"q\" name=\"q\" type=\"search\" value=\"{query}\" \
          placeholder=\"{hint}\" autocomplete=\"off\">{area_input} <button class=\"btn\" type=\"submit\">{go}</button></form>",
         back = lang.pick("← Heute", "← Today"),
         title = lang.pick("Stationen", "Stations"),
         total = found.total,
-        add = lang.pick("+ Station hinzufügen", "+ Add a station"),
         label = lang.pick("Suchen", "Search"),
         hint = lang.pick(
             "Kennung, EVSE, Modell, Firmware, Netz …",
@@ -386,7 +437,9 @@ pub fn render_list(listing: &Listing<'_>, lang: Lang) -> String {
         let _ = write!(
             body,
             "<p class=\"empty\">{}</p>",
-            if query.is_empty() {
+            if query.is_empty() && !can_write {
+                lang.pick("Keine Station registriert.", "No stations registered.")
+            } else if query.is_empty() {
                 lang.pick(
                     "Noch keine Station. „Station hinzufügen“ legt die erste an.",
                     "No station yet. “Add a station” creates the first.",
@@ -615,7 +668,7 @@ pub fn render_form(
         "<p class=\"eyebrow back\">{back}</p><h1>{title}</h1>\
          <p class=\"muted\">{intro}</p>{general}\
          <form method=\"post\" action=\"{action}\" class=\"card\">\
-         <h2>{station}</h2>{identity}{ocpp}{profile}{evse}{power}{connector}{tariff}{commissioned}{minutes}\
+         <h2>{station}</h2>{identity}{ocpp}{profile}{evse}{power}{connector}{tariff}{commissioned}{minutes}{access}{renewable}{show_price}\
          <h2>{place}</h2>{location_id}{location_name}{street}{house}{postal}{city}{country}{lat}{lon}{zone}{reason}\
          <p><button class=\"btn\" type=\"submit\">{submit}</button></p></form>",
         action = escape(&action),
@@ -669,6 +722,45 @@ pub fn render_form(
                 ("domestic_f", "Schuko"),
                 ("cee5", "CEE 16 A"),
             ],
+        ),
+        access = select(
+            "publicly_accessible",
+            lang.pick("Zugang zum Ladepunkt", "Charge point access"),
+            if form.publicly_accessible {
+                "true"
+            } else {
+                "false"
+            },
+            &[
+                ("false", lang.pick("Privat", "Private")),
+                ("true", lang.pick("Öffentlich", "Public")),
+            ]
+        ),
+        renewable = select(
+            "fully_renewable",
+            lang.pick("Strom zu 100 % erneuerbar", "Electricity is 100% renewable"),
+            match form.fully_renewable {
+                None => "unknown",
+                Some(true) => "true",
+                Some(false) => "false",
+            },
+            &[
+                ("unknown", lang.pick("Keine Angabe", "Undeclared")),
+                ("true", lang.pick("Ja", "Yes")),
+                ("false", lang.pick("Nein", "No")),
+            ]
+        ),
+        show_price = select(
+            "show_price",
+            lang.pick(
+                "Preis an die Station senden",
+                "Send the price to the station"
+            ),
+            if form.show_price { "true" } else { "false" },
+            &[
+                ("false", lang.pick("Aus", "Off")),
+                ("true", lang.pick("Ein", "On")),
+            ]
         ),
         tariff = field(
             "tariff",
@@ -894,7 +986,25 @@ mod tests {
         old.insert("origin", "https://evil.example".parse().unwrap());
         assert!(!same_origin(&old));
         old.insert("origin", "https://desk.example".parse().unwrap());
+        assert!(
+            !same_origin(&old),
+            "Host alone cannot verify the public scheme"
+        );
+        old.insert("origin", "http://desk.example".parse().unwrap());
+        assert!(!same_origin(&old));
+        old.insert("sec-fetch-site", "same-origin".parse().unwrap());
         assert!(same_origin(&old));
+        old.insert("origin", "https://other.example".parse().unwrap());
+        assert!(!same_origin(&old), "both pieces of evidence must agree");
+        old.insert("origin", "https://desk.example:444".parse().unwrap());
+        assert!(!same_origin(&old));
+        old.insert("origin", "null".parse().unwrap());
+        assert!(
+            same_origin(&old),
+            "a private same-origin form can send an opaque Origin"
+        );
+        old.remove("sec-fetch-site");
+        assert!(!same_origin(&old));
         assert!(!same_origin(&HeaderMap::new()), "no evidence is no write");
     }
 
@@ -1005,6 +1115,7 @@ mod tests {
                     limit: crate::heute::ROWS,
                 },
                 Lang::De,
+                true,
             );
             assert!(html.contains("<svg"), "a map is drawn");
             assert!(

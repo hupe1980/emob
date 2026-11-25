@@ -102,8 +102,8 @@ Each is an `emob_billing::Subscription`, taxed under `[UStG §3a(1)]` rather tha
 
 Each forgotten fact fails differently: a lost token store refuses every driver;
 a lost block admits a stolen card; a lost running total authorises past every
-credit limit, silently. `Book` is `Empd` folded from a journal of `contracted`,
-`issued`, `ran_up`, `invoiced` and `blocked` facts. A session offered twice at
+credit limit, silently. `Book` folds the journal’s contract, issue, label,
+block, operator change, native agreement, usage and invoice records. A session offered twice at
 the same figure records nothing (partner retries must not grow the journal); at
 a different figure it records, because a re-rated record moves the total.
 
@@ -111,10 +111,12 @@ a different figure it records, because a re-rated record moves the total.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[contracts]]`, `[services]`, `[[operators]]` |
+| `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[contracts]]`, `[[card_stock]]`, `[[public_plans]]`, `[desk] csmsd`, `[services]`, `[[operators]]` |
 | `EMPD_DATA_KEY` | **required** | 32 bytes, base64: the token references' key and the seal on UIDs. A default would be a key anyone with this source could use |
 | `EMPD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head. A `.head` signed under another key refuses the start |
-| `EMOB_SERVICE_TOKEN`, `EMOB_OPERATOR_TOKEN` | **required** | the variables the estate names: the bearer `csmsd` authorises with, the read model's bearer |
+| `EMOB_SERVICE_TOKEN` | **required** | Service credential used by `csmsd` for online authorisation |
+| `EMOB_OPERATOR_TOKEN` | **required in demo** | Named human operator with `write = true` for card changes and native agreements |
+| `EMOB_DESK_READ_TOKEN` | **required in demo** | Separate read-only identity for background desk queries |
 | `EMPD_HTTP_BIND` / `EMOB_HTTP_BIND` | `127.0.0.1:9585` | the shell |
 | `EMOB_JOURNAL_DIR` | `var` | journal directory — deliberately not a temp directory |
 | `EMOB_LOG_FORMAT` | JSON | `text` for a terminal |
@@ -135,11 +137,48 @@ Or `just demo`, or `just up` for the whole estate (`empd`'s shell on
 | Path | Answers |
 |---|---|
 | `POST /v1/authorize` | service token: a token's authorisation, fail-closed on anything unknown |
+| `POST /v1/empd/cards/lookup` | operator token. Find cards by a printed number, eMAID or exact keyed reference. Results are private and bounded to 20 cards. |
+| `POST /v1/empd/cards/preview` | Named writer. Review a change to one card and obtain its five-minute operation ID. |
+| `POST /v1/empd/cards/confirm` | Same named writer. Confirm the reviewed operation and return its journalled receipt. |
 | `GET /v1/empd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
 | `GET /v1/empd` | operator token: contracts and tokens **by reference, never by UID** |
 | `GET /health/live` | `200` while the process runs |
 | `GET /health/ready` | `200` once the contracts are folded from the journal; `503` listing `contracts` until then |
 | `GET /about` | name and version |
+
+To find a card, send JSON such as `{"kind":"visual","value":"MOB-1001"}` to the lookup endpoint. A token seed can set `visual_number` to the case-sensitive number printed on the card. The provider journals a keyed digest of the number. Changing or removing that number on the same token updates its search entry at the next start. The response shows an emob support label, token type, block status and keyed reference. The support label also works as a visual search. For a contract, use `kind: "emaid"` and supply its eMAID. For the reference stored on a session, use `kind: "reference"`. To read the next page, repeat the original request with the returned `next` value in `after`. Every search uses a POST body and a private, non-cacheable response. [OCPI token object](https://github.com/ocpi/ocpi/blob/release-2.3.0-bugfixes/mod_tokens.asciidoc#mod_tokens_token_object) · [RFC 9110 §17.9](https://www.rfc-editor.org/rfc/rfc9110.html#section-17.9)
+
+### Enrol a native driver card
+
+A named writer can issue one stocked RFID against one currently offered point and provider plan. The sleeve carries an inventory code such as `STOCK-1004`. Only the provider reads its configured UID. The signed agreement preserves the full operator tariff, provider fee schedule, validity, currency, VAT and their public offer digest.
+
+| Request | Access and result |
+|---|---|
+| `GET /v1/empd/contracts/options` | A reader can list configured provider, point and plan choices. The provider checks live publication during review and confirmation. |
+| `POST /v1/empd/contracts/preview` | A writer submits `{"stock":"STOCK-1004","point":"DE*ABC*E00001","plan":"standard"}`. The five-minute review contains a masked label, complete offer and operation reference. |
+| `POST /v1/empd/contracts/confirm` | The same writer submits `{"operation":"<reference>"}`. The provider checks the current offer again and commits the agreement, actor, assigned eMAID and sealed card together. |
+| `POST /v1/empd/contracts/lookup` | An operator submits `{"agreement":"<reference>"}` to retrieve the original accepted terms and time. The original writer can also repeat a successful confirmation after restart. |
+
+The next online authorization must identify the enrolled EVSE. The provider checks the card’s standing and the offer’s validity interval, and the CSMS checks the digest against its current advertised terms before approving charging. The card uses `NEVER` whitelisting, which requires real-time authorization. [OCPI Tokens](https://github.com/ocpi/ocpi/blob/release-2.3.0-bugfixes/mod_tokens.asciidoc#mod_tokens_real-time_authorization)
+
+A writer gets one pending enrolment at a time. A later review replaces it, and restarting the provider discards unconfirmed reviews. An unknown stock code or selection returns 404. An already used card, changed terms, wrong actor or expired review returns 409. Unavailable or unverifiable publication returns 503. After a lost confirmation response, look up the agreement reference or retry the original confirmation. The operator intake records administrative issuance. Customer billing, consent evidence, bank details and payment collection require separate workflows.
+
+### Review and change a card
+
+Find the card and send its keyed reference, desired `blocked` flag and reason to `/v1/empd/cards/preview`. Blocking accepts `lost`, `stolen` or `suspected_misuse`. Unblocking accepts `recovered` or `cleared`. Either direction accepts `correction`. The preview returns the card’s support label, effective change, expiry and operation ID. A new successful preview replaces the same operator’s previous preview. Reviewing makes no change to authorisation.
+
+Send `{"operation":"<64 lowercase hex>","reference":"<reviewed reference>"}` to `/v1/empd/cards/confirm` with the same writer credential. The optional reference checks the selected card against the review. The provider checks the current revision, records one decision and returns its operation, card, reason, actor and both UTC timestamps. Its next online authorisation uses the new standing. Unblocking resumes contract checks. Chargers retain any offline authorisation cache, and running sessions continue.
+
+Read the exact card by reference to recover the ten most recent confirmed changes, newest first. This also resolves a lost confirmation response. Read-only operators may see history. The provider drops pending previews after a restart and restores committed decisions from its signed journal, including changes to cards initially blocked in the estate.
+
+| Status | Meaning |
+|---|---|
+| 400 | Malformed JSON, invalid reference, unknown field or invalid reason |
+| 401 / 403 | Unrecognised credential / named operator lacks write permission |
+| 404 | The provider has no card with the requested reference |
+| 409 | Already in the requested state, mismatched reference or an expired, used or superseded review. Read the card again before retrying. |
+| 413 / 415 | Body exceeds 2 KiB / content type must be JSON |
+| 503 | Provider temporarily unavailable. Check the card’s history before retrying. |
 
 ## Built on
 
@@ -152,3 +191,7 @@ obligations), `emob-service` (shell, journal). See
 ## License
 
 MIT OR Apache-2.0
+
+### Public plans at a point
+
+For an opted-in public pass-through plan, the point's provider-price page and provider-side callers share `empd::public_retail_tariff`. It combines exact gross EUR rates **before** one session rating. `Empd::quote` remains available for existing library callers. The public offer includes the separate e-roaming fee and excludes recurring subscriptions from session examples. Rendering and durable price references live with the current station assignment in csmsd. Partner settlement and individual consumer invoicing are distinct from this public price lookup. [Public provider-price routes and estate setup](../csmsd/README.md#public-provider-prices)

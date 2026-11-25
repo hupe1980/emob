@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | Carries | the infrastructure and its prices | references and live state |
 //! | Changes when | somebody sends an engineer | somebody plugs in |
-//! | AFIR | Art. 20(2)(a)–(b) | Art. 20(2)(c) |
+//! | AFIR | Art. 20(2)(a)–(b) | Art. 20(2)(f) |
 //! | Wrapper | a bare `payload` | a `messageContainer` with exchange metadata |
 //!
 //! # Whose types these are
@@ -28,7 +28,7 @@ pub mod status;
 pub mod table;
 pub mod wire;
 
-pub use status::{PointUpdate, PriceUpdate, StatusPublication};
+pub use status::{Delivery, PointUpdate, PriceUpdate, StatusPublication};
 pub use table::{InformationStatus, Published, Publisher, TablePublication};
 
 use datex2::v3::afir_energy_infrastructure::{
@@ -147,6 +147,7 @@ pub(crate) const fn rate_policy(policy: RatePolicy) -> RatePolicyEnum {
 /// `[DATEX-II-Profil Tab. B.45]`.
 pub(crate) const fn point_status(status: PointStatus) -> RefillPointStatusEnum {
     match status {
+        PointStatus::Unknown => RefillPointStatusEnum::Unknown,
         PointStatus::Available => RefillPointStatusEnum::Available,
         PointStatus::Blocked => RefillPointStatusEnum::Blocked,
         PointStatus::Charging => RefillPointStatusEnum::Charging,

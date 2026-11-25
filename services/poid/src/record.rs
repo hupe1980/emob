@@ -23,6 +23,20 @@ use crate::{Accepted, Poid};
 #[serde(tag = "fact", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Event {
+    /// The dynamic receiver accepted the source positions, or delivery failed at that cut.
+    Dynamic {
+        /// Independently checkpointed dynamic feed.
+        checkpoint: crate::live::Checkpoint,
+    },
+    /// A delivery attempt, failure or acceptance after the initial destination is known.
+    Progress {
+        /// Last attempt and confirmed delivery state.
+        delivery: crate::live::DeliveryState,
+        /// Only positions newly acknowledged by this receiver.
+        changed: std::collections::BTreeMap<String, crate::live::Cursor>,
+        /// Confirmed removals from the receiver's inventory.
+        removed: Vec<String>,
+    },
     /// The access point took a snapshot, and this is what that snapshot put on
     /// the record.
     Accepted {
@@ -42,6 +56,8 @@ impl Kinded for Event {
     fn kind(&self) -> &'static str {
         match self {
             Self::Accepted { .. } => "accepted",
+            Self::Dynamic { .. } => "dynamic",
+            Self::Progress { .. } => "progress",
         }
     }
 }
@@ -77,7 +93,8 @@ impl<J: Journal> Ledger<J> {
         })
     }
 
-    fn fold(journal: &J) -> Result<Option<Accepted>, JournalError> {
+    fn fold(journal: &J) -> Result<(Option<Accepted>, crate::live::Checkpoint), JournalError> {
+        let mut dynamic = crate::live::Checkpoint::default();
         let mut held = None;
         for record in journal.records()? {
             let event: Event =
@@ -85,18 +102,39 @@ impl<J: Journal> Ledger<J> {
                     doing: "read back",
                     source,
                 })?;
-            let Event::Accepted {
-                published_at,
-                at,
-                published,
-            } = event;
-            held = Some(Accepted {
-                published_at,
-                at,
-                published,
-            });
+            match event {
+                Event::Dynamic { checkpoint } => {
+                    if checkpoint.destinations != dynamic.destinations {
+                        held = None;
+                    }
+                    dynamic = checkpoint;
+                }
+                Event::Progress {
+                    delivery,
+                    changed,
+                    removed,
+                } => {
+                    dynamic.delivery = delivery;
+                    dynamic.points.extend(changed);
+                    for id in removed {
+                        dynamic.points.remove(&id);
+                    }
+                }
+                Event::Accepted {
+                    published_at,
+                    at,
+                    published,
+                } => {
+                    dynamic.delivery.static_accepted_at = Some(at);
+                    held = Some(Accepted {
+                        published_at,
+                        at,
+                        published,
+                    });
+                }
+            }
         }
-        Ok(held)
+        Ok((held, dynamic))
     }
 
     /// What the access point last took, as the journal records it.
@@ -105,7 +143,67 @@ impl<J: Journal> Ledger<J> {
     ///
     /// As [`Self::open`].
     pub fn last_accepted(&self) -> Result<Option<Accepted>, JournalError> {
-        Self::fold(&self.journal)
+        Self::fold(&self.journal).map(|(held, _)| held)
+    }
+
+    /// Restore the dynamic receiver and its original delivery evidence.
+    ///
+    /// # Errors
+    /// A journal that cannot be read or decoded.
+    pub fn last_dynamic(&self) -> Result<crate::live::Checkpoint, JournalError> {
+        Self::fold(&self.journal).map(|(_, checkpoint)| checkpoint)
+    }
+
+    /// Commit dynamic delivery evidence before publishing the new read model.
+    ///
+    /// # Errors
+    /// A broken or unavailable signed journal stops this worker.
+    pub fn checkpoint(&mut self, checkpoint: &crate::live::Checkpoint) -> Result<(), JournalError> {
+        self.append(
+            &Actor::Timer,
+            &Event::Dynamic {
+                checkpoint: checkpoint.clone(),
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Preserve delivery evidence and any changed receiver positions in one journal record.
+    ///
+    /// # Errors
+    /// A broken or unavailable journal stops the worker.
+    pub fn progress(
+        &mut self,
+        previous: &crate::live::Checkpoint,
+        delivery: &crate::live::DeliveryState,
+        accepted: Option<&std::collections::BTreeMap<String, crate::live::Cursor>>,
+    ) -> Result<(), JournalError> {
+        let mut changed = std::collections::BTreeMap::new();
+        let mut removed = Vec::new();
+        if let Some(points) = accepted {
+            changed.extend(
+                points
+                    .iter()
+                    .filter(|(id, cursor)| previous.points.get(*id) != Some(cursor))
+                    .map(|(id, cursor)| (id.clone(), cursor.clone())),
+            );
+            removed.extend(
+                previous
+                    .points
+                    .keys()
+                    .filter(|id| !points.contains_key(*id))
+                    .cloned(),
+            );
+        }
+        self.append(
+            &Actor::Timer,
+            &Event::Progress {
+                delivery: delivery.clone(),
+                changed,
+                removed,
+            },
+        )
+        .map(|_| ())
     }
 
     /// The journal under it.
@@ -154,7 +252,17 @@ impl<J: Journal> Ledger<J> {
             at,
             published: publication.published().clone(),
         };
-        let body = serde_json::to_string(&event).map_err(|source| JournalError::Encoding {
+        self.append(by, &event)
+    }
+
+    fn append(&mut self, by: &Actor, event: &Event) -> Result<Record, JournalError> {
+        if let Some(why) = &self.halted {
+            return Err(JournalError::Encoding {
+                doing: "written after this service halted",
+                source: serde::de::Error::custom(why.clone()),
+            });
+        }
+        let body = serde_json::to_string(event).map_err(|source| JournalError::Encoding {
             doing: "written",
             source,
         })?;

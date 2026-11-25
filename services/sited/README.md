@@ -50,7 +50,7 @@ in order.
 | Variable | Default | Purpose |
 |---|---|---|
 | `EMOB_ESTATE` | `./estate.toml` | `[[operators]]` |
-| `EMOB_OPERATOR_TOKEN` | **required** | the variable `[[operators]]` names: the read model's bearer |
+| `EMOB_OPERATOR_TOKEN`, `EMOB_DESK_READ_TOKEN` | **required** | the example estate’s named operator and background read credentials |
 | `SITED_HTTP_BIND` | `127.0.0.1:9586` | health/readiness shell |
 | `EMOB_HTTP_BIND` | — | estate-wide shell address, used when `SITED_HTTP_BIND` is unset; defaults are loopback, unreachable inside a container |
 | `SITED_FAILSAFE_KW` | `4.2` | failsafe consumption limit in kW `[LPC-901/1]` — the `[BK6-22-300 Ziff. 4.5]` minimum unless the connection contract says otherwise |
@@ -62,7 +62,8 @@ Energy Guard writes its own.
 ## Running
 
 ```console
-EMOB_ESTATE=deploy/estate.example.toml EMOB_OPERATOR_TOKEN=… cargo run -p sited
+source .env    # local estate and credentials from `just dev-keys`
+cargo run -p sited
 ```
 
 Or `just up` for the whole estate (`sited`'s shell on `localhost:8087`).
