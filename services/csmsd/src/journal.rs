@@ -497,8 +497,8 @@ pub struct State {
     pub next_1_6: i32,
     /// The answer each transaction started under.
     pub authorized: BTreeMap<Key, Answer>,
-    /// Transactions whose start was refused: no event of theirs is billed.
-    pub refused: BTreeSet<Key>,
+    /// Index of each refused start in `answers`, for idempotent station retries.
+    pub refused: BTreeMap<Key, usize>,
     /// Every authorisation answer, in order — the operator's "why was this
     /// card turned away".
     pub answers: Vec<(String, Answer)>,
@@ -757,7 +757,7 @@ impl State {
             outcomes: Vec::new(),
             next_1_6: 1,
             authorized: BTreeMap::new(),
-            refused: BTreeSet::new(),
+            refused: BTreeMap::new(),
             answers: Vec::new(),
             outbox: BTreeMap::new(),
             zone,
@@ -1074,7 +1074,7 @@ pub fn apply(state: &mut State, event: Event) {
                     // 1.6 pre-start `Authorize` carries no transaction and is not
                     // counted: the start that follows asks again (SR-058).
                     state.attempt(at, &key.0, Ending::Failed(Cause::Authorisation));
-                    state.refused.insert(key);
+                    state.refused.insert(key, state.answers.len());
                 }
             }
             state.answers.push((station, answer));

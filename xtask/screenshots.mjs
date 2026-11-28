@@ -377,6 +377,9 @@ async function accessible(url, metrics, scheme, headers, then) {
   if (typeof then === "function") await send("Emulation.setEmulatedMedia", { media: "screen", features: [
     { name: "prefers-color-scheme", value: scheme }, { name: "prefers-reduced-motion", value: "reduce" }] });
   const found = [...(Array.isArray(said) ? said : []), ...await js(PAGE_CHECKS), ...await treeFindings()];
+  const navCount = await js('document.querySelectorAll("header nav.workspace-nav").length');
+  if (navCount !== (new URL(url).origin === new URL(links.heute).origin ? 1 : 0))
+    found.push("operator workspace bar missing or shown outside the desk");
   if (metrics.width <= 320) {
     const overflow = await js("document.documentElement.scrollWidth - document.documentElement.clientWidth");
     if (overflow > 0) found.push(`reflow: scrolls sideways by ${overflow} px`);
@@ -448,7 +451,7 @@ async function submitDeskForm(path, fields) {
       new URL(el.action).origin === location.origin && new URL(el.action).pathname === ${JSON.stringify(path)} &&
       (${JSON.stringify(path)} !== "/lookup" || el.elements.kind?.value === "reference"));
     if (!form) return false;
-    if (form.elements.reason) {
+    if (form.elements.reason && form.elements.blocked) {
       form.elements.reason.value = form.elements.blocked.value === "true" ? "lost" : "recovered";
     }
     for (const [name, value] of Object.entries(${JSON.stringify(fields)})) {
@@ -466,6 +469,179 @@ async function deskStep(path, fields = {}) {
   await submitDeskForm(path, fields);
   await within(loaded, `desk form ${path}`);
 }
+// Follow a rendered control, including its actual href or form action.
+async function activate(selector) {
+  const loaded = event("Page.loadEventFired");
+  const clicked = await js(`(() => {
+    const control = document.querySelector(${JSON.stringify(selector)});
+    if (!control || !control.getClientRects().length) return false;
+    setTimeout(() => control.click(), 0);
+    return true;
+  })()`);
+  if (!clicked) throw new Error(`Missing visible control: ${selector}`);
+  await within(loaded, `activate ${selector}`);
+}
+
+async function workspaceJourney() {
+  const current = await js(`document.querySelector('.workspace-nav [aria-current="location"]')?.pathname`);
+  if (current !== "/stations") return ["station workspace is not marked on its record"];
+  await js('document.querySelector(".workspace-more").focus()');
+  async function press(key, code) {
+    for (const type of ["keyDown", "keyUp"]) {
+      const event = { type, key, code: key, windowsVirtualKeyCode: code };
+      if (key === "Enter" && type === "keyDown") event.text = "\r";
+      await send("Input.dispatchKeyEvent", event);
+    }
+  }
+  await press("Enter", 13);
+  if (!await js('document.querySelector("#workspace-menu").matches(":popover-open")'))
+    return ["keyboard did not open More"];
+  const layout = await js(`(() => {
+    const bar = document.querySelector(".workspace-nav");
+    const menu = document.querySelector("#workspace-menu").getBoundingClientRect();
+    return bar.firstElementChild.offsetTop === bar.querySelector(".workspace-more").offsetTop &&
+      menu.left >= 0 && menu.right <= innerWidth && menu.bottom <= innerHeight;
+  })()`);
+  if (!layout) return ["workspace links wrap or the open menu is clipped"];
+  await press("Tab", 9);
+  if (!await js('document.querySelector("#workspace-menu").contains(document.activeElement)'))
+    return ["Tab skipped the open workspace menu"];
+  await press("Escape", 27);
+  if (!await js('!document.querySelector("#workspace-menu").matches(":popover-open") && document.activeElement.matches(".workspace-more")'))
+    return ["Escape did not close More and retain keyboard focus"];
+  const compact = await js('matchMedia("(max-width: 58rem)").matches');
+  if (compact) await press("Enter", 13);
+  const link = compact ? ".narrow-link" : ".wide-link";
+  await activate(`.workspace-nav ${link}[href^="/contracts?"]`);
+  return await js(`location.pathname === "/contracts" && document.documentElement.lang === "en" &&
+    [...document.querySelectorAll('.workspace-nav a[aria-current="page"]')].every(a => a.pathname === "/contracts") &&
+    !!document.querySelector('.workspace-nav a[aria-current="page"]')`) ? [] : ["workspace switch lost selection or language"];
+}
+
+async function fleetJourney(writeNote = false) {
+  await activate('nav[aria-label="Workspaces"] a[href^="/stations?"]');
+  if (!await js('document.documentElement.lang === "en"')) return ["lost desk language"];
+  await js('document.querySelector("input[type=search]").value = "CP-3"');
+  await activate('form[role="search"] button');
+  const search = await js("location.href");
+  const rowsFirst = await js(`(() => {
+    const map = document.querySelector("figure.map");
+    const panel = map?.closest("details");
+    const first = document.querySelector("tbody a");
+    return (!map || (panel && !panel.open)) && first && first.getBoundingClientRect().top < innerHeight;
+  })()`);
+  if (!rowsFirst) return ["first station is below the viewport or its map is expanded"];
+  await activate('tbody a[href^="/station/CP-3?"]');
+  if (!await js('document.querySelector("h1").textContent.includes("CP-3")')) return ["wrong station"];
+  if (writeNote) {
+    const note = "Shift handoff browser check";
+    const detail = await js("location.href");
+    await js(`document.querySelector("#notes summary").click()`);
+    await js(`document.querySelector("#note-text").value = ${JSON.stringify(note)}`);
+    await activate("#notes details button");
+    const removeAction = await js(`[...document.querySelectorAll("#notes li")]
+      .find(item => item.querySelector(".text")?.textContent === ${JSON.stringify(note)})
+      ?.querySelector("form")?.getAttribute("action")`);
+    if (!removeAction || await js("location.href") !== detail + "#notes") return ["saving the note lost the station, search or language"];
+    await activate(`form[action=${JSON.stringify(removeAction)}] button`);
+    if (await js("location.href") !== detail + "#notes" ||
+      await js(`[...document.querySelectorAll("#notes .text")].some(el => el.textContent === ${JSON.stringify(note)})`))
+      return ["removing the note lost the station or its working context"];
+  }
+  await activate('main .back a[href^="/stations?"]');
+  const restored = await js(`document.documentElement.lang === "en" &&
+    document.querySelector("input[type=search]")?.value === "CP-3" &&
+    new URLSearchParams(location.search).get("q") === new URL(${JSON.stringify(search)}).searchParams.get("q") &&
+    !!document.querySelector('tbody a[href^="/station/CP-3?"]')`);
+  return restored ? [] : ["station return lost the search, station or language"];
+}
+
+const portal = new URL(links.portal);
+if (portal.hostname !== "127.0.0.1" || portal.protocol !== "http:") {
+  throw new Error("Customer demo must use its loopback portal");
+}
+portal.searchParams.set("lang", "en");
+const customerKey = readFileSync(links.customer_key, "utf8").trim();
+secrets.push(customerKey);
+async function customerJourney(signedIn) {
+  if (await js(`!!document.querySelector('form[action^="/customer/logout"]')`)) {
+    await deskStep("/customer/logout");
+  }
+  if (!signedIn) return [];
+  await deskStep("/customer/login", { subject: "mika", secret: customerKey });
+  return await js(`!!document.querySelector('form[action^="/customer/document"]') &&
+    !!document.querySelector('a[href*="/r/"]')`) ? [] : ["missing issued invoice or receipt"];
+}
+const financeDesk = new URL("/receivables?lang=en", heute).href;
+async function financeJourney(stage) {
+  await deskStep("/receivables/balance", { account: "PAYER-PRIVATE", currency: "EUR" });
+  const number = await js('document.querySelector("#documents option")?.value');
+  if (!number) return ["missing issued retail invoice in the finance desk"];
+  if (stage === "balance") return [];
+  await deskStep("/receivables/review", {
+    source: "LOCAL-BANK", reference: "DEMO-PAYMENT", number, amount: "1.00",
+  });
+  return await js(`!!document.querySelector('form[action^="/receivables/confirm"]')`) ? [] : ["missing finance confirmation"];
+}
+const lineDesk = new URL("/line-credits?lang=en", heute).href;
+let lineConfirmation;
+async function lineJourney(stage) {
+  await deskStep("/line-credits/lookup", { number: links.fleet_invoice, agreement: links.fleet_agreement });
+  if (stage === "lines") return await js(`!!document.querySelector('select[name="line_id"] option')`) ? [] : ["missing attributed lines"];
+  await deskStep("/line-credits/review", { amount: "1.00", reason: "service_dispute" });
+  if (stage === "review") return await js(`!!document.querySelector('form[action^="/line-credits/confirm"]')`) ? [] : ["missing credit review"];
+  lineConfirmation ??= await js(`Object.fromEntries(new FormData(document.querySelector('form[action^="/line-credits/confirm"]')))`);
+  await deskStep("/line-credits/confirm", lineConfirmation);
+  return await js(`document.querySelector("h1")?.textContent === "Line credit issued"`) ? [] : ["missing issued line credit"];
+}
+
+const erasureDesk = new URL("/customer-erasure?lang=en", heute).href;
+async function erasureJourney(stage) {
+  await deskStep("/customer-erasure/status", { subject: "mika" });
+  if (stage === "status") return await js(`!!document.querySelector('form[action^="/customer-erasure/review"]')`) ? [] : ["missing active erasure status"];
+  if (await js(`!!document.querySelector('form[action^="/customer-erasure/review"]')`)) {
+    await deskStep("/customer-erasure/review");
+    if (stage === "review") return await js(`!!document.querySelector('form[action^="/customer-erasure/confirm"]')`) ? [] : ["missing erasure review"];
+    await deskStep("/customer-erasure/confirm");
+  }
+  return await js(`document.querySelector("h1")?.textContent === "Erasure receipt"`) ? [] : ["missing durable erasure receipt"];
+}
+
+const withdrawalDesk = new URL("/contracts/withdrawal?lang=en", heute).href;
+async function withdrawalJourney(stage) {
+  await deskStep("/contracts/withdrawal/lookup", { agreement: links.agreement });
+  if (stage === "intake") return await js(`!!document.querySelector('input[name="received_at"]')`) ? [] : ["missing intake time"];
+  if (await js(`!!document.querySelector('form[action^="/contracts/withdrawal/intake"]')`)) {
+    await deskStep("/contracts/withdrawal/intake", {
+      request_ref: "DEMO-DECLARATION", channel: "email",
+      received_at: new Date(links.received_at).toISOString().slice(0, 19),
+    });
+  }
+  if (stage === "case") return await js(`!!document.querySelector('form[action^="/contracts/withdrawal/review"]')`) ? [] : ["missing recorded withdrawal"];
+  await deskStep("/contracts/withdrawal/review", {
+    evidence_ref: "DEMO-DOSSIER", outcome: "hold", billing: "review_required",
+  });
+  return await js(`!!document.querySelector('form[action^="/contracts/withdrawal/confirm"]')`) ? [] : ["missing withdrawal decision review"];
+}
+
+async function withdrawalCreditJourney(stage) {
+  await deskStep("/contracts/withdrawal/lookup", { agreement: links.agreement });
+  if (await js(`!!document.querySelector('form[action^="/contracts/withdrawal/review"]')`)) {
+    await deskStep("/contracts/withdrawal/review", {
+      evidence_ref: "DEMO-DOSSIER", outcome: "approve", billing: "review_required",
+    });
+    await deskStep("/contracts/withdrawal/confirm");
+  }
+  await deskStep("/contracts/withdrawal/evidence", { number: links.retail_invoice });
+  if (stage === "evidence") return await js(`document.body.innerText.includes("Payment allocations")`) ? [] : ["missing allocation evidence"];
+  if (await js(`!!document.querySelector('form[action^="/contracts/withdrawal/credit-review"]')`)) {
+    await deskStep("/contracts/withdrawal/credit-review");
+    if (stage === "review") return await js(`!!document.querySelector('form[action^="/contracts/withdrawal/credit-confirm"]')`) ? [] : ["missing reviewed credit"];
+    await deskStep("/contracts/withdrawal/credit-confirm");
+  }
+  return await js(`document.body.innerText.includes("Credit issued")`) ? [] : ["missing issued credit"];
+}
+
 async function cardJourney(stage) {
   await deskStep("/lookup");
   if (!await js('!!document.querySelector("#card-history")')) return ["missing card history"];
@@ -493,7 +669,7 @@ async function enrolmentJourney(stage) {
     const selection = await js(`[...document.querySelectorAll("select[name=selection] option")]
       .find(option => option.value.endsWith("|standard"))?.value`);
     if (!selection) return ["missing eligible provider offer"];
-    await deskStep("/contracts/preview", { selection, stock: "STOCK-1004" });
+    await deskStep("/contracts/preview", { selection, stock: "STOCK-1004", account: "PAYER-FLEET" });
     const operation = await js('document.querySelector("input[name=operation]")?.value');
     if (!operation || !await js('document.body.innerText.includes("Gross contract prices")')) {
       return ["missing reviewed price or confirmation"];
@@ -512,13 +688,19 @@ if (A11Y) {
   const printable = await js(`(() => {
     const timeline = document.querySelector(".timeline");
     return timeline?.getClientRects().length && timeline.querySelector("time") &&
-      ![...document.querySelectorAll("main nav, main form")].some(el => el.getClientRects().length);
+      ![...document.querySelectorAll("header .workspace-nav, main nav, main form")].some(el => el.getClientRects().length);
   })()`);
   if (!printable) problems.push("printed session: missing timeline or visible navigation/actions");
   await send("Emulation.setEmulatedMedia", { media: "" });
-  const lookup = new URL("/lookup?lang=de", heute);
   const pages = [
-    ["Heute", heute, basic],
+    ["Heute", heute, basic, async () => {
+      await js(`document.querySelector('a[href="#queue"]')?.focus()`);
+      for (const type of ["keyDown", "keyUp"]) {
+        await send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
+      }
+      const queue = await js('location.hash === "#queue" && document.activeElement?.id === "queue"');
+      return queue ? [] : ["shift shortcut did not move focus to the queue"];
+    }],
     ["session evidence", session.href, basic,
       `(() => document.querySelector("h1")?.textContent === "Session evidence" &&
         document.querySelector("main time") && document.querySelector('form[method="post"]')
@@ -526,15 +708,49 @@ if (A11Y) {
     ...["detail", "review", "result"].map(stage => [
       `card ${stage}`, session.href, basic, () => cardJourney(stage),
     ]),
+    ["withdrawal lookup", withdrawalDesk, basic],
+    ...["intake", "case", "review"].map(stage => [
+      `withdrawal ${stage}`, withdrawalDesk, basic, () => withdrawalJourney(stage),
+    ]),
+    ["finance import", financeDesk, basic],
+    ...["balance", "review"].map(stage => [
+      `finance ${stage}`, financeDesk, basic, () => financeJourney(stage),
+    ]),
+    ["customer sign-in", portal.href, {}, () => customerJourney(false)],
+    ["customer overview", portal.href, {}, () => customerJourney(true)],
+    ["customer invoice balance", portal.href, {}, async () => {
+      const issues = await customerJourney(true);
+      if (issues.length) return issues;
+      const button = 'form[action^="/customer/balance"] button';
+      await activate(button);
+      if (!await js('location.search.includes("page=0") && !location.search.includes("number=")')) return ["invalid balance navigation state"];
+      await activate('main a[href^="/customer/?"]');
+      if (!await js('location.search.includes("page=0")')) return ["lost invoice history position"];
+      await activate(button);
+      return await js(`document.querySelector("h1")?.textContent === "Invoice balance"`) ? [] : ["missing payer balance"];
+    }],
+    ["customer access", new URL("/customer-access?lang=en", heute).href, basic, async () => {
+      await deskStep("/customer-access/open", { subject: "mika" });
+      return await js(`document.body.textContent.includes("PAYER-PRIVATE")`) ? [] : ["missing payer grant"];
+    }],
     ["driver contracts", contracts.href, basic],
+    ["retail invoices", new URL("/retail-invoices?lang=en", heute).href, basic],
+    ["retail month review", new URL("/retail-invoices?lang=en", heute).href, basic, async () => {
+      await deskStep("/retail-invoices/review", { account: "PAYER-FLEET", period: "2025-01" });
+      return await js(`document.body.innerText.includes("PAYER-FLEET") && !document.querySelector('form[action^="/retail-invoices/close"]')`) ? [] : ["expected a held month without issue controls"];
+    }],
     ...["review", "receipt"].map(stage => [
       `enrolment ${stage}`, contracts.href, basic, () => enrolmentJourney(stage),
     ]),
-    ["operator lookup", lookup.href, basic,
-      `(() => document.querySelector('form[method="post"] input[name="value"]')
-        ? [] : ["missing private lookup form"])()`],
+    ["operator lookup from session evidence", session.href, basic, async () => {
+      await activate('nav a[href^="/lookup?"]');
+      return await js(`location.search === "?lang=en" && !!document.querySelector('form[method="post"] input[name="value"]')`)
+        ? [] : ["missing direct private lookup or lost language"];
+    }],
     ["station", station, basic],
-    ["stations", stationList, basic],
+    ["switch workspace from station", new URL("/station/CP-3?lang=en", heute).href, basic, workspaceJourney],
+    ["stations via Today and station detail", new URL("/?lang=en", heute).href, basic, fleetJourney],
+    ["station note handoff", new URL("/?lang=en", heute).href, basic, () => fleetJourney(true)],
     ["new station", stationNew, basic],
     ["change station", stationEdit, basic],
     ["price", price, {}, PRICE_FIRST],
@@ -554,6 +770,17 @@ if (A11Y) {
     ["receipt (refused)", refused],
     ["receipt (checked)", receipt, {}, SELF_CHECK],
     ...(links.invoice ? [["invoice", `${links.invoice}?lang=de`]] : []),
+    ...["evidence", "review", "issued"].map(stage => [
+      `withdrawal credit ${stage}`, withdrawalDesk, basic, () => withdrawalCreditJourney(stage),
+    ]),
+    ["line credit lookup", lineDesk, basic],
+    ...["lines", "review", "issued"].map(stage => [
+      `line credit ${stage}`, lineDesk, basic, () => lineJourney(stage),
+    ]),
+    ["erasure entry", erasureDesk, basic],
+    ...["status", "review", "receipt"].map(stage => [
+      `erasure ${stage}`, erasureDesk, basic, () => erasureJourney(stage),
+    ]),
   ];
   let checked = 0;
   for (const [name, url, headers = {}, then] of pages) {
@@ -585,10 +812,26 @@ await inspect("receipt", receipt);
 await inspect("refused receipt", refused);
 if (links.inbox) await inspect("partner inbox", links.inbox);
 
+await shot("operator-workspaces-mobile.webp", {
+  url: new URL("/station/CP-3?lang=en", heute).href, metrics: { ...PHONE, width: 320 }, headers: basic,
+  then: async () => {
+    await js('document.querySelector(".workspace-more").click()');
+    return await js('document.querySelector("#workspace-menu").matches(":popover-open")') ? [] : ["More did not open"];
+  },
+});
 await shot("heute-light.webp", { url: heute, metrics: DESKTOP, headers: basic });
 await shot("heute-dark.webp", { url: heute, metrics: DESKTOP, scheme: "dark", headers: basic });
 await shot("heute-mobile-light.webp", { url: heute, metrics: PHONE, headers: basic });
 await shot("heute-mobile-dark.webp", { url: heute, metrics: PHONE, scheme: "dark", headers: basic });
+for (const scheme of ["light", "dark"]) {
+  await shot(`customer-overview-${scheme}.webp`, { url: portal.href, metrics: DESKTOP, scheme, then: () => customerJourney(true) });
+}
+for (const scheme of ["light", "dark"]) {
+  await shot(`line-credit-review-${scheme}.webp`, { url: lineDesk, metrics: DESKTOP, headers: basic, scheme, then: () => lineJourney("review") });
+  await shot(`erasure-review-${scheme}.webp`, { url: erasureDesk, metrics: DESKTOP, headers: basic, scheme, then: () => erasureJourney("review") });
+  await shot(`withdrawal-review-${scheme}.webp`, { url: withdrawalDesk, metrics: DESKTOP, headers: basic, scheme, then: () => withdrawalJourney("review") });
+  await shot(`payment-review-${scheme}.webp`, { url: financeDesk, metrics: DESKTOP, headers: basic, scheme, then: () => financeJourney("review") });
+}
 await shot("session-evidence-light.webp", { url: session.href, metrics: DESKTOP, headers: basic });
 await shot("session-evidence-dark.webp", { url: session.href, metrics: DESKTOP, scheme: "dark", headers: basic });
 await shot("enrolment-review-light.webp", { url: contracts.href, metrics: DESKTOP, headers: basic, then: () => enrolmentJourney("review") });

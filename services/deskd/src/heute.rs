@@ -47,6 +47,10 @@ pub const SCRIPT_PATH: &str = "/ui/heute.js";
 /// Everything one render reads.
 #[derive(Debug)]
 pub struct Snapshot {
+    /// The estate has a receivables service.
+    pub accounting: bool,
+    /// Grants of the signed-in operator.
+    pub access: emob_service::authority::OperatorAccess,
     /// `csmsd`'s read model.
     pub csmsd: Source<Csmsd>,
     /// `billd`'s.
@@ -198,12 +202,12 @@ pub fn render(snapshot: &Snapshot, lang: Lang) -> String {
         && snapshot.journals.iter().all(|seen| seen.alarm.is_none());
     let waiting: u64 = groups.iter().map(|(_, _, group)| group.len()).sum();
 
-    let mut body = head(snapshot, lang);
+    let mut body = head(snapshot, lang, waiting);
     body.push_str(&rate(snapshot, lang));
 
     let _ = write!(
         body,
-        "<section id=\"queue\" aria-labelledby=\"queue-h\"><h2 id=\"queue-h\">{title}{count}</h2>",
+        "<section id=\"queue\" tabindex=\"-1\" aria-labelledby=\"queue-h\"><h2 id=\"queue-h\">{title}{count}</h2>",
         title = lang.pick("Braucht dich heute", "Needs you today"),
         count = if waiting > 0 {
             format!(" <span class=\"count\">{waiting}</span>")
@@ -233,7 +237,7 @@ pub fn render(snapshot: &Snapshot, lang: Lang) -> String {
     body.push_str(&journals(snapshot, lang));
     body.push_str(&footer(snapshot, lang));
 
-    ui::page(
+    crate::navigation::today(
         &ui::Shell {
             title: lang.pick("Heute", "Today"),
             place: lang.pick("Betrieb", "Operations"),
@@ -242,6 +246,8 @@ pub fn render(snapshot: &Snapshot, lang: Lang) -> String {
             script: Some(SCRIPT_PATH),
         },
         &body,
+        snapshot.access,
+        snapshot.accounting,
     )
 }
 
@@ -338,17 +344,21 @@ fn publication(snapshot: &Snapshot, lang: Lang) -> String {
 }
 
 /// The page's title, its date and clock, and the other language.
-fn head(snapshot: &Snapshot, lang: Lang) -> String {
+fn head(snapshot: &Snapshot, lang: Lang, waiting: u64) -> String {
     let local = snapshot.zone.local(snapshot.now);
     let today = local.date;
+    let queue = if waiting == 0 {
+        String::new()
+    } else {
+        format!(
+            r##"<a href="#queue" class="btn ghost">{label} ({waiting})</a>"##,
+            label = lang.pick("Offene Aufgaben", "Open tasks")
+        )
+    };
     format!(
-        "<div class=\"head\"><h1>{h1}</h1><p class=\"when\">{date} · {stand} \
+        "<div class=\"head\"><div class=\"shift-title\"><h1>{h1}</h1>{queue}</div><p class=\"when\">{date} · {stand} \
          <time datetime=\"{iso}\">{clock}</time> · <a href=\"{other}\" lang=\"{other_lang}\" \
-         hreflang=\"{other_lang}\">{other_name}</a> · <a href=\"/stations\">{stations}</a> · <a href=\"/lookup?lang={tag}\">{lookup}</a> · <a href=\"/contracts?lang={tag}\">{contracts}</a></p></div>",
-        stations = lang.pick("Stationen", "Stations"),
-        tag = lang.tag(),
-        lookup = lang.pick("Vorgang oder Karte suchen", "Find a session or card"),
-        contracts = lang.pick("Ladeverträge", "Driver contracts"),
+         hreflang=\"{other_lang}\">{other_name}</a></p></div>",
         h1 = lang.pick("Heute", "Today"),
         date = escape(&format!(
             "{}, {}",
@@ -640,7 +650,8 @@ fn window(lang: Lang, id: &str, title: &str, window: &Window, none: &str) -> Str
             for point in &window.worst {
                 let _ = write!(
                     out,
-                    "<li><a href=\"{href}\">{name}</a><span class=\"num\">{percent}&#8239;% · {of}</span></li>",
+                    "<li><a href=\"{href}?lang={tag}\">{name}</a><span class=\"num\">{percent}&#8239;% · {of}</span></li>",
+                    tag = lang.tag(),
                     href = escape(&crate::station::href(&point.point)),
                     name = escape(&point.point),
                     percent = point
@@ -808,7 +819,10 @@ fn silent(snapshot: &Snapshot, lang: Lang, link: Links) -> Group {
                     )),
                 badge = badge(Tone::Warn, "◌", lang.pick("Still", "Silent")),
                 identity = escape(&station.identity),
-                href = escape(&crate::station::href(&station.identity)),
+                href = escape(
+                    &crate::stations::FleetView::default()
+                        .href(&crate::station::href(&station.identity), lang)
+                ),
                 evse = escape(&station.evse),
                 says = lang.pick("Kein Lebenszeichen seit", "Nothing heard since"),
                 // What the person who drives out reads first (spec 023).
@@ -853,8 +867,14 @@ fn by_network(networks: &[crate::model::NetworkShare], lang: Lang) -> String {
         .map(|share| {
             let name = share.carrier.as_deref().unwrap_or(&share.network);
             format!(
-                "<a href=\"/stations?q={network}+offline\"><strong>{name}</strong></a> {count}",
-                network = escape(&share.network),
+                "<a href=\"{href}\"><strong>{name}</strong></a> {count}",
+                href = escape(
+                    &crate::stations::FleetView {
+                        query: &format!("{} offline", share.network),
+                        ..Default::default()
+                    }
+                    .href("/stations", lang)
+                ),
                 name = escape(name),
                 count = match lang {
                     Lang::De => format!("{} von {} still", share.silent, share.stations),

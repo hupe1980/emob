@@ -9,7 +9,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use emob_core::PartyId;
 use emob_poi::site::{Address, ChargingPoint, Connector, Coordinates, Facility, Site};
 use emob_roam::{Partner as RoamPartner, PartnerRegistry, Wire};
 use emob_service::estate::{
@@ -192,6 +191,7 @@ pub fn registry(estate: &Estate) -> PartnerRegistry {
         PartnerRegistry::new(estate.parties.operator.clone()),
         |registry, partner| {
             let mut entry = RoamPartner::emsp(partner.party.clone());
+            entry.cdr_owners.clone_from(&partner.cdr_owners);
             if partner.signed_data {
                 entry = entry.on_signed_data();
             }
@@ -208,25 +208,33 @@ pub fn registry(estate: &Estate) -> PartnerRegistry {
 /// # Errors
 ///
 /// A party id OCPI cannot carry.
-pub fn credentials(operator: &PartyId, public_url: &str) -> Result<Credentials> {
+pub fn credentials(parties: &Parties, public_url: &str) -> Result<Credentials> {
+    use ocpi_kit::v2_3_0::types::Role;
+    let mut roles = Vec::with_capacity(2);
+    for (party, role) in [
+        (&parties.operator, Role::Cpo),
+        (&parties.provider, Role::Emsp),
+    ] {
+        roles.push(
+            CredentialsRole::builder()
+                .role(role)
+                .business_details(
+                    ocpi_kit::v2_3_0::locations::BusinessDetails::builder()
+                        .name(party.to_string())
+                        .build(),
+                )
+                .party_id(CiString::new(party.party_id()).map_err(anyhow::Error::msg)?)
+                .country_code(CiString::new(party.country_code()).map_err(anyhow::Error::msg)?)
+                .build(),
+        );
+    }
     Ok(Credentials::builder()
         .token(OcpiString::<64>::new("replaced-when-answering").map_err(anyhow::Error::msg)?)
         .url(KitUrl::new_lenient(format!(
             "{}/versions",
             public_url.trim_end_matches('/')
         )))
-        .roles(vec![
-            CredentialsRole::builder()
-                .role(ocpi_kit::v2_3_0::types::Role::Cpo)
-                .business_details(
-                    ocpi_kit::v2_3_0::locations::BusinessDetails::builder()
-                        .name(operator.to_string())
-                        .build(),
-                )
-                .party_id(CiString::new(operator.party_id()).map_err(anyhow::Error::msg)?)
-                .country_code(CiString::new(operator.country_code()).map_err(anyhow::Error::msg)?)
-                .build(),
-        ])
+        .roles(roles)
         .build())
 }
 
@@ -343,7 +351,7 @@ pub async fn run(options: Options) -> Result<Running> {
     let config = client_config(&estate.roaming);
     let base = KitUrl::new_lenient(estate.roaming.public_url.trim_end_matches('/').to_owned());
     let handshake = Handshake::new(
-        credentials(&estate.parties.operator, &estate.roaming.public_url)?,
+        credentials(&estate.parties, &estate.roaming.public_url)?,
         Arc::clone(&node),
         mint(),
         config.clone(),
@@ -428,7 +436,11 @@ pub async fn drain(service: &Mutex<Node<Journal>>, dispatcher: &Dispatcher, reac
         let Some(to) = lock(service)
             .state()
             .peers()
-            .for_party(consignment.recipient())
+            .registered()
+            .find(|peer| {
+                peer.roles
+                    .contains(&(consignment.recipient().clone(), emob_core::Role::Emsp))
+            })
             .cloned()
         else {
             tracing::debug!(key = %consignment.key, recipient = %consignment.recipient(), "no platform has registered for this party yet, so the record stays owed");

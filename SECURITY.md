@@ -30,7 +30,7 @@ Report issues against the current development branch. The project accepts breaki
 
 ## Scope
 
-Report issues in the workspace crates, the operator and driver interfaces, the Python test client and the nine services built here. These are `csmsd`, `roamd`, `billd`, `empd`, `poid`, `tarifd`, `sited`, `deskd` and `agentd`. The known
+Report issues in the workspace crates, the operator and driver interfaces, the Python test client and the eleven services built here. These are `csmsd`, `roamd`, `billd`, `empd`, `poid`, `tarifd`, `sited`, `deskd`, `portald`, `accountingd` and `agentd`. The known
 threats, their status and the open risks are in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 Defects in a protocol kit this workspace stands on (`ocpp-kit`, `ocpi-kit`,

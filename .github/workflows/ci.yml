@@ -105,7 +105,7 @@ jobs:
           args: --manifest-path emobtest/Cargo.toml --out dist
       - name: Test the wheel, lint the Python
         run: |
-          pip install pytest ruff
+          pip install pytest ruff openapi-spec-validator==0.7.2
           pip install --no-deps dist/*.whl
           cd emobtest && pytest -q && ruff check . && ruff format --check .
       # emob driven from outside: the estate's daemons, and emobtest's
@@ -115,8 +115,8 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
-      - name: Drive the estate (just e2e)
-        run: just e2e
+      - name: Check replacement interfaces against the estate
+        run: just interfaces
 
   recovery:
     name: Isolated recovery drill
@@ -179,19 +179,15 @@ jobs:
       - run: cargo check -p ${{ matrix.crate }} --all-features
 
   msrv:
-    name: MSRV 1.94
+    name: MSRV 1.96
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
-          toolchain: 1.94
+          toolchain: 1.96
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
-      # Not `--workspace`: `emob-roam` promises 1.96 because `ocpi-kit` does,
-      # and raising the shared floor would make every downstream pay for a wire
-      # it does not use. `just msrv` holds the per-crate list, so the promise is
-      # checked where it is made and defined in one place.
       - run: just msrv
 
   wasm:

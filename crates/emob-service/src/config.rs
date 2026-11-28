@@ -11,9 +11,8 @@ use serde::de::DeserializeOwned;
 /// secret, a database URL with a password in it. The commonest way each of them
 /// escapes is not an attack — it is a `tracing::info!(?settings)` written while
 /// debugging something else and never taken out.
-#[derive(Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(transparent))]
+#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(transparent)]
 pub struct Secret(String);
 
 impl Secret {

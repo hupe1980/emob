@@ -1,0 +1,22 @@
+[package]
+name = "accountingd"
+description = "Standalone retail receivables, statement import and payment allocation"
+publish = false
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+emob-core = { workspace = true, features = ["serde"] }
+emob-service.workspace = true
+hex.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "query"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "sync"] }

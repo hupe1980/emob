@@ -143,17 +143,28 @@ pub enum Refusal {
     },
 }
 
-/// Whether a delivery is a sample, marked `"emobtest": true` on the envelope.
+/// Read a signed CDR addressed to either estate receiver.
 ///
-/// `emob subscribers test` and `emobtest` send them, and a receiver takes one
-/// and never books it — the event schemas' own rule. Asked after the signature
-/// holds: a sample is genuine too, or it is refused like any other delivery.
-#[must_use]
-pub fn is_test(body: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|event| event.get("emobtest").and_then(serde_json::Value::as_bool))
-        .unwrap_or(false)
+/// A conforming dry run returns `None` and never reaches settlement. Call after verifying the
+/// signature and freshness of the raw body.
+///
+/// # Errors
+///
+/// Refuses an unexpected source, type, delivery ID or malformed event.
+pub fn open_cdr<D: DeserializeOwned>(body: &[u8], delivery_id: &str) -> Result<Option<D>, Refusal> {
+    let event = open::<Box<serde_json::value::RawValue>>(body, crate::events::cdr::ISSUED)?;
+    if event.source != "urn:emob:csmsd" || event.id != delivery_id {
+        return Err(Refusal::Malformed(
+            "unexpected CDR source or event id".into(),
+        ));
+    }
+    match event.extensions.get("emobtest") {
+        Some(serde_json::Value::Bool(true)) => Ok(None),
+        None | Some(serde_json::Value::Bool(false)) => serde_json::from_str(event.data.get())
+            .map(Some)
+            .map_err(|error| Refusal::Malformed(error.to_string())),
+        Some(_) => Err(Refusal::Malformed("emobtest must be a boolean".into())),
+    }
 }
 
 /// Read a body as an event of exactly one type.
@@ -184,15 +195,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_sample_is_told_from_a_record_by_its_mark_alone() {
-        assert!(is_test(br#"{"type":"de.emob.cdr.issued","emobtest":true}"#));
-        assert!(!is_test(br#"{"type":"de.emob.cdr.issued"}"#));
-        assert!(
-            !is_test(br#"{"emobtest":"true"}"#),
-            "a boolean, not a string"
-        );
-        assert!(!is_test(b"not json"));
+    fn a_signed_sample_still_has_to_identify_its_source_type_and_delivery() {
+        let sample = |daemon, kind| {
+            let mut event = CloudEvent::new("sample-1", daemon, kind, ());
+            event.extensions.insert("emobtest".into(), true.into());
+            serde_json::to_vec(&event).unwrap()
+        };
+        let body = sample("csmsd", events::cdr::ISSUED);
+        assert!(open_cdr::<String>(&body, "sample-1").unwrap().is_none());
+        assert!(open_cdr::<String>(&body, "another").is_err());
+        assert!(open_cdr::<String>(&sample("billd", events::cdr::ISSUED), "sample-1").is_err());
+        assert!(open_cdr::<String>(&sample("csmsd", events::invoice::ISSUED), "sample-1").is_err());
     }
+
     use crate::events;
 
     fn at() -> time::OffsetDateTime {

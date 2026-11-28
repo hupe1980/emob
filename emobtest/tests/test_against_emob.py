@@ -24,12 +24,16 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 from html.parser import HTMLParser
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
 import emobtest as et
+from emobtest import conformance
 
 CSMSD = os.environ.get("EMOB_CSMSD", "http://127.0.0.1:9001")
 TOKEN = os.environ.get("EMOB_OPERATOR_TOKEN")
@@ -99,6 +103,41 @@ def onboarded() -> dict[str, tuple[str, str]]:
 def cp(request, station, onboarded):
     identity, password = onboarded[request.param]
     return station(identity, password=password, ocpp=request.param, **ESTATE_METER)
+
+
+def test_published_integration_paths_answer_on_their_reference_services(capsys):
+    if not os.getenv("EMOB_TEST_ESTATE") and not all(
+        os.getenv(key) for key in ("EMOB_SERVICE_TOKEN", "EMOB_WEBHOOK_SECRET")
+    ):
+        pytest.skip("set service and webhook credentials to probe the integration ports")
+    contract = Path(__file__).resolve().parents[2] / "schemas/openapi.json"
+    paths = {
+        op["operationId"]: path
+        for path, item in json.loads(contract.read_text())["paths"].items()
+        for method, op in item.items()
+        if method in ("post", "get")
+    }
+    tarifd = os.environ.get("EMOB_TARIFD", "http://127.0.0.1:9581")
+    reports = [("tarifd", conformance.tariff(tarifd, "ad-hoc"))]
+    empd = os.environ.get("EMOB_EMPD", "http://127.0.0.1:9585") + paths["authorizeCharging"]
+    reports.append(
+        (
+            "empd",
+            conformance.authorize(
+                empd, os.environ["EMOB_SERVICE_TOKEN"], known=KNOWN, blocked=BLOCKED
+            ),
+        )
+    )
+    for service, port in (("billd", 9584), ("roamd", 9583)):
+        url = os.environ.get(f"EMOB_{service.upper()}", f"http://127.0.0.1:{port}")
+        report = conformance.receiver(
+            url + paths["receiveChargeDetailRecord"], os.environ["EMOB_WEBHOOK_SECRET"]
+        )
+        reports.append((service, report))
+    for owner, report in reports:
+        report.assert_passed()
+        with capsys.disabled():
+            print(f"{owner} | {report.suite} | {len(report.results)} checks passed")
 
 
 def test_a_session_bills_what_the_meter_signed(cp):
@@ -415,7 +454,7 @@ def test_enrol_a_stocked_card_at_its_agreed_point(station, onboarded):
         value for value in listing.options["selection"] if value.startswith("DE*ABC*E00001|")
     )
     preview_path, fields = listing.form("/contracts/preview")
-    fields.update(selection=selected, stock=STOCK_CODE)
+    fields.update(selection=selected, stock=STOCK_CODE, account="PAYER-FLEET")
     for token, origin in (
         (os.environ["EMOB_DESK_READ_TOKEN"], None),
         (TOKEN, "https://other.example"),
@@ -437,30 +476,43 @@ def test_enrol_a_stocked_card_at_its_agreed_point(station, onboarded):
     assert STOCK_UID not in receipt and STOCK_CODE not in receipt
     assert all(operation not in href for href in _DeskPage(receipt).links)
     assert _read_desk(confirm_path, form) == receipt
-    billed = cp.charge(card=STOCK_UID, minutes=5).assert_accepted()
+    usage_start = datetime.fromisoformat(os.environ["EMOB_TEST_USAGE_START"])
+    billed = cp.charge(card=STOCK_UID, minutes=5, started_at=usage_start).assert_accepted()
     assert _decision("CP-1", billed.transaction)["billed"]
+    # A second driver shares the payer, but has a separate card and agreement.
+    review_two = _read_desk(preview_path, {**fields, "stock": "STOCK-1005"})
+    confirm_two, form_two = _DeskPage(review_two).form("/contracts/confirm")
+    receipt_two = _read_desk(confirm_two, form_two)
+    assert form_two["operation"] != operation and "PAYER-FLEET" in receipt_two
+    second = cp.charge(
+        card="04AB0000000005", minutes=10, started_at=usage_start + timedelta(hours=1)
+    ).assert_accepted()
+    refused = cp.charge(
+        card="04AB0000000005",
+        minutes=5,
+        fault="tampered",
+        started_at=usage_start + timedelta(hours=2),
+    ).assert_accepted()
+    assert not _decision("CP-1", refused.transaction)["billed"]
+    retail = {
+        "period": usage_start.strftime("%Y-%m"),
+        "agreements": [operation, form_two["operation"]],
+        "session_kwh": [str(billed.kwh), str(second.kwh)],
+    }
+    private = _read_desk(
+        preview_path, {**fields, "account": "PAYER-PRIVATE", "stock": "STOCK-PRIVATE"}
+    )
+    private_confirm, private_fields = _DeskPage(private).form("/contracts/confirm")
+    assert "PAYER-PRIVATE" in _read_desk(private_confirm, private_fields)
+    retail["private_agreement"] = private_fields["operation"]
+    Path(os.environ["EMOB_TEST_INVOICE"]).write_text(json.dumps(retail))
     identity, password = onboarded["2.1"]
     other = station(identity, password=password, ocpp="2.1", **ESTATE_METER)
     other.charge(card=STOCK_UID, minutes=5).assert_refused("Invalid")
     Path(os.environ["EMOB_TEST_AGREEMENT"]).write_text(operation)
 
 
-@pytest.mark.skipif(
-    os.environ.get("EMOB_TEST_ESTATE") != "replayed", reason="after private provider restart"
-)
-def test_native_agreement_survives_restart_and_offer_withdrawal(station):
-    """native-driver-enrolment/SR-304. Reopen the same agreement after real replay."""
-    operation = Path(os.environ["EMOB_TEST_AGREEMENT"]).read_text()
-    reader = os.environ["EMOB_DESK_READ_TOKEN"]
-    page = _DeskPage(_read_desk("/contracts?lang=en", token=reader))
-    assert not any(action.startswith("/contracts/preview") for action, _ in page.forms)
-    path, fields = page.form("/contracts/lookup")
-    receipt = _read_desk(path, {**fields, "agreement": operation}, token=reader)
-    repeated = _read_desk("/contracts/confirm?lang=en", {"operation": operation})
-    assert receipt == repeated and operation in receipt and "Agreement issued" in receipt
-    cp = station("CP-1", password=CP1_KEY, ocpp="1.6", **ESTATE_METER)
-    cp.charge(card=STOCK_UID, minutes=5).assert_accepted()
-    # Withdraw publication from the live registry, then present the same physical card again.
+def _set_point_offer(published):
     edit = _DeskPage(_read_desk("/station/CP-1/edit?lang=en"))
     path, fields = edit.form("/station/CP-1/edit")
     fields.update(
@@ -481,12 +533,40 @@ def test_native_agreement_survives_restart_and_offer_withdrawal(station):
         latitude="52.5318",
         longitude="13.3849",
         time_zone="Europe/Berlin",
-        reason="End the local offer",
-        publicly_accessible="false",
+        reason="Publish the local offer" if published else "End the local offer",
+        publicly_accessible=str(published).lower(),
         show_price="false",
         fully_renewable="false",
     )
     _read_desk(path, fields)
+
+
+@pytest.mark.skipif(
+    os.environ.get("EMOB_TEST_ESTATE") != "replayed", reason="after private provider restart"
+)
+def test_native_agreement_survives_restart_and_offer_withdrawal(station):
+    """native-driver-enrolment/SR-304. Reopen the same agreement after real replay."""
+    operation = Path(os.environ["EMOB_TEST_AGREEMENT"]).read_text()
+    reader = os.environ["EMOB_DESK_READ_TOKEN"]
+    page = _DeskPage(_read_desk("/contracts?lang=en", token=reader))
+    assert not any(action.startswith("/contracts/preview") for action, _ in page.forms)
+    path, fields = page.form("/contracts/lookup")
+    receipt = _read_desk(path, {**fields, "agreement": operation}, token=reader)
+    repeated = _read_desk("/contracts/confirm?lang=en", {"operation": operation})
+    assert repeated == _read_desk(path, {**fields, "agreement": operation})
+    assert operation in receipt and "Agreement issued" in receipt and "PAYER-FLEET" in receipt
+    assert "/contracts/change/preview" not in receipt and "/contracts/change/preview" in repeated
+    cp = station("CP-1", password=CP1_KEY, ocpp="1.6", **ESTATE_METER)
+    usage_start = datetime.fromisoformat(os.environ["EMOB_TEST_USAGE_START"])
+    charged = cp.charge(
+        card=STOCK_UID, minutes=5, started_at=usage_start + timedelta(hours=3)
+    ).assert_accepted()
+    retail_path = Path(os.environ["EMOB_TEST_INVOICE"])
+    retail = json.loads(retail_path.read_text())
+    retail["session_kwh"].append(str(charged.kwh))
+    retail_path.write_text(json.dumps(retail))
+    # Withdraw publication from the live registry, then present the same physical card again.
+    _set_point_offer(False)
     cp.charge(card=STOCK_UID, minutes=5).assert_refused("Invalid")
     cp.charge(card=OTHER, minutes=5).assert_accepted()
     with pytest.raises(urllib.error.HTTPError) as refused:
@@ -500,4 +580,170 @@ def test_native_agreement_survives_restart_and_offer_withdrawal(station):
 
     assert (
         _read_desk("/contracts/lookup?lang=en", {"agreement": operation}, token=reader) == receipt
+    )
+
+
+@pytest.mark.skipif(os.environ.get("EMOB_TEST_ESTATE") != "closed", reason="after billing cutoff")
+def test_close_the_fleet_billing_month():
+    """driver-monthly-invoice/SR-305. Check reader, writer and payer boundaries."""
+    path = Path(os.environ["EMOB_TEST_INVOICE"])
+    expected = json.loads(path.read_text())
+    reader = os.environ["EMOB_DESK_READ_TOKEN"]
+    with pytest.raises(urllib.error.HTTPError) as anonymous:
+        urllib.request.urlopen(os.environ["EMOB_DESKD"] + "/retail-invoices", timeout=5)
+    with anonymous.value as response:
+        assert response.code == 401
+    page = _DeskPage(_read_desk("/retail-invoices?lang=en"))
+    assert set(page.options["account"]) == {"PAYER-FLEET", "PAYER-PRIVATE"}
+    review_path, request = page.form("/retail-invoices/review")
+    request.update(account="PAYER-FLEET", period=expected["period"])
+    deadline = time.monotonic() + 15
+    while True:
+        preview = _read_desk(review_path, request, token=reader)
+        if preview.count("Charging session ·") == len(expected["session_kwh"]):
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError("The billing owner did not include all verified fleet charges")
+        time.sleep(0.15)
+    assert preview.count("Monthly fee ·") == 2
+    assert "/retail-invoices/close?" not in preview
+    for agreement in expected["agreements"]:
+        assert agreement in preview
+    preview = _read_desk(review_path, request, token=os.environ["EMOB_CASE_FINANCE_TOKEN"])
+    close_path, form = _DeskPage(preview).form("/retail-invoices/close")
+    for credential, origin in ((reader, None), (TOKEN, "https://other.example")):
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            _read_desk(close_path, form, token=credential, origin=origin)
+        with refused.value as reply:
+            assert reply.code == 403
+    issued = _read_desk(close_path, form, token=os.environ["EMOB_CASE_FINANCE_TOKEN"])
+    assert "Issued retail invoice" in issued
+    download, fields = _DeskPage(issued).form("/retail-invoices/document")
+    document = _read_desk(download, fields, token=os.environ["EMOB_FINANCE_TOKEN"])
+    xml = ElementTree.fromstring(document)
+    payable = Decimal(xml.findtext("./{*}LegalMonetaryTotal/{*}PayableAmount"))
+    cents = Decimal("0.01")
+    total = sum(
+        (Decimal(kwh) * Decimal("0.60") + Decimal("0.30")).quantize(cents, rounding=ROUND_HALF_UP)
+        for kwh in expected["session_kwh"]
+    ) + 2 * Decimal("5.95")
+    assert payable == total
+    tax = Decimal(xml.findtext("./{*}TaxTotal/{*}TaxAmount"))
+    net = Decimal(xml.findtext("./{*}LegalMonetaryTotal/{*}TaxExclusiveAmount"))
+    assert tax == (net * Decimal("0.19")).quantize(cents, rounding=ROUND_HALF_UP)
+    assert "PAYER-PRIVATE" not in document
+    assert _read_desk(close_path, form, token=os.environ["EMOB_CASE_FINANCE_TOKEN"]) == issued
+    with pytest.raises(urllib.error.HTTPError) as denied:
+        _read_desk(
+            download, {**fields, "account": "PAYER-PRIVATE"}, token=os.environ["EMOB_FINANCE_TOKEN"]
+        )
+    with denied.value as reply:
+        assert reply.code in (403, 404)
+    expected.update(close=form, number=fields["number"], document=document)
+    path.write_text(json.dumps(expected))
+
+
+@pytest.mark.skipif(os.environ.get("EMOB_TEST_ESTATE") != "issued", reason="after billing restart")
+def test_reopen_the_issued_fleet_invoice():
+    """The original UBL survives a fresh billing owner. A repeated close spends no number."""
+    state = json.loads(Path(os.environ["EMOB_TEST_INVOICE"]).read_text())
+    request = {"account": "PAYER-FLEET", "period": state["period"]}
+    page = _read_desk(
+        "/retail-invoices/lookup?lang=en", request, token=os.environ["EMOB_FINANCE_TOKEN"]
+    )
+    assert "/line-credits/lookup" not in page
+    writer_page = _read_desk(
+        "/retail-invoices/lookup?lang=en", request, token=os.environ["EMOB_CASE_FINANCE_TOKEN"]
+    )
+    document, fields = _DeskPage(page).form("/retail-invoices/document")
+    assert fields["number"] == state["number"]
+    assert _read_desk(document, fields, token=os.environ["EMOB_FINANCE_TOKEN"]) == state["document"]
+    assert (
+        _read_desk(
+            "/retail-invoices/close?lang=en",
+            state["close"],
+            token=os.environ["EMOB_CASE_FINANCE_TOKEN"],
+        )
+        == writer_page
+    )
+    private = _read_desk(
+        "/retail-invoices/review?lang=en",
+        {**request, "account": "PAYER-PRIVATE"},
+        token=os.environ["EMOB_CASE_FINANCE_TOKEN"],
+    )
+    assert state["private_agreement"] in private and "Charging session ·" not in private
+    issued = _read_desk(
+        *_DeskPage(private).form("/retail-invoices/close"),
+        token=os.environ["EMOB_CASE_FINANCE_TOKEN"],
+    )
+    download, fields = _DeskPage(issued).form("/retail-invoices/document")
+    assert fields["number"] != state["number"]
+    xml = ElementTree.fromstring(
+        _read_desk(download, fields, token=os.environ["EMOB_FINANCE_TOKEN"])
+    )
+    assert xml.findtext("./{*}LegalMonetaryTotal/{*}PayableAmount") == "5.95"
+    assert xml.findtext(".//{*}AccountingCustomerParty//{*}RegistrationName") == "Mika Muster"
+
+
+def _provider_decision(uid):
+    request = urllib.request.Request(
+        os.environ["EMOB_EMPD"] + "/v1/authorize",
+        data=json.dumps({"uid": uid, "evse": "DE*ABC*E00001"}).encode(),
+        headers={
+            "Authorization": "Bearer " + os.environ["EMOB_SERVICE_TOKEN"],
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.load(response)
+
+
+@pytest.mark.skipif(os.environ.get("EMOB_TEST_ESTATE") != "lifecycle", reason="after month close")
+def test_replace_and_end_one_fleet_agreement():
+    """driver-monthly-invoice/SR-306. Retain the sale and payer while retiring each credential."""
+    path = Path(os.environ["EMOB_TEST_INVOICE"])
+    invoice = json.loads(path.read_text())
+    agreement = invoice["agreements"][0]
+    original = _provider_decision(STOCK_UID)
+    assert original["status"] == "Accepted"
+    lookup = "/contracts/lookup?lang=en"
+    receipt = _read_desk(lookup, {"agreement": agreement})
+    for change in ("replace", "end"):
+        route, fields = _DeskPage(receipt).form("/contracts/change/preview", action=change)
+        if change == "replace":
+            fields["stock"] = "STOCK-1006"
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            _read_desk(route, fields, token=os.environ["EMOB_DESK_READ_TOKEN"])
+        with denied.value as response:
+            assert response.code == 403
+        review = _read_desk(route, fields)
+        assert "PAYER-FLEET" in review and "04AB0000000006" not in review
+        confirm, reviewed = _DeskPage(review).form("/contracts/change/confirm")
+        _read_desk(confirm, reviewed)
+        _read_desk(confirm, reviewed)
+        assert _provider_decision(STOCK_UID)["status"] != "Accepted"
+        new = _provider_decision("04AB0000000006")
+        if change == "replace":
+            assert new["status"] == "Accepted"
+            assert new["retail"] == original["retail"]
+            assert new["token"]["contract_id"] == original["token"]["contract_id"]
+        else:
+            assert new["status"] != "Accepted"
+        receipt = _read_desk(lookup, {"agreement": agreement})
+        assert "PAYER-FLEET" in receipt and agreement in receipt
+    assert _provider_decision("04AB0000000005")["status"] == "Accepted"
+
+
+@pytest.mark.skipif(os.environ.get("EMOB_TEST_ESTATE") != "retired", reason="after provider replay")
+def test_retired_fleet_credentials_stay_retired():
+    assert _provider_decision(STOCK_UID)["status"] != "Accepted"
+    assert _provider_decision("04AB0000000006")["status"] != "Accepted"
+    assert _provider_decision("04AB0000000005")["status"] == "Accepted"
+    state = json.loads(Path(os.environ["EMOB_TEST_INVOICE"]).read_text())
+    request = {"account": "PAYER-FLEET", "period": state["period"], "number": state["number"]}
+    assert (
+        _read_desk(
+            "/retail-invoices/document?lang=en", request, token=os.environ["EMOB_FINANCE_TOKEN"]
+        )
+        == state["document"]
     )

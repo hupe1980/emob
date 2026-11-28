@@ -5,8 +5,9 @@ record, a real price or a real integration, not only for test authors.
     emobtest price --energy 0.59 --kwh 30        what does a session cost?
     emobtest feed table.json                     will the Mobilithek take it?
     emobtest inbox --port 9199                   show emob's events as they arrive
-    emobtest conformance receiver URL --secret …
-    emobtest conformance authorize URL --token …
+    emobtest conformance receiver URL --secret-env WEBHOOK_SECRET
+    emobtest conformance authorize URL --token-env SERVICE_TOKEN
+    emobtest conformance mcp emob mcp
 
 Exit status: 0 held · 1 the thing checked is wrong · 2 usage.
 """
@@ -14,11 +15,13 @@ Exit status: 0 held · 1 the thing checked is wrong · 2 usage.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import os
 import sys
 import time
 
 from . import __version__, conformance
-from .core import Tariff, check_feed, verify
+from .core import EVENT_TYPES, Tariff, check_feed, verify
 from .inbox import Inbox
 
 
@@ -84,18 +87,49 @@ def _inbox(args: argparse.Namespace) -> int:
 
 
 def _conformance(args: argparse.Namespace) -> int:
-    if args.suite == "receiver":
-        if not args.secret:
-            print("receiver needs --secret whsec_… (the subscriber's)", file=sys.stderr)
+    if args.suite == "mcp":
+        from .mcp import probe
+
+        try:
+            command = args.server[1:] if args.server[:1] == ["--"] else args.server
+            report = asyncio.run(probe(command))
+        except OSError as error:
+            print(f"MCP server did not start: {error}", file=sys.stderr)
+            return 1
+    elif args.suite == "receiver":
+        secret = os.getenv(args.secret_env) if args.secret_env else args.secret
+        if not secret:
+            print("The receiver secret is empty or unset.", file=sys.stderr)
             return 2
-        report = conformance.receiver(args.url, args.secret)
+        report = conformance.receiver(args.url, secret, event_type=args.event_type)
+    elif args.suite == "tariff":
+        report = conformance.tariff(args.url, args.tariff_id)
     else:
-        if not args.token:
-            print("authorize needs --token (the one csmsd presents)", file=sys.stderr)
+        token = os.getenv(args.token_env) if args.token_env else args.token
+        if not token:
+            print("The provider service token is empty or unset.", file=sys.stderr)
             return 2
-        report = conformance.authorize(args.url, args.token, known=args.known, blocked=args.blocked)
+        report = conformance.authorize(args.url, token, known=args.known, blocked=args.blocked)
     print(report)
     return 0 if report.passed else 1
+
+
+def _recover(args: argparse.Namespace) -> int:
+    from .recovery import recover_event
+
+    secret = os.environ.get(args.secret_env)
+    if not secret:
+        print(
+            "recovery signing secret is absent from the named environment variable", file=sys.stderr
+        )
+        return 2
+    try:
+        body = recover_event(args.url, args.subscriber, args.event_type, args.id, secret=secret)
+    except ValueError as error:
+        print(f"recovery failed: {error}", file=sys.stderr)
+        return 1
+    sys.stdout.buffer.write(body)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -132,13 +166,46 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(run=_inbox)
 
     p = sub.add_parser("conformance", help="hold a replacement service to emob's contract")
-    p.add_argument("suite", choices=sorted(conformance.SUITES))
-    p.add_argument("url")
-    p.add_argument("--secret", help="receiver: the subscriber's whsec_… secret")
-    p.add_argument("--token", help="authorize: the service token csmsd presents")
-    p.add_argument("--known", help="authorize: a uid the backend accepts")
-    p.add_argument("--blocked", help="authorize: a uid the backend blocks")
+    suites = p.add_subparsers(dest="suite", required=True)
     p.set_defaults(run=_conformance)
+    receiver = suites.add_parser("receiver", help="check a signed event receiver")
+    receiver.add_argument("url")
+    key = receiver.add_mutually_exclusive_group(required=True)
+    key.add_argument("--secret-env", metavar="VAR", help="variable holding the subscriber secret")
+    key.add_argument("--secret", help="the subscriber's whsec_… secret")
+    receiver.add_argument(
+        "--event-type",
+        choices=["de.emob.cdr.issued", "de.emob.invoice.issued"],
+        default="de.emob.cdr.issued",
+        help="event a replacement receiver accepts",
+    )
+    tariff = suites.add_parser("tariff", help="check current and versioned seller tariffs")
+    tariff.add_argument("url")
+    tariff.add_argument("--tariff-id", required=True, help="a published tariff id")
+    authorize = suites.add_parser("authorize", help="check a provider's authorization endpoint")
+    authorize.add_argument("url")
+    key = authorize.add_mutually_exclusive_group(required=True)
+    key.add_argument("--token-env", metavar="VAR", help="variable holding the service token")
+    key.add_argument("--token", help="the service token csmsd presents")
+    authorize.add_argument("--known", help="a uid the backend accepts")
+    authorize.add_argument("--blocked", help="a uid the backend blocks")
+    mcp = suites.add_parser("mcp", help="check the meter verifier over local stdio")
+    mcp.add_argument(
+        "server", nargs=argparse.REMAINDER, help="trusted local server command and arguments"
+    )
+
+    p = sub.add_parser("recover", help="retrieve and authenticate one originally addressed event")
+    p.add_argument("url", help="issuer base URL or recovery endpoint")
+    p.add_argument("--subscriber", required=True, help="original subscriber name")
+    p.add_argument("--event-type", required=True, choices=EVENT_TYPES)
+    p.add_argument("--id", required=True, help="original event ID")
+    p.add_argument(
+        "--secret-env",
+        required=True,
+        metavar="VAR",
+        help="environment variable containing the subscriber secret",
+    )
+    p.set_defaults(run=_recover)
 
     args = parser.parse_args(argv)
     try:

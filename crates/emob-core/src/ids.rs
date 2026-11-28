@@ -863,7 +863,7 @@ impl FromStr for PartyId {
     /// them bare. All five are one party.
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         let canonical = canonicalise(raw.trim(), &['-', '*']);
-        if canonical.len() != 5 {
+        if canonical.len() != 5 || !canonical.is_ascii() {
             return Err(IdError::BadOperator);
         }
         Self::new(&canonical[..2], &canonical[2..])
@@ -1240,7 +1240,7 @@ mod tests {
 
     #[test]
     fn a_party_that_is_not_a_pair_is_refused_rather_than_padded() {
-        for wrong in ["DE", "DE*ABCD", "D*ABC", "DE*AB", "", "DE**ABC*X"] {
+        for wrong in ["DE", "DE*ABCD", "D*ABC", "DE*AB", "", "DE**ABC*X", "DÉAB"] {
             assert!(wrong.parse::<PartyId>().is_err(), "{wrong}");
         }
     }

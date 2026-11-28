@@ -2,6 +2,8 @@
 
 The roaming node: decides who a charge detail record (CDR) goes to, whether it may be sent, when it is late, who may push records here, and what to do with one that arrives — over OCPI 2.3.0/2.2.1 and OICP 2.3.
 
+A replacement CDR receiver can use the event schema, signed headers and acknowledgement rules in the [integration OpenAPI document](../../schemas/openapi.json).
+
 ## Status
 
 | | |
@@ -15,6 +17,14 @@ The roaming node: decides who a charge detail record (CDR) goes to, whether it m
 Every document is `emob-roam`'s (`for_partner`, `to_oicp`, `from_ocpi`); `roamd`
 keeps the ledger of what was sent to whom and what came back, the operator's
 policies about partners, and the sockets.
+
+## Grant a sender access to its charge records
+
+The estate advertises its operator as CPO and its provider as eMSP. An authenticated credentials GET returns the caller’s own token and the estate’s versions URL. A registered peer rotates with PUT. Repeating POST after registration, or sending PUT or DELETE before registration, returns HTTP 405.
+
+In the platform’s `[[partners]]` entry, set `cdr_owners = ["NL*TNM", "BE*ALT"]` to approve its two sending CPOs. An empty list grants no CDR sender roles. The platform must also declare each CPO in its Credentials exchange. Registration and rotation check each claim against the estate.
+
+POST a CDR to the advertised receiver endpoint and retain the returned `Location`. That URL identifies the owner and local CDR ID. An exact retry returns the original URL. A conflicting document leaves the first original intact. Current CPO grants also govern reads after restart.
 
 ## What it owns
 

@@ -37,6 +37,34 @@ pub mod cdr {
     /// A record was issued: the session's signed values verified, the record
     /// was stored, and it is owed to the invoice and the partner.
     pub const ISSUED: &str = "de.emob.cdr.issued";
+
+    /// Private link from a settled CDR to the provider's accepted terms.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[cfg_attr(
+        feature = "serde",
+        derive(serde::Deserialize, serde::Serialize),
+        serde(deny_unknown_fields)
+    )]
+    pub struct RetailAuthorization {
+        /// Provider-issued agreement handle. A legacy authorization has no binding.
+        #[cfg_attr(feature = "serde", serde(default))]
+        pub agreement: String,
+        /// SHA-256 of the gross retail offer checked at authorization.
+        pub reference: String,
+    }
+
+    impl RetailAuthorization {
+        /// Both handles use the provider's canonical lowercase, 32-byte hex encoding.
+        #[must_use]
+        pub fn is_well_formed(&self) -> bool {
+            [&self.agreement, &self.reference].into_iter().all(|id| {
+                id.len() == 64
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+        }
+    }
 }
 
 /// Invoices.

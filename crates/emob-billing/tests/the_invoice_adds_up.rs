@@ -657,7 +657,7 @@ fn a_generated_month_is_a_document_that_adds_up_and_the_standard_accepts() {
             invoice
                 .lines
                 .iter()
-                .filter(move |line| line.cdr == cdr.key)
+                .filter(move |line| line.cdr.as_ref() == Some(&cdr.key))
                 .map(move |line| (cdr, line))
         }) {
             let stated = cdr

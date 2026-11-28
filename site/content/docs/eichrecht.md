@@ -103,8 +103,8 @@ The signature covers the payload **exactly as written**:
 > (removing and adding white spaces), otherwise positive validation is not
 > possible.
 
-So `ocmf` never re-serialises: `Record::signed_bytes()` returns a slice of the
-input. It is tested against the whole **S.A.F.E. Transparenzsoftware reference
+The `ocmf` parser preserves the original payload. Calling `record.signed_bytes()`
+returns a slice of the input. It is tested against the whole **S.A.F.E. Transparenzsoftware reference
 corpus** (256 records from eleven manufacturers, 705 readings) with OpenSSL's
 verdict on each as an independent oracle, plus a 162-case conformance suite.
 

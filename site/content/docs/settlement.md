@@ -25,6 +25,26 @@ let cdr = CdrBuilder::from_session(&session, Direction::Import)?
 assert_eq!(cdr.total_cost().unwrap().to_string(), "8.82 EUR");
 ```
 
+A withdrawal can produce a separately reviewed full credit when its invoice belongs entirely to the affected agreement. The linked UBL credit preserves the original issued invoice and the recorded payment. [Review a withdrawal](@/docs/run-the-estate.md#review-a-withdrawal)
+
+## Local statement import
+
+Finance staff import a UTF-8 JSON statement into Heute’s **Receivables** workspace. Each file identifies one source, payer account and currency. A source identifies the same bank account across imports. Amounts are exact integers in the currency’s minor unit.
+
+```json
+{
+  "version": 1,
+  "source": "LOCAL-BANK",
+  "account": "PAYER-PRIVATE",
+  "currency": "EUR",
+  "entries": [
+    {"reference": "EXAMPLE-0002", "status": "booked", "direction": "credit", "amount_minor": 500}
+  ]
+}
+```
+
+Save the [sample statement](../../examples/payment-statement-v1.json) to try the import. A repeat of the same entry leaves cash unchanged. A conflicting reference, missing identity, pending booking, debit or reversal is held for review. Keep the same source and reference when retrying. Finance chooses the invoice and amount in a separate confirmation step. Billd supplies the issued payable amount, credits and replacement links. Accounting preserves allocations through corrections and reports any excess customer credit separately from unapplied payments. The import records cash locally. [Operator walkthrough](@/docs/run-the-estate.md#allocate-a-payment)
+
 ## The quarter-hour split that conserves energy exactly
 
 Germany's pass-through model (*Durchleitung*) settles a session against the
@@ -504,7 +524,23 @@ cancel-and-re-bill — and checks after every call that the journal balances,
 contains nothing the recipient refused, and holds one document's gross as the
 receivable.
 
-### The monthly invoice in the running estate
+### Credits on a shared invoice
+
+Monthly retail and partner closes group completed sessions by their end time. The document’s service period includes the actual dates of its lines, including a session that began the previous month.
+
+One credit note can adjust a selected agreement’s line. Its net amount and VAT use the original line’s treatment and the remaining credit budget. The UBL references the preceding invoice. Accounting posts the gross credit against that invoice and preserves its payment history. [Operator guide](@/docs/run-the-estate.md#credit-one-invoice-line) · [UBL credit note lines](https://docs.peppol.eu/poacc/billing/3.0/syntax/ubl-creditnote/cac-CreditNoteLine/)
+
+### Apply credit across invoices
+
+Suppose a fleet pays €100 against a €100 invoice and then receives a €30 line credit. A second invoice for the same fleet has €80 due. Applying €20 from the first invoice leaves €10 credit there and €60 due on the second. Net debt is €50 before and after, and the original bank payment remains €100.
+
+Accounting records one offset naming the finance operator and both invoices. A later replacement inherits the affected cash and offsets once. The issued UBL and its payable amount remain the historical billing evidence. A payer can inspect the credit received or used on an authorized invoice separately from its cash payments. [Peppol invoice amount rule](https://docs.peppol.eu/poacc/billing/3.0/rules/ubl-tc434/BR-CO-16/) · [Desk walkthrough](@/docs/run-the-estate.md#apply-an-invoice-credit)
+
+### Native driver and fleet invoices
+
+The provider assigns each native agreement to a billing account. In **Retail invoices**, staff review verified usage at the accepted retail price and recurring fees for that account’s agreements. The billing journal retains the original UBL and links later credits and replacements. Finance staff and customers with an active payer grant can download the original document. The station receipt and partner invoice remain independently reconcilable. [Operator walkthrough](@/docs/run-the-estate.md#close-a-driver-or-fleet-billing-month)
+
+### The monthly partner invoice in the running estate
 
 `billd` receives each CDR `csmsd` settles, signed and checked for freshness, and
 an hourly calendar closes each roaming partner's previous month **once**: one

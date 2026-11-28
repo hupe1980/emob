@@ -586,11 +586,7 @@ fn render(found: &Found, lang: Lang) -> String {
     let _ = write!(b, "</dl>");
 
     // 3. Every session, with the receipt the driver checks it on.
-    let sessions = {
-        let mut keys: Vec<_> = invoice.lines.iter().map(|l| &l.cdr).collect();
-        keys.dedup();
-        keys.len()
-    };
+    let sessions = invoice.records().len();
     let _ = write!(
         b,
         "<h2>{} <span class=\"count\">{sessions}</span></h2><div class=\"scroll\"><table class=\"lines\">\
@@ -604,9 +600,11 @@ fn render(found: &Found, lang: Lang) -> String {
     );
     let mut previous = None;
     for line in &invoice.lines {
-        let first = previous != Some(&line.cdr);
-        previous = Some(&line.cdr);
-        let session = if first {
+        let first = previous != line.cdr.as_ref();
+        previous = line.cdr.as_ref();
+        let session = if let Some(key) = &line.cdr
+            && first
+        {
             let receipt = line.receipt.as_ref().map_or_else(String::new, |url| {
                 format!(
                     "<br><a href=\"{}\" rel=\"noreferrer\" class=\"print-url\">{}</a>",
@@ -617,7 +615,7 @@ fn render(found: &Found, lang: Lang) -> String {
             format!(
                 "<time>{}</time><br><span class=\"muted num\" translate=\"no\">{}</span>{receipt}",
                 lang.date(line.started_at.date()),
-                escape(&line.cdr.to_string()),
+                escape(&key.to_string()),
             )
         } else {
             String::new()
@@ -636,7 +634,10 @@ fn render(found: &Found, lang: Lang) -> String {
             b,
             "<tr{}><td>{session}</td><td>{}</td><td class=\"num\">{} × {}{unit}</td><td class=\"num\">{}</td></tr>",
             if first { " class=\"first\"" } else { "" },
-            dimension(line.dimension, lang),
+            line.cdr.as_ref().map_or_else(
+                || escape(&line.description),
+                |_| dimension(line.dimension, lang).into()
+            ),
             escape(&quantity),
             escape(&money_precise(line.unit_price, currency, lang)),
             escape(&money(line.net, currency, lang)),

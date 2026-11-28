@@ -11,13 +11,7 @@ edition.workspace      = true
 license.workspace      = true
 repository.workspace   = true
 
-# **Not** `workspace = true`, and the exception is the point. Every other crate
-# here promises 1.94 — the floor the sibling workspaces carry, and the one the
-# crates that decide money keep, so `mako` and `hems` can consume them. This one
-# speaks to `ocpi-kit`, which declares 1.96, and a roaming edge is not something
-# either sibling consumes. Raising the shared floor to take one dependency would
-# make every downstream pay for a wire they do not use.
-rust-version = "1.96"
+rust-version.workspace = true
 
 # `ocpi-kit` is not optional. Unlike the crates that decide money — which build
 # with no protocol implementation anywhere in their tree — this crate *is* the

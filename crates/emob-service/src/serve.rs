@@ -370,16 +370,42 @@ pub async fn read_bounded(
 /// may read, not one everybody may. An admitted request carries its operator
 /// as an [`crate::Actor`] extension ([`acting`]).
 pub fn operator_only(routes: Router, operators: crate::authority::Operators) -> Router {
-    operator_gate(routes, operators, false)
+    operator_gate(routes, operators, |_| true)
 }
 
 /// Require a named operator whose estate grant allows writes. Unknown
 /// credentials receive 401 and a valid read-only credential receives 403.
 pub fn operator_write(routes: Router, operators: crate::authority::Operators) -> Router {
-    operator_gate(routes, operators, true)
+    operator_gate(
+        routes,
+        operators,
+        crate::authority::OperatorAccess::can_write,
+    )
 }
 
-fn operator_gate(routes: Router, operators: crate::authority::Operators, write: bool) -> Router {
+/// Require a named operator explicitly granted access to receivables.
+pub fn finance_only(routes: Router, operators: crate::authority::Operators) -> Router {
+    operator_gate(
+        routes,
+        operators,
+        crate::authority::OperatorAccess::can_finance,
+    )
+}
+
+/// Require a named operator explicitly entrusted with customer erasure.
+pub fn privacy_only(routes: Router, operators: crate::authority::Operators) -> Router {
+    operator_gate(
+        routes,
+        operators,
+        crate::authority::OperatorAccess::can_privacy,
+    )
+}
+
+fn operator_gate(
+    routes: Router,
+    operators: crate::authority::Operators,
+    allows: fn(crate::authority::OperatorAccess) -> bool,
+) -> Router {
     routes.layer(axum::middleware::from_fn(
         move |mut request: axum::extract::Request, next: axum::middleware::Next| {
             let operators = operators.clone();
@@ -395,9 +421,7 @@ fn operator_gate(routes: Router, operators: crate::authority::Operators, write: 
                         [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
                     )
                         .into_response(),
-                    Some((_, access)) if write && !access.can_write() => {
-                        StatusCode::FORBIDDEN.into_response()
-                    }
+                    Some((_, access)) if !allows(access) => StatusCode::FORBIDDEN.into_response(),
                     Some((actor, access)) => {
                         acting(&mut request, actor.clone());
                         request.extensions_mut().insert(access);

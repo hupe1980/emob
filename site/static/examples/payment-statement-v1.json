@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "source": "LOCAL-BANK",
+  "account": "PAYER-PRIVATE",
+  "currency": "EUR",
+  "entries": [
+    {
+      "reference": "EXAMPLE-0002",
+      "status": "booked",
+      "direction": "credit",
+      "amount_minor": 500
+    }
+  ]
+}

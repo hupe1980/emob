@@ -171,14 +171,24 @@ impl Tally {
     /// Record one attempt at `point`.
     pub fn record(&mut self, point: &str, ending: Ending) {
         self.estate.add(ending);
-        self.points.entry(point.to_owned()).or_default().add(ending);
+        if let Some(rate) = self.points.get_mut(point) {
+            rate.add(ending);
+        } else {
+            let mut rate = Rate::default();
+            rate.add(ending);
+            self.points.insert(point.to_owned(), rate);
+        }
     }
 
     /// Add another tally to this one — two days into a window.
     pub fn merge(&mut self, other: &Self) {
         self.estate.merge(&other.estate);
         for (point, rate) in &other.points {
-            self.points.entry(point.clone()).or_default().merge(rate);
+            if let Some(existing) = self.points.get_mut(point) {
+                existing.merge(rate);
+            } else {
+                self.points.insert(point.clone(), rate.clone());
+            }
         }
     }
 
@@ -217,8 +227,15 @@ impl Daily {
 
     /// Record one attempt at `point` on `day`.
     pub fn record(&mut self, day: time::Date, point: &str, ending: Ending) {
+        let newest = self
+            .days
+            .last_key_value()
+            .map_or(day, |(latest, _)| day.max(*latest));
+        let first_kept = newest.saturating_sub(time::Duration::days(Self::RETENTION_DAYS));
+        if day < first_kept {
+            return;
+        }
         self.days.entry(day).or_default().record(point, ending);
-        let first_kept = day.saturating_sub(time::Duration::days(Self::RETENTION_DAYS));
         if self
             .days
             .first_key_value()
@@ -237,11 +254,13 @@ impl Daily {
     /// The attempts of the days `from..=to`, summed; empty when none.
     #[must_use]
     pub fn window(&self, from: time::Date, to: time::Date) -> Tally {
-        let mut sum = Tally::default();
-        if from <= to {
-            for tally in self.days.range(from..=to).map(|(_, tally)| tally) {
-                sum.merge(tally);
-            }
+        if from > to {
+            return Tally::default();
+        }
+        let mut days = self.days.range(from..=to).map(|(_, tally)| tally);
+        let mut sum = days.next().cloned().unwrap_or_default();
+        for tally in days {
+            sum.merge(tally);
         }
         sum
     }
@@ -391,6 +410,12 @@ mod tests {
                 .attempted,
             0
         );
+        let oldest_kept = date!(2026 - 03 - 01) - time::Duration::days(Daily::RETENTION_DAYS);
+        let expired = oldest_kept.previous_day().unwrap();
+        daily.record(expired, "CP-2", Ending::Billed);
+        daily.record(oldest_kept, "CP-2", Ending::Billed);
+        assert!(daily.on(expired).is_none());
+        assert_eq!(daily.on(oldest_kept).unwrap().estate.attempted, 1);
     }
 
     #[cfg(feature = "serde")]

@@ -1,12 +1,12 @@
 # Every daemon, one build.
 #
-# `docker buildx bake` builds the nine images from the one Dockerfile, each
+# `docker buildx bake` builds the daemon images from the one Dockerfile, each
 # with its own `DAEMON` build argument. The list is here rather than in a shell
 # loop so that `bake --print` is the answer to *what does this workspace ship*.
 #
 # The release workflow's `images` job runs this file on a `v*` tag with
 # `VERSION` set from the tag, pushes to ghcr.io and lets BuildKit attach its
-# provenance. One platform, `linux/amd64`: an arm64 build of nine Rust daemons
+# provenance. One platform, `linux/amd64`: an arm64 build of the Rust daemons
 # under emulation costs hours per release, and nobody has asked for one yet.
 
 variable "REGISTRY" {
@@ -17,10 +17,8 @@ variable "VERSION" {
   default = "dev"
 }
 
-# The nine. `csmsd` and `sited` are the two that hold a socket somebody else
-# dials; the other seven answer HTTP and a schedule.
 variable "DAEMONS" {
-  default = ["csmsd", "roamd", "billd", "empd", "poid", "tarifd", "sited", "agentd", "deskd"]
+  default = ["csmsd", "roamd", "billd", "empd", "poid", "tarifd", "sited", "agentd", "deskd", "portald", "accountingd"]
 }
 
 group "default" {

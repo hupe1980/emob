@@ -151,6 +151,13 @@ pub enum BillingError {
         number: String,
     },
 
+    /// The requested monetary adjustment cannot be reconciled to a source line.
+    #[error("invoice line cannot be credited: {reason}")]
+    InvalidLineCredit {
+        /// The balance, scope or precision check that prevented issuance.
+        reason: &'static str,
+    },
+
     /// Two records on one invoice are in different currencies.
     ///
     /// An EN 16931 invoice has one currency (BT-5) and every amount on it is in
@@ -236,8 +243,12 @@ pub enum BillingError {
     },
 
     /// The invoice has no lines.
-    #[error("an invoice needs at least one line: no record was accepted")]
+    #[error("an invoice needs at least one session or subscription line")]
     NoLines,
+
+    /// A subscription-only invoice needs an explicit currency.
+    #[error("set the subscription currency when the invoice has no charging sessions")]
+    SubscriptionCurrencyMissing,
 
     /// A record was superseded by a correction, and both were offered.
     ///

@@ -280,15 +280,20 @@ impl NativeStation {
     }
 
     #[allow(clippy::too_many_lines)] // One session, in the order a station plays it.
-    fn play(&self, card: &str, ev: Ev, minutes: u32, fault: Fault) -> Result<Played, String> {
+    fn play(
+        &self,
+        card: &str,
+        ev: Ev,
+        minutes: u32,
+        fault: Fault,
+        start: time::OffsetDateTime,
+    ) -> Result<Played, String> {
         // OCPP 2.x stations assign their transaction IDs. Reconnecting twice in
         // one second must still create two distinct sessions at the CSMS.
         let mut nonce = [0_u8; 16];
         getrandom::fill(&mut nonce)
             .map_err(|e| format!("generating station transaction ID: {e}"))?;
         let own_id = format!("ET-{}", hex::encode(nonce));
-        let start =
-            time::OffsetDateTime::now_utc() - time::Duration::minutes(i64::from(minutes) + 1);
         let start = start.replace_nanosecond(0).unwrap_or(start);
         let started_at = start
             .format(&time::format_description::well_known::Rfc3339)
@@ -597,7 +602,7 @@ impl NativeStation {
     }
 
     /// Charge a vehicle with `card`: `(status, transaction, kWh, records)`.
-    #[pyo3(signature = (card, minutes, battery_wh, soc, target_soc, max_amps, phases, fault))]
+    #[pyo3(signature = (card, minutes, battery_wh, soc, target_soc, max_amps, phases, fault, started_at=None))]
     #[allow(clippy::too_many_arguments)]
     fn charge(
         &self,
@@ -609,6 +614,7 @@ impl NativeStation {
         max_amps: u32,
         phases: u8,
         fault: &str,
+        started_at: Option<&str>,
     ) -> PyResult<(String, String, String, Vec<String>)> {
         let fault = match fault {
             "" => Fault::None,
@@ -627,7 +633,16 @@ impl NativeStation {
             .phases(phases)
             .current(6, max_amps)
             .build();
-        let played = self.play(card, ev, minutes, fault).map_err(lost)?;
+        let start = match started_at {
+            Some(value) => {
+                time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+                    .map_err(|_| refused("started_at requires an RFC 3339 timestamp"))?
+            }
+            None => {
+                time::OffsetDateTime::now_utc() - time::Duration::minutes(i64::from(minutes) + 1)
+            }
+        };
+        let played = self.play(card, ev, minutes, fault, start).map_err(lost)?;
         Ok((
             played.status,
             played.transaction,

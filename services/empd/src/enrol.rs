@@ -6,8 +6,9 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use emob_core::{ContractId, Emaid, EvseId, PartyId};
 use emob_service::Actor;
-use emob_service::estate::RetailOffer;
+use emob_service::estate::{RetailAccount, RetailAccountKind, RetailOffer};
 use emob_service::journal::Journal;
+use emob_service::vault::Digest;
 use emob_session::TokenRef;
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
@@ -31,15 +32,21 @@ pub(crate) struct Catalog {
     client: reqwest::Client,
     stock: BTreeMap<String, String>,
     selections: Vec<Selection>,
+    accounts: BTreeMap<String, RetailAccount>,
 }
 
 impl Catalog {
     pub(crate) fn configuration(
         estate: &crate::daemon::Estate,
     ) -> anyhow::Result<(Option<reqwest::Url>, Vec<Selection>)> {
+        emob_service::estate::validate_retail_accounts(&estate.retail_accounts)?;
         if estate.card_stock.is_empty() {
             return Ok((None, Vec::new()));
         }
+        anyhow::ensure!(
+            !estate.retail_accounts.is_empty(),
+            "native card stock requires at least one retail account"
+        );
         emob_service::estate::validate_card_stock(&estate.card_stock, &estate.contracts)?;
         let mut selections = Vec::new();
         for plan in estate
@@ -95,12 +102,31 @@ impl Catalog {
             base,
             client,
             stock,
+            accounts: estate
+                .retail_accounts
+                .iter()
+                .map(|a| (a.id.clone(), a.clone()))
+                .collect(),
             selections,
         })
     }
 
     pub(crate) fn options(&self) -> &[Selection] {
         &self.selections
+    }
+
+    pub(crate) fn account(&self, id: &str) -> Result<&RetailAccount, StatusCode> {
+        self.accounts.get(id).ok_or(StatusCode::NOT_FOUND)
+    }
+
+    pub(crate) fn accounts(&self) -> Vec<AccountOption> {
+        self.accounts
+            .values()
+            .map(|a| AccountOption {
+                id: a.id.clone(),
+                kind: a.kind,
+            })
+            .collect()
     }
 
     pub(crate) fn stock_uid(&self, code: &str) -> Result<&str, StatusCode> {
@@ -165,6 +191,12 @@ impl Catalog {
     }
 }
 
+#[derive(Serialize)]
+pub(crate) struct AccountOption {
+    id: String,
+    kind: RetailAccountKind,
+}
+
 #[derive(Clone, Serialize)]
 pub(crate) struct Review {
     pub(crate) operation: String,
@@ -176,6 +208,11 @@ pub(crate) struct Review {
     reviewed_at: OffsetDateTime,
     #[serde(skip)]
     pub(crate) stock: String,
+    account: String,
+    #[serde(skip)]
+    profile: Digest,
+    #[serde(skip)]
+    account_kind: RetailAccountKind,
     #[serde(skip)]
     started: std::time::Instant,
     #[serde(skip)]
@@ -189,6 +226,12 @@ pub(crate) type Reviews = BTreeMap<Actor, Review>;
 pub struct Agreement {
     /// Provider-issued operation identity, searchable after a lost confirmation.
     pub agreement: String,
+    /// Opaque bill-to identity selected by the issuer.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
+    /// Payer classification at issuance, where recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_kind: Option<RetailAccountKind>,
     /// Provider's contract identifier used at charge time.
     pub emaid: ContractId,
     /// Masked label staff can match against the card view.
@@ -218,7 +261,10 @@ impl Agreement {
             point: self.offer.terms.point.clone(),
             provider: self.offer.terms.provider.clone(),
             plan: self.offer.terms.code.clone(),
-            reference: self.offer.reference.clone(),
+            authorization: emob_service::events::cdr::RetailAuthorization {
+                agreement: self.agreement.clone(),
+                reference: self.offer.reference.clone(),
+            },
         }
     }
 }
@@ -233,8 +279,9 @@ pub struct RetailBinding {
     pub provider: PartyId,
     /// Public plan code.
     pub plan: String,
-    /// Digest of the accepted terms.
-    pub reference: String,
+    /// Agreement and price checked at this point.
+    #[serde(flatten)]
+    pub authorization: emob_service::events::cdr::RetailAuthorization,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -243,9 +290,21 @@ pub(crate) struct Agreements {
     by_card: BTreeMap<TokenRef, String>,
     consumed_stock: BTreeSet<String>,
     native_accounts: BTreeSet<Emaid>,
+    by_payer: BTreeMap<String, (Digest, Vec<Arc<Agreement>>)>,
 }
 
 impl Agreements {
+    pub(crate) fn receipt(&self, agreement: &str) -> Option<&Agreement> {
+        self.receipts.get(agreement).map(Arc::as_ref)
+    }
+
+    pub(crate) fn attach_replacement(&mut self, id: &str, reference: &TokenRef, held: &Token) {
+        self.by_card.insert(reference.clone(), id.to_owned());
+        if let Some(stock) = &held.visual_digest {
+            self.consumed_stock.insert(stock.clone());
+        }
+    }
+
     pub(crate) fn holds_account(&self, contract: &ContractId) -> bool {
         Emaid::parse(contract.as_str()).is_ok_and(|id| self.native_accounts.contains(&id))
     }
@@ -259,7 +318,12 @@ impl Agreements {
 }
 
 impl Empd {
-    pub(crate) fn apply_agreement(&mut self, agreement: Agreement, held: Token) {
+    pub(crate) fn apply_agreement(
+        &mut self,
+        agreement: Agreement,
+        held: Token,
+        profile: Option<Digest>,
+    ) {
         if let Ok(id) = Emaid::parse(agreement.emaid.as_str()) {
             self.agreements.native_accounts.insert(id);
         }
@@ -271,12 +335,21 @@ impl Empd {
         self.agreements
             .by_card
             .insert(agreement.reference.clone(), agreement.agreement.clone());
+        let agreement = Arc::new(agreement);
+        if let Some(profile) = profile.filter(|_| !agreement.account.is_empty()) {
+            self.agreements
+                .by_payer
+                .entry(agreement.account.clone())
+                .or_insert_with(|| (profile, Vec::new()))
+                .1
+                .push(Arc::clone(&agreement));
+        }
         self.agreements
             .receipts
-            .insert(agreement.agreement.clone(), Arc::new(agreement));
+            .insert(agreement.agreement.clone(), agreement);
     }
 
-    fn available_stock(&self, stock: &str, uid: &str) -> Result<TokenRef, StatusCode> {
+    pub(crate) fn available_stock(&self, stock: &str, uid: &str) -> Result<TokenRef, StatusCode> {
         let reference = self.reference_for(uid);
         let digest = self.printed_digest(stock).ok_or(StatusCode::BAD_REQUEST)?;
         if self.foreign_uid_key {
@@ -300,12 +373,93 @@ pub(crate) fn handle_valid(handle: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+#[derive(Serialize)]
+pub(crate) struct BillingRoster {
+    account: RetailAccount,
+    #[serde(serialize_with = "billing_entries")]
+    agreements: Vec<(Arc<Agreement>, Option<OffsetDateTime>)>,
+}
+
+// Serialize only invoice fields, after releasing the lock used for online authorization.
+fn billing_entries<S: serde::Serializer>(
+    agreements: &[(Arc<Agreement>, Option<OffsetDateTime>)],
+    out: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Entry<'a> {
+        agreement: &'a str,
+        account: &'a str,
+        emaid: &'a ContractId,
+        #[serde(with = "time::serde::rfc3339")]
+        at: OffsetDateTime,
+        #[serde(
+            with = "time::serde::rfc3339::option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        ended_at: Option<OffsetDateTime>,
+        offer: &'a RetailOffer,
+    }
+    out.collect_seq(agreements.iter().map(|(a, end)| Entry {
+        ended_at: *end,
+        agreement: &a.agreement,
+        account: &a.account,
+        emaid: &a.emaid,
+        at: a.at,
+        offer: &a.offer,
+    }))
+}
+
 impl<J: Journal> Book<J> {
+    pub(crate) fn profile_digest(&self, payer: &RetailAccount) -> Result<Digest, StatusCode> {
+        let payload = serde_json::to_vec(payer).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let current = self.state().key.digest("retail-payer/v1", &payload);
+        self.check_profile(&payer.id, &current)?;
+        Ok(current)
+    }
+
+    fn check_profile(&self, payer: &str, digest: &Digest) -> Result<(), StatusCode> {
+        if self
+            .state()
+            .agreements
+            .by_payer
+            .get(payer)
+            .is_some_and(|(pinned, _)| pinned != digest)
+        {
+            return Err(StatusCode::CONFLICT);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn billing_agreements(
+        &self,
+        payer: &RetailAccount,
+    ) -> Result<BillingRoster, StatusCode> {
+        self.guard().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        self.profile_digest(payer)?;
+        let agreements = self
+            .state()
+            .agreements
+            .by_payer
+            .get(&payer.id)
+            .map(|(_, receipts)| {
+                receipts
+                    .iter()
+                    .map(|a| (Arc::clone(a), self.state().ended_at(&a.agreement)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(BillingRoster {
+            account: payer.clone(),
+            agreements,
+        })
+    }
+
     pub(crate) fn review_agreement(
         &mut self,
         actor: &Actor,
         stock: String,
         uid: &str,
+        payer: &RetailAccount,
         offer: RetailOffer,
         now: OffsetDateTime,
     ) -> Result<Review, StatusCode> {
@@ -317,6 +471,9 @@ impl<J: Journal> Book<J> {
             operation: hex::encode(nonce),
             expires_at: now + Duration::minutes(5),
             card: label(&card),
+            account: payer.id.clone(),
+            profile: self.profile_digest(payer)?,
+            account_kind: payer.kind,
             reference: card,
             offer,
             reviewed_at: now,
@@ -381,6 +538,7 @@ impl<J: Journal> Book<J> {
             return Ok(prior);
         }
         let review = self.pending_agreement(actor, id, now)?;
+        self.check_profile(&review.account, &review.profile)?;
         let terms = &review.offer.terms;
         if !current.matches(&terms.point, self.state().party(), &terms.code, now)
             || review.offer.reference != current.reference
@@ -408,6 +566,8 @@ impl<J: Journal> Book<J> {
         held.visual_digest = self.state().printed_digest(&review.stock);
         let agreement = Agreement {
             agreement: id.to_owned(),
+            account: review.account.clone(),
+            account_kind: Some(review.account_kind),
             emaid,
             card: label(&reference),
             reference,
@@ -415,9 +575,10 @@ impl<J: Journal> Book<J> {
             actor: actor.clone(),
             at: now,
         };
-        self.record_card_fact(
+        self.record_fact(
             actor,
             Event::Enrolled {
+                profile: Some(review.profile.clone()),
                 agreement: Box::new(agreement.clone()),
                 held: Box::new(held),
             },
@@ -460,6 +621,15 @@ mod tests {
         }
     }
 
+    fn payer() -> RetailAccount {
+        emob_service::estate::from_str::<Estate>(include_str!(
+            "../../../deploy/estate.example.toml"
+        ))
+        .unwrap()
+        .retail_accounts
+        .remove(0)
+    }
+
     fn book() -> Book<Memory> {
         Book::open(
             Empd::new("DE*MSP".parse().unwrap(), DataKey::from_bytes(&[7; 32])),
@@ -476,10 +646,10 @@ mod tests {
         let other = Actor::operator("two").unwrap();
         let offer = offer();
         let review_one = book
-            .review_agreement(&owner, "STOCK-1".into(), UID, offer.clone(), NOW)
+            .review_agreement(&owner, "STOCK-1".into(), UID, &payer(), offer.clone(), NOW)
             .unwrap();
         let review_two = book
-            .review_agreement(&other, "STOCK-1".into(), UID, offer.clone(), NOW)
+            .review_agreement(&other, "STOCK-1".into(), UID, &payer(), offer.clone(), NOW)
             .unwrap();
         let denied = |result: Result<Agreement, StatusCode>| {
             assert_eq!(result.unwrap_err(), StatusCode::CONFLICT);
@@ -501,7 +671,7 @@ mod tests {
         ));
         denied(book.enrol(&owner, &review_one.operation, "04AB0000000005", &offer, NOW));
         let replacement = book
-            .review_agreement(&owner, "STOCK-1".into(), UID, offer.clone(), NOW)
+            .review_agreement(&owner, "STOCK-1".into(), UID, &payer(), offer.clone(), NOW)
             .unwrap();
         denied(book.enrol(&owner, &review_one.operation, UID, &offer, NOW));
         let receipt = book
@@ -518,6 +688,7 @@ mod tests {
                 &owner,
                 "STOCK-1".into(),
                 "04AB0000000005",
+                &payer(),
                 offer.clone(),
                 NOW
             )
@@ -547,6 +718,166 @@ mod tests {
                 .unwrap(),
             crate::Allowed::Blocked
         );
+    }
+
+    #[test]
+    fn ending_one_fleet_agreement_leaves_other_drivers_active() {
+        let mut book = book();
+        let estate = emob_service::estate::from_str::<crate::daemon::Estate>(include_str!(
+            "../../../deploy/estate.example.toml"
+        ))
+        .unwrap();
+        let catalog = Catalog::from_estate(&estate).unwrap();
+        let fleet = catalog.account("PAYER-FLEET").unwrap();
+        let writer = Actor::operator("issuer").unwrap();
+        let other = Actor::operator("another issuer").unwrap();
+        let offer = offer();
+        let mut drivers = Vec::new();
+        for code in ["STOCK-1004", "STOCK-1005"] {
+            let uid = catalog.stock_uid(code).unwrap();
+            let review = book
+                .review_agreement(&writer, code.to_owned(), uid, fleet, offer.clone(), NOW)
+                .unwrap();
+            drivers.push(
+                book.enrol(&writer, &review.operation, uid, &offer, NOW)
+                    .unwrap(),
+            );
+        }
+        let id = &drivers[0].agreement;
+        let stop = || crate::lifecycle::Request {
+            agreement: id.clone(),
+            action: crate::ChangeKind::End,
+            stock: None,
+        };
+        let review = book.preview_lifecycle(&writer, stop(), None, NOW).unwrap();
+        let competing = book.preview_lifecycle(&other, stop(), None, NOW).unwrap();
+        assert_eq!(
+            book.confirm_lifecycle(&other, id, &review.operation, &catalog, NOW)
+                .unwrap_err(),
+            StatusCode::CONFLICT
+        );
+        book.confirm_lifecycle(&writer, id, &review.operation, &catalog, NOW)
+            .unwrap();
+        assert_eq!(
+            book.confirm_lifecycle(&other, id, &competing.operation, &catalog, NOW)
+                .unwrap_err(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            book.confirm_lifecycle(&other, id, &review.operation, &catalog, NOW)
+                .unwrap_err(),
+            StatusCode::CONFLICT
+        );
+        let when = NOW + Duration::hours(1);
+        for (issued, status) in drivers
+            .iter()
+            .zip([crate::Allowed::Blocked, crate::Allowed::Allowed])
+        {
+            assert_eq!(
+                book.state()
+                    .authorize_at(&issued.reference, when, Some(&offer.terms.point))
+                    .unwrap(),
+                status
+            );
+        }
+        let roster = book.billing_agreements(fleet).unwrap();
+        assert_eq!(roster.agreements[0].1, Some(NOW));
+        assert_eq!(roster.agreements[1].1, None);
+    }
+
+    #[test]
+    fn an_existing_agreement_without_a_payer_replays_without_inventing_a_recipient() {
+        let mut original = book();
+        let writer = Actor::operator("issuer").unwrap();
+        let offer = offer();
+        let payer = payer();
+        let review = original
+            .review_agreement(&writer, "STOCK-1".into(), UID, &payer, offer.clone(), NOW)
+            .unwrap();
+        let issued = original
+            .enrol(&writer, &review.operation, UID, &offer, NOW)
+            .unwrap();
+        let record = original.journal().records().unwrap().pop().unwrap();
+        let mut body: serde_json::Value = serde_json::from_str(&record.body).unwrap();
+        body.as_object_mut().unwrap().remove("profile");
+        body["agreement"].as_object_mut().unwrap().remove("account");
+        body["agreement"]
+            .as_object_mut()
+            .unwrap()
+            .remove("account_kind");
+        let journal = Memory::new();
+        journal
+            .append(&record.kind, &writer, &body.to_string())
+            .unwrap();
+        let restored = Book::open(
+            Empd::new("DE*MSP".parse().unwrap(), DataKey::from_bytes(&[7; 32])),
+            journal,
+        )
+        .unwrap();
+        let receipt = restored.receipt(&issued.agreement).unwrap().unwrap();
+        assert!(receipt.account.is_empty());
+        assert_eq!(
+            restored
+                .state()
+                .authorize_at(&receipt.reference, NOW, Some(&offer.terms.point))
+                .unwrap(),
+            crate::Allowed::Allowed
+        );
+        assert!(
+            restored
+                .billing_agreements(&payer)
+                .unwrap()
+                .agreements
+                .is_empty()
+        );
+    }
+
+    // driver-monthly-invoice/SR-301
+    #[test]
+    fn fleet_payer_is_pinned_for_both_drivers_and_profile_edits_require_review() {
+        let mut book = book();
+        let mut fleet = emob_service::estate::from_str::<Estate>(include_str!(
+            "../../../deploy/estate.example.toml"
+        ))
+        .unwrap()
+        .retail_accounts
+        .remove(1);
+        let writer = Actor::operator("issuer").unwrap();
+        let offer = offer();
+        for (code, uid) in [("STOCK-1", UID), ("STOCK-2", "04AB0000000005")] {
+            let review = book
+                .review_agreement(&writer, code.into(), uid, &fleet, offer.clone(), NOW)
+                .unwrap();
+            let found = book
+                .enrol(&writer, &review.operation, uid, &offer, NOW)
+                .unwrap();
+            assert_eq!(found.account, fleet.id);
+        }
+        let roster = book.billing_agreements(&fleet).unwrap();
+        assert_eq!(roster.agreements.len(), 2);
+        assert_ne!(roster.agreements[0].0.emaid, roster.agreements[1].0.emaid);
+        assert!(
+            book.billing_agreements(&payer())
+                .unwrap()
+                .agreements
+                .is_empty()
+        );
+        fleet.name = "Another recipient".into();
+        assert!(matches!(
+            book.billing_agreements(&fleet),
+            Err(StatusCode::CONFLICT)
+        ));
+        assert!(matches!(
+            book.review_agreement(
+                &writer,
+                "STOCK-3".into(),
+                "04AB0000000006",
+                &fleet,
+                offer,
+                NOW
+            ),
+            Err(StatusCode::CONFLICT)
+        ));
     }
 
     // native-driver-enrolment/SR-301. Historic mixed-case UID and printed label.
@@ -605,7 +936,7 @@ mod tests {
         let actor = Actor::operator("issuer").unwrap();
         let offer = offer();
         let r = book
-            .review_agreement(&actor, "STOCK-1".into(), UID, offer.clone(), NOW)
+            .review_agreement(&actor, "STOCK-1".into(), UID, &payer(), offer.clone(), NOW)
             .unwrap();
         assert_eq!(
             book.enrol(&actor, &r.operation, UID, &offer, NOW)

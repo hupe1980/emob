@@ -17,28 +17,13 @@
 //!    is 4.2 kW against a three-phase 6 A of 4.14: sixty watts, which is the
 //!    distance a rounding eats and a compliance question turns on.
 //! 2. **Which state the site is in.** `[LPC §2.3.2]` gives a controllable system
-//!    five, three of which allow full power and are three different facts.
-//!    `emob_smart::GridLimit` is those five; [`Watchdog`] is the clock that says
-//!    which one holds now.
+//!    five states. Each control decision uses the last heartbeat, the current
+//!    limit's validity and the configured minimum residence in failsafe.
 //!
-//! # The line this crate draws
+//! A newly started controller holds the configured initialization power until
+//! the guard sends a heartbeat and a following limit. A site without a
+//! commissioned guard can use `emob_smart::GridLimit::Uncontrolled` directly.
 //!
-//! `csmsd` draws the same one with `ocpp-kit`: that crate's CSMS ledger answers
-//! an *operational* question from a numeric register, and **no billed
-//! kilowatt-hour is routed through it**. Here the kit answers the
-//! *communication* question, and the value that **binds an allocation** comes
-//! off the `ScaledNumber` on the datagram as a `Decimal`.
-//!
-//! Since `eebus` 0.13 the kit holds every regulatory quantity exactly too, so
-//! this is no longer about floats. It is about two things the kit's
-//! `ControllableSystem` is not built to be: a **pure query** — [`Watchdog`]
-//! answers "which state at this instant" from facts, the same answer whether it
-//! is asked at 21:00 or two years later in a dispute, where the kit's machine is
-//! advanced by timeouts — and a site **nobody has commissioned**, which
-//! `emob_smart::GridLimit` calls `Uncontrolled` (D302) and the kit, describing a
-//! commissioned device, starts in its failsafe. And [`read_limit_write`] says
-//! *why* a write is refused, which is what `sited` reports.
-
 //! # No I/O, no clock
 //!
 //! A datagram is a value and every instant is an argument; the sockets, the TLS
@@ -56,16 +41,10 @@
 //!
 //! let mut watchdog = Watchdog::new(Decimal::from_str_exact("4.2")?, time::Duration::hours(2));
 //! watchdog.heard_from(datetime!(2026-06-01 18:00 +2));
-//! // Two hours of silence is the failsafe `[LPC-912]`…
-//! assert_eq!(
-//!     watchdog.limit_at(datetime!(2026-06-01 20:30 +2)).lpc_state(),
-//!     Some("failsafe state")
-//! );
-//! // …and two more release it `[LPC-022]`, which every summary of § 14a drops.
-//! assert_eq!(
-//!     watchdog.limit_at(datetime!(2026-06-01 23:00 +2)).lpc_state(),
-//!     Some("unlimited/autonomous")
-//! );
+//! // Initialization holds the site at failsafe power until the first paired write.
+//! assert_eq!(watchdog.limit_at(datetime!(2026-06-01 18:00 +2)).lpc_state(), Some("init"));
+//! assert_eq!(watchdog.limit_at(datetime!(2026-06-01 18:00 +2)).stated_kw(), Some(Decimal::from_str_exact("4.2")?));
+//!
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -78,4 +57,4 @@ pub mod watchdog;
 
 pub use error::EebusError;
 pub use limit::{LimitWrite, read_limit_write, watts_of};
-pub use watchdog::{FAILSAFE_AFTER, Watchdog};
+pub use watchdog::{MIN_FAILSAFE_RESIDENCE, Watchdog};

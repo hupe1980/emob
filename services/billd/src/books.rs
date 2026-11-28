@@ -60,6 +60,8 @@ pub enum Event {
         /// before 0.3 holds none and reads as the EN 16931 core.
         #[serde(default = "core")]
         specification: emob_billing::Specification,
+        /// The XML syntax chosen at issue, including after configuration changes.
+        delivery_syntax: emob_billing::Syntax,
         /// The subscribers its `de.emob.invoice.issued` event is owed to.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         owed_to: Vec<String>,
@@ -86,8 +88,17 @@ pub enum Event {
         /// Which document.
         number: String,
     },
+    /// Immutable retail invoice, with the credit document when a late record corrected an issue.
+    RetailIssued(Box<crate::retail::Issue>),
+    /// A separately authorized credit against one fully attributable retail invoice.
+    WithdrawalCredited(Box<crate::retail::WithdrawalCredit>),
+    /// A numbered, reviewed credit against one attributable original UBL line.
+    LineCredited(Box<crate::retail::LineCredit>),
     /// A rated record arrived from `csmsd`, owed by `partner` for `period`.
     Received {
+        /// Authorization binding supplied only to the private billing receiver.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retail: Option<crate::retail::Binding>,
         /// The record, whole: the invoice line is built from this value.
         cdr: Box<emob_cdr::Cdr>,
         /// Who pays it — the issuer of the contract it was charged under.
@@ -103,6 +114,9 @@ pub enum Event {
 impl Kinded for Event {
     fn kind(&self) -> &'static str {
         match self {
+            Self::RetailIssued(_) => "retail_issued",
+            Self::LineCredited(_) => "line_credited",
+            Self::WithdrawalCredited(_) => "withdrawal_credited",
             Self::Issued { .. } => "issued",
             Self::Submitted { .. } => "submitted",
             Self::Announced { .. } => "announced",
@@ -120,6 +134,9 @@ const fn core() -> emob_billing::Specification {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum BooksError {
+    /// The same CDR key arrived with different commercial or measured facts.
+    #[error("conflicting delivery for a retained record")]
+    ConflictingDelivery,
     /// The closing itself was refused.
     ///
     /// Boxed because it is the large half of a small enum, and every call here
@@ -283,6 +300,7 @@ impl<J: Journal> Books<J> {
             .folded
             .state_mut()
             .issue_as(period, specification, invoice)?;
+        let delivery_syntax = issued.delivery_syntax;
         let number = issued.invoice.number.clone();
         let invoice = Box::new(issued.invoice.clone());
         self.folded.state_mut().owe(&number, &self.subscribers);
@@ -293,6 +311,7 @@ impl<J: Journal> Books<J> {
             cancels: None,
             replaces: None,
             specification,
+            delivery_syntax,
             owed_to: self.subscribers.clone(),
         };
         self.commit(by, &event, &number)?;
@@ -329,15 +348,15 @@ impl<J: Journal> Books<J> {
             (
                 state
                     .issued(&credit)
-                    .map(|d| (d.invoice.clone(), d.specification)),
+                    .map(|d| (d.invoice.clone(), d.specification, d.delivery_syntax)),
                 state
                     .issued(&replaced)
-                    .map(|d| (d.invoice.clone(), d.specification)),
+                    .map(|d| (d.invoice.clone(), d.specification, d.delivery_syntax)),
             )
         };
         self.folded.state_mut().owe(&credit, &self.subscribers);
         self.folded.state_mut().owe(&replaced, &self.subscribers);
-        if let Some((invoice, specification)) = credit_doc {
+        if let Some((invoice, specification, delivery_syntax)) = credit_doc {
             self.commit(
                 by,
                 &Event::Issued {
@@ -347,12 +366,13 @@ impl<J: Journal> Books<J> {
                     cancels: Some(number.to_owned()),
                     replaces: None,
                     specification,
+                    delivery_syntax,
                     owed_to: self.subscribers.clone(),
                 },
                 &credit,
             )?;
         }
-        if let Some((invoice, specification)) = replacement_doc {
+        if let Some((invoice, specification, delivery_syntax)) = replacement_doc {
             self.commit(
                 by,
                 &Event::Issued {
@@ -362,6 +382,7 @@ impl<J: Journal> Books<J> {
                     cancels: None,
                     replaces: Some(number.to_owned()),
                     specification,
+                    delivery_syntax,
                     owed_to: self.subscribers.clone(),
                 },
                 &replaced,
@@ -372,7 +393,8 @@ impl<J: Journal> Books<J> {
 
     /// Owe every document issued from now on to these subscribers as well.
     #[must_use]
-    pub fn delivering_to(mut self, subscribers: Vec<String>) -> Self {
+    pub fn delivering_to(mut self, subscribers: Vec<String>, syntax: emob_billing::Syntax) -> Self {
+        self.folded.state_mut().delivery_syntax = syntax;
         self.subscribers = subscribers;
         self
     }
@@ -493,32 +515,75 @@ impl<J: Journal> Books<J> {
         partner: emob_core::PartyId,
         receipt: Option<String>,
     ) -> Result<bool, BooksError> {
+        self.receive_bound(by, cdr, partner, receipt, None)
+    }
+
+    pub(crate) fn receive_bound(
+        &mut self,
+        by: &Actor,
+        cdr: emob_cdr::Cdr,
+        partner: emob_core::PartyId,
+        receipt: Option<String>,
+        retail: Option<crate::retail::Binding>,
+    ) -> Result<bool, BooksError> {
         self.guard()?;
         let key = cdr.key.to_string();
-        if self.state().received.contains_key(&key) {
+        if let Some(prior) = self.state().received.get(&key) {
+            if prior.cdr != cdr || prior.partner != partner || prior.retail != retail {
+                return Err(BooksError::ConflictingDelivery);
+            }
             return Ok(false);
         }
         let period = crate::period_of(&partner, cdr.ended_at);
-        self.folded.state_mut().received.insert(
-            key.clone(),
-            crate::Received {
-                cdr: cdr.clone(),
-                partner: partner.clone(),
-                period: period.clone(),
-                receipt: receipt.clone(),
-            },
-        );
-        self.commit(
-            by,
-            &Event::Received {
-                cdr: Box::new(cdr),
-                partner,
-                period,
-                receipt,
-            },
-            &key,
-        )?;
+        let event = Event::Received {
+            cdr: Box::new(cdr),
+            retail,
+            partner,
+            period,
+            receipt,
+        };
+        self.commit(by, &event, &key)?;
+        self.folded.state_mut().apply(event);
         Ok(true)
+    }
+
+    pub(crate) fn issue_retail(
+        &mut self,
+        by: &Actor,
+        issue: crate::retail::Issue,
+    ) -> Result<(), BooksError> {
+        self.guard()?;
+        let number = issue.document.number.clone();
+        let event = Event::RetailIssued(Box::new(issue));
+        self.commit(by, &event, &number)?;
+        self.folded.state_mut().apply(event);
+        Ok(())
+    }
+
+    pub(crate) fn line_credit(
+        &mut self,
+        actor: &Actor,
+        credit: crate::retail::LineCredit,
+        number: &str,
+    ) -> Result<(), BooksError> {
+        self.guard()?;
+        let event = Event::LineCredited(Box::new(credit));
+        self.commit(actor, &event, number)?;
+        self.folded.state_mut().apply(event);
+        Ok(())
+    }
+
+    pub(crate) fn withdrawal_credit(
+        &mut self,
+        actor: &Actor,
+        credit: crate::retail::WithdrawalCredit,
+    ) -> Result<(), BooksError> {
+        self.guard()?;
+        let number = credit.number.clone();
+        let event = Event::WithdrawalCredited(Box::new(credit));
+        self.commit(actor, &event, &number)?;
+        self.folded.state_mut().apply(event);
+        Ok(())
     }
 
     /// Close one partner's month from the records received for it.
@@ -564,6 +629,7 @@ impl<J: Journal> Books<J> {
                 why: error.to_string(),
             })?;
         let specification = closing.specification;
+        let syntax = self.state().delivery_syntax;
         let number = self.issue_as(by, &period, specification, |number| {
             let mut builder = emob_billing::InvoiceBuilder::new(
                 number,
@@ -587,7 +653,7 @@ impl<J: Journal> Books<J> {
             // refused here, while it is only a spent number — not served on a
             // page and posted to an access point that hands it back. The
             // profile's own proof, the one the files are written through.
-            emob_billing::en16931::write(&invoice, specification, emob_billing::Syntax::Ubl)?;
+            emob_billing::en16931::write(&invoice, specification, syntax)?;
             Ok(invoice)
         })?;
         Ok(Some(number))
@@ -605,6 +671,9 @@ impl Billd {
     /// ruled out by checking the chain.
     pub(crate) fn apply(&mut self, event: Event) {
         match event {
+            Event::RetailIssued(issue) => self.retail.apply(*issue),
+            Event::LineCredited(credit) => self.retail.apply_line_credit(*credit),
+            Event::WithdrawalCredited(credit) => self.retail.apply_credit(*credit),
             Event::Issued {
                 period,
                 number,
@@ -612,6 +681,7 @@ impl Billd {
                 cancels,
                 replaces,
                 specification,
+                delivery_syntax,
                 owed_to,
             } => {
                 self.numbering.resume_past(&number);
@@ -630,6 +700,7 @@ impl Billd {
                         replaces,
                         booked: false,
                         specification,
+                        delivery_syntax,
                         owed_to,
                         answered: std::collections::BTreeMap::new(),
                     },
@@ -654,14 +725,28 @@ impl Billd {
             }
             Event::Received {
                 cdr,
+                retail,
                 partner,
                 period,
                 receipt,
             } => {
+                let key = cdr.key.to_string();
+                if let Some(binding) = retail.as_ref().filter(|b| !b.agreement.is_empty())
+                    && receipt.is_some()
+                    && cdr
+                        .evidence
+                        .as_ref()
+                        .is_some_and(|e| e.energy_billable && !e.payload_digests.is_empty())
+                    && emob_cdr::validate(&cdr).is_settleable()
+                {
+                    self.retail
+                        .index_receipt(binding, cdr.ended_at, key.clone());
+                }
                 self.received.insert(
-                    cdr.key.to_string(),
+                    key,
                     crate::Received {
                         cdr: *cdr,
+                        retail,
                         partner,
                         period,
                         receipt,

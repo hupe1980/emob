@@ -4,7 +4,7 @@ German calibration law (*Eichrecht*) for EV charging: decides whether a signed
 meter value may be invoiced, for charge point operators and the platforms that
 bill for them.
 
-[![crates.io](https://img.shields.io/crates/v/emob-eichrecht.svg)](https://crates.io/crates/emob-eichrecht) [![docs.rs](https://img.shields.io/docsrs/emob-eichrecht)](https://docs.rs/emob-eichrecht) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-eichrecht.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-eichrecht.svg)](https://crates.io/crates/emob-eichrecht) [![docs.rs](https://img.shields.io/docsrs/emob-eichrecht)](https://docs.rs/emob-eichrecht) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-eichrecht.svg)](#license)
 
 A customer may be billed for a measured value only if they can verify it, long
 after the session `[MessEG §33]`, `[PTB-A 50.7]`, `[REA 6-A]`. This crate makes

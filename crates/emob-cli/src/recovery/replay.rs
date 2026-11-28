@@ -14,6 +14,7 @@ use tower::ServiceExt as _;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Expected {
+    pub receivables_digest: String,
     pub settled: String,
     pub energy_kwh: String,
     pub price: String,
@@ -140,6 +141,18 @@ pub(super) fn run(
     let accepted = fold(report, "poid", || {
         ok(ok(poid::Ledger::open(state.take("poid")?))?.last_accepted())
     })?;
+    let cash = fold(report, "accountingd", || {
+        let data = Arc::new(key(&state, "accountingd")?);
+        ok(accountingd::recovery_proof(
+            state.take("accountingd")?,
+            data,
+            &estate.parties.provider,
+        ))
+    })?;
+    report.compare(
+        "receivables",
+        cash["digest"].as_str() == Some(e.receivables_digest.as_str()),
+    );
     let exact = csms
         .state()
         .cdrs
@@ -273,11 +286,11 @@ pub(super) fn run(
     let books = Arc::new(Mutex::new(books));
     let mut secret_bytes = [0u8; 32];
     getrandom::fill(&mut secret_bytes).map_err(|_| super::missing("random_unavailable"))?;
-    let secret = webhook::Secret::raw(secret_bytes);
+    let secret = ok(webhook::Secret::raw(secret_bytes))?;
     let app = billd::receive::delivery_router(billd::receive::Shared {
         books: Arc::clone(&books),
         secret: secret.clone(),
-        partners: bill.partners.iter().map(|p| p.party.clone()).collect(),
+        partners: bill.billing_issuers(),
         refused: Arc::new(AtomicU64::new(0)),
     });
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -323,7 +336,10 @@ async fn retry(app: axum::Router, secret: &webhook::Secret, delivery: &Delivery)
     let req = ok(Request::post("/v1/deliveries")
         .header(webhook::ID_HEADER, &delivery.id)
         .header(webhook::TIMESTAMP_HEADER, at.unix_timestamp().to_string())
-        .header(webhook::SIGNATURE_HEADER, webhook::sign(&attempt, secret))
+        .header(
+            webhook::SIGNATURE_HEADER,
+            ok(webhook::sign(&attempt, secret))?,
+        )
         .body(Body::from(delivery.body.clone())))?;
     let response = app.oneshot(req).await.expect("axum router is infallible");
     if !response.status().is_success() {

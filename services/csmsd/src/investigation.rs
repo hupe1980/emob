@@ -97,6 +97,15 @@ impl Investigations {
         );
     }
 
+    /// A late token cannot establish a new payer for an already closed decision.
+    pub(crate) fn has_decision(&self, key: &Key) -> bool {
+        self.by_transaction.get(&key.1).is_some_and(|positions| {
+            positions
+                .iter()
+                .any(|p| self.decisions[p].summary.identity == key.0)
+        })
+    }
+
     fn search(&self, query: &Search, limit: usize) -> Page<&Summary> {
         let positions = self
             .by_transaction

@@ -59,10 +59,46 @@ pub enum Event {
     },
     /// One accepted native agreement and its first physical card are indivisible.
     Enrolled {
+        /// Keyed fingerprint of the bill-to profile accepted for this account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<emob_service::vault::Digest>,
         /// Exact terms, card reference, actor and acceptance time.
         agreement: Box<crate::Agreement>,
         /// Sealed UID and online-only standing of the issued card.
         held: Box<Token>,
+    },
+    /// The sole live physical card changed, or the contract ended.
+    AgreementChanged {
+        /// Effective operation and immutable agreement identity.
+        change: Box<crate::AgreementChange>,
+        /// Retired card.
+        previous: TokenRef,
+        /// Sealed replacement, when another card is issued.
+        replacement: Option<Box<(TokenRef, Token)>>,
+    },
+    /// A private withdrawal request or its reviewed disposition.
+    Withdrawal {
+        /// Sealed evidence and agreement binding.
+        evidence: emob_service::vault::Sealed,
+    },
+    /// Identifies the independent custody for this provider journal.
+    CustodyBound {
+        /// Random store identity pinned on first initialization.
+        id: String,
+    },
+    /// The independently committed erasure acknowledged to a named privacy reviewer.
+    CustomerErased {
+        /// Blinded customer selector in the independent custody.
+        subject_tag: String,
+        /// Original immutable erasure operation.
+        operation: String,
+    },
+    /// A named operator changed one customer access assignment.
+    CustomerGrant {
+        /// Blinded customer key selector.
+        subject_tag: String,
+        /// Sealed subject, target and desired standing.
+        change: emob_service::vault::Sealed,
     },
     /// A session was counted against a contract.
     RanUp {
@@ -87,7 +123,12 @@ impl Kinded for Event {
     fn kind(&self) -> &'static str {
         match self {
             Self::Contracted { .. } => "contracted",
+            Self::Withdrawal { .. } => "withdrawal",
+            Self::CustodyBound { .. } => "custody_bound",
+            Self::CustomerGrant { .. } => "customer_grant",
+            Self::CustomerErased { .. } => "customer_erased",
             Self::Issued { .. } => "issued",
+            Self::AgreementChanged { .. } => "agreement_changed",
             Self::Enrolled { .. } => "enrolled",
             Self::Labelled { .. } => "labelled",
             Self::Blocked { .. } => "blocked",
@@ -138,6 +179,10 @@ pub struct Book<J: Journal> {
     folded: Folded<Empd, Event, J>,
     halted: Option<String>,
     pub(crate) pending: crate::actions::Pending,
+    pub(crate) lifecycle_reviews: std::collections::BTreeMap<Actor, crate::lifecycle::Review>,
+    pub(crate) withdrawal_reviews: std::collections::BTreeMap<Actor, crate::withdrawal::Review>,
+    pub(crate) erasure_reviews:
+        std::collections::BTreeMap<Actor, crate::customer::erasure::Pending>,
     pub(crate) enrol_reviews: crate::enrol::Reviews,
 }
 
@@ -165,10 +210,28 @@ impl<J: Journal> Book<J> {
     /// [`JournalError::Broken`] when the journal does not chain, and
     /// [`JournalError::Encoding`] when it holds a fact this build cannot read.
     pub fn open(empty: Empd, journal: J) -> Result<Self, JournalError> {
+        let folded = Folded::open(empty, journal, Empd::apply)?;
+        if !folded.state().grants.readable() {
+            return Err(JournalError::Encoding {
+                doing: "opening customer grants",
+                source: serde::de::Error::custom(
+                    "restore the current customer custody and original provider data key",
+                ),
+            });
+        }
+        if folded.state().withdrawals.unreadable {
+            return Err(JournalError::Encoding {
+                doing: "opening withdrawal evidence",
+                source: serde::de::Error::custom("restore the original empd data key and journal"),
+            });
+        }
         Ok(Self {
-            folded: Folded::open(empty, journal, Empd::apply)?,
+            folded,
             halted: None,
             pending: crate::actions::Pending::new(),
+            lifecycle_reviews: std::collections::BTreeMap::new(),
+            withdrawal_reviews: std::collections::BTreeMap::new(),
+            erasure_reviews: std::collections::BTreeMap::new(),
             enrol_reviews: crate::enrol::Reviews::default(),
         })
     }
@@ -177,6 +240,10 @@ impl<J: Journal> Book<J> {
     #[must_use]
     pub const fn state(&self) -> &Empd {
         self.folded.state()
+    }
+
+    pub(crate) fn forget_customer_grants(&mut self, subject: &str) {
+        self.folded.state_mut().grants.forget(subject);
     }
 
     /// The journal under it.
@@ -212,11 +279,12 @@ impl<J: Journal> Book<J> {
     }
 
     // A standing becomes visible only after storage acknowledges its record.
-    pub(crate) fn record_card_fact(&mut self, by: &Actor, event: Event) -> Result<(), BookError> {
+    pub(crate) fn record_fact(&mut self, by: &Actor, event: Event) -> Result<(), BookError> {
+        let kind = event.kind();
         self.folded.record(by, event).map_err(|source| {
             self.halted = Some(source.to_string());
             BookError::Journal {
-                about: "a card".into(),
+                about: kind.into(),
                 source,
             }
         })?;
@@ -342,7 +410,7 @@ impl<J: Journal> Book<J> {
             .ok_or_else(|| ProviderError::UnknownToken {
                 token: token.as_str().to_owned(),
             })?;
-        self.record_card_fact(
+        self.record_fact(
             by,
             Event::Blocked {
                 token: token.clone(),
@@ -427,8 +495,31 @@ impl Empd {
     /// Fold one recorded fact back in.
     pub(crate) fn apply(&mut self, event: Event) {
         match event {
+            Event::Withdrawal { evidence } => self.apply_withdrawal(&evidence),
+            Event::AgreementChanged {
+                change,
+                previous,
+                replacement,
+            } => self.apply_contract_change(*change, previous, replacement.map(|r| *r)),
             Event::Contracted { contract } => self.hold(*contract),
-            Event::Enrolled { agreement, held } => self.apply_agreement(*agreement, *held),
+            Event::CustodyBound { id } => {
+                if !self.custody.matches(&id) {
+                    self.grants.reject_custody();
+                }
+            }
+            Event::CustomerErased {
+                subject_tag,
+                operation,
+            } => self.apply_erasure_witness(subject_tag, &operation),
+            Event::CustomerGrant {
+                subject_tag,
+                change,
+            } => self.apply_customer_grant(&subject_tag, &change),
+            Event::Enrolled {
+                agreement,
+                held,
+                profile,
+            } => self.apply_agreement(*agreement, *held, profile),
             Event::CardChanged { change } => self.apply_change(change),
             Event::Issued { token, held, .. } => {
                 self.store_card(&token, *held);

@@ -1,0 +1,187 @@
+{
+  "openapi": "3.1.2",
+  "info": {
+    "title": "emob integration ports",
+    "version": "1",
+    "description": "Contracts for a replacement provider authorization service, charge detail record receiver and event subscriber. Each operation names its owning daemon and default standalone address. Webhook destinations are configured by the receiving organization."
+  },
+  "paths": {
+    "/v1/driver-tariffs/{id}": {
+      "servers": [{ "url": "http://127.0.0.1:9581", "x-emob-service": "tarifd", "description": "tarifd" }],
+      "parameters": [{ "$ref": "#/components/parameters/tariffId" }],
+      "get": {
+        "operationId": "currentDriverTariff",
+        "summary": "Read the version of a public driver tariff in force now",
+        "security": [],
+        "responses": {
+          "200": { "$ref": "#/components/responses/tariff" },
+          "404": { "description": "Tariff unknown or no version in force." }
+        }
+      }
+    },
+    "/v1/driver-tariffs/{id}/{version}": {
+      "servers": [{ "url": "http://127.0.0.1:9581", "x-emob-service": "tarifd", "description": "tarifd" }],
+      "parameters": [
+        { "$ref": "#/components/parameters/tariffId" },
+        { "in": "path", "name": "version", "required": true, "schema": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+      ],
+      "get": {
+        "operationId": "versionedDriverTariff",
+        "summary": "Read an exact tariff by its retained fingerprint",
+        "security": [],
+        "responses": {
+          "200": { "$ref": "#/components/responses/tariff" },
+          "404": { "description": "Tariff or retained version unknown." }
+        }
+      }
+    },
+    "/v1/authorize": {
+      "servers": [{ "url": "http://127.0.0.1:9585", "x-emob-service": "empd", "description": "empd" }],
+      "post": {
+        "operationId": "authorizeCharging",
+        "summary": "Ask the provider whether this card can charge",
+        "description": "Send the station UID and, when known, the EVSE. The CSMS treats an unavailable or unreadable response as a refusal. Its default budget is two seconds. Unknown cards receive an Invalid decision.",
+        "security": [{ "serviceBearer": [] }],
+        "requestBody": {
+          "required": true,
+          "description": "At most 2048 bytes.",
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "required": ["uid"],
+            "additionalProperties": false,
+            "properties": {
+              "uid": { "type": "string" },
+              "evse": { "type": ["string", "null"], "description": "EVSE identifier, required for a point-bound agreement." }
+            },
+            "examples": [{ "uid": "EMOBTEST", "evse": "DE*EMT*E1" }]
+          } } }
+        },
+        "responses": {
+          "200": { "description": "The provider decided.", "content": { "application/json": { "schema": { "$ref": "openapi/authorize-answer.json" } } } },
+          "400": { "description": "Malformed JSON, unknown field or invalid field value." },
+          "401": { "description": "Service token missing or incorrect." },
+          "413": { "description": "Request exceeds 2048 bytes." },
+          "415": { "description": "JSON content type required." }
+        }
+      }
+    },
+    "/v1/deliveries": {
+      "servers": [
+        { "url": "http://127.0.0.1:9584", "x-emob-service": "billd", "description": "billd" },
+        { "url": "http://127.0.0.1:9583", "x-emob-service": "roamd", "description": "roamd" }
+      ],
+      "post": {
+        "operationId": "receiveChargeDetailRecord",
+        "summary": "Accept a settled charging session",
+        "description": "For a real delivery the signed event id, webhook-id and CDR key must agree. Acknowledge only after durable acceptance. A duplicate is acknowledged once more. A signed sample carrying emobtest=true must never book or forward a record. The reference receivers cap the body at 1 MiB and accept at most 300 seconds of clock skew.",
+        "security": [{ "webhookSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/webhookId" }, { "$ref": "#/components/parameters/webhookTimestamp" }],
+        "requestBody": { "$ref": "#/components/requestBodies/cdr" },
+        "responses": {
+          "200": { "description": "Durably accepted or already received.", "content": { "application/json": { "schema": { "type": "object", "required": ["duplicate"], "properties": { "duplicate": { "type": "boolean" } } } } } },
+          "202": { "description": "Signed sample accepted.", "content": { "application/json": { "schema": { "type": "object", "required": ["test"], "properties": { "test": { "const": true } } } } } },
+          "401": { "$ref": "#/components/responses/invalidSignature" },
+          "409": { "description": "Billing already holds conflicting facts for this delivery." },
+          "413": { "description": "Body exceeds 1 MiB." },
+          "422": { "description": "Envelope or charging record cannot be accepted." },
+          "503": { "description": "Receiver could not record the delivery. Retry later." }
+        }
+      }
+    },
+    "/v1/subscriber-events/recover": {
+      "servers": [
+        { "url": "http://127.0.0.1:9001", "x-emob-service": "csmsd", "description": "csmsd for charge detail records" },
+        { "url": "http://127.0.0.1:9584", "x-emob-service": "billd", "description": "billd for issued invoices" }
+      ],
+      "post": {
+        "operationId": "recoverSubscriberEvent",
+        "summary": "Read a previously owed event by its original id",
+        "description": "Authenticate as the original named subscriber. Verify the response signature and id before consuming it. Recovery reads one event without changing delivery state.",
+        "security": [{ "webhookSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/webhookId" }, { "$ref": "#/components/parameters/webhookTimestamp" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["subscriber", "type", "id", "purpose"],
+          "properties": {
+            "subscriber": { "type": "string", "minLength": 1 },
+            "type": { "enum": ["de.emob.cdr.issued", "de.emob.invoice.issued"] },
+            "id": { "type": "string", "minLength": 1 },
+            "purpose": { "const": "recover" }
+          }
+        } } } },
+        "responses": {
+          "200": {
+            "description": "The event, freshly signed under the subscriber secret.",
+            "headers": {
+              "Cache-Control": { "schema": { "const": "private, no-store" } },
+              "webhook-id": { "required": true, "schema": { "type": "string" } },
+              "webhook-timestamp": { "required": true, "schema": { "type": "integer", "format": "int64" } },
+              "webhook-signature": { "required": true, "schema": { "type": "string" } }
+            },
+            "content": { "application/cloudevents+json": { "schema": { "oneOf": [{ "$ref": "events/de.emob.cdr.issued.json" }, { "$ref": "events/de.emob.invoice.issued.json" }] } } }
+          },
+          "400": { "description": "Malformed recovery request." },
+          "401": { "$ref": "#/components/responses/invalidSignature" },
+          "404": { "description": "Event unavailable to this subscriber." },
+          "413": { "description": "Request exceeds 4096 bytes." },
+          "5XX": { "description": "The issuer could not read or sign the event. Retry later." }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "chargeDetailRecordIssued": {
+      "post": {
+        "operationId": "deliverChargeDetailRecord",
+        "summary": "Deliver a charge detail record to a subscribed URL",
+        "security": [{ "webhookSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/webhookId" }, { "$ref": "#/components/parameters/webhookTimestamp" }],
+        "requestBody": { "$ref": "#/components/requestBodies/cdr" },
+        "responses": {
+          "2XX": { "description": "Subscriber acknowledged this id." },
+          "default": { "$ref": "#/components/responses/deliveryFailed" }
+        }
+      }
+    },
+    "invoiceIssued": {
+      "post": {
+        "operationId": "deliverInvoice",
+        "summary": "Deliver the issued invoice to a subscriber or the configured ERP",
+        "security": [{ "webhookSignature": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/webhookId" }, { "$ref": "#/components/parameters/webhookTimestamp" }],
+        "requestBody": { "required": true, "content": { "application/cloudevents+json": { "schema": { "$ref": "events/de.emob.invoice.issued.json" } } } },
+        "responses": {
+          "2XX": {
+            "description": "Delivery accepted. An ERP may return a reference. A subscriber acknowledgment only clears that subscriber's delivery.",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "reference": { "type": "string" } } } } }
+          },
+          "default": { "$ref": "#/components/responses/deliveryFailed" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "serviceBearer": { "type": "http", "scheme": "bearer", "description": "Token configured by services.service_token_env." },
+      "webhookSignature": { "type": "apiKey", "in": "header", "name": "webhook-signature", "description": "Computed per request, never the secret itself. Sign the exact body and the two accompanying headers per Standard Webhooks." }
+    },
+    "parameters": {
+      "tariffId": { "in": "path", "name": "id", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "webhookId": { "in": "header", "name": "webhook-id", "required": true, "schema": { "type": "string", "minLength": 1 } },
+      "webhookTimestamp": { "in": "header", "name": "webhook-timestamp", "required": true, "description": "Unix seconds when this attempt was signed.", "schema": { "type": "integer", "format": "int64" } }
+    },
+    "requestBodies": {
+      "cdr": { "required": true, "content": { "application/cloudevents+json": { "schema": { "$ref": "events/de.emob.cdr.issued.json" } } } }
+    },
+    "responses": {
+      "tariff": {
+        "description": "Published driver-tariff.v1 with exact decimal prices.",
+        "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-store" } } },
+        "content": { "application/json": { "schema": { "$ref": "driver-tariff.v1.json" } } }
+      },
+      "invalidSignature": { "description": "Signature missing, incorrect or outside the freshness window." },
+      "deliveryFailed": { "description": "A timeout, 401, 408, 429 or server error leaves the delivery pending. Any other 4xx records a refusal." }
+    }
+  }
+}

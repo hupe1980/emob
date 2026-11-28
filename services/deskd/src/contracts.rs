@@ -1,4 +1,7 @@
 //! Native enrolment. Forms carry private inputs to the provider in POST bodies.
+mod lifecycle;
+mod withdrawal;
+
 use core::fmt::Write as _;
 use std::sync::Arc;
 
@@ -28,7 +31,10 @@ pub(super) fn routes() -> Router<Arc<Page>> {
         .route("/contracts/preview", post(preview))
         .route("/contracts/confirm", post(confirm))
         .route("/contracts/lookup", post(lookup))
+        .route("/contracts/change/preview", post(lifecycle::preview))
+        .route("/contracts/change/confirm", post(lifecycle::confirm))
         .layer(DefaultBodyLimit::max(2048))
+        .merge(withdrawal::routes())
 }
 
 #[derive(Deserialize)]
@@ -40,6 +46,7 @@ struct IndexParams {
 
 #[derive(Deserialize)]
 struct Options {
+    accounts: Vec<crate::retail::AccountChoice>,
     offers: Vec<OptionView>,
 }
 
@@ -54,6 +61,7 @@ struct OptionView {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Intake {
+    account: String,
     selection: String,
     stock: String,
 }
@@ -72,6 +80,7 @@ struct Lookup {
 
 #[derive(Deserialize)]
 struct Review {
+    account: String,
     card: String,
     operation: String,
     offer: RetailOffer,
@@ -81,6 +90,10 @@ struct Review {
 
 #[derive(Deserialize)]
 struct Receipt {
+    withdrawal_status: Option<withdrawal::Stage>,
+    lifecycle: Option<lifecycle::Changed>,
+    #[serde(default)]
+    account: String,
     agreement: String,
     emaid: Emaid,
     card: String,
@@ -157,7 +170,12 @@ fn receipt_lookup(lang: Lang) -> String {
     )
 }
 
-fn enrol_form(offers: &[OptionView], requested_page: usize, lang: Lang) -> String {
+fn enrol_form(
+    offers: &[OptionView],
+    accounts: &[crate::retail::AccountChoice],
+    requested_page: usize,
+    lang: Lang,
+) -> String {
     const PAGE: usize = 24;
     let last = offers.len().saturating_sub(1) / PAGE;
     let page = requested_page.min(last);
@@ -199,10 +217,19 @@ fn enrol_form(offers: &[OptionView], requested_page: usize, lang: Lang) -> Strin
                 "The provider has no offers available for enrolment."
             )
         )
+    } else if accounts.is_empty() {
+        format!(
+            "<p>{}</p>",
+            lang.pick(
+                "Es ist kein Rechnungskonto eingerichtet.",
+                "No billing accounts are configured."
+            )
+        )
     } else {
         format!(
-            "<form method=\"post\" action=\"/contracts/preview?lang={tag}\" autocomplete=\"off\"><p><label>{offer}<br><select name=\"selection\" required><option value=\"\">{choose}</option>{options}</select></label></p><p><label>{card}<br><input name=\"stock\" type=\"text\" required maxlength=\"32\" pattern=\"[A-Z0-9][A-Z0-9\\-]{{0,31}}\" spellcheck=\"false\" aria-describedby=\"stock-help\"></label><br><small id=\"stock-help\">{help}</small></p><button type=\"submit\" class=\"btn\">{review}</button></form><div class=\"card-controls\">{links}</div>",
+            "<form method=\"post\" action=\"/contracts/preview?lang={tag}\" autocomplete=\"off\"><p><label>{offer}<br><select name=\"selection\" required><option value=\"\">{choose}</option>{options}</select></label></p>{payer}<p><label>{card}<br><input name=\"stock\" type=\"text\" required maxlength=\"32\" pattern=\"[A-Z0-9][A-Z0-9\\-]{{0,31}}\" spellcheck=\"false\" aria-describedby=\"stock-help\"></label><br><small id=\"stock-help\">{help}</small></p><button type=\"submit\" class=\"btn\">{review}</button></form><div class=\"card-controls\">{links}</div>",
             tag = lang.tag(),
+            payer = crate::retail::account_field(accounts, lang),
             offer = lang.pick("Tarif und Ladepunkt", "Plan and charging point"),
             choose = lang.pick("Angebot auswählen", "Choose an offer"),
             card = lang.pick("Bestandsnummer der Karte", "Card stock number"),
@@ -235,7 +262,7 @@ async fn index(
     {
         (
             StatusCode::OK,
-            enrol_form(&options.offers, params.page, lang),
+            enrol_form(&options.offers, &options.accounts, params.page, lang),
         )
     } else {
         let message = lang.pick(
@@ -248,6 +275,9 @@ async fn index(
         )
     };
     body.push_str(&receipt_lookup(lang));
+    if access.can_write() {
+        body.push_str(&withdrawal::link(lang));
+    }
     with_status(
         shell(lang, lang.pick("Ladeverträge", "Driver contracts"), &body),
         code,
@@ -328,8 +358,9 @@ fn terms(offer: &RetailOffer, lang: Lang, zone: &TimeZone) -> Option<String> {
 
 fn review_view(review: &Review, lang: Lang, zone: &TimeZone) -> Option<Response> {
     let price = terms(&review.offer, lang, zone)?;
-    let body = format!("<section class=\"card\"><h2>{heading}</h2><dl class=\"kv\"><dt>{card}</dt><dd>{masked}</dd><dt>{by}</dt><dd>{expiry}</dd></dl><p>{effect}</p></section>{price}<div class=\"card-controls\">{confirm}{back}</div>",
+    let body = format!("<section class=\"card\"><h2>{heading}</h2><dl class=\"kv\"><dt>{payer}</dt><dd>{account}</dd><dt>{card}</dt><dd>{masked}</dd><dt>{by}</dt><dd>{expiry}</dd></dl><p>{effect}</p></section>{price}<div class=\"card-controls\">{confirm}{back}</div>",
         heading=lang.pick("Karte anmelden","Enrol card"),card=lang.pick("Kartennummer des Anbieters","Provider card number"),masked=escape(&review.card),by=lang.pick("Bestätigen bis","Confirm by"),expiry=moment(review.expires_at,zone,lang),
+        payer=crate::retail::account_label(lang),account=escape(&review.account),
         effect=lang.pick("Mit der Bestätigung teilt der Anbieter die Karte für diesen Ladepunkt und genau diesen Preisstand zu.","Confirmation issues the card for online charging at this point under these exact terms."),
         confirm=action_form("confirm","operation",&review.operation,lang.pick("Vertrag anlegen und Karte zuteilen","Confirm enrolment"),lang),back=back(lang));
     Some(shell(
@@ -342,12 +373,18 @@ fn review_view(review: &Review, lang: Lang, zone: &TimeZone) -> Option<Response>
 fn error_page(error: Why, lang: Lang, action: &str) -> Response {
     match error {
         Why::Refused => access_error(lang),
+        Why::Status(404) if action == "change" => failure(StatusCode::NOT_FOUND,lang,lang.pick("Vertrag oder Ersatzkarte unbekannt. Prüfen Sie die eingegebenen Angaben.","Agreement or replacement card not found. Check the details you entered.")),
+        Why::Status(409) if action == "change" => failure(StatusCode::CONFLICT,lang,lang.pick("Der Vertrag oder die Karte wurde geändert. Prüfen Sie den aktuellen Vertrag.","The agreement or card has changed. Reopen the agreement to review its current state.")),
         Why::Status(404) if action == "lookup" => failure(StatusCode::NOT_FOUND,lang,lang.pick("Zu dieser Referenz wurde kein Vertrag gefunden.","No agreement was found for this reference.")),
         Why::Status(404) => failure(StatusCode::NOT_FOUND,lang,lang.pick("Die Bestandsnummer oder das gewählte Angebot ist unbekannt. Prüfen Sie beides.","The stock number or selected offer could not be found. Check both details.")),
         Why::Status(409) => failure(StatusCode::CONFLICT,lang,lang.pick("Die Vorschau ist nicht mehr gültig oder die Karte wurde bereits zugeteilt. Prüfen Sie die Vertragsreferenz und fordern Sie bei Bedarf eine neue Vorschau an.","The review is no longer current or the card has already been issued. Check the agreement reference before starting another review.")),
         Why::Status(400 | 422) => invalid(lang, StatusCode::BAD_REQUEST),
         _ => failure(StatusCode::BAD_GATEWAY,lang,lang.pick("Der Anbieter ist derzeit nicht verfügbar. Versuchen Sie es später erneut.","The provider is currently unavailable. Try again later.")),
     }
+}
+
+fn valid_stock(stock: &str) -> bool {
+    !stock.is_empty() && stock.len() <= 32
 }
 
 async fn preview(
@@ -368,22 +405,23 @@ async fn preview(
     let Some((point, plan)) = input.selection.split_once('|') else {
         return invalid(lang, StatusCode::BAD_REQUEST);
     };
-    if input.stock.is_empty()
-        || input.stock.len() > 32
+    if !crate::retail::valid_account(&input.account)
+        || !valid_stock(&input.stock)
         || plan.is_empty()
         || plan.len() > 40
         || point.parse::<EvseId>().is_err()
     {
         return invalid(lang, StatusCode::BAD_REQUEST);
     }
-    let payload = json!({"point":point,"plan":plan,"stock":input.stock});
+    let payload = json!({"point":point,"plan":plan,"stock":input.stock,"account":input.account});
     match desk
         .reader
         .operator_action::<Review>(&endpoint(&desk, "preview"), &token, &payload)
         .await
     {
         Ok(r)
-            if valid_reference(&r.operation)
+            if r.account == input.account
+                && valid_reference(&r.operation)
                 && masked(&r.card)
                 && valid_reference(&r.offer.reference)
                 && r.offer.terms.point.to_string() == point
@@ -400,10 +438,12 @@ async fn preview(
 fn receipt_view(
     receipt: &Receipt,
     expected: &str,
+    may_write: bool,
     lang: Lang,
     zone: &TimeZone,
 ) -> Option<Response> {
-    if receipt.agreement != expected
+    if (!receipt.account.is_empty() && !crate::retail::valid_account(&receipt.account))
+        || receipt.agreement != expected
         || !valid_reference(&receipt.reference)
         || !masked(&receipt.card)
         || !receipt.reference[..12].eq_ignore_ascii_case(&receipt.card[3..])
@@ -412,12 +452,34 @@ fn receipt_view(
         return None;
     }
     let pricing = terms(&receipt.offer, lang, zone)?;
+    let withdrawn = receipt.withdrawal_status == Some(withdrawal::Stage::Approved);
+    let mut lifecycle = lifecycle::section(receipt, may_write && !withdrawn, zone, lang)?;
+    if withdrawn {
+        let _ = write!(
+            lifecycle,
+            "<section class=\"card\"><h2>{}</h2><p>{}</p></section>",
+            lang.pick("Widerruf anerkannt", "Withdrawal approved"),
+            lang.pick(
+                "Der Anbieter verweigert die nächste Online-Autorisierung.",
+                "The provider will refuse the next online charging authorization."
+            )
+        );
+    }
+    if may_write {
+        lifecycle.push_str(&withdrawal::open_case(&receipt.agreement, lang));
+    }
     let body = format!(
-        "<section class=\"card\"><h2>{issued}</h2><dl class=\"kv\"><dt>{reference}</dt><dd><code>{agreement}</code></dd><dt>eMAID</dt><dd>{emaid}</dd><dt>{card}</dt><dd>{masked}</dd><dt>{operator}</dt><dd>{actor}</dd><dt>{at_label}</dt><dd>{at}</dd></dl></section>{pricing}<div class=\"card-controls\">{history}{back}</div>",
+        "<section class=\"card\"><h2>{issued}</h2><dl class=\"kv\"><dt>{reference}</dt><dd><code>{agreement}</code></dd><dt>eMAID</dt><dd>{emaid}</dd><dt>{payer}</dt><dd>{account}</dd><dt>{card}</dt><dd>{masked}</dd><dt>{operator}</dt><dd>{actor}</dd><dt>{at_label}</dt><dd>{at}</dd></dl></section>{pricing}{lifecycle}<div class=\"card-controls\">{history}{back}</div>",
         issued = lang.pick("Vertrag angelegt", "Agreement issued"),
         reference = lang.pick("Vertragsreferenz", "Agreement reference"),
         agreement = escape(&receipt.agreement),
         emaid = receipt.emaid,
+        payer = crate::retail::account_label(lang),
+        account = if receipt.account.is_empty() {
+            lang.pick("Keine Zuordnung", "Unassigned").to_owned()
+        } else {
+            escape(&receipt.account)
+        },
         card = lang.pick("Kartennummer des Anbieters", "Provider card number"),
         masked = escape(&receipt.card),
         operator = lang.pick("Angelegt durch", "Issued by"),
@@ -433,19 +495,16 @@ fn receipt_view(
         ),
         back = back(lang)
     );
-    let detail = lang.pick(
-        "Dieser Nachweis dokumentiert die Kartenzuteilung und den vereinbarten Preisstand. Die monatliche Fahrerabrechnung ist noch in Entwicklung.",
-        "This record documents card fulfilment and the agreed terms. Monthly driver invoicing is planned separately.",
-    );
     Some(shell(
         lang,
         lang.pick("Ladevertrag", "Driver contract"),
-        &format!("{body}<p>{detail}</p>"),
+        &body,
     ))
 }
 
 async fn lookup(
     State(desk): State<Arc<Page>>,
+    Extension(access): Extension<OperatorAccess>,
     Query(params): Query<Params>,
     headers: HeaderMap,
     input: Result<Form<Lookup>, FormRejection>,
@@ -476,7 +535,7 @@ async fn lookup(
         )
         .await
     {
-        Ok(r) => receipt_view(&r, &query.agreement, lang, &desk.zone)
+        Ok(r) => receipt_view(&r, &query.agreement, access.can_write(), lang, &desk.zone)
             .unwrap_or_else(|| error_page(Why::Unreadable, lang, "lookup")),
         Err(e) => error_page(e, lang, "lookup"),
     }
@@ -525,7 +584,7 @@ async fn confirm(
         )
         .await
     {
-        Ok(r) => receipt_view(&r, &input.operation, lang, &desk.zone)
+        Ok(r) => receipt_view(&r, &input.operation, true, lang, &desk.zone)
             .unwrap_or_else(|| unconfirmed(&input.operation, lang)),
         Err(Why::Status(404 | 409)) => {
             let message = lang.pick(
@@ -567,13 +626,17 @@ mod tests {
                 name: "<&>".repeat(53),
             })
             .collect();
+        let accounts = serde_json::from_value::<Vec<crate::retail::AccountChoice>>(
+            json!([{"id":"PAYER-PRIVATE","kind":"private"}]),
+        )
+        .unwrap();
         for (lang, next, previous) in [
             (Lang::De, "Weitere Angebote", "Vorherige Angebote"),
             (Lang::En, "Next offers", "Previous offers"),
         ] {
             let mut choices = 0;
             for page in 0..11 {
-                let form = enrol_form(&offers, page, lang);
+                let form = enrol_form(&offers, &accounts, page, lang);
                 choices += form.matches("DE*ABC*E00001|plan-").count();
                 assert!(
                     form.contains("&lt;&amp;&gt;") && !form.contains("<&>") && form.len() < 150_000
@@ -582,8 +645,8 @@ mod tests {
                 assert_eq!(form.contains(previous), page > 0);
             }
             assert_eq!(choices, 256);
-            assert!(enrol_form(&offers, usize::MAX, lang).contains("plan-256"));
-            assert!(!enrol_form(&[], 0, lang).contains("/contracts/preview"));
+            assert!(enrol_form(&offers, &accounts, usize::MAX, lang).contains("plan-256"));
+            assert!(!enrol_form(&[], &accounts, 0, lang).contains("/contracts/preview"));
         }
     }
 }

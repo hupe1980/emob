@@ -3,8 +3,24 @@
 version = 4
 
 [[package]]
+name = "accountingd"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "emob-core",
+ "emob-service",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "agentd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "agentplane",
  "anyhow",
@@ -224,6 +240,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -281,7 +298,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "billd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -668,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "csmsd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -789,8 +806,9 @@ dependencies = [
 
 [[package]]
 name = "deskd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "accountingd",
  "anyhow",
  "axum",
  "base64 0.23.1",
@@ -803,6 +821,7 @@ dependencies = [
  "emob-sim",
  "emob-tariff",
  "empd",
+ "form_urlencoded",
  "ocpp-kit",
  "reqwest",
  "roamd",
@@ -913,9 +932,9 @@ dependencies = [
 
 [[package]]
 name = "eebus"
-version = "0.13.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e3a590861b7126a1788e7687a539652b33f2f4aba3d94c4d2fdf5fd87ab3622"
+checksum = "15adbcd8f5dbef000be67f8bfa9c8d189c357423690b0af9d1a3f17ed2c1f63a"
 dependencies = [
  "serde",
  "serde_json",
@@ -959,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "emob-billing"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -982,7 +1001,7 @@ dependencies = [
 
 [[package]]
 name = "emob-cdr"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-core",
  "emob-eichrecht",
@@ -1001,8 +1020,9 @@ dependencies = [
 
 [[package]]
 name = "emob-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "accountingd",
  "anyhow",
  "axum",
  "base64 0.23.1",
@@ -1030,10 +1050,13 @@ dependencies = [
  "ocpp-kit",
  "p256",
  "poid",
+ "portald",
  "qrcode",
  "reqwest",
+ "rmcp",
  "roamd",
  "rust_decimal",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2",
@@ -1045,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "emob-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "iso15118",
  "jiff 1.0.1",
@@ -1058,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "emob-eebus"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "eebus",
  "emob-core",
@@ -1072,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "emob-eichrecht"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-core",
  "hex",
@@ -1088,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "emob-ocpp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1107,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "emob-pnc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.23.1",
  "emob-cdr",
@@ -1130,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "emob-poi"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "datex2",
  "emob-core",
@@ -1144,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "emob-roam"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-billing",
  "emob-cdr",
@@ -1169,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "emob-service"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -1179,11 +1202,13 @@ dependencies = [
  "emob-tariff",
  "hex",
  "hmac",
+ "reqwest",
  "rust_decimal",
  "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2",
+ "standardwebhooks",
  "subtle",
  "thiserror",
  "time",
@@ -1193,11 +1218,12 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
 name = "emob-session"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1209,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "emob-sim"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1228,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "emob-smart"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1240,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "emob-tariff"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-core",
  "rust_decimal",
@@ -1253,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "emob-thg"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-cdr",
  "emob-core",
@@ -1273,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "emob-verify"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "emob-eichrecht",
  "ocmf",
@@ -1283,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "empd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -1497,12 +1523,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
+name = "futures"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -1510,6 +1552,34 @@ name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "031b47cf1a3c6cc8bc2fc76cd437f521619387907d469316e7c0bc278f1f5432"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
+
+[[package]]
+name = "futures-io"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
+
+[[package]]
+name = "futures-macro"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fb9654ba8355388abeb8dcb4fc62f511300867002afc858860463bdd9fe0c44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
+]
 
 [[package]]
 name = "futures-sink"
@@ -1529,9 +1599,13 @@ version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d50a92467f8ba5dd6e3ee5d4bd04d73ab2e4e1c44474a0674821dfce14b79bc"
 dependencies = [
+ "futures-channel",
  "futures-core",
+ "futures-io",
+ "futures-macro",
  "futures-sink",
  "futures-task",
+ "memchr",
  "pin-project-lite",
  "slab",
 ]
@@ -1664,6 +1738,12 @@ checksum = "6303bc9732ae41b04cb554b844a762b4115a61bfaa81e3e83050991eeb56863f"
 dependencies = [
  "digest 0.11.3",
 ]
+
+[[package]]
+name = "hmac-sha256"
+version = "1.1.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad320b3b96fb2a455a0726d16efe0a5afdbd34b71dea5bc53b05ea057714d4e"
 
 [[package]]
 name = "http"
@@ -2477,6 +2557,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
+]
+
+[[package]]
 name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2797,6 +2894,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pastey"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2851,7 +2954,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "poid"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2883,6 +2986,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
 dependencies = [
  "portable-atomic",
+]
+
+[[package]]
+name = "portald"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.1",
+ "emob-core",
+ "emob-service",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
 ]
 
 [[package]]
@@ -3345,8 +3464,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmcp"
+version = "3.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "391f153431ab68664d946513ea0cb3edbca78eaf99c5a983036cacab6220d85b"
+dependencies = [
+ "chrono",
+ "futures",
+ "indexmap 2.14.2",
+ "libc",
+ "pastey",
+ "percent-encoding",
+ "pin-project-lite",
+ "rmcp-macros",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "unicode-general-category",
+ "unicode-normalization",
+ "uuid",
+]
+
+[[package]]
+name = "rmcp-macros"
+version = "3.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3598e3f36f4af2b5219b133baf7d97a2197039225adc3d4acf3dd8805b5a2aef"
+dependencies = [
+ "darling",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 3.0.10",
+]
+
+[[package]]
 name = "roamd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3558,6 +3717,7 @@ version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "ref-cast",
  "schemars_derive",
@@ -3876,7 +4036,7 @@ checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
 
 [[package]]
 name = "sited"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3929,6 +4089,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+
+[[package]]
 name = "spki"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3955,6 +4121,19 @@ dependencies = [
  "libc",
  "psm",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "standardwebhooks"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca0476284408cba80764ef46b87a479225c97b4171b59e7eb89244c7f7cf8c9d"
+dependencies = [
+ "base64 0.23.1",
+ "hmac-sha256",
+ "http",
+ "thiserror",
+ "time",
 ]
 
 [[package]]
@@ -4046,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "tarifd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "axum",

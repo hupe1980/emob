@@ -289,13 +289,11 @@ fn peer() -> emob_service::Principal {
 }
 
 fn node() -> Roamd {
-    Roamd::new(
-        PartnerRegistry::new(PartyId::new("DE", "ABC").expect("a valid party")).with(
-            Partner::emsp(PartyId::new("NL", "TNM").expect("a valid party"))
-                .on_signed_data()
-                .settling_within(time::Duration::days(30)),
-        ),
-    )
+    let mut partner = Partner::emsp(PartyId::new("NL", "TNM").unwrap())
+        .on_signed_data()
+        .settling_within(time::Duration::days(30));
+    partner.cdr_owners = vec!["NL*TNM".parse().unwrap(), "BE*ALT".parse().unwrap()];
+    Roamd::new(PartnerRegistry::new(PartyId::new("DE", "ABC").unwrap()).with(partner))
 }
 
 #[test]
@@ -499,6 +497,22 @@ fn a_partners_record_is_accepted_re_rated_and_never_taken_twice() {
         node.receive(&peer(), &document, Some(ours.clone()), at(60)),
         Verdict::Duplicate { .. }
     ));
+    assert_eq!(node.received().len(), 1);
+
+    let mut alternate_case = document.clone();
+    alternate_case.id = document.id.as_str().to_ascii_uppercase().into();
+    assert!(matches!(
+        node.receive(&peer(), &alternate_case, Some(ours.clone()), at(60)),
+        Verdict::Duplicate { .. }
+    ));
+    for invalid_id in ["non-ASCII-ä".to_owned(), "x".repeat(40)] {
+        let mut invalid = document.clone();
+        invalid.id = invalid_id.into();
+        assert!(matches!(
+            node.receive(&peer(), &invalid, None, at(60)),
+            Verdict::Rejected { .. }
+        ));
+    }
     assert_eq!(node.received().len(), 1);
 
     // …and a restatement under a held id is a **conflict**, never an upsert:
@@ -958,7 +972,7 @@ fn registered_at(addr: std::net::SocketAddr) -> roamd::Registration {
             role: "RECEIVER".to_owned(),
             url: format!("http://{addr}/ocpi/cdrs"),
         }],
-        parties: vec![("NL".to_owned(), "TNM".to_owned())],
+        roles: vec![("NL*TNM".parse().unwrap(), emob_core::Role::Emsp)],
     }
 }
 
@@ -1123,7 +1137,7 @@ use ocpi_kit::ModuleId;
 use ocpi_kit::client::{ClientConfig as KitConfig, OcpiClient, OcpiRequest};
 use ocpi_kit::server::InMemoryTokenStore;
 use ocpi_kit::transport::CredentialsToken;
-use ocpi_kit::types::{OcpiString, Url as KitUrl};
+use ocpi_kit::types::Url as KitUrl;
 use ocpi_kit::v2_3_0::credentials::Credentials;
 use roamd::inbound::{Handshake, router};
 use roamd::peering::Registry;
@@ -1165,8 +1179,15 @@ async fn this_node() -> (std::net::SocketAddr, Arc<StdMutex<Node<Memory>>>) {
 async fn this_node_reaching(
     reach: roamd::reach::ReachBack,
 ) -> (std::net::SocketAddr, Arc<StdMutex<Node<Memory>>>) {
+    serve_node(node(), reach).await
+}
+
+async fn serve_node(
+    state: Roamd,
+    reach: roamd::reach::ReachBack,
+) -> (std::net::SocketAddr, Arc<StdMutex<Node<Memory>>>) {
     let node = Arc::new(StdMutex::new(
-        Node::open(node(), Memory::new(), data_key()).expect("an empty journal folds"),
+        Node::open(state, Memory::new(), data_key()).expect("an empty journal folds"),
     ));
     // The bootstrap token, handed to the platform out of band — which is what
     // `[OCPI 2.3.0 §credentials]` says happens before any of this.
@@ -1181,22 +1202,11 @@ async fn this_node_reaching(
     let addr = listener.local_addr().expect("bound");
     let base = KitUrl::new_lenient(format!("http://{addr}/ocpi"));
 
-    let me = Credentials::builder()
-        .token(OcpiString::<64>::new("unused-until-we-answer").expect("a token"))
-        .url(base.clone())
-        .roles(vec![
-            ocpi_kit::v2_3_0::credentials::CredentialsRole::builder()
-                .role(ocpi_kit::v2_3_0::types::Role::Cpo)
-                .business_details(
-                    ocpi_kit::v2_3_0::locations::BusinessDetails::builder()
-                        .name("emob")
-                        .build(),
-                )
-                .party_id(ocpi_kit::types::CiString::new("ABC").expect("a party"))
-                .country_code(ocpi_kit::types::CiString::new("DE").expect("a country"))
-                .build(),
-        ])
-        .build();
+    let parties = emob_service::estate::Parties {
+        operator: "DE*ABC".parse().unwrap(),
+        provider: "DE*EMP".parse().unwrap(),
+    };
+    let me = roamd::daemon::credentials(&parties, base.as_str()).unwrap();
 
     // Deterministic on purpose: a handshake replayed in a test has to produce
     // the same bytes, and a token reached through ambient randomness is the one
@@ -1276,14 +1286,54 @@ async fn a_peer_discovers_this_node_registers_with_it_and_then_pushes_a_record()
     )
     .expect("a credentials object");
 
+    let credentials_url = KitUrl::new_lenient(format!("http://{mine}/ocpi/credentials"));
+    for method in [http::Method::PUT, http::Method::DELETE] {
+        let mut early = OcpiRequest::new(
+            method.clone(),
+            credentials_url.clone(),
+            ModuleId::Credentials,
+        );
+        if method == http::Method::PUT {
+            early = early.with_body(&theirs).unwrap();
+        }
+        assert!(matches!(
+            client
+                .transport()
+                .send_with_headers::<serde_json::Value>(&early, &token_a, &Default::default())
+                .await,
+            Err(ocpi_kit::transport::OcpiError::MethodNotAllowed(_))
+        ));
+    }
+
     let registered_peer = selected
         .register(client.transport(), &theirs)
         .await
         .expect("the handshake completes");
-    // The peer now holds a token this node issued, and presents it on every
-    // later request. What it is, is asserted against the node's own ledger
-    // below rather than against this handle: `CredentialsToken` redacts itself.
-    let _ = registered_peer.token();
+    let read = OcpiRequest::new(
+        http::Method::GET,
+        credentials_url.clone(),
+        ModuleId::Credentials,
+    );
+    let credentials = client
+        .transport()
+        .send::<Credentials>(&read, registered_peer.token(), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        credentials.token.as_str(),
+        registered_peer.token().expose_secret()
+    );
+    assert_eq!(
+        credentials.url.as_str(),
+        format!("http://{mine}/ocpi/versions")
+    );
+    use ocpi_kit::v2_3_0::types::Role;
+    let roles: Vec<_> = credentials
+        .roles
+        .iter()
+        .map(|r| (r.role, r.country_code.as_str(), r.party_id.as_str()))
+        .collect();
+    assert_eq!(roles, [(Role::Cpo, "DE", "ABC"), (Role::Emsp, "DE", "EMP")]);
 
     // 3. …and it is on the record, not only in memory.
     {
@@ -1333,6 +1383,13 @@ async fn a_peer_discovers_this_node_registers_with_it_and_then_pushes_a_record()
     )
     .with_body(&theirs)
     .expect("encodes");
+    assert!(matches!(
+        client
+            .transport()
+            .send_with_headers::<Credentials>(&repeat, registered_peer.token(), &Default::default())
+            .await,
+        Err(ocpi_kit::transport::OcpiError::MethodNotAllowed(_))
+    ));
     let again = client
         .transport()
         .send_with_headers::<Credentials>(&repeat, &token_a, &Default::default())
@@ -1446,11 +1503,12 @@ async fn a_partner_that_registers_is_reachable_from_that_moment() {
     // This node, and the handshake.
     let (mine, node) = this_node().await;
     let client = OcpiClient::with_config(KitConfig::for_testing()).expect("a client");
-    let theirs = ocpi_kit::testkit::sample::credentials(
+    let mut theirs = ocpi_kit::testkit::sample::credentials(
         "TOKEN-B-FROM-THE-PEER",
         &format!("http://{peer_addr}/ocpi/versions"),
     )
     .expect("a credentials object");
+    theirs.roles[0].role = ocpi_kit::v2_3_0::types::Role::Emsp;
     ocpi_kit::client::Registration::new(
         KitUrl::new_lenient(format!("http://{mine}/ocpi/versions")),
         CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").expect("a token"),
@@ -1899,4 +1957,257 @@ fn sr_096_a_journal_cut_by_one_record_does_not_start() {
         "the refusal names both positions: {said}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn receipt_estate() -> Roamd {
+    let registry = node().registry().clone();
+    let mut independent = Partner::emsp("BE*ALT".parse().unwrap());
+    independent.cdr_owners.push(independent.party.clone());
+    Roamd::new(registry.with(independent))
+}
+
+#[tokio::test]
+async fn scoped_receipts_survive_restart_and_follow_the_current_roles() {
+    // roaming-record-access/SR-030 and roaming-record-access/SR-031
+    let (mine, running) = serve_node(
+        receipt_estate(),
+        roamd::reach::ReachBack::allowing(["127.0.0.1"]),
+    )
+    .await;
+    let client = OcpiClient::with_config(KitConfig::for_testing()).unwrap();
+    let token = CredentialsToken::new("TOKEN-C-THIS-NODE-ISSUED").unwrap();
+    let mut registration = registered_at(mine);
+    let nl: PartyId = "NL*TNM".parse().unwrap();
+    let be: PartyId = "BE*ALT".parse().unwrap();
+    registration.roles = vec![
+        (be.clone(), emob_core::Role::Cpo),
+        (nl.clone(), emob_core::Role::Cpo),
+    ];
+    running
+        .lock()
+        .unwrap()
+        .register(&Actor::Estate, registration.clone())
+        .unwrap();
+    let mut second = registered_at(mine);
+    second.peer_id = be.to_string();
+    second.roles = vec![(be.clone(), emob_core::Role::Cpo)];
+    second.incoming = data_key().digest(roamd::peering::INCOMING, b"SECOND-PLATFORM-TOKEN");
+    let other_token = CredentialsToken::new("SECOND-PLATFORM-TOKEN").unwrap();
+    running
+        .lock()
+        .unwrap()
+        .register(&Actor::Estate, second)
+        .unwrap();
+    let endpoint = advertised(
+        &client,
+        mine,
+        &token,
+        ModuleId::Cdrs,
+        ocpi_kit::InterfaceRole::Receiver,
+    )
+    .await;
+    let (_, _, Outbound::V2_3_0(template)) = queued() else {
+        panic!("expected 2.3")
+    };
+    let mut receipts = Vec::new();
+    for owner in [&nl, &be] {
+        let mut document = (*template).clone();
+        document.country_code = owner.country_code().into();
+        document.party_id = owner.party_id().into();
+        let push = OcpiRequest::new(
+            http::Method::POST,
+            KitUrl::new_lenient(&endpoint),
+            ModuleId::Cdrs,
+        )
+        .with_body(&document)
+        .unwrap();
+        let mut locations = Vec::new();
+        for _ in 0..2 {
+            let (response, headers) = client
+                .transport()
+                .send_with_headers::<serde_json::Value>(&push, &token, &Default::default())
+                .await
+                .unwrap();
+            assert!(response.is_success());
+            locations.push(
+                ocpi_kit::transport::header_str(&headers, &ocpi_kit::transport::headers::LOCATION)
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        assert_eq!(locations[0], locations[1]);
+        let mut changed = document.clone();
+        changed.remark = Some("additional remark".into());
+        let conflict = OcpiRequest::new(
+            http::Method::POST,
+            KitUrl::new_lenient(&endpoint),
+            ModuleId::Cdrs,
+        )
+        .with_body(&changed)
+        .unwrap();
+        let result = client
+            .transport()
+            .send::<serde_json::Value>(&conflict, &token, &Default::default())
+            .await;
+        assert!(result.is_err());
+        receipts.push((locations.remove(0), document));
+    }
+    assert_ne!(receipts[0].0, receipts[1].0);
+    let read =
+        |url: String| OcpiRequest::new(http::Method::GET, KitUrl::new_lenient(url), ModuleId::Cdrs);
+    {
+        let mut held = running.lock().unwrap();
+        let replay = Memory::new();
+        for record in held.journal().records().unwrap() {
+            replay
+                .append(&record.kind, &record.actor, &record.body)
+                .unwrap();
+        }
+        *held = Node::open(receipt_estate(), replay, data_key()).unwrap();
+        assert_eq!(held.state().received().len(), 2);
+        registration.roles.reverse();
+        held.register(&Actor::Estate, registration.clone()).unwrap();
+    }
+    for (url, expected) in &receipts {
+        let original: ocpi_kit::v2_3_0::Cdr = client
+            .transport()
+            .send(&read(url.clone()), &token, &Default::default())
+            .await
+            .unwrap();
+        assert_eq!(&original, expected);
+    }
+    for (i, (url, document)) in receipts.iter().enumerate() {
+        let result = client
+            .transport()
+            .send::<ocpi_kit::v2_3_0::Cdr>(&read(url.clone()), &other_token, &Default::default())
+            .await;
+        if i == 1 {
+            assert_eq!(&result.unwrap(), document);
+        } else {
+            assert!(matches!(
+                result,
+                Err(ocpi_kit::transport::OcpiError::NotFound(_))
+            ));
+        }
+    }
+    registration.roles = vec![(nl, emob_core::Role::Emsp), (be, emob_core::Role::Cpo)];
+    running
+        .lock()
+        .unwrap()
+        .register(&Actor::Estate, registration)
+        .unwrap();
+    for url in [
+        receipts[0].0.clone(),
+        format!("{endpoint}/unknown"),
+        format!("{endpoint}/{}", template.id.as_str()),
+    ] {
+        let unavailable = client
+            .transport()
+            .send::<serde_json::Value>(&read(url), &token, &Default::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(unavailable, ocpi_kit::transport::OcpiError::NotFound(_)),
+            "{unavailable}"
+        );
+    }
+    let still_authorized: ocpi_kit::v2_3_0::Cdr = client
+        .transport()
+        .send(&read(receipts[1].0.clone()), &token, &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(still_authorized, receipts[1].1);
+}
+
+#[test]
+fn a_failed_journal_append_never_exposes_a_receipt_or_ledger_entry() {
+    use emob_service::journal::{Journal, JournalError, Record};
+    struct Unavailable;
+    impl Journal for Unavailable {
+        fn append(&self, _: &str, _: &Actor, _: &str) -> Result<Record, JournalError> {
+            Err(JournalError::Io {
+                path: "journal".into(),
+                doing: "appended",
+                source: std::io::Error::other("unavailable"),
+            })
+        }
+        fn records(&self) -> Result<Vec<Record>, JournalError> {
+            Ok(Vec::new())
+        }
+    }
+    let mut held = Node::open(node(), Unavailable, data_key()).unwrap();
+    let (_, _, Outbound::V2_3_0(document)) = queued() else {
+        panic!("expected 2.3")
+    };
+    let owner = PartyId::new(document.country_code.as_str(), document.party_id.as_str()).unwrap();
+    let principal = emob_service::Principal::peer(
+        owner.clone(),
+        emob_core::Role::Cpo,
+        emob_service::Capabilities::of([emob_service::caps::CDR_WRITE]),
+    );
+    assert!(
+        held.receive(
+            &Actor::partner(&owner),
+            &principal,
+            &document,
+            None,
+            time::OffsetDateTime::UNIX_EPOCH
+        )
+        .is_err()
+    );
+    assert!(held.is_halted());
+    assert!(held.state().received().is_empty());
+}
+
+#[tokio::test]
+async fn registration_and_rotation_require_an_estate_grant_for_every_claim() {
+    let (mine, running) = this_node().await;
+    let peer = peer_platform().await;
+    let client = OcpiClient::with_config(KitConfig::for_testing()).unwrap();
+    let bootstrap = CredentialsToken::new("TOKEN-A-HANDED-OVER-BY-EMAIL").unwrap();
+    let endpoint = advertised(
+        &client,
+        mine,
+        &bootstrap,
+        ModuleId::Credentials,
+        ocpi_kit::InterfaceRole::Sender,
+    )
+    .await;
+    let requested = ocpi_kit::testkit::sample::credentials(
+        "TOKEN-B-FROM-THE-PEER",
+        &format!("http://{peer}/ocpi/versions"),
+    )
+    .unwrap();
+    let mut outside_grant = requested.clone();
+    let mut other = requested.roles[0].clone();
+    other.party_id = "XYZ".into();
+    outside_grant.roles.push(other);
+    for (method, credential, body, allowed) in [
+        (http::Method::POST, &bootstrap, &outside_grant, false),
+        (http::Method::POST, &bootstrap, &requested, true),
+        (
+            http::Method::PUT,
+            &CredentialsToken::new("TOKEN-C-FOR-NL*TNM").unwrap(),
+            &outside_grant,
+            false,
+        ),
+    ] {
+        let request = OcpiRequest::new(
+            method,
+            KitUrl::new_lenient(&endpoint),
+            ModuleId::Credentials,
+        )
+        .with_body(body)
+        .unwrap();
+        let result = client
+            .transport()
+            .send::<Credentials>(&request, credential, &Default::default())
+            .await;
+        assert_eq!(result.is_ok(), allowed, "{result:?}");
+    }
+    let held = running.lock().unwrap();
+    assert_eq!(
+        held.state().peers().registered().next().unwrap().roles,
+        vec![("NL*TNM".parse().unwrap(), emob_core::Role::Cpo)]
+    );
 }

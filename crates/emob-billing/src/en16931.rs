@@ -552,13 +552,15 @@ fn invoice_line(
     //
     // And where the session has one, the receipt link: the page the driver
     // checks this line's signed values on `[MessEG §33]` (spec 003).
+    let Some(key) = &line.cdr else {
+        return Ok(built);
+    };
     let note = line.compensated_loss.map_or_else(
-        || format!("CDR {}", line.cdr),
+        || format!("CDR {key}"),
         |loss| {
             format!(
-                "CDR {} — {loss} of this measured value is compensated cable or rectification \
-                 loss and is part of the stated value [REA 6-A §3.2]",
-                line.cdr
+                "CDR {key} — {loss} of this measured value is compensated cable or rectification \
+                 loss and is part of the stated value [REA 6-A §3.2]"
             )
         },
     );

@@ -7,7 +7,7 @@ description = "Run the emob EV charging estate: just demo, one estate.toml, OCPP
 nav = "Run the estate"
 +++
 
-The standalone demo starts five services, three simulated charging stations and a loopback OCPI peer. Its seeded morning includes a signed meter record that billing refuses. You can investigate that refusal with the same operator desk and receipt pages used on a persistent estate. Use `just run` to run all nine services from one estate file.
+The standalone demo starts seven services, three simulated charging stations and a loopback OCPI peer. Its seeded morning includes a signed meter record that billing refuses. You can investigate that refusal with the same operator desk and receipt pages used on a persistent estate. Use `just run` to run all eleven services from one estate file.
 
 ## Try it: `just demo`
 
@@ -87,10 +87,10 @@ The timeline and search work with JavaScript disabled. Printing the timeline pre
 
 ### Enrol a driver and issue a card
 
-1. In **Heute**, open **Driver contracts** with the example writer. Choose the **standard** offer at the demo point and enter the sleeve code `STOCK-1004`. The persistent example and the disposable demo each include one unissued card with that code.
+1. In **Heute**, open **Driver contracts** with the example writer. Choose the private or fleet billing account, select the **standard** offer at the demo point and enter the sleeve code `STOCK-1004`. Use a different stock code for each additional driver under the same payer.
 2. Select **Review contract**. Check the charging point, provider, gross component prices, monthly fee, validity and offer reference. The card is still unissued at this stage.
 3. Select **Confirm enrolment**. Keep the agreement reference from the receipt. It reopens the original terms, eMAID, masked card label and issuing operator. If the provider’s reply is lost, use the same operation or reopen the agreement.
-4. The new card can now start an online charge at the selected point while that offer remains current. A different point or a withdrawn offer refuses the card. The existing card controls let a writer block it later. A read-only operator can use **Open agreement**.
+4. The new card can now start an online charge at the selected point while that offer remains current. A different point or a withdrawn offer refuses the card. Open its agreement to review and confirm a replacement card or termination. Replacing preserves the eMAID and payer. Ending retires the active card. A read-only operator can use **Open agreement**.
 
 The agreement receipt documents card issuance and the agreed price. The driver's charging receipt reports the station-side meter and price evidence. To replay the issuance and charge using simulated equipment, run `just e2e`. To provision your own unissued card, add a unique uppercase inventory code and its hexadecimal RFID UID to `[[card_stock]]`. Protect the estate file containing those identifiers.
 
@@ -98,6 +98,14 @@ The agreement receipt documents card issuance and the agreed price. The driver's
 <picture><source media="(prefers-color-scheme: dark)" srcset="../../img/enrolment-review-dark.webp"><img src="../../img/enrolment-review-light.webp" width="1280" height="800" loading="lazy" alt="Driver contract review showing the selected charging point, gross price components and provider terms"></picture>
 <figcaption>The price reference identifies the exact offer staff reviewed.</figcaption>
 </figure>
+
+### Close a driver or fleet billing month
+
+1. Open **Retail invoices**, select the billing account and a completed UTC calendar month, then choose **Review charges**. Each session shows its agreement, source record, offer and retail amount. The issuer re-prices verified usage at the agreed rate.
+2. Check net, VAT, rounding and payable. Each agreement with a full month of coverage contributes its agreed monthly fee once. A positive fee with unspecified partial-month pricing holds the close. Resolve any listed holds before issuing.
+3. A writer selects **Issue invoice**. Staff can use **Open issued invoice** to inspect the closed month. A named operator with `finance = true` can download the original UBL, including after a restart. If late usage changes a closed month, review again before issuing the credit and replacement.
+
+Configure the provider in `[billing.retail_seller]` and each bill-to party in `[[retail_accounts]]`. The native workflow supports domestic German EUR invoices. A staff download records neither delivery to the customer nor consent to electronic delivery.
 
 ## Without Rust: the `emob` image
 
@@ -107,12 +115,13 @@ loopback only, and the links it prints are the host's) and as your user, with
 the TLS directory from `just dev-ca` mounted read-only:
 
 ```console
+mkdir -p -m 700 "$PWD/target/demo-tmp"
 docker run --rm -it --network host --user "$(id -u):$(id -g)" \
+  -e TMPDIR="$PWD/target/demo-tmp" -v "$PWD/target/demo-tmp:$PWD/target/demo-tmp" \
   -v "$PWD/target/dev-tls:/tls:ro" ghcr.io/hupe1980/emob demo --tls /tls
 ```
 
-This needs the first release that publishes the image (0.3); before it, the
-pull is denied. On Docker Desktop, `--network host` needs host networking
+On Docker Desktop, `--network host` needs host networking
 enabled (Settings → Resources → Network).
 
 ### Accessibility: `just a11y`
@@ -127,7 +136,67 @@ a visible focus on every Tab stop, text contrast (4.5:1, 3:1 for large text),
 says so and skips; in CI, where it runs after the demo check, a missing tool
 fails it.
 
-## What runs: nine daemons
+## Allocate a payment
+
+In `just demo`, open **Receivables** from Heute, enter `PAYER-PRIVATE` and choose EUR. The invoice comes from the same simulated charge the driver sees in the customer portal. The demo includes a EUR 5.00 payment with source `LOCAL-BANK` and reference `DEMO-PAYMENT`.
+
+1. Open the account. Read the amount outstanding and the unapplied cash.
+2. Select the payment and the issued invoice. Enter `1.00` and choose **Review allocation**. The review shows the remaining invoice amount and the payment left after allocation.
+3. Confirm and reopen the balance. The remaining cash is EUR 4.00. The allocation names the operator who confirmed it.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/payment-review-dark.webp"><img src="../../img/payment-review-light.webp" width="1280" height="800" loading="lazy" alt="Finance review showing one euro allocated to an invoice, with the remaining invoice and payment balances before confirmation."></picture>
+
+To import another payment, open **Receivables**, choose the [sample statement](../../examples/payment-statement-v1.json) or another local version 1 JSON file and select **Import file**. The report counts booked and duplicate rows and explains held entries. For a persistent estate enable a named `[[operators]]` entry with `finance = true` and a distinct `token_env`. For an existing estate starting its first accounting journal, add fresh 32-byte base64 `ACCOUNTINGD_DATA_KEY` and `ACCOUNTINGD_SIGNING_KEY` values to its private environment. A restored journal requires its original keys. The operator’s ordinary write permission is independent. [Statement format](@/docs/settlement.md#local-statement-import)
+
+## Credit one invoice line
+
+1. Sign in to Heute with both `finance = true` and `write = true`. Open **Retail invoices** and the line credit form. In `just demo`, use the fleet invoice and agreement printed together in the terminal.
+2. Select the original line and reason, enter the **net** credit amount and review. Check the VAT, gross credit and net amount still available on that line. **Confirm and issue credit** creates a separate numbered UBL document.
+3. Open the account balance to reconcile the credit with cash already applied. The authorized payer can download both documents and select **View invoice balance** in the customer portal. A credit exceeding the unpaid amount leaves a credit balance.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/line-credit-review-dark.webp"><img src="../../img/line-credit-review-light.webp" width="1280" height="800" loading="lazy" alt="Line credit review showing the original invoice and line, selected reason, net amount, VAT and gross credit before confirmation."></picture>
+
+If the requested split cannot reconcile the original VAT to the cent, return to the source line and review the amount. Once a line credit has been issued, billing holds whole-invoice cancellation and automatic month replacement to prevent a second credit for the same charge.
+
+## Apply an invoice credit
+
+Sign in to Heute with finance and write access. Open **Receivables** and select the payer and currency. When an invoice has available credit and another has unpaid debt, select **Invoice with available credit** and **Invoice to pay**, enter the amount, then choose **Review credit offset**. You can type an invoice number from another page. Check both resulting amounts and choose **Confirm credit offset**.
+
+If a colleague posts first, review the new figures before submitting again. A lost confirmation response can be retried with the same review. The account history identifies the writer and both invoices. The customer portal shows the credit used or received on the selected invoice. [Reconciliation example](@/docs/settlement.md#apply-credit-across-invoices)
+
+## Erase customer portal access
+
+1. In Heute, sign in with a named operator whose estate entry has `privacy = true`. Select **Customer erasure** and enter the customer’s sign-in ID. In the disposable demo, use **mika**.
+2. Review the agreement and payer grant counts and the retained records. **Permanently erase portal access** ends the customer’s sessions and destroys the key for those links. Open the same sign-in ID again for the dated receipt.
+3. Remove the obsolete `[[portal_users]]` entry and its credential from your identity configuration. Review any separate requests concerning the agreement, charging evidence or finance records. The card can still charge under an active agreement.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/erasure-review-dark.webp"><img src="../../img/erasure-review-light.webp" width="1280" height="800" loading="lazy" alt="Customer erasure review showing one agreement grant, one billing grant and the invoice and contract records that will be retained."></picture>
+
+For recovery, stop the provider, restore the journal and signed head, and mount the **current** `EMPD_CUSTODY_DIR`. Its native default is `custody/empd`. Compose mounts a separate volume. Protect this directory independently of journal backups. Rolling back both stores together can restore retired keys. Include earlier snapshots, replicas and exports when defining your key retirement procedure.
+
+## Review a withdrawal
+
+1. Copy the private driver’s agreement reference from their contract receipt. In the demo, sign in as **mika** to find it under **Charging agreements**. In Heute, open **Driver contracts → Manage a withdrawal** and enter the reference.
+2. Record when the declaration arrived (UTC), its channel and your intake reference. Review the archived terms and the case file. A hold keeps the existing entitlement. Approving the withdrawal blocks the current card on its next online authorization. The driver sees the status on their agreement.
+3. If the invoice needs review, select that billing disposition. Open the case with a named operator who has both `write` and `finance` grants. Enter the issued invoice number to inspect its billed lines and payment allocations. Review the amount and original number, then confirm a full credit only when justified. For a shared invoice, [review the attributable line](#credit-one-invoice-line).
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/withdrawal-review-dark.webp"><img src="../../img/withdrawal-review-light.webp" width="1280" height="800" loading="lazy" alt="Review of a held withdrawal with its evidence reference, the effect on charging and a separate billing decision."></picture>
+
+A held case can be reviewed again. Approval or decline closes the case. For each agreement the owner retains a single case and its confirmed decisions.
+
+A confirmed credit appears in the payer’s archive. Its billing reference points to the original invoice. Allocated cash stays recorded and can leave the payer with a credit balance. A bank refund is a separate operation.
+
+## Customer portal
+
+Open the portal URL printed by `just demo`. Sign in as **mika** using the access key in the local file named beside the URL. The overview shows the agreed price, the receipt for a simulated charge and the issued monthly invoice. Download the UBL to get the original XML.
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="../../img/customer-overview-dark.webp"><img src="../../img/customer-overview-light.webp" width="1280" height="800" loading="lazy" alt="Customer overview with a driver agreement, an issued monthly invoice and its charging receipt."></picture>
+
+For a persistent estate, set `[portal].public_url` to the browser origin. Use a dedicated HTTPS hostname outside loopback. Enable a `[[portal_users]]` entry and set its `secret_env` variable in the provider environment to 32 random bytes encoded as 64 hex characters. For the Compose example with an existing private `.env`, append the new key once with `printf 'EMOB_PORTAL_MIKA=%s\n' "$(openssl rand -hex 32)" >> .env`. Reload the provider and deliver the key privately to the customer.
+
+In Heute, open **Customer access** with a named writer account. Enter the sign-in ID, select an agreement for charging receipts or a payer account for invoices, then review and confirm. A private customer may need both grants. Fleet drivers can each receive their own agreement while finance receives the account. Removing a grant applies to the next request, including downloads from an open browser tab. The provider expires sessions after 30 idle minutes or eight hours and ends them on restart.
+
+## What runs: eleven daemons
 
 | Daemon | Role | Loopback | Compose |
 |---|---|---|---|
@@ -140,6 +209,8 @@ fails it.
 | `agentd` | advisory specialists; cannot move money | `:9580` | `:8086` |
 | `sited` | the § 14a site controller | `:9586` | `:8087` |
 | `deskd` | the operator page Heute; the witness | `:9587` | `:8088` |
+| `accountingd` | retail receivables and payment allocation | `:9591` | `:8090` |
+| `portald` | customer sign-in, charging agreements, receipts and invoice downloads | `:9589` | `:8089` |
 
 ```mermaid
 flowchart LR
@@ -149,6 +220,9 @@ flowchart LR
     CSMS -->|"CloudEvents outbox"| ROAM["roamd"]
     CSMS & BILL -.->|"CloudEvents"| SUB["your subscribers"]
     ROAM <-->|"OCPI 2.3.0"| P["roaming partner"]
+    DESK --> CASH["accountingd · Receivables"]
+    CASH -->|"issued retail documents"| BILL
+    PORTAL["portald · Customer portal"] -->|"customer session"| EMP & BILL
     DESK["deskd · Heute"] -.->|"read models"| CSMS & BILL & ROAM
     DESK -->|"named card decisions"| EMP
     DRV["driver's phone"] -->|"/r/token"| CSMS
@@ -158,11 +232,9 @@ flowchart LR
 timeout or an unreachable `empd` answers `Invalid` — it fails closed. Each
 settled session with a provider is delivered to `billd` and `roamd` as a
 `de.emob.cdr.issued` CloudEvent signed per Standard Webhooks, retried until
-acknowledged and recorded in `csmsd`'s journal, so a restart loses nothing. Every daemon also serves an
-operator read model behind an operator bearer token — `csmsd`, `billd` and
-`roamd` as a bounded view at `GET /v1/<daemon>/today`, the others at
-`GET /v1/<daemon>`; the
-journalled ones (`csmsd`, `billd`, `roamd`, `empd`, `poid`) also serve their
+acknowledged and recorded in `csmsd`'s journal, so a restart loses nothing. `csmsd`, `billd` and `roamd` expose bounded operator views at
+`GET /v1/<daemon>/today`. The six journal owners (`csmsd`, `billd`, `roamd`,
+`empd`, `poid` and `accountingd`) also serve their
 signed head at `GET /v1/<daemon>/head`.
 
 ## The estate file
@@ -227,9 +299,7 @@ only needs to recognise as keyed digests. The hash chain runs over the sealed
 bytes, so it verifies without the key.
 
 `eval "$(just dev-keys)"` prints a fresh set of data and signing keys; `just
-up` and compose refuse to start without them. Losing `EMPD_DATA_KEY` erases every
-card UID `empd` journalled — crypto-erasure, on purpose. Losing any other data
-key stops that daemon from starting, naming the key id.
+up` and compose require these keys. Recover each journal with its original key. The provider also needs its current customer key store. [Customer custody and recovery](#erase-customer-portal-access)
 
 ### Every fact names its actor
 
@@ -261,7 +331,7 @@ refuses to start on any other.
 A hash chain proves nothing was rewritten or removed from the middle, but not
 that nothing was cut off the end — a journal missing its last record looks like
 one whose process was killed mid-append. So after **every** append, each
-journalled daemon (`csmsd`, `billd`, `roamd`, `empd`, `poid`) signs its head —
+journalled daemon (`csmsd`, `billd`, `roamd`, `empd`, `poid`, `accountingd`) signs its head —
 the position and the hash there — with its Ed25519 signing key, and keeps it in
 `<journal>.head`. The head is a [C2SP signed note](https://c2sp.org/signed-note),
 readable with `curl` and checkable by any signed-note verifier:
@@ -292,7 +362,7 @@ that went **backwards** (regressed), one at the same position with another hash
 record in the witness's own chained file, so an alarm stays until somebody
 moves that file aside.
 
-`deskd` witnesses `csmsd`, `billd`, `roamd` and `empd` every 30 seconds into
+`deskd` witnesses `csmsd`, `billd`, `roamd`, `empd` and the configured `accountingd` every 30 seconds into
 `witness.ndjson` beside its journals (in compose, its own `deskd` volume).
 Anyone else can run one from their own machine — including for `poid`, which
 `deskd` does not read:
@@ -585,13 +655,17 @@ types = ["de.emob.cdr.issued", "de.emob.invoice.*"]
 | `de.emob.cdr.issued` | `csmsd` | `cdr/<key>` | the record, the token it bills, the signed meter values, the station, the receipt link (JSON) |
 | `de.emob.invoice.issued` | `billd` | `invoice/<number>` | the invoice file (`application/xml`); the page link as `invoiceurl` |
 
-Every event is one structured-mode CloudEvent 1.0 (`application/cloudevents+json`,
-`source` `urn:emob:<daemon>`), signed per [Standard Webhooks](https://www.standardwebhooks.com)
-with `webhook-id` equal to the event `id` — the idempotency key. A `2xx` is
-taken; `401`, `408`, `429`, `5xx` or no answer is retried every `retry_secs`;
-any other `4xx` is recorded as refused with the body, and not retried. Who
-answered is a journal fact. An event is owed to the subscribers named when it
-was emitted; a subscriber added later receives what is emitted from then on.
+Each event is a structured-mode CloudEvent 1.0 (`application/cloudevents+json`)
+with source `urn:emob:<daemon>`. Deduplicate on the source and event id. Each
+attempt carries that same id as `webhook-id` and a fresh signature with the
+attempt's timestamp. [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)
+
+A `2xx` acknowledges the delivery. A `401`, `408`, `429`, server error or
+missing answer leaves it pending for the next `retry_secs` interval. Configure
+the receiver's final URL. A redirect leaves the event pending at the configured
+destination. Other `4xx` answers record a final refusal with bounded diagnostic
+text. The journal records who answered. A subscriber receives events issued
+while it is named in the estate.
 A pattern that matches no type emob emits refuses the start, so a typo does not
 subscribe to nothing. Each type has a published JSON Schema —
 [`de.emob.cdr.issued`](https://hupe1980.github.io/emob/schemas/events/de.emob.cdr.issued.json),
@@ -604,9 +678,15 @@ $ emob subscribers test warehouse
 ✓ → https://dwh.example.com/emob/events de.emob.cdr.issued … 204 No Content (83 ms)
 ```
 
-One signed sample of every type the subscriber takes, sent exactly as the real
-one is; it carries `emobtest: true` and an id starting `test-`, so a receiver
-can tell it apart, and nothing is journalled.
+Each invocation sends one signed sample per subscribed type. Every sample carries
+`emobtest: true` and a fresh `test-` id so a receiver can exercise deduplication
+without booking a real document.
+
+Billd records the selected XML syntax at issue. Switching the estate from UBL to
+CII affects newly issued invoices. Pending deliveries and recovered invoices
+keep the original document and event id. Links to the receipt or invoice page
+use the configured public origin when served. An earlier journal whose issued
+invoice facts lack the delivery syntax requires a fresh estate with this version.
 
 `de.emob.cdr.issued` carries the card UID and the station's location: a
 subscriber receives personal data, and the estate file is where that decision
@@ -615,7 +695,7 @@ is reviewed.
 ### Handing the invoice to the operator system
 
 `billd` writes the invoice and does not transmit it — no SMTP, no Peppol access
-point. With `[billing.delivery]` set, it posts every issued invoice to the
+point. With `[billing.delivery]` set, it posts each issued partner invoice to the
 operator's ERP or Peppol provider as a `de.emob.invoice.issued` CloudEvent
 (`application/cloudevents+json`): `data` is the file in the `syntax` chosen
 (`ubl` or `cii`, `datacontenttype: application/xml`), `subject` is
@@ -643,7 +723,7 @@ From source, with the example estate, in three commands:
 ```console
 just dev-keys > .env     # every secret the estate names, fresh, for this machine (gitignored)
 just dev-ca              # loopback TLS for csmsd
-just run                 # checks the estate, starts all nine, waits until each is ready
+just run                 # checks the estate, starts all eleven, waits until each is ready
 ```
 
 `just run` prints where Heute is (user `demo operator`, password
@@ -658,9 +738,9 @@ curl -H "Authorization: Bearer $EMOB_OPERATOR_TOKEN" http://127.0.0.1:9001/v1/cs
 In containers, with a named volume per journal:
 
 ```console
-just up          # build and start all nine; shells on :8080…:8088, OCPP on wss://localhost:9000
+just up          # build and start all eleven; shells on :8080…:8090, OCPP on wss://localhost:9000
 just down        # stop, keeping the journals
-just images      # build the nine daemon images and the emob image from one Dockerfile
+just images      # build the eleven daemon images and the emob image from one Dockerfile
 ```
 
 `just up` refuses without the data and signing keys and mints the TLS
@@ -682,7 +762,7 @@ libraries do each of these and are tested; no daemon calls them.
 
 ## Rehearse a recovery
 
-Rehearse a cold restore of the standalone estate with the included synthetic records and local receiver. Use physical directory paths for the inputs and the new report. On macOS, use `pwd -P` inside the report directory to resolve the system’s `/var` or `/tmp` symlink. The drill compares the five signed journal heads belonging to csmsd, billd, roamd, empd and poid with a separately held witness history. It then checks a settled session, a refusal, the issued invoice, two card decisions, a roaming consignment and the accepted facility versions. Finally, a receiver that already booked a delivery receives the original event twice inside the isolated worker. Its financial effect must stay at one.
+Rehearse a cold restore of the standalone estate with the included synthetic records and local receiver. Use physical directory paths for the inputs and the new report. On macOS, use `pwd -P` inside the report directory to resolve the system’s `/var` or `/tmp` symlink. The drill compares the six signed journal heads belonging to csmsd, billd, roamd, empd, poid and accountingd with a separately held witness history. It then checks a settled session, a refusal, the issued invoice, two card decisions, a roaming consignment, the accepted facility versions and the restored receivables state. Finally, a receiver that already booked a delivery receives the original event twice inside the isolated worker. Its financial effect must stay at one.
 
 Run from a checkout with Python 3 and a local Linux Docker engine connected by Unix socket, including Docker Desktop on macOS. The launcher refuses remote Docker contexts. Use one CLI image for both capture and recovery. The build digest is part of the cut. The temporary directory below contains private synthetic material and the report is created exclusively.
 
@@ -700,6 +780,6 @@ python3 deploy/recovery-drill.py --image emob-recovery:pilot \
 
 An installed host CLI accepts the same arguments with `emob recovery-drill`. It includes the launcher. Use `--scratch` to supply a fresh private scratch directory, or let the launcher allocate a disposable memory filesystem.
 
-The fixture writer stops all five writers before capturing the cut. For the custody rehearsal, place the copy, independent witness and expectations, and escrowed keys in separately controlled locations and supply their real directory paths to the launcher. Three sibling folders on a single disk only exercise the mechanics. The launcher mounts inputs read-only and uses a private, network-isolated container. The replay and both retries run entirely in memory. A receipt-link key, invoice-page key, external partner state, station TLS configuration and access to real card or payment systems are outside the five-ledger result.
+The fixture writer stops all six writers before capturing the cut. For the custody rehearsal, place the copy, independent witness and expectations, and escrowed keys in separately controlled locations and supply their real directory paths to the launcher. Three sibling folders on a single disk only exercise the mechanics. The launcher mounts inputs read-only and uses a private, network-isolated container. The replay and both retries run entirely in memory. A receipt-link key, invoice-page key, external partner state, station TLS configuration and access to real card or payment systems are outside the six-journal result. Portal grant erasure has a separate cold-restore test in `just e2e`.
 
 Exit 0 means every check passed, 1 means a contradiction or unsafe input, and 2 means evidence, isolation or a completed run is missing. A fresh output path is required for each attempt. Share only the redacted report. It records the measured duration and the witnessed cutoff. To set recovery objectives for an installation, measure restore time on its hardware using a representative backup and record the age of its last independently held witness.

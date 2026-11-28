@@ -126,7 +126,7 @@ pub struct Failsafe {
 ///
 /// - `unlimited/controlled` — the grid operator is there and is allowing it;
 /// - `unlimited/autonomous` — the grid operator has been gone for hours
-///   `[LPC-906]`, and the site is running on its own;
+///   `[LPC-922]`, and the site is running on its own;
 /// - and a site with no Energy Guard commissioned at all, where there is
 ///   nothing to fall silent.
 ///
@@ -155,6 +155,12 @@ pub enum GridLimit {
     /// control box to. Its own connection is the only bound.
     Uncontrolled,
 
+    /// A commissioned controller awaiting its first heartbeat and limit.
+    Initializing {
+        /// Configured initialization power in kW (LPC-901).
+        limit_kw: Decimal,
+    },
+
     /// `limited`: a setpoint from the grid operator is in force.
     Curtailed(Curtailment),
 
@@ -166,12 +172,12 @@ pub enum GridLimit {
         heard_at: time::OffsetDateTime,
     },
 
-    /// `init` or `failsafe state`: the Energy Guard is not speaking, and the
+    /// `failsafe state`: the Energy Guard is not speaking, and the
     /// failsafe value applies `[LPC-901/1]`, `[LPC-912]`.
     UnderFailsafe(Failsafe),
 
     /// `unlimited/autonomous`: the Energy Guard has been absent longer than the
-    /// Failsafe Duration Minimum, and the site runs on its own `[LPC-906]`.
+    /// Failsafe Duration Minimum, and the site runs on its own `[LPC-922]`.
     ///
     /// The failsafe is a floor under a communications fault, not a punishment
     /// for one: `[LPC-022]` holds a site there for between two and 24 hours and
@@ -209,6 +215,7 @@ impl GridLimit {
     pub const fn stated_kw(&self) -> Option<Decimal> {
         match self {
             Self::Uncontrolled | Self::InContact { .. } | Self::Autonomous { .. } => None,
+            Self::Initializing { limit_kw } => Some(*limit_kw),
             Self::Curtailed(curtailment) => Some(curtailment.setpoint_kw),
             Self::UnderFailsafe(failsafe) => Some(failsafe.limit_kw),
         }
@@ -224,6 +231,7 @@ impl GridLimit {
     pub const fn lpc_state(&self) -> Option<&'static str> {
         match self {
             Self::Uncontrolled => None,
+            Self::Initializing { .. } => Some("init"),
             Self::Curtailed(_) => Some("limited"),
             Self::InContact { .. } => Some("unlimited/controlled"),
             Self::UnderFailsafe(_) => Some("failsafe state"),
@@ -329,7 +337,7 @@ pub enum SmartNote {
     },
 
     /// The controller has been absent past the Failsafe Duration Minimum, and
-    /// the site is running unlimited on its own `[LPC-906]`.
+    /// the site is running unlimited on its own `[LPC-922]`.
     ///
     /// The dangerous quiet. `[LPC-022]` says a site leaves the failsafe after
     /// between two and 24 hours, so this is the *correct* behaviour — and it
@@ -385,11 +393,11 @@ impl core::fmt::Display for SmartNote {
                 silent_since,
             } => write!(
                 f,
-                "the Energy Guard has not been heard from since {silent_since} and this site is held at its failsafe value of {limit_kw} kW [LPC-021]: the ceiling is a communications fault rather than a grid operator's instruction, and the box that stopped talking is still not talking"
+                "control was lost after the heartbeat at {silent_since}. The site is holding its configured failsafe limit of {limit_kw} kW [LPC-021]"
             ),
             Self::RunningAutonomously { silent_since } => write!(
                 f,
-                "the Energy Guard has not been heard from since {silent_since}, longer than the Failsafe Duration Minimum, so this site has left the failsafe and runs on its own connection [LPC-906]: it is drawing what it likes and the grid operator cannot currently reduce it"
+                "control was lost after the heartbeat at {silent_since}. The failsafe residence has elapsed and the site is using its own connection capacity [LPC-922]"
             ),
             Self::Headroom { kw } => write!(
                 f,
@@ -493,7 +501,10 @@ fn ceiling_for(
         GridLimit::Autonomous { silent_since } => notes.push(SmartNote::RunningAutonomously {
             silent_since: *silent_since,
         }),
-        GridLimit::Uncontrolled | GridLimit::Curtailed(_) | GridLimit::InContact { .. } => {}
+        GridLimit::Initializing { .. }
+        | GridLimit::Uncontrolled
+        | GridLimit::Curtailed(_)
+        | GridLimit::InContact { .. } => {}
     }
     // The Anspruch holds against a failsafe exactly as it holds against a
     // setpoint. `[BK6-22-300 Ziff. 4.5]` guarantees the Mindestleistung is a

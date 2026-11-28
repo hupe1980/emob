@@ -2,6 +2,22 @@
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="../../site/static/img/heute-dark.webp"><img src="../../site/static/img/heute-light.webp" alt="Heute: the charging success rate, a refused session with the paragraph that refused it, and an invoice awaiting acceptance" width="1280"></picture>
 
+Use the top bar to switch workspaces from any rendered operator page. The active workspace is underlined. On a phone, **Today**, **Stations** and **Search** stay visible. **More** opens contracts, invoices and permitted specialist tools. Escape closes the menu and returns focus to **More**. [Phone layout with More open](../../site/static/img/operator-workspaces-mobile.webp).
+
+Choose **Open tasks** beside Today to move keyboard focus to the waiting queue. Under **Stations**, a result opens the station record. **Back to station results** restores the search, map area, page and language. Use **Map area** to browse clusters with the keyboard. Posting or removing a note, placing a reservation and cancelling it keep the station working set. From session evidence, choose **Search** to start the next support call.
+
+In **Driver contracts**, open **Manage a withdrawal** with a writer account. Look up the agreement, record when the request arrived, inspect its invoice lines and review the effect on the next online charge before confirming. Writers with a finance grant can also inspect invoice allocations and separately confirm an eligible full credit.
+
+In **Retail invoices**, open an issued invoice and select the agreement whose charge needs adjusting. A finance writer can choose a line, enter the net credit in EUR, review VAT and the remaining amount, and issue the credit. Reopen the line to download its latest credit or check the payer’s balance in **Receivables**.
+
+In **Receivables**, a finance operator selects a local version 1 JSON statement (up to 100 rows and 64 KiB) and opens a billing account in its currency. Choose a payment reference and an invoice, enter the amount in major units, review the two remaining balances and confirm. The account shows applied payments, outstanding invoices, credits, unapplied cash and entries held for review.
+
+To use an invoice’s credit, open the payer’s balance with both finance and write access. Under **Apply credit**, enter the source and target invoice numbers and the amount. The two invoices can appear on different pages of the same account. **Review credit offset** shows how much credit and debt will remain. Choose **Edit invoices or amount** to correct the selection, or **Confirm credit offset** to record it. Finance readers can inspect the two document references and named receipt under **Posted credit offsets**. If another writer has changed either balance, the desk shows the current figures and keeps the selection for a fresh review.
+
+Open **Customer erasure** with a named privacy grant. Enter the customer’s sign-in ID to review the affected portal grants and the evidence retained for billing. Confirmation ends their portal sessions and disables future sign-in. Reopen the ID to retrieve the dated receipt. Charging cards and issued invoices remain with their respective owners.
+
+In **Customer access**, a named writer enters the customer’s sign-in ID, then reviews and confirms an agreement or payer grant. Removing a grant takes effect on the next customer request. [Portal setup](../../site/content/docs/run-the-estate.md#customer-portal)
+
 The operator's page. **Heute** is what needs a person today, in order, headed by
 the charging success rate — rendered on the server from the read models of the
 daemons that made each decision. `deskd` decides nothing; the one thing it
@@ -14,7 +30,7 @@ keeps is the **witness** — its own record of where each daemon's journal ended
 | ✅ page | `GET /` — the success rate (estate, weakest points, failures by cause), then refused sessions with **"Warum?"**, stations silent beyond their heartbeat, records a partner has not taken, invoices awaiting acceptance, the obligation calendar's duties of the next 90 days, and **Journale** (below). German first, `?lang=en`. Works without JavaScript; `/ui/heute.js` (< 2 kB) refreshes it every 15 s while visible |
 | ✅ station page | `GET /station/<identity>` — one station's asset card from `csmsd`'s station view: whether it is held for a card (reserved and cancelled from the card), its notes (written and removed from the card), online or silent since when, what it said at boot, what its meter signs and whether its key is registered, every firmware change (the `[MessEG §31(2) Nr. 4]` intervention record), its reports, success and last sessions. Station links open this card while the point remains registered |
 | ✅ access | HTTP Basic whose password is one of the estate's `[[operators]]` tokens; binds `127.0.0.1:9587` unless `DESKD_HTTP_BIND`/`EMOB_HTTP_BIND` says otherwise (compose publishes it on `localhost:8088`) |
-| ✅ witness | every 30 s reads the signed journal head of `csmsd`, `billd`, `roamd` and `empd` and records it in `witness.ndjson` under `EMOB_JOURNAL_DIR` — on deskd's own volume (`deskd:/var/lib/emob` in compose), never one of the daemons' |
+| ✅ witness | every 30 s reads the signed journal head of `csmsd`, `billd`, `roamd`, `empd` and the configured `accountingd` and records it in `witness.ndjson` under `EMOB_JOURNAL_DIR` — on deskd's own volume (`deskd:/var/lib/emob` in compose), never one of the daemons' |
 | ✅ tested | render tests (order, escaping, bounds, a down daemon, de/en, a11y basics) and `tests/heute_reads_the_estate.rs`, which starts the real `empd`, `billd`, `roamd` and `csmsd` and holds the rate's numerator to the records `billd` received |
 
 ## What it reads
@@ -28,7 +44,7 @@ keeps is the **witness** — its own record of where each daemon's journal ended
 | Optional `poid` `GET /v1/poid/dynamic` | separate static and dynamic attempt counts, attempt times and acknowledgements, last full dynamic snapshot, measured change-to-receipt time, delta messages since the snapshot, cumulative late deliveries and current problem | Mobilithek delivery on Heute |
 | `billd` `GET /v1/billd/today` | documents whose `submission` is not accepted | invoices awaiting acceptance |
 | `emob_core::obligation` | `starting_between(today, today + 90 days)` | duties, with "in 44 Tagen" and the exact date on focus |
-| `csmsd`, `billd`, `roamd`, `empd` `GET /v1/<name>/head` | each journal's signed head | "Journale" |
+| `csmsd`, `billd`, `roamd`, `empd` and configured `accountingd` `GET /v1/<name>/head` | each journal's signed head | "Journale" |
 
 **At scale.** The desk reads bounded views with a 1 MiB maximum response. The scale test builds an estate with one million settled sessions and 50 000 refusals, checks the paginated rows, then times the owner read and desk render (`tests/heute_at_scale.rs`). Each long list ends in a plain "Ältere anzeigen" link — no script needed.
 
@@ -44,7 +60,7 @@ In Heute, select a transaction in **Refused sessions** to open its evidence. Eac
 
 ## Block or unblock a provider card
 
-Open **Find a session or card**, choose a card from the results, or follow a session’s linked card. Its page shows the provider’s current status and ten most recent changes. With a named writer account, select a reason and **Review block** or **Review unblock**. Check the emob lookup number, reason, effect and expiry, then confirm or return to the card. A review lasts five minutes. Opening another review with the same account replaces it.
+Open **Search**, choose a card from the results, or follow a session’s linked card. Its page shows the provider’s current status and ten most recent changes. With a named writer account, select a reason and **Review block** or **Review unblock**. Check the emob lookup number, reason, effect and expiry, then confirm or return to the card. A review lasts five minutes. Opening another review with the same account replaces it.
 
 Blocking takes effect at the next online authorization. Unblocking restores the ordinary contract and credit checks. Existing charging sessions continue, and a disconnected station can still use its cached decision. If the confirmation response is lost, open **Check card history** and match the action reference before making another change. The same confirmation can be retried. Each recorded change identifies its operator, reason, review time and application time.
 
@@ -54,9 +70,9 @@ Use a current browser over HTTPS or on loopback HTTP. For private lookups and ac
 
 ## Enrol a driver card
 
-Open **Driver contracts** on Heute. With a named writer account, choose a plan and charging point, enter the unissued card’s stock number, and select **Review contract**. In the example estate use `STOCK-1004`. The provider supplies the masked card, gross rates, separate monthly fee, exact offer reference and review expiry. **Confirm enrolment** issues the card and records that operator’s agreement with the displayed terms. A confirmed agreement can be reopened with its reference from the same page using a reader account.
+Open **Driver contracts** on Heute. With a named writer account, choose a bill-to account, plan and charging point, enter the unissued card’s stock number, and select **Review contract**. In the example estate use `STOCK-1004`. The provider supplies the masked card, gross rates, separate monthly fee, exact offer reference and review expiry. **Confirm enrolment** issues the card and records that operator’s agreement with the displayed terms. A confirmed agreement can be reopened with its reference from the same page using a reader account.
 
-If confirmation is interrupted, choose **Check agreement**. Retrying the same confirmation returns the recorded result after a successful issue. Stock numbers and agreement references travel in private POST bodies. The receipt links to the issued card’s current status. It records fulfilment and agreed terms. Monthly driver invoicing is a later milestone.
+If confirmation is interrupted, choose **Check agreement**. Retrying the same confirmation returns the recorded result after a successful issue. Stock numbers and agreement references travel in private POST bodies. The receipt links to the issued card’s current status. It records fulfilment and agreed terms. Open **Retail invoices** to review the payer’s completed UTC month. A named writer can issue a reviewed invoice or correction. Readers can inspect the agreement and session references. Staff downloads of the archived UBL require a finance grant.
 
 ## Public charging and price evidence
 

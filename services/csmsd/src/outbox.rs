@@ -21,17 +21,17 @@
 //! byte for byte would be refused as the replay it looks like.
 
 use emob_service::Actor;
-use emob_service::cloudevent;
 use emob_service::estate::Subscription;
 use emob_service::journal::Journal;
-use emob_service::webhook::{self, ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
+use emob_service::webhook::{self, transport};
+use transport::Disposition;
 
 use crate::Csmsd;
 use crate::journal::{Delivery, Event, Target};
 
 /// Where deliveries go, and the secrets they are signed with.
 pub struct Dispatcher {
-    client: reqwest::Client,
+    client: transport::Client,
     secret: webhook::Secret,
     billd: String,
     roamd: String,
@@ -71,7 +71,7 @@ impl Dispatcher {
         timeout: std::time::Duration,
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            client: reqwest::Client::builder().timeout(timeout).build()?,
+            client: transport::Client::new(timeout)?,
             secret,
             billd: billd.trim_end_matches('/').to_owned(),
             roamd: roamd.trim_end_matches('/').to_owned(),
@@ -96,7 +96,7 @@ impl Dispatcher {
             Target::Subscriber(name) => self
                 .subscribers
                 .iter()
-                .find(|s| &s.name == name)
+                .find(|s| &s.name == name && s.takes(emob_service::events::cdr::ISSUED))
                 .map(|s| (s.url.clone(), &s.secret)),
         }
     }
@@ -109,33 +109,18 @@ impl Dispatcher {
                 delivery.to.name()
             ));
         };
-        let signature = webhook::sign(
-            &webhook::Delivery::new(&delivery.id, at, delivery.body.as_bytes()),
-            secret,
-        );
-        let sent = self
+        let reply = match self
             .client
-            .post(url)
-            .header(ID_HEADER, &delivery.id)
-            .header(TIMESTAMP_HEADER, at.unix_timestamp().to_string())
-            .header(SIGNATURE_HEADER, signature)
-            .header("content-type", cloudevent::CONTENT_TYPE)
-            .body(delivery.body.clone())
-            .send()
-            .await;
-        let response = match sent {
-            Ok(response) => response,
+            .post(&url, secret, &delivery.id, delivery.body.clone(), at)
+            .await
+        {
+            Ok(reply) => reply,
             Err(error) => return Attempt::Again(error.to_string()),
         };
-        let status = response.status();
-        if status.is_success() {
-            return Attempt::Delivered;
-        }
-        let text = response.text().await.unwrap_or_default();
-        match status.as_u16() {
-            401 | 408 | 429 | 500..=599 => Attempt::Again(format!("{status}: {text}")),
-            400..=499 => Attempt::Refused(format!("{status}: {text}")),
-            _ => Attempt::Again(format!("{status}: {text}")),
+        match reply.disposition() {
+            Disposition::Accepted => Attempt::Delivered,
+            Disposition::Refused => Attempt::Refused(format!("{}: {}", reply.status, reply.text)),
+            Disposition::Retry => Attempt::Again(reply.status.to_string()),
         }
     }
 

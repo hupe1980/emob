@@ -49,6 +49,9 @@ pub struct Estate {
     pub partners: Vec<Partner>,
     /// The operator's invoicing identity.
     pub billing: BillingSection,
+    /// Public receipt origin from the station owner.
+    #[serde(default)]
+    pub receipts: Option<emob_service::estate::ReceiptSection>,
     /// Who may read the read model.
     #[serde(default)]
     pub operators: Vec<Operator>,
@@ -57,6 +60,22 @@ pub struct Estate {
     /// Systems outside the estate that receive events.
     #[serde(default)]
     pub subscribers: Vec<emob_service::estate::Subscriber>,
+}
+
+impl Estate {
+    /// Token issuers whose signed CDRs this estate can account for.
+    #[must_use]
+    pub fn billing_issuers(&self) -> Vec<emob_core::PartyId> {
+        let mut issuers = self
+            .partners
+            .iter()
+            .map(|p| p.party.clone())
+            .collect::<Vec<_>>();
+        if self.billing.retail_seller.is_some() && !issuers.contains(&self.parties.provider) {
+            issuers.push(self.parties.provider.clone());
+        }
+        issuers
+    }
 }
 
 /// The party on an invoice.
@@ -226,18 +245,19 @@ pub fn close_what_is_due<J: emob_service::journal::Journal>(
 /// The operator system's dispatcher, where the estate configures one
 /// (spec 010): the secret resolved, the target refused unless https or
 /// loopback (SR-121).
-fn dispatcher(estate: &Estate, env: &Env) -> Result<Option<crate::deliver::Dispatcher>> {
+fn dispatcher(
+    estate: &Estate,
+    env: &Env,
+    list: &[emob_service::estate::Subscription],
+    internal: &emob_service::webhook::Secret,
+) -> Result<Option<crate::deliver::Dispatcher>> {
     let Some(delivery) = &estate.billing.delivery else {
         return Ok(None);
     };
-    let key = "billing.delivery.secret_env";
-    let secret = delivery.secret_env.resolve_in(key, env)?;
-    let secret = emob_service::webhook::Secret::standard(secret.expose())
-        .map_err(|error| anyhow::anyhow!("{key}: {error}"))?;
+    let secret = delivery.signing_key(env, list, Some(internal))?;
     Ok(Some(crate::deliver::Dispatcher::new(
         &delivery.url,
         secret,
-        delivery.syntax,
         std::time::Duration::from_secs(10),
     )?))
 }
@@ -261,19 +281,19 @@ fn dispatching(
     })
 }
 
-/// The subscribers that take invoices, checked at start.
-fn subscribers(estate: &Estate, env: &Env) -> Result<crate::deliver::Subscribers> {
-    let syntax = estate
+/// The wire encoding to assign to newly issued invoices.
+#[must_use]
+pub fn delivery_syntax(estate: &Estate) -> emob_billing::Syntax {
+    match estate
         .billing
         .delivery
         .as_ref()
         .map(|d| d.syntax)
-        .unwrap_or_default();
-    Ok(crate::deliver::Subscribers::new(
-        emob_service::estate::subscriptions(&estate.subscribers, env)?,
-        syntax,
-        std::time::Duration::from_secs(10),
-    )?)
+        .unwrap_or_default()
+    {
+        emob_service::estate::InvoiceSyntax::Ubl => emob_billing::Syntax::Ubl,
+        emob_service::estate::InvoiceSyntax::Cii => emob_billing::Syntax::Cii,
+    }
 }
 
 /// The loops that hand issued invoices on: to the operator system, where
@@ -328,9 +348,13 @@ fn announcing(
 }
 
 /// billd's journal, sealed and signed, folded into its books.
-fn open_books(journal: &std::path::Path, estate: &Estate, env: &Env) -> Result<Books<Journal>> {
+fn open_books(
+    journal: &std::path::Path,
+    estate: &Estate,
+    env: &Env,
+    key: Arc<DataKey>,
+) -> Result<Books<Journal>> {
     let year = time::OffsetDateTime::now_utc().year();
-    let key = Arc::new(DataKey::from_env(DATA_KEY, env)?);
     let signing = SigningKey::for_daemon("billd", env)?;
     let file = Signing::open(
         Sealing::new(
@@ -342,13 +366,24 @@ fn open_books(journal: &std::path::Path, estate: &Estate, env: &Env) -> Result<B
         head::beside(journal),
     )
     .context("opening billd's journal against its signed head")?;
-    Books::open(
+    let books = Books::open(
         "emob",
         Numbering::series(estate.billing.series.clone(), year),
         ChartOfAccounts::new(),
         file,
     )
-    .context("folding billd's journal")
+    .context("folding billd's journal")?;
+    tracing::info!(
+        documents = books.state().documents().count(),
+        received = books.state().received().count(),
+        head = books
+            .journal()
+            .head()
+            .map(|h| h.position)
+            .unwrap_or_default(),
+        "the books are what the journal says they are"
+    );
+    Ok(books)
 }
 
 /// Start `billd`.
@@ -359,6 +394,14 @@ fn open_books(journal: &std::path::Path, estate: &Estate, env: &Env) -> Result<B
 /// (one sealed under another `BILLD_DATA_KEY` among them) or is shorter than
 /// the head billd last signed, an address that cannot be bound.
 pub async fn run(options: Options) -> Result<Running> {
+    run_with_clock(options, emob_service::system_clock()).await
+}
+
+/// Start billing with a supplied business clock used to determine closed retail periods.
+///
+/// # Errors
+/// As [`run`].
+pub async fn run_with_clock(options: Options, clock: emob_service::Clock) -> Result<Running> {
     let Options {
         http,
         journal,
@@ -370,20 +413,14 @@ pub async fn run(options: Options) -> Result<Running> {
     let secret = emob_service::estate::webhook_secret(&estate.services, &env)?;
     let operators = emob_service::estate::operator_tokens(&estate.operators, &env)?;
 
-    let dispatcher = dispatcher(&estate, &env)?;
-    let subscribers = subscribers(&estate, &env)?;
+    let list = emob_service::estate::subscriptions(&estate.subscribers, &env)?;
+    emob_service::estate::separate_subscriber_keys(&list, &secret)?;
+    let dispatcher = dispatcher(&estate, &env, &list, &secret)?;
+    let subscribers = crate::deliver::Subscribers::new(list, std::time::Duration::from_secs(10))?;
     let readiness = Readiness::new().expecting(NUMBERING);
-    let books = open_books(&journal, &estate, &env)?.delivering_to(subscribers.names());
-    tracing::info!(
-        documents = books.state().documents().count(),
-        received = books.state().received().count(),
-        head = books
-            .journal()
-            .head()
-            .map(|h| h.position)
-            .unwrap_or_default(),
-        "the books are what the journal says they are"
-    );
+    let key = Arc::new(DataKey::from_env(DATA_KEY, &env)?);
+    let books = open_books(&journal, &estate, &env, Arc::clone(&key))?
+        .delivering_to(subscribers.names(), delivery_syntax(&estate));
     let invoices = Arc::new(
         crate::invoice_page::Invoices::open(
             journal
@@ -402,12 +439,20 @@ pub async fn run(options: Options) -> Result<Running> {
         crate::receive::Shared {
             books: Arc::clone(&books),
             secret,
-            partners: estate.partners.iter().map(|p| p.party.clone()).collect(),
+            partners: estate.billing_issuers(),
             refused: Arc::new(AtomicU64::new(0)),
         },
         latest,
-        operators,
+        operators.clone(),
     )
+    .merge(subscribers.recovery(Arc::clone(&books), Arc::clone(&invoices)))
+    .merge(crate::retail::router(
+        Arc::clone(&books),
+        &estate,
+        clock,
+        operators,
+        key,
+    )?)
     .merge(crate::invoice_page::router(
         Arc::clone(&books),
         Arc::clone(&invoices),

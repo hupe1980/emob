@@ -13,7 +13,7 @@
 //!
 //! # What a daemon gets, and what it brings
 //!
-//! Nine daemons is nine copies of the same forty lines: read a configuration
+//! Each daemon would repeat a copy of the same forty lines: read a configuration
 //! file, let the environment override it, start structured logging, bind a
 //! socket, answer a health probe, and stop when the orchestrator says so.
 //! Written nine times, those forty lines diverge — and they diverge in the
@@ -84,7 +84,10 @@ pub mod journal;
 pub mod page;
 #[cfg(feature = "policy")]
 pub mod policy;
+#[cfg(feature = "serde")]
 pub mod publication;
+#[cfg(feature = "serde")]
+pub mod recovery;
 pub mod serve;
 pub mod shutdown;
 pub mod telemetry;

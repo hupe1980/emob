@@ -60,6 +60,7 @@ pub mod daemon;
 pub mod deliver;
 pub mod invoice_page;
 pub mod receive;
+pub mod retail;
 
 pub use books::{Books, BooksError, Event};
 
@@ -139,6 +140,8 @@ pub struct Issued {
     /// (spec 010). A decision made once, at issue: a partner whose
     /// configuration changes later does not change a document already issued.
     pub specification: Specification,
+    /// XML syntax selected when this document was issued.
+    pub delivery_syntax: emob_billing::Syntax,
     /// The `[[subscribers]]` its `de.emob.invoice.issued` event is owed to,
     /// fixed at issue.
     pub owed_to: Vec<String>,
@@ -520,6 +523,8 @@ impl ChartOfAccounts {
 /// A record `csmsd` delivered, and whom it is owed by.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Received {
+    /// Commercial authorization attached to the signed private delivery.
+    pub retail: Option<retail::Binding>,
     /// The record.
     pub cdr: emob_cdr::Cdr,
     /// Who pays it.
@@ -572,7 +577,9 @@ pub struct Closing {
 pub struct Billd {
     /// Records delivered, by key.
     received: BTreeMap<String, Received>,
+    retail: retail::Ledger,
     numbering: Numbering,
+    delivery_syntax: emob_billing::Syntax,
     chart: ChartOfAccounts,
     /// Keyed by invoice number, which `[UStG §14(4) Nr. 4]` makes unique.
     issued: BTreeMap<String, Issued>,
@@ -589,7 +596,9 @@ impl Billd {
     pub fn new(ledger: &str, numbering: Numbering) -> Self {
         Self {
             received: BTreeMap::new(),
+            retail: retail::Ledger::default(),
             numbering,
+            delivery_syntax: emob_billing::Syntax::Ubl,
             chart: ChartOfAccounts::new(),
             issued: BTreeMap::new(),
             closed: BTreeMap::new(),
@@ -721,6 +730,7 @@ impl Billd {
             replaces: None,
             booked: false,
             specification,
+            delivery_syntax: self.delivery_syntax,
             owed_to: Vec::new(),
             answered: std::collections::BTreeMap::new(),
         }))
@@ -792,6 +802,7 @@ impl Billd {
                 replaces: None,
                 booked: false,
                 specification,
+                delivery_syntax: self.delivery_syntax,
                 owed_to: Vec::new(),
                 answered: std::collections::BTreeMap::new(),
             },
@@ -813,6 +824,7 @@ impl Billd {
                 replaces: Some(number.to_owned()),
                 booked: false,
                 specification,
+                delivery_syntax: self.delivery_syntax,
                 owed_to: Vec::new(),
                 answered: std::collections::BTreeMap::new(),
             },

@@ -49,6 +49,7 @@ impl Drop for Exercise {
     }
 }
 
+// receivables-allocation/SR-355: both independently witnessed replays include the cash ledger.
 #[test]
 fn sr_221_sr_222_sr_223_sr_224_two_restores_repeat_one_receipt_without_touching_the_sources() {
     let drill = Exercise::new();

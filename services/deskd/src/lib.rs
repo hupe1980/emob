@@ -31,7 +31,7 @@
 //! # The one thing `deskd` keeps
 //!
 //! The witness file. Every 30 seconds `deskd` reads `GET /v1/<name>/head` from
-//! csmsd, billd, roamd and empd and records it in its own chained file
+//! csmsd, billd, roamd, empd and the configured accountingd. It records each head
 //! ([`emob_service::witness`]); a head that went backwards, forked or came
 //! under another key is an alarm on Heute until somebody moves the file aside.
 //! A daemon's volume does not hold this copy, which is the point.
@@ -58,12 +58,17 @@ use serde::Deserialize;
 
 mod card;
 mod contracts;
+mod customer_access;
+mod customer_erasure;
 pub mod europe;
 pub mod fetch;
+mod finance;
 pub mod heute;
 mod investigation;
 pub mod map;
 pub mod model;
+mod navigation;
+mod retail;
 pub mod station;
 pub mod stations;
 pub mod why;
@@ -87,6 +92,30 @@ pub struct Estate {
     /// Where receipt links point, for the station page's sessions.
     #[serde(default)]
     pub receipts: Option<estate::ReceiptSection>,
+}
+
+impl Estate {
+    /// Check the destination that receives the finance operator's credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a configured ledger address is not an HTTP(S) origin.
+    pub fn validate(&self) -> Result<()> {
+        if let Some(raw) = &self.services.accountingd {
+            let url = reqwest::Url::parse(raw).context("services.accountingd")?;
+            anyhow::ensure!(
+                matches!(url.scheme(), "http" | "https")
+                    && url.has_host()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "services.accountingd must be an HTTP(S) origin"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Where the page reads "now" from: its date, its clock and the 90-day duty
@@ -205,6 +234,7 @@ struct Page {
     watch: Arc<Watch>,
     csmsd: String,
     billd: String,
+    accountingd: Option<String>,
     roamd: String,
     poid: Option<String>,
     empd: String,
@@ -274,6 +304,14 @@ fn router(desk: Arc<Page>, operators: emob_service::Operators) -> axum::Router {
             axum::routing::post(new_password),
         )
         .merge(contracts::routes())
+        .merge(customer_access::routes())
+        .merge(customer_erasure::routes())
+        .merge(retail::routes())
+        .merge(finance::routes())
+        .layer(axum::middleware::from_fn_with_state(
+            desk.accountingd.is_some(),
+            navigation::scope,
+        ))
         .with_state(desk);
     ui::operator_page(page, operators)
         .merge(ui::assets())
@@ -281,6 +319,7 @@ fn router(desk: Arc<Page>, operators: emob_service::Operators) -> axum::Router {
 }
 
 async fn heute_page(
+    Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     params: Result<Query<Params>, QueryRejection>,
     headers: HeaderMap,
@@ -316,6 +355,8 @@ async fn heute_page(
         desk.reader.publication(desk.poid.as_deref(), now),
     );
     let snapshot = heute::Snapshot {
+        accounting: desk.accountingd.is_some(),
+        access,
         csmsd,
         billd,
         roamd,
@@ -346,6 +387,19 @@ struct SearchParams {
     lang: Option<String>,
 }
 
+impl SearchParams {
+    fn fleet_view(&self) -> stations::FleetView<'_> {
+        stations::FleetView {
+            query: self.q.as_deref().unwrap_or_default(),
+            area: self.area.as_deref().filter(|area| {
+                area.split(',').count() == 4
+                    && area.split(',').all(|edge| map::hundredths(edge).is_some())
+            }),
+            offset: self.offset.unwrap_or_default(),
+        }
+    }
+}
+
 /// `GET /stations` — the registry, searched (spec 021).
 async fn stations_page(
     Extension(access): Extension<OperatorAccess>,
@@ -357,35 +411,25 @@ async fn stations_page(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let lang = language(params.lang.as_deref(), &headers);
-    let query = params.q.unwrap_or_default();
-    let offset = params.offset.unwrap_or(0);
-    // Only an area of four numbers is passed on; `csmsd` judges the rest.
-    let area = params.area.filter(|area| {
-        let edges: Vec<&str> = area.split(',').collect();
-        edges.len() == 4 && edges.iter().all(|edge| map::hundredths(edge).is_some())
-    });
+    let view = params.fleet_view();
     let (found, drawn) = tokio::join!(
         desk.reader.stations::<stations::Found>(
             &desk.csmsd,
-            &query,
-            area.as_deref(),
-            offset,
+            view.query,
+            view.area,
+            view.offset,
             heute::ROWS
         ),
         desk.reader
-            .map::<stations::Drawn>(&desk.csmsd, &query, area.as_deref()),
+            .map::<stations::Drawn>(&desk.csmsd, view.query, view.area),
     );
     match found {
         Ok(found) => ui::html(stations::render_list(
             &stations::Listing {
                 found: &found,
                 // A map that did not come is a page without one, not an error.
-                map: drawn
-                    .map(|drawn| drawn.svg(&query, lang))
-                    .unwrap_or_default(),
-                query: &query,
-                area: area.as_deref(),
-                offset,
+                map: drawn.map(|drawn| drawn.svg(view, lang)).unwrap_or_default(),
+                view,
                 limit: heute::ROWS,
             },
             lang,
@@ -622,10 +666,11 @@ async fn reserve(
     Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
+    Query(params): Query<SearchParams>,
     headers: HeaderMap,
     axum::Form(form): axum::Form<ReserveForm>,
 ) -> Response {
-    let lang = language(None, &headers);
+    let lang = language(params.lang.as_deref(), &headers);
     let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
@@ -646,7 +691,7 @@ async fn reserve(
         minutes: form.minutes,
         reason: &form.reason,
     };
-    back_to(&identity, "reservation", answer, Some(&typed), lang)
+    reservation_result(&identity, params.fleet_view(), answer, Some(&typed), lang)
 }
 
 /// `POST /station/{identity}/reservations/{number}/cancel`.
@@ -654,9 +699,10 @@ async fn cancel_reservation(
     Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
+    Query(params): Query<SearchParams>,
     headers: HeaderMap,
 ) -> Response {
-    let lang = language(None, &headers);
+    let lang = language(params.lang.as_deref(), &headers);
     let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
@@ -675,19 +721,19 @@ async fn cancel_reservation(
             &serde_json::Value::Null,
         )
         .await;
-    back_to(&identity, "reservation", answer, None, lang)
+    reservation_result(&identity, params.fleet_view(), answer, None, lang)
 }
 
 /// Back to the section on the asset card; a refusal is a page that says why
 /// and links back — the station's own word when it was the station.
-fn back_to(
+fn reservation_result(
     identity: &str,
-    section: &str,
+    view: stations::FleetView<'_>,
     answer: Result<(u16, serde_json::Value), fetch::Why>,
     typed: Option<&station::Typed<'_>>,
     lang: Lang,
 ) -> Response {
-    let back = format!("{}#{section}", station::href(identity));
+    let back = format!("{}#reservation", view.href(&station::href(identity), lang));
     let reason = match answer {
         Ok((201 | 204 | 404, _)) => return axum::response::Redirect::to(&back).into_response(),
         Ok((_, body)) => station::refusal_text(body["reason"].as_str().unwrap_or("refused"), lang),
@@ -699,19 +745,19 @@ fn back_to(
         "<div class=\"verdict tone-bad\"><span class=\"icon\" aria-hidden=\"true\">✗</span><div>\
          <h1>{title}</h1><p>{reason}</p></div></div>{again_form}<p><a href=\"{back}\">{back_label}</a></p>",
         title = match lang {
-            Lang::De => format!("{identity} ist nicht reserviert"),
-            Lang::En => format!("{identity} is not held"),
+            Lang::De => format!("{} ist nicht reserviert", ui::escape(identity)),
+            Lang::En => format!("{} is not held", ui::escape(identity)),
         },
         reason = ui::escape(&reason),
         // What was typed stays, so a changed card or time is one click.
         again_form = typed.map_or_else(String::new, |typed| format!(
             "<section class=\"card\">{}</section>",
-            station::reserve_form(identity, Some(typed), lang)
+            station::reserve_form(identity, Some(typed), lang, view)
         )),
         back = ui::escape(&back),
         back_label = lang.pick("Zurück zur Station", "Back to the station"),
     );
-    let mut page = ui::html(ui::page(
+    let mut page = ui::html(navigation::page(
         &ui::Shell {
             title: lang.pick("Nicht reserviert", "Not held"),
             place: lang.pick("Station", "Station"),
@@ -736,9 +782,15 @@ async fn write_note(
     Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
+    Query(params): Query<SearchParams>,
     headers: HeaderMap,
     axum::Form(note): axum::Form<NoteForm>,
 ) -> Response {
+    let lang = language(params.lang.as_deref(), &headers);
+    let back = format!(
+        "{}#notes",
+        params.fleet_view().href(&station::href(&identity), lang)
+    );
     let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
@@ -750,7 +802,8 @@ async fn write_note(
     );
     let body = serde_json::json!({ "text": note.text });
     back_to_notes(
-        &identity,
+        &back,
+        lang,
         desk.reader
             .write(reqwest::Method::POST, &url, &token, &body)
             .await,
@@ -762,8 +815,14 @@ async fn remove_note(
     Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path((identity, number)): axum::extract::Path<(String, u64)>,
+    Query(params): Query<SearchParams>,
     headers: HeaderMap,
 ) -> Response {
+    let lang = language(params.lang.as_deref(), &headers);
+    let back = format!(
+        "{}#notes",
+        params.fleet_view().href(&station::href(&identity), lang)
+    );
     let token = match writer(&headers, access) {
         Ok(token) => token,
         Err(refusal) => return refusal.into_response(),
@@ -782,23 +841,37 @@ async fn remove_note(
             &serde_json::Value::Null,
         )
         .await;
-    back_to_notes(&identity, answer)
+    back_to_notes(&back, lang, answer)
 }
 
 /// A note written or removed goes back to the notes; a refusal says why.
-fn back_to_notes(identity: &str, answer: Result<(u16, serde_json::Value), fetch::Why>) -> Response {
-    match answer {
-        Ok((201 | 204 | 404, _)) => {
-            axum::response::Redirect::to(&format!("{}#notes", station::href(identity)))
-                .into_response()
-        }
+fn back_to_notes(
+    back: &str,
+    lang: Lang,
+    answer: Result<(u16, serde_json::Value), fetch::Why>,
+) -> Response {
+    let (status, reason) = match answer {
+        Ok((201 | 204 | 404, _)) => return axum::response::Redirect::to(back).into_response(),
         Ok((_, body)) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             body["reason"].as_str().unwrap_or("refused").to_owned(),
-        )
-            .into_response(),
-        Err(_) => (StatusCode::BAD_GATEWAY, "csmsd is not answering").into_response(),
-    }
+        ),
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            lang.pick("csmsd antwortet nicht.", "csmsd is not answering.")
+                .to_owned(),
+        ),
+    };
+    let body = format!(
+        r#"<p role="alert">{}</p><p><a href="{}">{}</a></p>"#,
+        ui::escape(&reason),
+        ui::escape(back),
+        lang.pick("Zurück zu den Notizen", "Back to station notes")
+    );
+    investigation::with_status(
+        investigation::shell(lang, lang.pick("Stationsnotizen", "Station notes"), &body),
+        status,
+    )
 }
 
 /// `POST /station/{identity}/password` — a new password, on a new sheet.
@@ -852,15 +925,11 @@ async fn station_page(
     Extension(access): Extension<OperatorAccess>,
     State(desk): State<Arc<Page>>,
     axum::extract::Path(identity): axum::extract::Path<String>,
-    params: Result<Query<Params>, QueryRejection>,
+    Query(params): Query<SearchParams>,
     headers: HeaderMap,
 ) -> Response {
-    let lang = Lang::negotiate(
-        params.ok().and_then(|Query(p)| p.lang).as_deref(),
-        headers
-            .get(axum::http::header::ACCEPT_LANGUAGE)
-            .and_then(|value| value.to_str().ok()),
-    );
+    let lang = language(params.lang.as_deref(), &headers);
+    let view = params.fleet_view();
     match desk
         .reader
         .station::<station::StationPage>(&desk.csmsd, &identity)
@@ -873,6 +942,7 @@ async fn station_page(
             (desk.clock)(),
             &desk.receipts,
             access.can_write(),
+            view,
         )),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(why) => {
@@ -905,6 +975,7 @@ pub async fn run(options: Options) -> Result<Running> {
         clock,
         witness,
     } = options;
+    estate.validate()?;
     let operators = estate::operator_tokens(&estate.operators, &env)?;
     let token = estate::desk_read_credential(&estate.desk, &env, &operators)?;
     let zone =
@@ -913,14 +984,18 @@ pub async fn run(options: Options) -> Result<Running> {
             reason: error.to_string(),
         })?;
     let reader = Arc::new(fetch::Reader::new(token)?);
+    let mut daemons = vec![
+        ("csmsd", estate.desk.csmsd.clone()),
+        ("billd", estate.services.billd.clone()),
+        ("roamd", estate.services.roamd.clone()),
+        ("empd", estate.services.empd.clone()),
+    ];
+    if let Some(url) = &estate.services.accountingd {
+        daemons.push(("accountingd", url.clone()));
+    }
     let watch = Arc::new(Watch {
         reader: Arc::clone(&reader),
-        daemons: vec![
-            ("csmsd", estate.desk.csmsd.clone()),
-            ("billd", estate.services.billd.clone()),
-            ("roamd", estate.services.roamd.clone()),
-            ("empd", estate.services.empd.clone()),
-        ],
+        daemons,
         witness: emob_service::witness::Witness::open(&witness, &estate.witness.keys)
             .with_context(|| format!("opening the witness at {}", witness.display()))?,
         clock: Arc::clone(&clock),
@@ -930,6 +1005,7 @@ pub async fn run(options: Options) -> Result<Running> {
         watch: Arc::clone(&watch),
         csmsd: estate.desk.csmsd.clone(),
         billd: estate.services.billd.clone(),
+        accountingd: estate.services.accountingd.clone(),
         roamd: estate.services.roamd.clone(),
         poid: estate.desk.poid.clone(),
         empd: estate.services.empd.clone(),
@@ -992,12 +1068,14 @@ mod tests {
         );
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
         assert_eq!(
-            writer(&headers, OperatorAccess::Write).unwrap_err().0,
+            writer(&headers, OperatorAccess::new(true, false, false))
+                .unwrap_err()
+                .0,
             StatusCode::FORBIDDEN
         );
         headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
         assert_eq!(
-            writer(&headers, OperatorAccess::Write).unwrap(),
+            writer(&headers, OperatorAccess::new(true, false, false)).unwrap(),
             "token",
             "the operator's own token is forwarded"
         );

@@ -15,10 +15,10 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use emob_service::cloudevent::{self, CloudEvent};
+use emob_service::cloudevent::CloudEvent;
 use emob_service::estate::{self, Estate};
 use emob_service::events;
-use emob_service::webhook::{self, ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
+use emob_service::webhook::transport;
 
 /// How far the receiver's own answer is indented under its line.
 const INDENT: &str = "    ";
@@ -80,34 +80,24 @@ pub fn main(args: &[String], out: &mut impl Write, err: &mut impl Write) -> u8 {
         .copied()
         .filter(|kind| subscription.takes(kind))
     {
-        let body = sample(kind);
-        let id = format!("test-{}", kind.rsplit('.').next().unwrap_or("event"));
+        let mut nonce = [0_u8; 16];
+        if let Err(error) = getrandom::fill(&mut nonce) {
+            let _ = writeln!(err, "could not generate a test event id: {error}");
+            return 2;
+        }
+        let id = format!("test-{}", hex::encode(nonce));
+        let body = sample(kind, &id);
         let at = time::OffsetDateTime::now_utc();
-        let signature = webhook::sign(
-            &webhook::Delivery::new(&id, at, body.as_bytes()),
-            &subscription.secret,
-        );
         let started = Instant::now();
         let answer = runtime.block_on(async {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()?;
-            let response = client
-                .post(&subscription.url)
-                .header(ID_HEADER, &id)
-                .header(TIMESTAMP_HEADER, at.unix_timestamp().to_string())
-                .header(SIGNATURE_HEADER, signature)
-                .header("content-type", cloudevent::CONTENT_TYPE)
-                .body(body)
-                .send()
-                .await?;
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            Ok::<_, reqwest::Error>((status, text))
+            let client = transport::Client::new(Duration::from_secs(10))?;
+            client
+                .post(&subscription.url, &subscription.secret, &id, body, at)
+                .await
         });
         let took = started.elapsed().as_millis();
         match answer {
-            Ok((status, text)) => {
+            Ok(transport::Reply { status, text }) => {
                 let ok = status.is_success();
                 failed |= !ok;
                 let said: String = text.chars().take(200).collect();
@@ -133,11 +123,10 @@ pub fn main(args: &[String], out: &mut impl Write, err: &mut impl Write) -> u8 {
 }
 
 /// A sample of `kind`, as a daemon would send it, marked as a test.
-fn sample(kind: &'static str) -> String {
-    let id = format!("test-{}", kind.rsplit('.').next().unwrap_or("event"));
+fn sample(kind: &'static str, id: &str) -> String {
     let mut event = if kind == events::invoice::ISSUED {
         CloudEvent::new(
-            id.clone(),
+            id,
             "billd",
             kind,
             serde_json::Value::String(
@@ -149,7 +138,7 @@ fn sample(kind: &'static str) -> String {
         .content_type("application/xml")
     } else {
         CloudEvent::new(
-            id.clone(),
+            id,
             "csmsd",
             kind,
             serde_json::json!({
@@ -184,7 +173,8 @@ mod tests {
                 include_str!("../../../schemas/events/de.emob.invoice.issued.json"),
             ),
         ] {
-            let body: serde_json::Value = serde_json::from_str(&sample(kind)).unwrap();
+            let body: serde_json::Value =
+                serde_json::from_str(&sample(kind, "test-example")).unwrap();
             assert_eq!(body["emobtest"], true, "{kind}");
             assert!(body["id"].as_str().unwrap().starts_with("test-"));
             let schema: serde_json::Value = serde_json::from_str(schema).unwrap();

@@ -13,7 +13,7 @@ rust-version.workspace = true
 emob-billing = { workspace = true }
 emob-cdr     = { workspace = true }
 emob-core    = { workspace = true }
-emob-service = { workspace = true }
+emob-service = { workspace = true, features = ["webhook-client"] }
 
 # The journal. **The only manifest in this workspace that may declare it**: it
 # takes `uuid`/`v7`, and therefore a clock, so no crate promising replay may
@@ -25,6 +25,7 @@ emob-tariff  = { workspace = true }
 # CSPRNG, the receipt's construction (SR-116).
 base64       = { workspace = true }
 getrandom    = "0.4"
+hex          = { workspace = true }
 hmac         = { workspace = true }
 sha2         = { workspace = true }
 # The client half of the invoice delivery (SR-119). Already in the graph
@@ -48,7 +49,6 @@ en16931        = { workspace = true }
 en16931-formats = { workspace = true }
 emob-eichrecht = { workspace = true }
 emob-session   = { workspace = true }
-hex            = { workspace = true }
 ocmf           = { workspace = true }
 p256           = { workspace = true }
 time           = { workspace = true, features = ["macros"] }

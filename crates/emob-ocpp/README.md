@@ -4,7 +4,7 @@ The OCPP seam for CSMS developers: turns a charging station's transaction events
 into a billable session, and carries tariffs and § 14a grid limits back to the
 station.
 
-[![crates.io](https://img.shields.io/crates/v/emob-ocpp.svg)](https://crates.io/crates/emob-ocpp) [![docs.rs](https://img.shields.io/docsrs/emob-ocpp)](https://docs.rs/emob-ocpp) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-ocpp.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-ocpp.svg)](https://crates.io/crates/emob-ocpp) [![docs.rs](https://img.shields.io/docsrs/emob-ocpp)](https://docs.rs/emob-ocpp) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-ocpp.svg)](#license)
 
 OCPP carries two kinds of meter value, and only one is money. The numeric ones
 (`meterStart`, `meterStop`, `SampledValue.value`) are operational telemetry; the

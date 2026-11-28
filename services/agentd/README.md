@@ -9,7 +9,7 @@ The advisory daemon: deterministic specialists, run on [`agentplane`](https://gi
 | ✅ library | three specialists (`compliance-sweep`, `evidence-triage`, `tariff-review`), the `Advice` output type, the read-only `advisory` principal — runs and replays tested in the crate |
 | ✅ daemon | builds the `agentplane` runtime with the three specialists over an **in-memory** store, acting as the advisory principal's delegation chain for the estate's operator party (`agentd::runtime(store, &agent)`). `GET /v1/agentd` lists the specialists and their capabilities |
 | ⏳ not wired | nothing in the estate triggers a run |
-| — | it runs **no language model** and exposes **no MCP surface**. Every specialist is plain Rust |
+| ✅ execution | The advisory specialists run as deterministic Rust functions. The [local MCP receipt verifier](../../crates/emob-cli/README.md#emob-mcp) is available through the CLI. |
 
 ## What it owns
 

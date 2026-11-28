@@ -13,6 +13,18 @@ use rust_decimal::Decimal;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum EebusError {
+    /// A valid limit exceeds the local numeric or instant range.
+    #[error("the limit exceeds local precision or time range")]
+    OutsidePrecision,
+    /// The resolved SPINE state inherited a duration without a known receipt.
+    #[error("the inherited duration needs an explicit end time after restart")]
+    UnknownValidity,
+    /// A recovery write needs a recent heartbeat.
+    #[error("a heartbeat must precede the recovery write by at most 60 seconds")]
+    HeartbeatRequired,
+    /// Receipt instants must be monotonic.
+    #[error("the event predates the preceding receipt")]
+    OutOfSequence,
     /// The payload is not a limit write, or carries no entry for this limit.
     #[error("this is not a limit write: {detail}")]
     NotALimitWrite {

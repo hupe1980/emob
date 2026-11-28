@@ -25,19 +25,16 @@ from a silence needs a clock and domain crates have none.
 `Sited::allocate` calls `emob_smart::allocate`; `Sited::charging_profiles` calls
 `emob_ocpp::to_charging_profiles`. None of them chooses a number.
 
-### Why it runs at the site
+### Read the site state
 
-`[LPC-912]` puts a site into its failsafe when the Energy Guard (the grid
-operator's control box) goes silent, and `[LPC-021]` floors that timer at two
-hours. A controller in a data centre behind a broken WAN link would hold the
-site at its failsafe because **this process** was unreachable, not because the
-grid operator asked.
+`GET /v1/sited` returns the LPC state as a string, the ceiling stated by that state in kW (null for unlimited operation), and the effective site ceiling after applying the connection capacity and allocation floor. An empty site can report `init` with 4.2 kW configured and 0 kW available.
 
-### Silence is not permission
-
-"No limit" stands for three facts: never asked, released by the operator, or the
-control box is gone. `Sited::limit_at` walks `[LPC-912]`'s failsafe and
-`[LPC-022]`'s release after two to 24 hours, and each state carries a note.
+| Observation | What to check |
+| --- | --- |
+| `init` | After startup, the guard must send a heartbeat followed within 60 seconds by a limit. |
+| A timed limit ends | Compare receipt time and duration. A value-only write retains the deadline. |
+| `failsafe state` | Check the last heartbeat. Both controlled states enter failsafe at 120 seconds of silence. |
+| `unlimited/autonomous` | Failsafe residence elapsed. Check the connection before expecting a new active limit. |
 
 ### The evidence § 14a asks for
 
@@ -56,8 +53,7 @@ in order.
 | `SITED_FAILSAFE_KW` | `4.2` | failsafe consumption limit in kW `[LPC-901/1]` — the `[BK6-22-300 Ziff. 4.5]` minimum unless the connection contract says otherwise |
 | `RUST_LOG` | `info,sited=debug` | log filter |
 
-The failsafe period is fixed at the two-hour floor of `[LPC-021]` until the
-Energy Guard writes its own.
+The daemon uses a two-hour failsafe residence. The library accepts a configured residence within the LPC range.
 
 ## Running
 

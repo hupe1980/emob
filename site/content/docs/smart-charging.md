@@ -36,7 +36,7 @@ asked breaks its promise to a driver over a duty that does not exist.
 and returns `NotSteuVe` with the reason otherwise. A compliance answer and the
 load manager therefore cannot disagree about whether the statute applies.
 
-## The five EEBUS LPC states, three of them at full power
+## What the LPC state tells the operator
 
 The Festlegung is implemented over the EEBUS use case *Limitation of Power
 Consumption* `[LPC §2.3.2]`, which gives a controllable system five states:
@@ -44,17 +44,13 @@ Consumption* `[LPC §2.3.2]`, which gives a controllable system five states:
 | State | What it means | What the operator does |
 |---|---|---|
 | no Energy Guard | no control box commissioned | nothing |
+| `init` | commissioned controller waiting for a heartbeat and limit | check the pairing and configured failsafe power |
 | `limited` | a setpoint is in force | obey it |
 | `unlimited/controlled` | the grid operator is connected and allows full power `[LPC-905]` | nothing |
-| `failsafe state` | the Energy Guard has been silent past the Failsafe Duration Minimum `[LPC-912]` | replace the control box |
+| `failsafe state` | 120 seconds since the last heartbeat in either controlled state `[LPC-911/912]` | check connectivity and heartbeat timestamps |
 | `unlimited/autonomous` | the silence has outlasted `[LPC-022]`'s release, two to 24 hours | tell the grid operator it cannot curtail this site |
 
-A *limited / unlimited* flag cannot tell these apart. A depot at full power
-because its grid operator allows it and one at full power because the box died
-four hours ago draw the same number and are different problems. The last row
-matters most: a site **leaves** failsafe. `emob_eebus::Watchdog::limit_at`
-computes the state from the last time the Energy Guard was heard and the
-instant asked about; `FAILSAFE_AFTER` defaults to two hours.
+A timed limit expires at its own deadline during healthy communication. Updating only the watts preserves that deadline. A heartbeat alone cannot restore an old setpoint after loss. The site enters autonomous operation after its configured failsafe residence, measured from the 120-second threshold. The library exercises these transitions through allocation and the resulting OCPP profiles. [EEBUS LPC specification](https://www.eebus.org/wp-content/uploads/2023/04/EEBus_UC_TS_LimitationOfPowerConsumption_V1.0.0_public.pdf)
 
 ## Reading the EEBUS setpoint as an exact decimal
 

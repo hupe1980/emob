@@ -1,21 +1,23 @@
 +++
 title = "Architecture"
 weight = 13
-description = "emob architecture: sans-I/O Rust crates for Eichrecht, OCPP, OCPI and billing; nine daemons connected by APIs and signed CloudEvents."
+description = "emob architecture: sans-I/O Rust crates for Eichrecht, OCPP, OCPI and billing; eleven daemons connected by APIs and signed CloudEvents."
 
 [extra]
 nav = "Architecture"
 +++
 
-Nine services share one estate configuration. Five keep signed journals that an independent witness can check. Stations connect to `csmsd`, `empd` authorises charging, `billd` invoices and `roamd` exchanges roaming records. The fifth journal belongs to `poid`, which records public-feed delivery. A native agreement binds one issued card to the complete price offer at a single point. The provider journals the agreement and the CSMS checks the current offer before online charging or reservation. The operator desk reads those services over their APIs and forwards each card change to the provider under the signed-in operator’s grant. emob does not implement the charging protocols
+Eleven services share one estate configuration. Six keep signed journals that an independent witness can check. Stations connect to `csmsd`, `empd` authorises charging, `billd` invoices and `roamd` exchanges roaming records. The fifth journal belongs to `poid`, which records public-feed delivery. A native agreement binds a bill-to account to the accepted price at one point. The active card can be replaced under that agreement. The provider journals the agreement and the CSMS checks the current offer before online charging or reservation. The operator desk reads those services over their APIs and forwards each card change to the provider under the signed-in operator’s grant. emob does not implement the charging protocols
 itself: it builds on separate protocol libraries (OCPP, OCPI, OICP, ISO 15118,
 EEBUS, OCMF) and adds the business rules on top.
+
+The stateless customer portal forwards the customer session to each owner. `empd` authenticates local identities and encrypts each customer’s grant records under a separate key. Its current key store lives outside the operational backup. `billd` rechecks those grants for each page and document. [Customer access](@/docs/run-the-estate.md#customer-portal)
 
 ## Two roles: charge point operator and mobility service provider
 
 A German charging business usually plays two roles. As **CPO** (charge point
 operator) it runs the stations; as **EMP/eMSP** (e-mobility service provider) it
-holds the driver’s contract and decides whether their card can charge. The billing service closes invoices between the operator and mobility provider. The law gives each role different
+holds the driver’s contract and decides whether their card can charge. The billing service closes the CPO’s partner month and separately issues the eMSP’s retail invoices to drivers and fleet payers. The law gives each role different
 duties, so emob models both.
 
 ```mermaid
@@ -30,6 +32,10 @@ flowchart TB
     POI -->|"Static table"| NAP["Mobilithek"]
     POI -->|"Status and price updates"| NAP
     DRIVER["Driver"] -->|"Point or provider price"| CSMS
+    DESK -->|"Review and allocate payments"| CASH["accountingd"]
+    CASH -->|"Read issued retail facts"| BILL
+    PORTAL["portald"] -->|"Customer session and agreements"| EMP
+    PORTAL -->|"Scoped history and original UBL"| BILL
     DESK["deskd"] -->|"Read operator evidence"| CSMS & BILL & POI
     DESK -->|"Enrol and manage cards"| EMP
 ```
@@ -46,7 +52,7 @@ adding partners changes the transport, never the arithmetic.
 |---|---|---|
 | Domain crates | Under `crates/emob-*` | No — sans-I/O, no clock, no floats |
 | Service shell | `crates/emob-service` | Yes — HTTP, config, journals, shutdown |
-| Daemons | `services/*` (nine binaries) | Yes — sockets, clock, files |
+| Daemons | `services/*` (eleven binaries) | Yes — sockets, clock, files |
 | Protocol kits | separate crates on crates.io | the wire formats |
 
 ### Domain crates ✅
@@ -70,17 +76,19 @@ adding partners changes the transport, never the arithmetic.
 
 ### Daemons
 
-| Daemon | Owns | State |
-|---|---|---|
-| `csmsd` | The CSMS: OCPP 1.6J / 2.0.1 / 2.1 with security profiles 1–3, settlement, the outbox, driver receipts | ✅ |
-| `empd` | Contracts, tokens, authorisation (`POST /v1/authorize`) | ✅ · ⏳ OCPI tokens endpoint, fees |
-| `billd` | Receiving CDRs, closing each partner's month into an invoice, numbering, postings; the invoice page and signed delivery to the operator system | ✅ · ⏳ SEPA runs |
-| `roamd` | OCPI in both directions behind a reach-back guard; who a record goes to | ✅ OCPI · ⏳ OICP transport |
-| `deskd` | Heute, card investigations and operator actions, and the witness of every journal’s signed head | ✅ |
-| `tarifd` | Publishing the estate's tariff versions | ✅ read model · ✅ `driver-tariff.v1` · ⏳ push clients |
-| `poid` | The inventory for the national access point | public CSMS register, static and dynamic publication, receiver acknowledgements |
-| `sited` | The § 14a site controller, run **at** the site | ⏳ SHIP session, OCPP leg |
-| `agentd` | Advisory specialists over many records, run under the read-only advisory principal | ✅ runtime · ⏳ nothing triggers a run |
+| Daemon | Responsibility |
+|---|---|
+| `csmsd` | Connects OCPP 1.6J, 2.0.1 and 2.1 stations, verifies signed readings, settles sessions and serves driver receipts. |
+| `empd` | Authorizes charging cards, records driver agreements and payer assignments, and manages customer sessions and access grants. |
+| `billd` | Closes retail and partner billing periods, issues invoices and corrections, and retains the original UBL. |
+| `roamd` | Exchanges OCPI credentials and charge detail records with the configured roaming parties. |
+| `deskd` | Runs Heute for operators to investigate sessions, manage stations and cards, grant customer access and review invoices. Witnesses signed journal heads. |
+| `accountingd` | Replays retail issues and credits, books local statement entries and owns the receivables balance and named allocations. |
+| `portald` | Shows customers their assigned agreements, receipts and payer invoices in German or English. |
+| `tarifd` | Publishes the estate’s versioned charging tariffs and driver price documents. |
+| `poid` | Publishes the public point register and static and dynamic DATEX II offers, and records receiver acknowledgements. |
+| `sited` | Applies § 14a site setpoints and the configured failsafe when the grid operator goes silent. |
+| `agentd` | Runs read-only evidence, tariff and compliance specialists. |
 
 The edges between them:
 
@@ -91,10 +99,15 @@ The edges between them:
 | `csmsd` → `billd`, `roamd` | the outbox: each settled session as a `de.emob.cdr.issued` CloudEvent, signed per Standard Webhooks, `POST /v1/deliveries`, retried until a `2xx`, journalled |
 | `roamd` ↔ partner | OCPI 2.3.0 credentials, CDRs |
 | `deskd` → `csmsd`, `billd`, `roamd` | the bounded operator read models, `GET /v1/<daemon>/today` |
+| `deskd` → `accountingd` → `billd` | The finance operator’s bearer authorizes an on-demand read of issued documents. Each service checks the explicit finance grant. |
+| `billd` → `empd` | A withdrawal credit checks the approved decision and billing disposition before the issuer commits a numbered credit. |
+| `portald` → `accountingd` → `billd` | A live payer session authorizes one invoice balance. Billing supplies current issued and credited amounts. Accounting supplies applied cash. |
+| `portald` → `empd`, `billd` | customer session and current agreement or payer grants on every read |
 | `deskd` → `empd` | private card and agreement lookup with a reader, enrolment and card changes with the signed-in writer |
-| `deskd` → `csmsd`, `billd`, `roamd`, `empd`, `poid` | the signed journal heads, `GET /v1/<daemon>/head`, every 30 s |
-| `billd` → operator system | each issued invoice as a `de.emob.invoice.issued` CloudEvent carrying the UBL or CII file, signed, retried until answered |
-| `csmsd`, `billd` → subscribers | the same events to every `[[subscribers]]` entry whose `types` take them, each signed with its own secret, retried until a `2xx`, journalled |
+| `deskd` → `csmsd`, `billd`, `roamd`, `empd` and configured `accountingd` | Signed journal heads at `GET /v1/<daemon>/head`, every 30 s. An independent witness can also track `poid`. |
+| `deskd` → `billd` | account/month review for staff, issue with a named writer and retail UBL download with a finance grant |
+| `billd` → operator system | each issued partner invoice as a `de.emob.invoice.issued` CloudEvent carrying the UBL or CII file, signed, retried until answered |
+| `csmsd`, `billd` → subscribers | eligible events without private retail attribution to each `[[subscribers]]` entry whose `types` take them, each signed with its own secret, retried until a `2xx`, journalled |
 
 Between emob and anything else there are two ways in or out: an HTTP API or a
 CloudEvent. emob emits two event types, both
@@ -108,7 +121,7 @@ model behind the operator token. `emob demo` runs the daemons' own
 configured rather than forked — and `deskd` takes its clock as a parameter, so
 the demo can play a morning at 60×. See [Run the estate](@/docs/run-the-estate.md).
 
-**1426 tests** cover the workspace.
+**1495 tests** cover the workspace.
 
 An end-to-end test drives the full chain: OCMF records signed with a real key at
 test time, verified, matched against a session, split into quarter hours, built
@@ -250,16 +263,15 @@ instant and key is an argument, the fold gives the same answer every time.
   history rewritten *and* extended past the witnessed position is beyond it: the
   journal is a chain, not a Merkle tree.
 
-`csmsd`, `billd`, `roamd`, `empd` and `poid` fold their journals on start. A
-journal is the file most likely to leave the building in a backup, so record
-bodies are sealed with AES-256-GCM under a per-daemon data key while the hash
-chain runs over the sealed bytes — it verifies without the key, and no card UID
-or credential sits on disk in clear. A daemon with a journal is a **single
-writer**, so the deployment runs no replicas.
+Six services replay their journals on startup. `csmsd`, `billd`, `roamd`,
+`empd` and `accountingd` seal private record bodies with AES-256-GCM under
+per-service keys. The hash chain covers the sealed bytes and can be verified
+without decrypting them. `poid` signs the head of its public register journal.
+Each journal has one writer.
 
 ## Deployment
 
-One `Dockerfile` builds all nine daemons and the `emob` command line, selected by a build argument, on a
+One `Dockerfile` builds all eleven daemons and the `emob` command line, selected by a build argument, on a
 `distroless/cc` runtime (no shell, no package manager). `docker-bake.hcl` builds
 them all; `compose.yaml` starts them on one machine with a named volume per
 journal. Every default bind address is loopback, so nothing is reachable until
@@ -344,16 +356,13 @@ emob does not implement charging protocols; it depends on these libraries:
 | [`oicp-kit`](https://crates.io/crates/oicp-kit) | 0.1 | Hubject OICP, CPO and EMP sides |
 | [`datex2`](https://crates.io/crates/datex2) | 0.3 | DATEX II for the AFIR feed to the Mobilithek |
 | [`iso15118`](https://crates.io/crates/iso15118) | 0.9 | Certificate path validation for Plug & Charge |
-| [`eebus`](https://crates.io/crates/eebus) | 0.13 | SHIP and SPINE for § 14a; used without its runtime, so `emob-eebus` stays sans-I/O |
+| [`eebus`](https://crates.io/crates/eebus) | 0.14 | SHIP and SPINE for § 14a; used without its runtime, so `emob-eebus` stays sans-I/O |
 | [`en16931`](https://crates.io/crates/en16931), `en16931-formats` | 0.10 | The European e-invoice model, validation, UBL and CII |
 | [`sepa`](https://crates.io/crates/sepa) | 0.10 | SEPA direct debit (pain.008) |
 | [`doubleentry`](https://crates.io/crates/doubleentry) | 0.9 | Bookkeeping in `billd` |
 | [`agentplane`](https://crates.io/crates/agentplane) | 0.61 | The run journal for `agentd` |
 
-The crates that decide money keep Rust 1.94 as their minimum version so that
-sibling workspaces ([`mako`](https://hupe1980.github.io/mako/) for German market communication, [`hems`](https://hupe1980.github.io/hems/) for home
-energy management) can consume them; `emob-roam` needs 1.96 because `ocpi-kit`
-does.
+All workspace members require Rust 1.96. Run `just msrv` to check the locked dependency graph at that floor.
 
 ## Why the dependencies point the way they do
 
@@ -424,3 +433,5 @@ minimum power the operator is owed. See [§ 14a and the grid](@/docs/smart-charg
 Related: [Getting started](@/docs/getting-started.md) ·
 [The Eichrecht chain](@/docs/eichrecht.md) · [Roaming](@/docs/roaming.md) ·
 [threat model](https://github.com/hupe1980/emob/blob/main/THREAT_MODEL.md)
+
+The [replacement interface guide](@/docs/interfaces.md) maps the authorization, tariff, event and MCP contracts to their owners and probes.

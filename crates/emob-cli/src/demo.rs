@@ -1,10 +1,10 @@
-//! `emob demo` — five services, simulated stations and a roaming peer on loopback.
+//! `emob demo` — seven services, simulated stations and a roaming peer on loopback.
 //!
-//! One process runs the CSMS, provider, roaming, billing and desk services.
+//! One process runs the charging estate, staff desk, customer portal and receivables ledger.
 //! It writes a seeded `estate.toml` for **Stadtwerke
 //! Musterstadt eMobility** (one site, three charge points on OCPP 1.6, 2.0.1
 //! and 2.1, one `emob-sim` meter each, security profile 2 over `just dev-ca`'s
-//! throwaway TLS); starts `empd`, `billd`, `roamd`, `csmsd` and `deskd` through
+//! throwaway TLS); starts the seven services through
 //! the very `daemon::run` each `main` calls (FR-003); registers `ocpi-kit`'s
 //! `MockPeer` as the roaming partner; connects three `ocpp-kit` stations over
 //! `wss://`; and plays a morning on one simulated clock — seven sessions
@@ -26,6 +26,7 @@
 mod estate;
 mod inbox;
 mod invoice;
+mod portal;
 mod station;
 mod story;
 
@@ -179,12 +180,13 @@ fn random_hex(bytes: usize) -> String {
 struct Secrets {
     operator: String,
     desk_read: String,
+    customer: String,
     service: String,
     webhook: String,
     token_a: String,
     token_b: String,
-    data_keys: [String; 4],
-    signing_keys: [String; 4],
+    data_keys: [String; 5],
+    signing_keys: [String; 5],
     passwords: [String; 3],
 }
 
@@ -195,6 +197,7 @@ impl Secrets {
         Self {
             operator: random_hex(16),
             desk_read: random_hex(16),
+            customer: random_hex(32),
             service: random_hex(16),
             webhook: format!(
                 "whsec_{}",
@@ -211,6 +214,7 @@ impl Secrets {
     fn env(&self) -> Env {
         let mut values: BTreeMap<&'static str, String> = [
             (estate::env::OPERATOR, self.operator.clone()),
+            ("EMOB_PORTAL_MIKA", self.customer.clone()),
             (estate::env::DESK_READ, self.desk_read.clone()),
             (estate::env::SERVICE, self.service.clone()),
             (estate::env::WEBHOOK, self.webhook.clone()),
@@ -231,6 +235,7 @@ impl Secrets {
     fn never_printed(&self) -> Vec<&str> {
         let mut all = vec![
             self.desk_read.as_str(),
+            self.customer.as_str(),
             self.service.as_str(),
             self.webhook.as_str(),
             self.token_a.as_str(),
@@ -250,7 +255,9 @@ impl Secrets {
             self.operator.as_str(),
             estate::GOOD_CARD,
             estate::BLOCKED_CARD,
+            portal::PRIVATE_CARD,
         ]);
+        all.extend(portal::FLEET_CARDS);
         all
     }
 }
@@ -296,13 +303,15 @@ impl Drop for Removed {
 /// names; `--check` takes whatever the system hands out. The partner's
 /// listener is kept: nobody else's code binds it.
 fn ports(listen: IpAddr, fixed: bool) -> Result<(Ports, tokio::net::TcpListener), Refusal> {
-    let wanted: [(&str, u16); 7] = [
+    let wanted: [(&str, u16); 9] = [
         ("csmsd (OCPP)", 9000),
         ("csmsd", 9001),
         ("roamd", 9583),
         ("billd", 9584),
         ("empd", 9585),
         ("deskd", 9587),
+        ("portald", 9589),
+        ("accountingd", 9591),
         ("the partner", 9590),
     ];
     let mut held = Vec::new();
@@ -327,8 +336,10 @@ fn ports(listen: IpAddr, fixed: bool) -> Result<(Ports, tokio::net::TcpListener)
         billd: addr(3),
         empd: addr(4),
         deskd: addr(5),
+        portald: addr(6),
+        accountingd: addr(7),
     };
-    let partner = held.pop().expect("seven listeners");
+    let partner = held.pop().expect("partner listener");
     partner
         .set_nonblocking(true)
         .and_then(|()| tokio::net::TcpListener::from_std(partner))
@@ -411,10 +422,14 @@ struct Estate {
     roamd: roamd::daemon::Running,
     csmsd: csmsd::daemon::Running,
     deskd: deskd::Running,
+    portald: portald::Running,
+    accountingd: accountingd::Running,
 }
 
 impl Estate {
     async fn stop(self) {
+        self.portald.kill().await;
+        self.accountingd.kill().await;
         self.deskd.kill().await;
         self.csmsd.kill().await;
         self.roamd.kill().await;
@@ -560,7 +575,9 @@ async fn demo(
         "the demo's own estate does not pass `emob check`"
     );
     let env = secrets.env();
-    let journal = |name: &str| scratch.0.join(format!("{name}.ndjson"));
+    let journals = scratch.0.join("journals");
+    std::fs::create_dir(&journals)?;
+    let journal = |name: &str| journals.join(format!("{name}.ndjson"));
     let me = |name: &'static str| Identity::new(name, "demo");
 
     out.say(format!(
@@ -582,6 +599,7 @@ async fn demo(
         empd::daemon::Options {
             http: ports.empd,
             journal: journal("empd"),
+            custody: scratch.0.join("custody"),
             estate: emob_service::estate::from_str(&text)?,
             env: env.clone(),
             shutdown: Shutdown::new(),
@@ -591,14 +609,19 @@ async fn demo(
     )
     .await
     .context("empd")?;
-    let billd = billd::daemon::run(billd::daemon::Options {
-        http: ports.billd,
-        journal: journal("billd"),
-        estate: emob_service::estate::from_str(&text)?,
-        env: env.clone(),
-        shutdown: Shutdown::new(),
-        identity: me("billd"),
-    })
+    let billing_time = Arc::new(Clock::new(start, Speed::Max));
+    let billing_now = Arc::clone(&billing_time);
+    let billd = billd::daemon::run_with_clock(
+        billd::daemon::Options {
+            http: ports.billd,
+            journal: journal("billd"),
+            estate: emob_service::estate::from_str(&text)?,
+            env: env.clone(),
+            shutdown: Shutdown::new(),
+            identity: me("billd"),
+        },
+        Arc::new(move || billing_now.now()),
+    )
     .await
     .context("billd")?;
     let roamd = roamd::daemon::run(roamd::daemon::Options {
@@ -633,6 +656,16 @@ async fn demo(
     })
     .await
     .context("csmsd")?;
+    let accountingd = accountingd::run(accountingd::Options {
+        http: ports.accountingd,
+        journal: journal("accountingd"),
+        estate: emob_service::estate::from_str(&text)?,
+        env: env.clone(),
+        shutdown: Shutdown::new(),
+        identity: me("accountingd"),
+    })
+    .await
+    .context("accountingd")?;
     let deskd = deskd::run(deskd::Options {
         http: ports.deskd,
         estate: emob_service::estate::from_str(&text)?,
@@ -640,11 +673,21 @@ async fn demo(
         shutdown: Shutdown::new(),
         identity: me("deskd"),
         clock: business_clock,
-        witness: scratch.0.join("witness.ndjson"),
+        witness: journal("witness"),
     })
     .await
     .context("deskd")?;
+    let portald = portald::run(portald::Options {
+        http: ports.portald,
+        estate: emob_service::estate::from_str(&text)?,
+        shutdown: Shutdown::new(),
+        identity: me("portald"),
+    })
+    .await
+    .context("portald")?;
     let estate = Estate {
+        accountingd,
+        portald,
         empd,
         billd,
         roamd,
@@ -675,7 +718,7 @@ async fn demo(
         );
     }
     out.say(format!(
-        "  ✓ empd billd roamd csmsd deskd up · CP-1 (1.6) CP-2 (2.0.1) CP-3 (2.1) on wss://{} with profile 2 · partner DE*MSP registered",
+        "  ✓ empd billd roamd csmsd deskd portald accountingd up · CP-1 (1.6) CP-2 (2.0.1) CP-3 (2.1) on wss://{} with profile 2 · partner DE*MSP registered",
         ports.ocpp
     ));
     // SR-072 / SR-077: every listener is bound, on loopback.
@@ -688,9 +731,33 @@ async fn demo(
         )
     ));
 
-    // The morning.
     let mut meters = meters;
     let sessions = story::sessions(options.seed, start, &mut meters);
+    let fleet_sessions = portal::fleet_sessions(&sessions);
+    let demo_agreement = portal::enrol(
+        &ports,
+        &secrets.operator,
+        "STOCK-1006",
+        CHARGE_POINTS[0].evse,
+        "PAYER-PRIVATE",
+    )
+    .await?;
+    portal::grant_private(&ports, &secrets.operator, &demo_agreement).await?;
+    let mut fleet_agreements = Vec::new();
+    for (stock, session) in ["STOCK-1007", "STOCK-1008"].into_iter().zip(fleet_sessions) {
+        let point = CHARGE_POINTS[sessions[session].beat.station].evse;
+        fleet_agreements
+            .push(portal::enrol(&ports, &secrets.operator, stock, point, "PAYER-FLEET").await?);
+    }
+    let key_file = scratch.0.join("customer-key");
+    write_private(&key_file, &secrets.customer)?;
+    out.say(format!(
+        "  Customer portal: http://{}/customer/ · user mika · sign-in key in {}",
+        ports.portald,
+        key_file.display()
+    ));
+
+    // The morning.
     let mut transactions: Vec<Option<String>> = vec![None; sessions.len()];
     let mut said_receipt: Option<String> = None;
     let mut refused_receipt: Option<String> = None;
@@ -709,7 +776,14 @@ async fn demo(
         let id = transactions[s]
             .clone()
             .unwrap_or_else(|| session.label.clone());
-        let answer = wire.play(event, session.beat.card, &id).await?;
+        let card = if s == portal::PRIVATE_SESSION {
+            portal::PRIVATE_CARD
+        } else if let Some(driver) = fleet_sessions.iter().position(|session| *session == s) {
+            portal::FLEET_CARDS[driver]
+        } else {
+            session.beat.card
+        };
+        let answer = wire.play(event, card, &id).await?;
         match answer {
             Some(Started::Accepted(id)) => transactions[s] = Some(id),
             Some(Started::Refused(status)) => {
@@ -794,7 +868,11 @@ async fn demo(
     }
 
     // The month's end: billd's own calendar, at the simulated date.
-    let last = clock.now();
+    let last = clock.now().to_offset(time::UtcOffset::UTC);
+    if start.to_offset(time::UtcOffset::UTC).month() != last.month() {
+        let cutoff = last.date().replace_day(1)?;
+        billd::daemon::close_what_is_due(&estate.billd.books, &estate.billd.estate, cutoff);
+    }
     let next_month = last
         .date()
         .replace_day(1)
@@ -846,7 +924,7 @@ async fn demo(
     }
     for (number, records, total) in &invoices {
         out.say(format!(
-            "  ⏩ month end ({next_month}): billd issues invoice {number} to MSP Mobility GmbH — {} lines, {total}",
+            "  ⏩ month end: billd issues invoice {number} to MSP Mobility GmbH — {} lines, {total}",
             records.len()
         ));
         out.say(format!(
@@ -862,6 +940,28 @@ async fn demo(
             )
         ));
     }
+    billing_time.reach(next_month.midnight().assume_utc()).await;
+    let demo_invoice = portal::issue(
+        &ports,
+        &secrets.operator,
+        "PAYER-PRIVATE",
+        &[&demo_agreement],
+        sessions[portal::PRIVATE_SESSION].charged.ended_at,
+    )
+    .await?;
+    let fleet_invoice = portal::issue(
+        &ports,
+        &secrets.operator,
+        "PAYER-FLEET",
+        &[&fleet_agreements[0], &fleet_agreements[1]],
+        sessions[fleet_sessions[0]].charged.ended_at,
+    )
+    .await?;
+    let fleet_agreement = &fleet_agreements[0];
+    out.say(format!(
+        "  Credit an invoice line: fleet invoice {fleet_invoice} · agreement {fleet_agreement}"
+    ));
+    portal::fund(&ports, &secrets.operator).await?;
     clock.freeze();
 
     // The witness reads every journal's signed head (spec 008).
@@ -914,6 +1014,17 @@ async fn demo(
             let invoice = estate.billd.invoices.path(number);
             let _ = writeln!(text, "invoice=http://{}{invoice}", ports.billd);
         }
+        let _ = writeln!(
+            text,
+            "portal=http://{}/customer/\ncustomer_key={}",
+            ports.portald,
+            key_file.display()
+        );
+        let received_at = last.format(&time::format_description::well_known::Rfc3339)?;
+        let _ = writeln!(
+            text,
+            "agreement={demo_agreement}\nretail_invoice={demo_invoice}\nfleet_invoice={fleet_invoice}\nfleet_agreement={fleet_agreement}\nreceived_at={received_at}"
+        );
         write_private(path, &text)?;
     }
 
@@ -983,7 +1094,7 @@ async fn demo(
                 )
             })
             .collect();
-        seen.unattributed = unattributed(&scratch.0);
+        seen.unattributed = unattributed(&journals);
         let mut failures = judge(&seen, story::billable());
         // Spec 010: the invoice as its recipient reads it, files validated
         // by their consumer.
@@ -1102,8 +1213,8 @@ struct Observed {
     blocked: Vec<String>,
     open: usize,
     invoices: Vec<(String, Vec<String>)>,
-    /// What the billed sessions' receipts state, summed — each `Cost::gross`.
-    receipts: rust_decimal::Decimal,
+    /// Station records and receipt amounts for each completed UTC billing month.
+    month_receipts: Vec<(Vec<String>, rust_decimal::Decimal)>,
     /// BT-115 of each invoice.
     payable: Vec<rust_decimal::Decimal>,
     /// Each journalled daemon the witness read, and whether its head was
@@ -1124,7 +1235,7 @@ struct Observed {
 /// SC-002: every record of every journal the demo wrote names who caused it.
 fn unattributed(dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
-    for name in ["csmsd", "billd", "roamd", "empd", "witness"] {
+    for name in ["csmsd", "billd", "roamd", "empd", "accountingd", "witness"] {
         let text = std::fs::read_to_string(dir.join(format!("{name}.ndjson"))).unwrap_or_default();
         let total = text.lines().count();
         let named = text
@@ -1201,12 +1312,19 @@ fn observe(
             .iter()
             .map(|(number, records, _)| (number.clone(), records.clone()))
             .collect(),
-        receipts: estate.csmsd.csmsd.with_cdrs(|ledger| {
-            ledger
-                .iter()
-                .filter_map(|cdr| cdr.cost.as_ref())
-                .map(|cost| cost.gross().amount())
-                .sum()
+        month_receipts: estate.csmsd.csmsd.with_cdrs(|ledger| {
+            let mut months = BTreeMap::new();
+            for cdr in ledger.iter() {
+                let end = cdr.ended_at.to_offset(time::UtcOffset::UTC);
+                let (records, payable) = months
+                    .entry((end.year(), u8::from(end.month())))
+                    .or_insert_with(|| (Vec::new(), rust_decimal::Decimal::ZERO));
+                records.push(cdr.key.to_string());
+                if let Some(cost) = &cdr.cost {
+                    *payable += cost.gross().amount();
+                }
+            }
+            months.into_values().collect()
         }),
         payable: estate
             .billd
@@ -1297,29 +1415,33 @@ fn judge(seen: &Observed, billable: usize) -> Vec<String> {
         format!("no transaction left open, found {}", seen.open),
     );
     expect(
-        seen.invoices.len() == 1,
-        format!("one invoice for the month, found {}", seen.invoices.len()),
+        seen.invoices.len() == seen.month_receipts.len(),
+        format!(
+            "one invoice per billed month, found {} for {} months",
+            seen.invoices.len(),
+            seen.month_receipts.len()
+        ),
     );
-    if let Some((number, records)) = seen.invoices.first() {
+    for (i, ((number, records), (expected_records, receipts))) in
+        seen.invoices.iter().zip(&seen.month_receipts).enumerate()
+    {
         expect(
-            sorted(records) == ours,
+            sorted(records) == sorted(expected_records),
             format!(
-                "invoice {number}'s lines are the billed records: {:?}",
+                "invoice {number}'s lines are the billed records for the month: {:?}",
                 sorted(records)
             ),
         );
+        expect(
+            seen.payable.get(i) == Some(receipts),
+            format!(
+                "invoice {number} asks for what the receipts said, {receipts} EUR: {:?}",
+                seen.payable.get(i)
+            ),
+        );
     }
-    // The driver who adds up the session receipts gets the invoice's amount
-    // due: BT-115, with any rounding stated as BT-114.
     expect(
-        seen.payable == [seen.receipts],
-        format!(
-            "the invoice asks for what the receipts said, {} EUR: {:?}",
-            seen.receipts, seen.payable
-        ),
-    );
-    expect(
-        seen.witnessed.len() == 4 && seen.witnessed.iter().all(|(_, ok)| *ok),
+        seen.witnessed.len() == 5 && seen.witnessed.iter().all(|(_, ok)| *ok),
         format!(
             "SR-098: the witness read every journal's signed head: {:?}",
             seen.witnessed
@@ -1408,10 +1530,10 @@ mod tests {
             )],
             blocked: vec!["Blocked".to_owned()],
             open: 0,
-            invoices: vec![("R-2026-0001".to_owned(), keys)],
-            receipts: rust_decimal::Decimal::new(8578, 2),
+            invoices: vec![("R-2026-0001".to_owned(), keys.clone())],
+            month_receipts: vec![(keys, rust_decimal::Decimal::new(8578, 2))],
             payable: vec![rust_decimal::Decimal::new(8578, 2)],
-            witnessed: ["csmsd", "billd", "roamd", "empd"]
+            witnessed: ["csmsd", "billd", "roamd", "empd", "accountingd"]
                 .map(|name| (name.to_owned(), true))
                 .to_vec(),
             unattributed: Vec::new(),
@@ -1563,6 +1685,8 @@ mod tests {
             billd: at(4),
             empd: at(5),
             deskd: at(6),
+            portald: at(7),
+            accountingd: at(8),
         };
         let hash = csmsd::edge::hash_password(ocpp_kit::Version::V1_6, &one.passwords[0]).unwrap();
         let text = estate::text(

@@ -4,7 +4,7 @@ EV charging tariffs for charge point operators and e-mobility providers: one
 tariff object rates the session, produces the price the driver is shown, and
 checks itself against AFIR and the German price-indication rules.
 
-[![crates.io](https://img.shields.io/crates/v/emob-tariff.svg)](https://crates.io/crates/emob-tariff) [![docs.rs](https://img.shields.io/docsrs/emob-tariff)](https://docs.rs/emob-tariff) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-tariff.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-tariff.svg)](https://crates.io/crates/emob-tariff) [![docs.rs](https://img.shields.io/docsrs/emob-tariff)](https://docs.rs/emob-tariff) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-tariff.svg)](#license)
 
 Most stacks compute a charging price in several places — the station display, the
 invoice, the roaming feed — and reconcile none of them. Here `describe()` and

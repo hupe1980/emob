@@ -18,12 +18,14 @@ members = [
     "crates/emob-service",
     "crates/emob-verify",
     "crates/emob-cli",
+    "services/accountingd",
     "services/agentd",
     "services/billd",
     "services/csmsd",
     "services/deskd",
     "services/empd",
     "services/poid",
+    "services/portald",
     "services/roamd",
     "services/sited",
     "services/tarifd",
@@ -33,12 +35,12 @@ members = [
 exclude = ["emobtest"]
 
 [workspace.package]
-version      = "0.7.0"
+version      = "0.8.0"
 authors      = ["hupe1980"]
 edition      = "2024"
 license      = "MIT OR Apache-2.0"
 repository   = "https://github.com/hupe1980/emob"
-rust-version = "1.94"
+rust-version = "1.96"
 
 [workspace.dependencies]
 # ── External ────────────────────────────────────────────────────────────────
@@ -75,7 +77,7 @@ oicp-kit = { version = "0.1", default-features = false, features = ["cpo", "emp"
 iso15118 = { version = "0.9", default-features = false }
 
 # SHIP and SPINE types for site controls. Domain crates use the protocol without its network runtime.
-eebus = { version = "0.13", default-features = false, features = ["std"] }
+eebus = { version = "0.14", default-features = false, features = ["std"] }
 
 # Use emob-tariff for rating and EN 16931 for invoice validation.
 en16931 = { version = "0.10", default-features = false, features = ["time"] }
@@ -104,21 +106,21 @@ hex       = "0.4"
 base64    = "0.23"
 
 # ── Internal (path + version so the domain crates can be published) ─────────
-emob-core      = { path = "crates/emob-core",      version = "0.7" }
-emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.7" }
-emob-session   = { path = "crates/emob-session",   version = "0.7" }
-emob-cdr       = { path = "crates/emob-cdr",       version = "0.7" }
-emob-tariff    = { path = "crates/emob-tariff",    version = "0.7" }
-emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.7" }
-emob-eebus     = { path = "crates/emob-eebus",     version = "0.7" }
-emob-pnc       = { path = "crates/emob-pnc",       version = "0.7" }
-emob-poi       = { path = "crates/emob-poi",       version = "0.7" }
-emob-sim       = { path = "crates/emob-sim",       version = "0.7" }
-emob-smart     = { path = "crates/emob-smart",     version = "0.7" }
-emob-roam      = { path = "crates/emob-roam",      version = "0.7" }
-emob-billing   = { path = "crates/emob-billing",   version = "0.7" }
-emob-thg       = { path = "crates/emob-thg",       version = "0.7" }
-emob-service   = { path = "crates/emob-service",   version = "0.7" }
+emob-core      = { path = "crates/emob-core",      version = "0.8" }
+emob-eichrecht = { path = "crates/emob-eichrecht", version = "0.8" }
+emob-session   = { path = "crates/emob-session",   version = "0.8" }
+emob-cdr       = { path = "crates/emob-cdr",       version = "0.8" }
+emob-tariff    = { path = "crates/emob-tariff",    version = "0.8" }
+emob-ocpp      = { path = "crates/emob-ocpp",      version = "0.8" }
+emob-eebus     = { path = "crates/emob-eebus",     version = "0.8" }
+emob-pnc       = { path = "crates/emob-pnc",       version = "0.8" }
+emob-poi       = { path = "crates/emob-poi",       version = "0.8" }
+emob-sim       = { path = "crates/emob-sim",       version = "0.8" }
+emob-smart     = { path = "crates/emob-smart",     version = "0.8" }
+emob-roam      = { path = "crates/emob-roam",      version = "0.8" }
+emob-billing   = { path = "crates/emob-billing",   version = "0.8" }
+emob-thg       = { path = "crates/emob-thg",       version = "0.8" }
+emob-service   = { path = "crates/emob-service",   version = "0.8" }
 
 # ── The daemon shell ────────────────────────────────────────────────────────
 # Only `emob-service` and the daemons above it see these. Every domain crate

@@ -27,9 +27,12 @@ def _key(secret: str) -> bytes:
     if not secret.startswith("whsec_"):
         raise ValueError("a Standard Webhooks secret starts with whsec_")
     try:
-        return base64.b64decode(secret.removeprefix("whsec_"), validate=True)
+        key = base64.b64decode(secret.removeprefix("whsec_"), validate=True)
     except ValueError as error:
         raise ValueError(f"the secret is not Base64 after whsec_: {error}") from None
+    if not key:
+        raise ValueError("the webhook signing key is empty")
+    return key
 
 
 def signature(secret: str, msg_id: str, timestamp: int, body: bytes) -> str:
@@ -71,5 +74,7 @@ def verify(secret: str, headers: dict[str, str], body: bytes, *, now: int | None
     if abs(now - timestamp) > TOLERANCE_SECONDS:
         raise ValueError(f"webhook-timestamp is {abs(now - timestamp)} s off: a replay, or a clock")
     expected = signature(secret, msg_id, timestamp, body)
-    if not any(hmac.compare_digest(expected, part) for part in given.split()):
+    if not given.isascii() or not any(
+        hmac.compare_digest(expected, part) for part in given.split()
+    ):
         raise ValueError("webhook-signature does not match: another secret, or an altered body")

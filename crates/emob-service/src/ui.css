@@ -35,6 +35,33 @@ header.bar { display: flex; gap: 1rem; align-items: baseline; flex-wrap: wrap;
 header.bar .brand { font-weight: 700; color: var(--text); text-decoration: none; }
 header.bar .where { color: var(--muted); }
 header.bar .spacer { flex: 1; }
+/* The operator desk has one workspace bar across queue, record and review pages. */
+header.bar:has(.workspace-nav) { align-items: center; gap: .25rem .75rem; padding-block: .35rem; }
+.workspace-nav { display: flex; align-items: center; flex-wrap: wrap; gap: .15rem; margin-inline-start: .75rem; }
+.workspace-nav a, .workspace-more { display: inline-flex; align-items: center; min-height: 2.75rem; padding: .35rem .7rem;
+  background: transparent; color: var(--text); font: inherit; font-weight: 600; text-decoration: none; border: 0; border-radius: 4px; }
+.workspace-more { cursor: pointer; anchor-name: --workspace-toggle; }
+.workspace-more::after { content: ""; width: .4rem; height: .4rem; border: solid currentColor; border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-.1rem) rotate(45deg); margin-inline-start: .5rem; }
+.workspace-nav a:hover, .workspace-more:hover, .workspace-nav:has(:popover-open) .workspace-more { background: var(--surface); color: var(--accent); }
+.workspace-nav [aria-current], .workspace-more.current { color: var(--accent); box-shadow: inset 0 -3px var(--accent); }
+.workspace-menu { width: 14rem; margin: 0; inset: 4rem 1rem auto auto; padding: .35rem; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 .5rem 1.6rem #0002; max-width: calc(100vw - 2rem); }
+@supports (top: anchor(bottom)) {
+  .workspace-menu { position-anchor: --workspace-toggle; top: anchor(bottom); right: anchor(right); }
+}
+.workspace-menu a { display: flex; padding-inline: 1rem; }
+.workspace-nav .narrow-link, .workspace-nav .compact-only { display: none; }
+@media (max-width: 58rem) {
+  header.bar:has(.workspace-nav) { padding-inline: .75rem; }
+  .workspace-nav { margin: 0; flex-basis: 100%; }
+  .workspace-menu { left: .75rem; right: auto; width: calc(100vw - 1.5rem); max-width: 20rem; }
+  .workspace-nav .wide-link { display: none; }
+  .workspace-nav .narrow-link, .workspace-nav .compact-only { display: flex; }
+  .workspace-nav > a, .workspace-more { padding-inline: .45rem; }
+  .workspace-more.compact-current { color: var(--accent); box-shadow: inset 0 -3px var(--accent); }
+}
+@media print { .workspace-menu { display: none !important; } }
 main { max-width: 64rem; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
 main.reading { max-width: 40rem; }
 h1 { font-size: clamp(1.6rem, 4vw, 2.1rem); line-height: 1.2; margin: .2rem 0 .6rem; letter-spacing: -.015em; }
@@ -79,12 +106,16 @@ footer.foot p > a:only-child { display: inline-block; padding: .3rem .25rem; }
 @media print { header.bar, .noprint { display: none; } body { background: #fff; color: #000; } }
 /* ── the operator's queue (deskd's Heute) ───────────────────────────────── */
 .head { display: flex; flex-wrap: wrap; gap: .4rem 1rem; align-items: baseline; justify-content: space-between; }
+.shift-title { display: flex; align-items: baseline; flex-wrap: wrap; gap: .3rem .85rem; }
+.desk-nav { display: flex; flex-wrap: wrap; gap: .25rem .6rem; margin: .5rem 0 1.25rem; }
+.desk-nav a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: .25rem .6rem; }
+@media print { .desk-nav.noprint { display: none; } }
 .head .when { color: var(--muted); margin: 0; }
 /* A link back up the page hierarchy: a target, not a word (WCAG 2.2 2.5.8). */
 /* Search and forms (spec 021): a field is a full-width target with its label above. */
 form.search { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 0 0 1rem; }
 form.search input { flex: 1 1 16rem; }
-input[type=text], input[type=search], input[type=date], input[type=number], select, textarea { font: inherit; padding: .5rem .6rem; min-height: 2.5rem;
+input[type=text], input[type=password], input[type=search], input[type=date], input[type=datetime-local], input[type=month], input[type=number], select, textarea { font: inherit; padding: .5rem .6rem; min-height: 2.5rem;
   border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); width: 100%; max-width: 32rem; }
 input[aria-invalid=true] { border-color: var(--bad); }
 /* A link that is a table row's name is a target too (WCAG 2.2 2.5.8). */
@@ -207,6 +238,7 @@ table.totals th { text-transform: none; letter-spacing: 0; font-size: .94rem; co
 
 /* Notes on a station (deskd, spec 023): what the next person needs, in their
    own words, with who wrote it and when. */
+input[type=file] { max-width: 100%; min-height: 2.5rem; font: inherit; }
 textarea { min-height: 5rem; resize: vertical; }
 ol.notes { list-style: none; padding: 0; margin: 0 0 1rem; }
 ol.notes li { display: flex; flex-wrap: wrap; gap: .2rem .8rem; align-items: baseline; padding: .6rem 0; border-bottom: 1px solid var(--line); }

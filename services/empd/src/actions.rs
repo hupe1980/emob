@@ -142,7 +142,7 @@ impl<J: Journal> Book<J> {
             .state()
             .token(&request.reference)
             .ok_or(Refusal::Unknown)?;
-        if token.blocked == request.blocked {
+        if token.blocked == request.blocked || self.state().changes.retired(&request.reference) {
             return Err(Refusal::Stale);
         }
         let mut nonce = [0_u8; 32];
@@ -198,6 +198,7 @@ impl<J: Journal> Book<J> {
         if now < preview.reviewed_at
             || now >= preview.expires_at
             || preview.revision != token.revision
+            || self.state().changes.retired(&preview.reference)
             || preview.blocked == token.blocked
         {
             return Err(Refusal::Stale);
@@ -211,7 +212,7 @@ impl<J: Journal> Book<J> {
             reviewed_at: preview.reviewed_at,
             at: now,
         };
-        self.record_card_fact(
+        self.record_fact(
             actor,
             crate::Event::CardChanged {
                 change: change.clone(),

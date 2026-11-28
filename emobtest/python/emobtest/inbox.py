@@ -31,18 +31,24 @@ class Inbox:
         self.secret = secret or webhooks.new_secret()
         self.events: list[Event] = []
         self.refused: list[str] = []
-        self._seen: set[str] = set()
+        self._seen: set[tuple[str, str]] = set()
         self._arrived = threading.Condition()
         inbox = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
-                length = int(self.headers.get("content-length") or 0)
+                try:
+                    length = int(self.headers.get("content-length", ""))
+                    if length < 0:
+                        raise ValueError
+                except ValueError:
+                    self._answer(400, "invalid content length")
+                    return
                 if length > MAX_BODY:
                     self._answer(413, "too large")
                     return
                 body = self.rfile.read(length)
-                headers = {key: value for key, value in self.headers.items()}
+                headers = {key.lower(): value for key, value in self.headers.items()}
                 try:
                     webhooks.verify(inbox.secret, headers, body)
                 except ValueError as why:
@@ -50,28 +56,37 @@ class Inbox:
                         inbox.refused.append(str(why))
                     self._answer(401, str(why))
                     return
-                msg_id = headers.get("webhook-id", "")
-                with inbox._arrived:
-                    if msg_id in inbox._seen:
-                        self._answer(200, '{"duplicate":true}')
-                        return
-                    inbox._seen.add(msg_id)
                 try:
                     parsed = json.loads(body)
-                except ValueError:
-                    parsed = {}
+                    if not isinstance(parsed, dict):
+                        raise ValueError
+                    problems = event_problems(body)
+                    if problems or parsed["id"] != headers["webhook-id"]:
+                        raise ValueError
+                except (ValueError, KeyError):
+                    reason = "invalid event or mismatched delivery id"
+                    with inbox._arrived:
+                        inbox.refused.append(reason)
+                    self._answer(422, reason)
+                    return
+                key = (parsed["source"], parsed["id"])
                 event = Event(
-                    id=str(parsed.get("id", msg_id)),
-                    type=str(parsed.get("type", "")),
-                    subject=str(parsed.get("subject", "")),
-                    data=parsed.get("data") or {},
+                    id=parsed["id"],
+                    type=parsed["type"],
+                    subject=parsed["subject"],
+                    data=parsed["data"],
                     raw=body,
                     headers=headers,
-                    problems=tuple(event_problems(body)) if parsed else ("not JSON",),
                 )
                 with inbox._arrived:
-                    inbox.events.append(event)
-                    inbox._arrived.notify_all()
+                    duplicate = key in inbox._seen
+                    if not duplicate:
+                        inbox.events.append(event)
+                        inbox._seen.add(key)
+                        inbox._arrived.notify_all()
+                if duplicate:
+                    self._answer(200, '{"duplicate":true}')
+                    return
                 self._answer(204, "")
 
             def _answer(self, status: int, text: str) -> None:

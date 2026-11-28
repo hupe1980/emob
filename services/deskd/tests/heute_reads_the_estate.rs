@@ -29,14 +29,32 @@ const GOOD_CARD: &str = "04A1B2C3D4E5F6";
 const BLOCKED_CARD: &str = "04DEADBEEF0001";
 const OPERATOR: &str = "operator-token";
 const READER: &str = "reader-token";
+const FINANCE: &str = "finance-fixture";
+const FINANCE_WRITER: &str = "line-review-fixture";
+const PRIVACY: &str = "privacy-fixture";
 const SECRET: &str = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
 
 fn env() -> Env {
     let values: BTreeMap<&str, &str> = [
+        (
+            "ACCOUNTINGD_DATA_KEY",
+            "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+        ),
+        (
+            "ACCOUNTINGD_SIGNING_KEY",
+            "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU=",
+        ),
         ("EMOB_WEBHOOK_SECRET", SECRET),
         ("EMOB_SERVICE_TOKEN", "service-token"),
         ("EMOB_OPERATOR_TOKEN", OPERATOR),
         ("EMOB_DESK_READ_TOKEN", READER),
+        ("EMOB_FINANCE_TEST", FINANCE),
+        ("EMOB_LINE_REVIEW_TEST", FINANCE_WRITER),
+        ("EMOB_PRIVACY_TEST", PRIVACY),
+        (
+            "EMOB_PORTAL_TEST",
+            "078b2d6f021bb6fc3afeaa69ca8c93ed8cd633ad6851ab8a39e93eb5dd7bd095",
+        ),
         ("EMPD_TOKEN_KEY", "a key nobody outside empd holds"),
         (
             "EMPD_DATA_KEY",
@@ -111,7 +129,11 @@ impl Estate {
             .replace("security_profile = 2", "security_profile = 1")
             .replace(r#"tls_cert = "../target/dev-tls/server.pem""#, "")
             .replace(r#"tls_key = "../target/dev-tls/server.key""#, "")
-            .replace(r#"client_ca = "../target/dev-tls/ca.pem""#, "");
+            .replace(r#"client_ca = "../target/dev-tls/ca.pem""#, "")
+            + "\n[[operators]]\nname=\"Line reviewer\"\ntoken_env=\"EMOB_LINE_REVIEW_TEST\"\nfinance=true\nwrite=true\n"
+            + "\n[[operators]]\nname=\"Cash desk\"\ntoken_env=\"EMOB_FINANCE_TEST\"\nfinance=true\n"
+            + "\n[[operators]]\nname=\"Privacy desk\"\ntoken_env=\"EMOB_PRIVACY_TEST\"\nprivacy=true\n"
+            + "\n[[portal_users]]\nsubject=\"private-fixture\"\nsecret_env=\"EMOB_PORTAL_TEST\"\n";
         Self {
             dir,
             empd,
@@ -279,6 +301,252 @@ async fn investigate(page: &str, refusal: &serde_json::Value, heute: &str) {
     );
 }
 
+async fn line_credit_forms_require_a_finance_writer_and_same_origin(page: &str) {
+    let path = format!("{page}line-credits?lang=en");
+    for (token, status) in [
+        (READER, 403),
+        (OPERATOR, 403),
+        (PRIVACY, 403),
+        (FINANCE, 403),
+        (FINANCE_WRITER, 200),
+    ] {
+        let (code, body) = get(&path, Some(&basic(token))).await;
+        assert_eq!(code, status);
+        assert_eq!(body.contains("name=\"agreement\""), status == 200);
+    }
+    for action in ["lookup", "review", "confirm"] {
+        assert_eq!(
+            desk_post(
+                page,
+                &format!("line-credits/{action}"),
+                FINANCE_WRITER,
+                "cross-site",
+                ""
+            )
+            .await
+            .0,
+            403
+        );
+    }
+    let input = format!("number=UNKNOWN-INVOICE&agreement={}", "a".repeat(64));
+    let (code, body) = desk_post(
+        page,
+        "line-credits/lookup",
+        FINANCE_WRITER,
+        "same-origin",
+        &input,
+    )
+    .await;
+    assert_eq!(code, 404);
+    assert!(body.contains("No matching invoice line"));
+}
+
+/// Privacy-only staff can review a subject and reopen the same owner receipt.
+async fn erasure_is_reviewed_by_a_named_privacy_operator(page: &str) {
+    let path = "customer-erasure";
+    let subject = "subject=private-fixture";
+    let home = format!("{page}?lang=en");
+    let (code, nav) = get(&home, Some(&basic(PRIVACY))).await;
+    assert_eq!(code, 200);
+    assert!(nav.contains("href=\"/customer-erasure?lang=en\""));
+    assert!(!nav.contains("href=\"/customer-access?lang=en\""));
+    // fleet-navigation/SR-032. Every deep workspace uses the current operator grants.
+    let support = format!("{page}lookup?lang=en&finance=true");
+    for (role, portal_access, receivables, erasure) in [
+        (READER, false, false, false),
+        (OPERATOR, true, false, false),
+        (FINANCE, false, true, false),
+        (PRIVACY, false, false, true),
+    ] {
+        let (status, html) = get(&support, Some(&basic(role))).await;
+        assert_eq!(status, 200);
+        let header = html.split_once("</header>").unwrap().0;
+        assert!(header.contains(r#"href="/lookup?lang=en" aria-current="page""#));
+        for (path, allowed) in [
+            ("customer-access", portal_access),
+            ("receivables", receivables),
+            ("customer-erasure", erasure),
+        ] {
+            assert_eq!(
+                header.contains(&format!(r#"href="/{path}?lang=en""#)),
+                allowed,
+                "{path}"
+            );
+        }
+    }
+    for role in [READER, OPERATOR, FINANCE] {
+        assert!(
+            !get(&home, Some(&basic(role)))
+                .await
+                .1
+                .contains("href=\"/customer-erasure?lang=en\"")
+        );
+        assert_eq!(
+            get(&format!("{page}{path}"), Some(&basic(role))).await.0,
+            403
+        );
+        assert_eq!(
+            desk_post(
+                page,
+                "customer-erasure/status",
+                role,
+                "same-origin",
+                subject
+            )
+            .await
+            .0,
+            403
+        );
+    }
+    for action in ["review", "status", "confirm"] {
+        let (status, page) = desk_post(
+            page,
+            &format!("{path}/{action}"),
+            PRIVACY,
+            "cross-site",
+            "subject=PRIVATE-MARKER",
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert!(!page.contains("PRIVATE-MARKER"));
+    }
+    let (code, german) = get(&format!("{page}{path}?lang=de"), Some(&basic(PRIVACY))).await;
+    assert_eq!(code, 200);
+    assert!(german.contains("Portal-Kennung"));
+    let (code, current) = desk_post(
+        page,
+        "customer-erasure/status",
+        PRIVACY,
+        "same-origin",
+        subject,
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert!(current.contains("Active customer"));
+    let (code, review) = desk_post(
+        page,
+        "customer-erasure/review",
+        PRIVACY,
+        "same-origin",
+        subject,
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert!(
+        review.contains("GDPR Article 17")
+            && review.contains("German VAT Act")
+            && review.contains("Permanently erase portal access")
+    );
+    let form = format!("{subject}&operation={}", hidden(&review, "operation"));
+    let (code, receipt) = desk_post(
+        page,
+        "customer-erasure/confirm",
+        PRIVACY,
+        "same-origin",
+        &form,
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert!(receipt.contains("Erasure receipt") && receipt.contains("Privacy desk"));
+    assert!(!receipt.contains("action=\"/customer-erasure/confirm"));
+    assert_eq!(
+        desk_post(
+            page,
+            "customer-erasure/confirm",
+            PRIVACY,
+            "same-origin",
+            &form
+        )
+        .await
+        .1,
+        receipt
+    );
+    assert_eq!(
+        desk_post(
+            page,
+            "customer-erasure/status",
+            PRIVACY,
+            "same-origin",
+            subject
+        )
+        .await
+        .1,
+        receipt
+    );
+}
+
+// receivables-allocation/SR-354. Exercise the browser file picker at the HTTP boundary.
+async fn finance_file_import(page: &str) {
+    let client = reqwest::Client::new();
+    let upload = |token: &'static str, site: &'static str, file: &str| {
+        client.post(format!("{page}receivables/upload?lang=en"))
+            .basic_auth("desk", Some(token))
+            .header("sec-fetch-site", site)
+            .header("content-type", "multipart/form-data; boundary=fixture")
+            .body(format!("--fixture\r\nContent-Disposition: form-data; name=\"file\"; filename=\"statement.json\"\r\nContent-Type: application/json\r\n\r\n{file}\r\n--fixture--\r\n"))
+    };
+    let statement = serde_json::json!({"version":1,"source":"BANK-1","account":"PAYER-PRIVATE","currency":"EUR","entries":[
+        {"reference":"ENTRY-1","amount_minor":500,"status":"booked","direction":"credit"}]}).to_string();
+    for (token, site) in [(OPERATOR, "same-origin"), (FINANCE, "cross-site")] {
+        assert_eq!(
+            upload(token, site, &statement)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    assert_eq!(
+        upload(FINANCE, "same-origin", &"x".repeat(65_537))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        413
+    );
+    let ambiguous = statement.replace(
+        r#""amount_minor":500"#,
+        r#""amount_minor":700,"amount_minor":500"#,
+    );
+    assert_eq!(
+        upload(FINANCE, "same-origin", &ambiguous)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let (status, bad) = desk_post(
+        page,
+        "receivables/confirm",
+        FINANCE,
+        "same-origin",
+        "amount_minor=PRIVATE-FIELD",
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(!bad.contains("PRIVATE-FIELD"));
+    let r = upload(FINANCE, "same-origin", &statement)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["cache-control"], "no-store");
+    assert!(r.text().await.unwrap().contains("Newly booked</dt><dd>1"));
+    let (status, balance) = desk_post(
+        page,
+        "receivables/balance",
+        FINANCE,
+        "same-origin",
+        "account=PAYER-PRIVATE&currency=EUR",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(balance.contains("ENTRY-1") && balance.contains("5.00 EUR"));
+    assert!(!balance.contains("action=\"/receivables/review"));
+}
+
 async fn desk_post(page: &str, path: &str, token: &str, site: &str, body: &str) -> (u16, String) {
     let response = reqwest::Client::new()
         .post(format!("{page}{path}?lang=en"))
@@ -391,7 +659,7 @@ async fn enrol_card(page: &str) -> String {
     assert!(reader.contains("/contracts/lookup") && !reader.contains("/contracts/preview"));
 
     let site = "same-origin";
-    let intake = "selection=DE*ABC*E00001%7Cstandard&stock=STOCK-1004";
+    let intake = "selection=DE*ABC*E00001%7Cstandard&stock=STOCK-1004&account=PAYER-FLEET";
     for (who, origin) in [(READER, site), (OPERATOR, "cross-site")] {
         assert_eq!(
             desk_post(page, "contracts/preview", who, origin, intake)
@@ -449,12 +717,31 @@ async fn enrol_card(page: &str) -> String {
             .0,
         403
     );
-    assert_eq!(
-        desk_post(page, "contracts/lookup", READER, site, &lookup)
-            .await
-            .1,
-        issued
-    );
+    let (status, read_receipt) = desk_post(page, "contracts/lookup", READER, site, &lookup).await;
+    assert_eq!(status, 200);
+    assert!(read_receipt.contains("Agreement issued") && read_receipt.contains(id));
+    assert!(!read_receipt.contains("Manage agreement"));
+    assert!(issued.contains("Manage agreement"));
+    let change = format!("{lookup}&action=replace&stock=STOCK-1006");
+    for (who, origin) in [(READER, site), (OPERATOR, "cross-site")] {
+        assert_eq!(
+            desk_post(page, "contracts/change/preview", who, origin, &change)
+                .await
+                .0,
+            403
+        );
+        assert_eq!(
+            desk_post(page, "contracts/change/confirm", who, origin, &confirm)
+                .await
+                .0,
+            403
+        );
+    }
+    let (status, pending) =
+        desk_post(page, "contracts/change/preview", OPERATOR, site, &change).await;
+    assert_eq!(status, 200);
+    assert!(pending.contains("Confirm change") && pending.contains("PAYER-FLEET"));
+    assert!(!pending.contains("STOCK-1006") && !pending.contains("04AB0000000006"));
     for html in [&review, &issued] {
         for private in ["STOCK-1004", "04AB0000000004", OPERATOR, READER] {
             assert!(!html.contains(private));
@@ -462,6 +749,119 @@ async fn enrol_card(page: &str) -> String {
         assert!(!html.contains("<script") && html.len() < 150_000);
     }
     confirm
+}
+
+/// A writer records a private request and confirms the exact review. A reader, a
+/// finance-only account and a cross-origin submission cannot enter the case.
+async fn review_private_withdrawal(page: &str) {
+    let site = "same-origin";
+    let path = "contracts/withdrawal";
+    let (status, landing) = get(&format!("{page}{path}?lang=en"), Some(&basic(OPERATOR))).await;
+    assert_eq!(status, 200);
+    assert!(landing.contains("Find a case"));
+    for account in [READER, FINANCE] {
+        assert_eq!(
+            get(&format!("{page}{path}?lang=en"), Some(&basic(account)))
+                .await
+                .0,
+            403
+        );
+    }
+    for action in [
+        "lookup",
+        "intake",
+        "review",
+        "confirm",
+        "evidence",
+        "credit-review",
+        "credit-confirm",
+    ] {
+        for (caller, origin) in [(OPERATOR, "cross-site"), (READER, site), (FINANCE, site)] {
+            let (code, denied) = desk_post(
+                page,
+                &format!("{path}/{action}"),
+                caller,
+                origin,
+                "private=PRIVATE-MARKER",
+            )
+            .await;
+            assert_eq!(code, 403);
+            assert!(!denied.contains("PRIVATE-MARKER"));
+        }
+    }
+    let (code, enrolment) = desk_post(
+        page,
+        "contracts/preview",
+        OPERATOR,
+        site,
+        "selection=DE*ABC*E00001%7Cstandard&stock=STOCK-1005&account=PAYER-PRIVATE",
+    )
+    .await;
+    assert_eq!(code, 200, "{enrolment}");
+    let agreement = hidden(&enrolment, "operation");
+    assert_eq!(
+        desk_post(
+            page,
+            "contracts/confirm",
+            OPERATOR,
+            site,
+            &format!("operation={agreement}")
+        )
+        .await
+        .0,
+        200
+    );
+    let lookup = format!("agreement={agreement}");
+    let (code, fresh) = desk_post(page, &format!("{path}/lookup"), OPERATOR, site, &lookup).await;
+    assert_eq!(code, 200, "{fresh}");
+    assert!(fresh.contains("Record request"));
+    let received = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let request = format!("{lookup}&request_ref=MAIL-DESK-1&channel=email&received_at={received}");
+    let (code, saved) = desk_post(page, &format!("{path}/intake"), OPERATOR, site, &request).await;
+    assert_eq!(code, 200, "{saved}");
+    assert!(saved.contains("MAIL-DESK-1") && saved.contains("Review decision"));
+    let draft = format!("{lookup}&outcome=approve&evidence_ref=FILE-904&billing=review_required");
+    let (code, review) = desk_post(page, &format!("{path}/review"), OPERATOR, site, &draft).await;
+    assert_eq!(code, 200, "{review}");
+    assert!(
+        review.contains("refuse the next online charging authorization")
+            && review.contains("separate billing confirmation")
+    );
+    let confirm = format!("{lookup}&operation={}", hidden(&review, "operation"));
+    let (code, approved) =
+        desk_post(page, &format!("{path}/confirm"), OPERATOR, site, &confirm).await;
+    assert_eq!(code, 200, "{approved}");
+    assert!(approved.contains("Withdrawal approved") && approved.contains("FILE-904"));
+    assert!(!approved.contains("action=\"/contracts/withdrawal/review"));
+    assert_eq!(
+        desk_post(page, &format!("{path}/confirm"), OPERATOR, site, &confirm)
+            .await
+            .1,
+        approved
+    );
+    assert_eq!(
+        desk_post(page, &format!("{path}/lookup"), OPERATOR, site, &lookup)
+            .await
+            .1,
+        approved
+    );
+    let (code, agreement) = desk_post(page, "contracts/lookup", OPERATOR, site, &lookup).await;
+    assert_eq!(code, 200);
+    assert!(agreement.contains("Withdrawal approved") && !agreement.contains("Review replacement"));
+    assert_eq!(
+        desk_post(
+            page,
+            &format!("{path}/credit-review"),
+            OPERATOR,
+            site,
+            &format!("{lookup}&number=INV-1")
+        )
+        .await
+        .0,
+        403
+    );
 }
 
 async fn edit_publication_settings(page: &str, csmsd: SocketAddr) {
@@ -506,7 +906,8 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         let estate = Estate::new();
         let empd = empd::daemon::run(empd::daemon::Options {
             http: estate.empd,
-            journal: estate.dir.join("empd.ndjson"),
+            journal: estate.dir.join("journals/empd.ndjson"),
+            custody: estate.dir.join("custody"),
             estate: estate.sections(),
             env: env(),
             shutdown: Shutdown::new(),
@@ -516,7 +917,7 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         .expect("empd starts");
         let billd = billd::daemon::run(billd::daemon::Options {
             http: estate.billd,
-            journal: estate.dir.join("billd.ndjson"),
+            journal: estate.dir.join("journals/billd.ndjson"),
             estate: estate.sections(),
             env: env(),
             shutdown: Shutdown::new(),
@@ -524,9 +925,17 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         })
         .await
         .expect("billd starts");
+        let accounting = accountingd::run(accountingd::Options {
+            http: "127.0.0.1:0".parse().unwrap(),
+            journal: estate.dir.join("journals/accountingd.ndjson"),
+            estate: estate.sections(),
+            env: env(),
+            shutdown: Shutdown::new(),
+            identity: Identity::new("accountingd", "test"),
+        }).await.expect("accountingd starts");
         let roamd = roamd::daemon::run(roamd::daemon::Options {
             http: estate.roamd,
-            journal: estate.dir.join("roamd.ndjson"),
+            journal: estate.dir.join("journals/roamd.ndjson"),
             estate: estate.sections(),
             env: env(),
             shutdown: Shutdown::new(),
@@ -537,7 +946,7 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         let csmsd = csmsd::daemon::run(csmsd::daemon::Options {
             ocpp: "127.0.0.1:0".parse().unwrap(),
             http: estate.csmsd,
-            journal: estate.dir.join("csmsd.ndjson"),
+            journal: estate.dir.join("journals/csmsd.ndjson"),
             estate: estate.sections(),
             env: env(),
             shutdown: Shutdown::new(),
@@ -565,6 +974,7 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         let serving = tokio::spawn(async move { axum::serve(listener, routes).await.unwrap() });
         let mut desk_estate: deskd::Estate = estate.sections();
         desk_estate.desk.poid = Some(format!("http://{publisher}"));
+        desk_estate.services.accountingd = Some(format!("http://{}", accounting.http));
         let desk = deskd::run(deskd::Options {
             http: "127.0.0.1:0".parse().unwrap(),
             estate: desk_estate,
@@ -577,10 +987,13 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         .await
         .expect("deskd starts");
         let page = format!("http://{}/", desk.http);
+        line_credit_forms_require_a_finance_writer_and_same_origin(&page).await;
+        finance_file_import(&page).await;
+        erasure_is_reviewed_by_a_named_privacy_operator(&page).await;
 
         // SR-098: deskd witnesses every journalled daemon it reads.
         let rounds = desk.watch.round().await;
-        assert_eq!(rounds.len(), 4, "{rounds:?}");
+        assert_eq!(rounds.len(), 5, "{rounds:?}");
         assert!(
             rounds
                 .iter()
@@ -697,6 +1110,7 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         }
         let confirmation = control_card(&page).await;
         let enrolment = enrol_card(&page).await;
+        review_private_withdrawal(&page).await;
         edit_publication_settings(&page, estate.csmsd).await;
         serving.abort();
         assert!(
@@ -720,6 +1134,7 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         ))
         .unwrap();
         blind.services.empd = format!("http://{nobody}");
+        blind.services.accountingd = Some(format!("http://{}", accounting.http));
         let blind = deskd::run(deskd::Options {
             http: "127.0.0.1:0".parse().unwrap(),
             estate: blind,
@@ -757,10 +1172,191 @@ async fn the_rate_heute_shows_is_the_count_billd_received() {
         station.shutdown(Duration::from_secs(1)).await;
         empd.kill().await;
         desk.kill().await;
+        accounting.kill().await;
         billd.kill().await;
         csmsd.kill().await;
         roamd.kill().await;
     })
     .await
     .expect("the story ran in under thirty seconds");
+}
+
+// The desk renders the owner's decision and recovers a stale form without
+// submitting another movement. The accounting suite verifies the movement itself.
+#[tokio::test]
+async fn a_finance_writer_can_review_recover_and_reopen_a_credit_offset_from_the_desk() {
+    use axum::extract::{Json, Request};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    use serde_json::{Value, json};
+
+    let receipt = json!({"account":"FLEET-A","currency":"EUR","source_number":"INV-A","target_number":"INV-B",
+        "amount_minor":2000,"actor":"operator:Line reviewer","review":"a".repeat(64),
+        "source_before_minor":-3000,"source_after_minor":-1000,"target_before_minor":8000,"target_after_minor":6000});
+    let records = receipt.clone();
+    let owner = axum::Router::new()
+        .route("/v1/accountingd/balance", axum::routing::post(async move || Json(json!({
+            "issuer":"DE*MSP","account":"FLEET-A","currency":"EUR","can_allocate":false,"can_offset":true,
+            "net_due_minor":5000,"credit_minor":1000,"unapplied_minor":0,
+            "documents":[{"number":"INV-A","kind":"invoice","amount_minor":10000,"predecessor":null,
+                       "open_minor":0,"due_minor":-1000,"incoming_minor":0,"outgoing_minor":2000}],
+            "payments":[],"held":[],"allocations":[],"offsets":[records],"next_page":1
+        }))))
+        .route("/v1/accountingd/withdrawal/evidence", axum::routing::post(async |Json(input): Json<Value>| Json(json!({
+            "number":input["number"],"currency":"EUR","account":"FLEET-A",
+            "due_minor":if input["number"]=="INV-A" {-1000} else {6000}
+        }))))
+        .route("/v1/accountingd/offsets/{action}", axum::routing::post(async move |req: Request| {
+            assert_eq!(req.headers()["authorization"],format!("Bearer {FINANCE_WRITER}"));
+            let confirm = req.uri().path().ends_with("/confirm");
+            let payload: Value = serde_json::from_slice(&axum::body::to_bytes(req.into_body(),2048).await.unwrap()).unwrap();
+            for key in ["source_number","target_number","currency","account","amount_minor"] {
+                assert_eq!(payload[key], receipt[key], "{key}");
+            }
+            if confirm && payload["review"]!=receipt["review"] {
+                return StatusCode::CONFLICT.into_response();
+            }
+            Json(receipt.clone()).into_response()
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let estate = Estate::new();
+    let mut config: deskd::Estate = estate.sections();
+    config.services.accountingd = Some(format!("http://{}", listener.local_addr().unwrap()));
+    let server = tokio::spawn(async move { axum::serve(listener, owner).await.unwrap() });
+    let desk = deskd::run(deskd::Options {
+        http: "127.0.0.1:0".parse().unwrap(),
+        estate: config,
+        env: env(),
+        shutdown: Shutdown::new(),
+        identity: Identity::new("deskd", "test"),
+        clock: deskd::system_clock(),
+        witness: estate.dir.join("witness.ndjson"),
+    })
+    .await
+    .unwrap();
+    let page = format!("http://{}/", desk.http);
+
+    let scope = "account=FLEET-A&currency=EUR";
+    for (user, can_write) in [(FINANCE, false), (FINANCE_WRITER, true)] {
+        let (status, html) =
+            desk_post(&page, "receivables/balance", user, "same-origin", scope).await;
+        assert_eq!(status, 200);
+        assert!(html.contains("Posted credit offsets") && html.contains("operator:Line reviewer"));
+        assert_eq!(
+            html.contains("action=\"/receivables/offsets/review"),
+            can_write
+        );
+        if can_write {
+            assert!(html.contains(
+                "Invoice with available credit<br><input type=\"text\" name=\"source_number\""
+            ));
+            assert!(html.contains("Invoice to pay<br><input type=\"text\" name=\"target_number\""));
+            assert!(html.contains(r#"<option value="INV-A">10.00 EUR</option>"#));
+            assert!(html.contains(r#"<datalist id="offset-targets"></datalist>"#));
+        }
+    }
+    for path in ["receivables/offsets/review", "receivables/offsets/confirm"] {
+        for (user, origin) in [
+            (FINANCE, "same-origin"),
+            (OPERATOR, "same-origin"),
+            (FINANCE_WRITER, "cross-site"),
+        ] {
+            assert_eq!(desk_post(&page, path, user, origin, scope).await.0, 403);
+        }
+    }
+    let selected = format!("{scope}&source_number=INV-A&target_number=INV-B");
+    let (status, review) = desk_post(
+        &page,
+        "receivables/offsets/review",
+        FINANCE_WRITER,
+        "same-origin",
+        &format!("{selected}&amount=20%2C00"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    for text in [
+        "Credit on invoice INV-A",
+        "Amount due on invoice INV-B",
+        "Before</dt><dd>30.00 EUR",
+        "After</dt><dd>10.00 EUR",
+        "Before</dt><dd>80.00 EUR",
+        "After</dt><dd>60.00 EUR",
+        "Confirm credit offset",
+    ] {
+        assert!(review.contains(text), "{text}");
+    }
+    let confirmation = format!(
+        "{selected}&amount_minor=2000&review={}",
+        hidden(&review, "review")
+    );
+    let (status, posted) = desk_post(
+        &page,
+        "receivables/offsets/confirm",
+        FINANCE_WRITER,
+        "same-origin",
+        &confirmation,
+    )
+    .await;
+    assert_eq!(status, 200);
+    for text in [
+        "Credit applied",
+        "Receipt reference",
+        "Confirmed by",
+        "operator:Line reviewer",
+    ] {
+        assert!(posted.contains(text), "{text}");
+    }
+    assert!(!posted.contains("action=\"/receivables/offsets/confirm"));
+    assert_eq!(
+        desk_post(
+            &page,
+            "receivables/offsets/confirm",
+            FINANCE_WRITER,
+            "same-origin",
+            &confirmation
+        )
+        .await
+        .1,
+        posted
+    );
+    let stale = format!("{selected}&amount_minor=2000&review={}", "e".repeat(64));
+    let (status, changed) = desk_post(
+        &page,
+        "receivables/offsets/confirm",
+        FINANCE_WRITER,
+        "same-origin",
+        &stale,
+    )
+    .await;
+    assert_eq!(status, 409);
+    for text in [
+        "Available credit · INV-A · <strong>10.00 EUR",
+        "Amount due · INV-B · <strong>60.00 EUR",
+        "value=\"INV-A\"",
+        "value=\"INV-B\"",
+        "value=\"20.00\"",
+    ] {
+        assert!(changed.contains(text), "{text}");
+    }
+    assert!(!changed.contains("action=\"/receivables/offsets/confirm"));
+    let de = reqwest::Client::new()
+        .post(format!("{page}receivables/offsets/review?lang=de"))
+        .header("authorization", basic(FINANCE_WRITER))
+        .header("sec-fetch-site", "same-origin")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("{selected}&amount=20,00"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        de.contains("Guthaben auf Rechnung INV-A")
+            && de.contains("30,00 EUR")
+            && de.contains("Verrechnung bestätigen")
+    );
+    desk.kill().await;
+    server.abort();
+    std::fs::remove_dir_all(estate.dir).unwrap();
 }

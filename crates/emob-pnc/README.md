@@ -2,7 +2,7 @@
 
 ISO 15118 Plug & Charge from the back office's side: which ecosystem a contract certificate belongs to, under which generation's rules (ISO 15118-2 or -20), whether anything on its path has been revoked, and which vehicle it was installed against.
 
-[![crates.io](https://img.shields.io/crates/v/emob-pnc.svg)](https://crates.io/crates/emob-pnc) [![docs.rs](https://img.shields.io/docsrs/emob-pnc)](https://docs.rs/emob-pnc) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-pnc.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-pnc.svg)](https://crates.io/crates/emob-pnc) [![docs.rs](https://img.shields.io/docsrs/emob-pnc)](https://docs.rs/emob-pnc) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-pnc.svg)](#license)
 
 With Plug & Charge the vehicle authenticates with a contract certificate instead
 of an RFID card. The protocol side — EXI codec, message sets, session engines,

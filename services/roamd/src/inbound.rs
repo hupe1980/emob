@@ -129,11 +129,20 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
         peer_id: &str,
         credentials: &Credentials,
         selected: &ocpi_kit::client::Selected,
+        previous: Option<&emob_service::vault::Digest>,
     ) -> Handled<Credentials> {
         let issued = (self.mint)(peer_id);
         // Digested and sealed before anything is recorded: the journal holds
         // neither token (SR-044).
-        let key = lock(&self.node).key();
+        let mut node = lock(&self.node);
+        let peers = node.state().peers();
+        let current = peers.registered().find(|r| r.peer_id == peer_id);
+        if !peers.has_offer_for(peer_id) || current.map(|r| &r.incoming) != previous {
+            return Err(OcpiError::Unauthorized(
+                "registration changed during discovery".into(),
+            ));
+        }
+        let key = node.key();
         let registration = Registration {
             peer_id: peer_id.to_owned(),
             incoming: key.digest(crate::peering::INCOMING, issued.as_bytes()),
@@ -150,23 +159,13 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
                     url: endpoint.url.as_str().to_owned(),
                 })
                 .collect(),
-            parties: credentials
-                .roles
-                .iter()
-                .map(|role| {
-                    (
-                        role.country_code.as_str().to_owned(),
-                        role.party_id.as_str().to_owned(),
-                    )
-                })
-                .collect(),
+            roles: approved_roles(node.state(), peer_id, credentials)?,
         };
         // Journalled before the peer is told, and a journal that refuses halts
         // the node: a token this node has issued and cannot reproduce is one a
         // partner will present to a `401` for ever.
         let by = partner(peer_id)?;
-        lock(&self.node)
-            .register(&by, registration)
+        node.register(&by, registration)
             .map_err(|error| OcpiError::Remote {
                 status_code: ocpi_kit::transport::StatusCode::new(3000),
                 status_message: Some(format!(
@@ -178,6 +177,38 @@ impl<J: emob_service::journal::Journal> Handshake<J> {
         mine.token = issued.into();
         Ok(mine)
     }
+}
+
+fn approved_roles(
+    state: &crate::Roamd,
+    peer_id: &str,
+    credentials: &Credentials,
+) -> Result<Vec<(emob_core::PartyId, emob_core::Role)>, OcpiError> {
+    let unavailable = || OcpiError::Unauthorized("unapproved business role".into());
+    let grant = state
+        .registry()
+        .get(&peer_id.parse().map_err(|_| unavailable())?)
+        .ok_or_else(unavailable)?;
+    if credentials.roles.is_empty() {
+        return Err(unavailable());
+    }
+    credentials
+        .roles
+        .iter()
+        .map(|r| {
+            let party = emob_core::PartyId::new(r.country_code.as_str(), r.party_id.as_str())
+                .map_err(|_| unavailable())?;
+            let role = match r.role {
+                ocpi_kit::v2_3_0::types::Role::Cpo => emob_core::Role::Cpo,
+                ocpi_kit::v2_3_0::types::Role::Emsp => emob_core::Role::Emsp,
+                _ => return Err(unavailable()),
+            };
+            grant
+                .permits_role(&party, role)
+                .then_some((party, role))
+                .ok_or_else(unavailable)
+        })
+        .collect()
 }
 
 /// Who a credentials call is from: the party the presented token resolved to
@@ -197,9 +228,20 @@ fn lock<T>(held: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+// The kit authenticates the header but omits the token from RequestContext.
+// Scope it to this read so the peer can retrieve its credentials (§7.2.1)
+// while the journal continues to hold only a digest of the issued token.
+tokio::task_local! {
+    static CREDENTIAL_READ_TOKEN: CredentialsToken;
+}
+
 impl<J: emob_service::journal::Journal> CredentialsHandler for Handshake<J> {
     async fn get(&self, _context: RequestContext) -> Handled<Credentials> {
-        Ok(self.me.clone())
+        let mut mine = self.me.clone();
+        mine.token = CREDENTIAL_READ_TOKEN
+            .try_with(CredentialsToken::to_credentials_field)
+            .map_err(|_| OcpiError::Unauthorized("credentials token required".into()))?;
+        Ok(mine)
     }
 
     async fn post(
@@ -213,33 +255,53 @@ impl<J: emob_service::journal::Journal> CredentialsHandler for Handshake<J> {
             .registered()
             .any(|held| held.peer_id == context.peer.peer_id)
         {
-            // `[OCPI 2.3.0 §credentials]`: a POST to a platform that is already
-            // registered is `2002`, and the remedy is PUT. Answering `200` here
-            // would mint a second token for one platform, and the older one
-            // would keep working.
-            return Err(OcpiError::Remote {
-                status_code: ocpi_kit::transport::StatusCode::new(2002),
-                status_message: Some(
-                    "this platform is already registered: rotate with PUT, or DELETE first"
-                        .to_owned(),
-                ),
-            });
+            return Err(OcpiError::MethodNotAllowed(
+                "already registered: use PUT to rotate the credentials".into(),
+            ));
         }
+        approved_roles(
+            lock(&self.node).state(),
+            &context.peer.peer_id,
+            &credentials,
+        )?;
         let selected = self.reach_back(&credentials).await?;
-        self.accept(&context.peer.peer_id, &credentials, &selected)
+        self.accept(&context.peer.peer_id, &credentials, &selected, None)
     }
 
     async fn put(&self, credentials: Credentials, context: RequestContext) -> Handled<Credentials> {
-        // > *The server must fetch the client's endpoints again, even if the
-        // > version has not changed.*
+        let previous = {
+            let node = lock(&self.node);
+            let digest = node
+                .state()
+                .peers()
+                .registered()
+                .find(|r| r.peer_id == context.peer.peer_id)
+                .map(|r| r.incoming.clone())
+                .ok_or_else(|| OcpiError::MethodNotAllowed("registration required".into()))?;
+            approved_roles(node.state(), &context.peer.peer_id, &credentials)?;
+            digest
+        };
         let selected = self.reach_back(&credentials).await?;
-        self.accept(&context.peer.peer_id, &credentials, &selected)
+        self.accept(
+            &context.peer.peer_id,
+            &credentials,
+            &selected,
+            Some(&previous),
+        )
     }
 
     async fn delete(&self, context: RequestContext) -> Handled<()> {
         let by = partner(&context.peer.peer_id)?;
-        lock(&self.node)
-            .unregister(&by, &context.peer.peer_id)
+        let mut node = lock(&self.node);
+        if !node
+            .state()
+            .peers()
+            .registered()
+            .any(|r| r.peer_id == context.peer.peer_id)
+        {
+            return Err(OcpiError::MethodNotAllowed("registration required".into()));
+        }
+        node.unregister(&by, &context.peer.peer_id)
             .map_err(|error| OcpiError::Remote {
                 status_code: ocpi_kit::transport::StatusCode::new(3000),
                 status_message: Some(error.to_string()),
@@ -259,24 +321,109 @@ pub struct Inbox<J: emob_service::journal::Journal> {
     base: Url,
 }
 
+// OCPI CDR ids are CiString<39>. Keep the original spelling in the document.
+pub(crate) fn receipt_key(key: &emob_cdr::CdrKey) -> emob_cdr::CdrKey {
+    emob_cdr::CdrKey {
+        party: key.party.clone(),
+        id: key
+            .id
+            .as_str()
+            .to_ascii_uppercase()
+            .parse()
+            .expect("case folding preserves a validated id"),
+    }
+}
+
+fn handle(key: &emob_cdr::CdrKey) -> String {
+    format!(
+        "r1.{}.{}",
+        key.party,
+        hex::encode(key.id.as_str().as_bytes())
+    )
+}
+
+fn parse_handle(raw: &str) -> Option<emob_cdr::CdrKey> {
+    let (owner, encoded) = raw.strip_prefix("r1.")?.split_once('.')?;
+    if encoded.len() > 2 * ocpi_kit::types::CiString::<39>::MAX_LEN {
+        return None;
+    }
+    let key = emob_cdr::CdrKey {
+        party: owner.parse().ok()?,
+        id: String::from_utf8(hex::decode(encoded).ok()?)
+            .ok()?
+            .parse()
+            .ok()?,
+    };
+    (handle(&key) == raw).then_some(key)
+}
+
+fn cpo_principal(
+    state: &crate::Roamd,
+    context: &RequestContext,
+    owner: &emob_core::PartyId,
+    cap: &'static str,
+) -> Option<emob_service::Principal> {
+    let peer = &context.peer;
+    if peer.role != ocpi_kit::transport::TokenRole::C {
+        return None;
+    }
+    let registered = state
+        .peers()
+        .registered()
+        .find(|r| r.peer_id == peer.peer_id)?;
+    let grant = state.registry().get(&peer.peer_id.parse().ok()?)?;
+    let matches_owner = |p: &ocpi_kit::types::PartyRef| {
+        p.country_code
+            .as_str()
+            .eq_ignore_ascii_case(owner.country_code())
+            && p.party_id.as_str().eq_ignore_ascii_case(owner.party_id())
+    };
+    if !grant.permits_role(owner, emob_core::Role::Cpo)
+        || !registered
+            .roles
+            .contains(&(owner.clone(), emob_core::Role::Cpo))
+        || !peer.parties.iter().any(matches_owner)
+        || context
+            .routing
+            .as_ref()
+            .is_some_and(|r| !matches_owner(&r.from))
+    {
+        return None;
+    }
+    Some(emob_service::Principal::peer(
+        owner.clone(),
+        emob_core::Role::Cpo,
+        emob_service::Capabilities::of([cap]),
+    ))
+}
+
 impl<J: emob_service::journal::Journal> CdrsReceiver for Inbox<J> {
     async fn cdr(
         &self,
         cdr_id: String,
-        _context: RequestContext,
+        context: RequestContext,
     ) -> Handled<ocpi_kit::v2_3_0::cdrs::Cdr> {
-        // `[OCPI 2.3.0 §mod_cdrs]` makes this the URL the `Location` header
-        // named, so a sender can read back **what it sent**. So this returns
-        // the document that arrived rather than a rebuild of it from the
-        // canonical model: the two are not the same document, and answering
-        // with the second would answer a question about the partner's
-        // arithmetic with a claim about ours. An inbox holds the message, which
-        // is D324's rule pointed inward.
-        lock(&self.node)
-            .state()
-            .document_received(&cdr_id)
-            .cloned()
-            .ok_or_else(|| OcpiError::NotFound(format!("no record {cdr_id} was pushed here")))
+        let unavailable = || OcpiError::NotFound("record unavailable".into());
+        let key = parse_handle(&cdr_id).ok_or_else(unavailable)?;
+        let node = lock(&self.node);
+        let state = node.state();
+        let cap = emob_service::caps::CDR_READ;
+        let principal = cpo_principal(state, &context, &key.party, cap).ok_or_else(unavailable)?;
+        let document = state.document_received(&key).ok_or_else(unavailable)?;
+        if node.is_halted()
+            || state
+                .may(
+                    &principal,
+                    cap,
+                    &key.party,
+                    document.id.as_str(),
+                    time::OffsetDateTime::now_utc(),
+                )
+                .is_err()
+        {
+            return Err(unavailable());
+        }
+        Ok(document.clone())
     }
 
     async fn post_cdr(
@@ -284,61 +431,47 @@ impl<J: emob_service::journal::Journal> CdrsReceiver for Inbox<J> {
         cdr: ocpi_kit::v2_3_0::cdrs::Cdr,
         context: RequestContext,
     ) -> Handled<Url> {
-        let id = cdr.id.as_str().to_owned();
         let at = time::OffsetDateTime::now_utc();
-
-        // The principal comes from the **credential**, never from the document.
-        //
-        // `Roamd::receive` asks whether this caller may write records for the
-        // party the document names. Building the principal out of that same
-        // document makes the question compare a claim with itself, and every
-        // push self-authorises: a partner could settle records in any operator's
-        // name by writing that name in the payload. A check fed by the thing it
-        // is checking is not a check (rule 3, D332).
-        //
-        // A platform speaks for the parties its credentials listed. It may push
-        // for any of them and for nobody else, which is also what the wire layer
-        // enforces one step earlier with a 404 `[OCPI 2.3.0
-        // §transport_and_format]` — belt and braces, deliberately: the outer
-        // check is the kit's and could be configured away, and this one decides
-        // what reaches the ledger.
-        let speaking_for = context.peer.parties.first().ok_or_else(|| {
-            OcpiError::Unauthorized(
-                "the credential names no party, so there is nobody this push could be for"
-                    .to_owned(),
-            )
-        })?;
-        let party = emob_core::PartyId::new(
-            speaking_for.country_code.as_str(),
-            speaking_for.party_id.as_str(),
-        )
-        .map_err(|error| OcpiError::Unauthorized(error.to_string()))?;
-        let by = Actor::partner(&party);
-        let principal = emob_service::Principal::peer(
-            party,
-            emob_core::Role::Cpo,
-            emob_service::Capabilities::of([emob_service::caps::CDR_WRITE]),
-        );
+        let owner = emob_core::PartyId::new(cdr.country_code.as_str(), cdr.party_id.as_str())
+            .map_err(|_| OcpiError::Unauthorized("unknown record owner".into()))?;
+        let by = partner(&context.peer.peer_id)?;
         let verdict = {
             let mut node = lock(&self.node);
+            let principal = cpo_principal(
+                node.state(),
+                &context,
+                &owner,
+                emob_service::caps::CDR_WRITE,
+            )
+            .ok_or_else(|| {
+                OcpiError::Unauthorized(format!(
+                    "the credential has no emob.cdr.write grant for {owner}"
+                ))
+            })?;
             node.receive(&by, &principal, &cdr, None, at)
                 .map_err(|error| OcpiError::Remote {
                     status_code: ocpi_kit::transport::StatusCode::new(3000),
                     status_message: Some(error.to_string()),
                 })?
         };
-        match verdict {
-            // A retry is the first delivery's answer again, which is what makes
-            // a re-send safe for the sender (D325, from the other end).
-            Verdict::Accepted(_) | Verdict::Duplicate { .. } => {
-                Ok(Url::new_lenient(format!("{}/{id}", self.base.as_str())))
+        let key = match &verdict {
+            Verdict::Accepted(inbound) => &inbound.cdr.key,
+            Verdict::Duplicate { key } => key,
+            Verdict::Unauthorised { reasons } => {
+                return Err(OcpiError::Unauthorized(reasons.join("; ")));
             }
-            Verdict::Unauthorised { reasons } => Err(OcpiError::Unauthorized(reasons.join("; "))),
-            other => Err(OcpiError::Remote {
-                status_code: ocpi_kit::transport::StatusCode::new(2001),
-                status_message: Some(format!("{other:?}")),
-            }),
-        }
+            other => {
+                return Err(OcpiError::Remote {
+                    status_code: ocpi_kit::transport::StatusCode::new(2001),
+                    status_message: Some(format!("{other:?}")),
+                });
+            }
+        };
+        Ok(Url::new_lenient(format!(
+            "{}/{}",
+            self.base.as_str(),
+            handle(&receipt_key(key))
+        )))
     }
 }
 
@@ -389,10 +522,28 @@ pub fn router<J: emob_service::journal::Journal>(
         node,
         base: receiver.join(ocpi_kit::ModuleId::Cdrs.as_str()),
     };
+    let accept_unencoded = config.quirks.accept_unencoded_token;
     let inner = OcpiRouter::new(VersionNumber::V2_3_0, base, Arc::new(registry))
         .with_config(config)
         .credentials(handshake)
         .cdrs_receiver(inbox)
-        .build();
+        .build()
+        .route_layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+                if request.method() == http::Method::GET
+                    && request.uri().path() == "/credentials"
+                    && let Some(token) = request
+                        .headers()
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| {
+                            CredentialsToken::parse_header(value, accept_unencoded).ok()
+                        })
+                {
+                    return CREDENTIAL_READ_TOKEN.scope(token, next.run(request)).await;
+                }
+                next.run(request).await
+            },
+        ));
     axum::Router::new().nest(path, inner)
 }

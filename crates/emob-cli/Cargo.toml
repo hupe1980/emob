@@ -1,7 +1,7 @@
 [package]
 name        = "emob-cli"
 publish     = false
-description = "The emob command line: `emob verify <transparency-file>` checks every signed meter value in a S.A.F.E. transparency file offline, with the same check the receipt page runs in the browser; `emob demo` runs five demo services on loopback with simulated stations and a roaming partner"
+description = "Run the standalone charging demo, validate an estate, verify meter records and witness signed journals."
 keywords    = ["ocmf", "eichrecht", "cli", "verification", "ev-charging"]
 readme      = "README.md"
 version.workspace      = true
@@ -9,9 +9,7 @@ authors.workspace      = true
 edition.workspace      = true
 license.workspace      = true
 repository.workspace   = true
-# `emob demo` links roamd, and roamd speaks to `ocpi-kit`, which asks for the
-# toolchain's 1.96 — the same reason `emob-roam` overrides the workspace floor.
-rust-version = "1.96"
+rust-version.workspace = true
 
 [[bin]]
 name = "emob"
@@ -34,6 +32,8 @@ datex2         = { workspace = true }
 # the counterparties. Every crate below is already in the workspace's graph.
 billd          = { path = "../../services/billd" }
 csmsd          = { path = "../../services/csmsd" }
+accountingd    = { path = "../../services/accountingd" }
+portald        = { path = "../../services/portald" }
 deskd          = { path = "../../services/deskd" }
 empd           = { path = "../../services/empd" }
 roamd          = { path = "../../services/roamd" }
@@ -42,7 +42,7 @@ tarifd         = { path = "../../services/tarifd" }
 emob-core      = { workspace = true }
 emob-roam      = { workspace = true }
 emob-ocpp      = { workspace = true }
-emob-service   = { workspace = true, features = ["schema"] }
+emob-service   = { workspace = true, features = ["schema", "webhook-client"] }
 emob-sim       = { workspace = true }
 ocpp-kit       = { workspace = true, features = ["std", "tokio", "station", "rustls", "v1_6", "v2_0_1", "v2_1"] }
 ocpi-kit       = { workspace = true, features = ["client", "server", "testkit"] }
@@ -56,6 +56,8 @@ base64         = { workspace = true }
 getrandom      = "0.4"
 hex            = { workspace = true }
 rust_decimal   = { workspace = true }
+rmcp           = { version = "3.11", default-features = false, features = ["macros", "server", "transport-io"] }
+schemars       = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 time           = { workspace = true }

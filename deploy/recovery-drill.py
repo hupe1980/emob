@@ -86,7 +86,7 @@ def run(args):
     name = "emob-recovery-" + attempt
     start = time.monotonic()
     incomplete = {
-        "version": 1,
+        "version": 2,
         "verdict": "incomplete",
         "attempt_id": attempt,
         "reasons": ["attempt_interrupted"],
@@ -183,7 +183,7 @@ def run(args):
         payload = json.loads(worker.stdout)
         if (
             not isinstance(payload, dict)
-            or payload.get("version") != 1
+            or payload.get("version") != 2
             or payload.get("verdict")
             != ("pass", "fail", "incomplete")[worker.returncode]
         ):

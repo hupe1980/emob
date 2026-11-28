@@ -4,7 +4,7 @@ EV charging sessions for CSMS and billing developers: how a session was
 authorised, what the meter said, and how its energy divides exactly across the
 quarter hours the energy market settles in.
 
-[![crates.io](https://img.shields.io/crates/v/emob-session.svg)](https://crates.io/crates/emob-session) [![docs.rs](https://img.shields.io/docsrs/emob-session)](https://docs.rs/emob-session) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-session.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-session.svg)](https://crates.io/crates/emob-session) [![docs.rs](https://img.shields.io/docsrs/emob-session)](https://docs.rs/emob-session) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-session.svg)](#license)
 
 A session's energy has to be settled per quarter hour, and its idle time priced
 per minute. This crate splits a meter series so the slots sum to the session

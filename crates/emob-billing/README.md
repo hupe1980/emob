@@ -2,7 +2,7 @@
 
 Turns rated charging records into invoices, VAT decisions, EN 16931 e-invoices, SEPA direct debits and balanced bookkeeping postings — for charge point operators (CPOs) and e-mobility service providers (eMSPs) who bill in the EU.
 
-[![crates.io](https://img.shields.io/crates/v/emob-billing.svg)](https://crates.io/crates/emob-billing) [![docs.rs](https://img.shields.io/docsrs/emob-billing)](https://docs.rs/emob-billing) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-billing.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-billing.svg)](https://crates.io/crates/emob-billing) [![docs.rs](https://img.shields.io/docsrs/emob-billing)](https://docs.rs/emob-billing) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-billing.svg)](#license)
 
 A CDR (charge detail record) is a claim about what happened; an invoice is a
 demand a tax authority reads, a partner pays against and an auditor asks for.
@@ -182,6 +182,10 @@ seller contact, payment instructions) and would refuse lawful B2B invoices if
 used for everything. `Syntax` picks UBL or CII, the two syntaxes CEN/TS 16931-2
 makes mandatory; which one is a fact about the recipient.
 
+### Crediting one invoice line
+
+`Invoice::line_credit` issues a monetary adjustment against one numbered line. Supply the net and VAT already credited on that line. The credit preserves the source tax category and references the preceding invoice. If a split cannot reconcile the VAT cents, the method returns an error. [Credit-note lines](https://docs.peppol.eu/poacc/billing/3.0/syntax/ubl-creditnote/cac-CreditNoteLine/) · [VAT rounding rule](https://docs.peppol.eu/poacc/billing/3.0/rules/ubl-tc434/BR-CO-17/)
+
 ### Cancellations (*Stornorechnung*)
 
 `Invoice::cancellation` builds a credit note (BT-3 = 381) referencing the
@@ -213,7 +217,7 @@ documents need it.
 | Item | Purpose |
 |---|---|
 | `InvoiceBuilder` | assemble an invoice from records or a `CdrLedger`, with parties, period, rates, subscriptions |
-| `Invoice` | the document: lines, adjustments, tax subtotals, totals, `reconciles`, `rounding_residual`, `cancellation` |
+| `Invoice` | the document: lines, adjustments, tax subtotals, totals, `reconciles`, `rounding_residual`, `cancellation`, `line_credit` |
 | `Counterparty`, `TaxStatus` | seller/buyer identity and VAT status (`consumer`, `business`, `reseller`, `also_established_in`) |
 | `TaxTreatment::decide`, `TaxTreatment::decide_service` | VAT category, place of supply and rate for electricity / for a service fee |
 | `VatRates` | standard rates by country |

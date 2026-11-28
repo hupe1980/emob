@@ -54,11 +54,40 @@ billing = { name = "MSP Mobility GmbH", street = "Am Markt 2", post_code = "5066
 series = "R"
 vat_rate = "19"
 seller = { name = "ABC Charging GmbH", street = "Invalidenstrasse 1", post_code = "10115", city = "Berlin", country = "DE", vat_id = "DE987654321" }
+retail_seller = { name = "MSP Mobility GmbH", street = "Ring 9", post_code = "10115", city = "Berlin", country = "DE", vat_id = "DE111222333" }
 
-# Unissued RFID for the standalone driver-enrolment walkthrough.
+# Payers for private and fleet agreements.
+[[retail_accounts]]
+id = "PAYER-PRIVATE"
+kind = "private"
+name = "Mika Muster"
+street = "Beispielweg 2"
+post_code = "10115"
+city = "Berlin"
+country = "DE"
+
+[[retail_accounts]]
+id = "PAYER-FLEET"
+kind = "fleet"
+name = "Musterflotte GmbH"
+street = "Beispielweg 4"
+post_code = "10115"
+city = "Berlin"
+country = "DE"
+vat_id = "DE111333555"
+electronic_address = "fleet@example.invalid"
+
 [[card_stock]]
 code = "STOCK-1004"
 uid = "04AB0000000004"
+
+[[card_stock]]
+code = "STOCK-1005"
+uid = "04AB0000000005"
+
+[[card_stock]]
+code = "STOCK-1006"
+uid = "04AB0000000006"
 
 [[contracts]]
 id = "DE-MSP-C00000001-W"
@@ -67,6 +96,19 @@ tokens = [
   { uid = "04A1B2C3D4E5F6", visual_number = "MOB-1001", type = "RFID", whitelist = "ALLOWED" },
   { uid = "04DEADBEEF0001", visual_number = "MOB-1003", type = "RFID", whitelist = "ALLOWED", blocked = true },
 ]
+
+# A dedicated privacy reviewer can erase portal bindings and inspect the receipt.
+# [[operators]]
+# name = "privacy reviewer"
+# token_env = "EMOB_PRIVACY_TOKEN"
+# privacy = true
+
+# Enable after provisioning a distinct finance credential.
+# [[operators]]
+# name = "finance clerk"
+# token_env = "EMOB_FINANCE_TOKEN"
+# finance = true
+# Add write = true for a reviewer authorized to issue withdrawal credits.
 
 [[operators]]
 name = "demo operator"
@@ -95,6 +137,14 @@ csmsd = "http://csmsd:8080"
 token_env = "EMOB_DESK_READ_TOKEN"
 time_zone = "Europe/Berlin"   # the page's "today" and its clock
 
+[portal]
+public_url = "http://localhost:8089"
+
+# Enable a customer by provisioning this secret in the provider environment.
+# [[portal_users]]
+# subject = "mika"
+# secret_env = "EMOB_PORTAL_MIKA"
+
 [receipts]
 # Where a driver's phone reaches csmsd's shell: every receipt link
 # (`<public_url>/r/<token>`) starts here, on invoice lines too. The
@@ -102,6 +152,7 @@ time_zone = "Europe/Berlin"   # the page's "today" and its clock
 public_url = "http://localhost:8080"
 
 [services]
+accountingd = "http://accountingd:8080"
 billd = "http://billd:8080"
 roamd = "http://roamd:8080"
 empd = "http://empd:8080"

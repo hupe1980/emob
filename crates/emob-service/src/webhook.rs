@@ -1,108 +1,63 @@
 //! Signing what leaves, and checking what arrives.
 //!
-//! # One signer, because two is how a receiver stops trusting either
-//!
-//! A platform notifies outward in several places — a CDR was refused, a duty
-//! falls due, a station stopped answering — and each of them is a `POST` to a
-//! URL somebody configured. Signed differently in each place, a receiver has to
-//! implement three verifiers and will get one wrong.
-//!
-//! So there is one, and it is [Standard Webhooks]: HMAC-SHA256 over
-//! `{id}.{timestamp}.{payload}`, base64, in a `webhook-signature` header that
-//! can carry **several** signatures at once so a secret can be rotated without
-//! a flag day.
+//! emob signs `CloudEvents` with the official [Standard Webhooks] library. The
+//! stable event id is the receiver's idempotency key. Each retry signs the
+//! original encoded event at the time of the new attempt. During rotation
+//! a sender can sign with both keys and a receiver can accept either.
 //!
 //! [Standard Webhooks]: https://www.standardwebhooks.com
 //!
-//! # The timestamp is an argument, and the tolerance is the caller's
-//!
-//! Signing reads no clock: the instant is passed in, so a delivery replayed
-//! from an outbox produces the same bytes it did the first time — which is the
-//! property that lets a receiver de-duplicate on the signature rather than on a
-//! guess. [`verify`] takes the instant it is checking against for the same
-//! reason, and this crate has no opinion about how old is too old: a five-minute
-//! window is right for an interactive callback and wrong for an overnight batch,
-//! and a library that picked one would be picking it for both.
-//!
-//! # The secret's encoding is stated, never inferred
-//!
-//! Standard Webhooks writes a secret as `whsec_<base64>`, and some deployments
-//! configure a passphrase instead. Guessing between them is ambiguous for
-//! exactly the secrets that look like base64: `"mysecret"` is eight ASCII bytes
-//! *and* a valid base64 string, `"hunter2"` is not, and a sender and receiver
-//! that read the same string differently disagree on every delivery.
-//!
-//! So [`Secret::standard`] and [`Secret::raw`] are two constructors and the
-//! first is fallible. The same string means two different keys, and which one a
-//! deployment wants is not something a library can infer (D188).
-//!
-//! # Comparison is constant time, and a receiver that holds no secret rejects
-//!
-//! A signature compared with `==` leaks where two differ. And a verifier
-//! configured with no secrets rejects everything rather than accepting
-//! everyone — the deployment where somebody forgot the secret is exactly the one
-//! nobody would notice.
+//! [`verify`] checks the signature. On an incoming HTTP request use [`receive`],
+//! which also requires an id and checks freshness against the supplied clock.
+//! Configured keys use `whsec_<base64>`. For raw key bytes use [`Secret::raw`].
 
-use core::fmt;
-
-use base64::Engine as _;
-use hmac::{Hmac, KeyInit as _, Mac};
-use sha2::Sha256;
+use standardwebhooks::{Webhook, WebhookError};
 use subtle::ConstantTimeEq as _;
 
-type HmacSha256 = Hmac<Sha256>;
+#[cfg(feature = "webhook-client")]
+pub mod transport;
 
-/// The header a signature travels in.
-pub const SIGNATURE_HEADER: &str = "webhook-signature";
-/// The header the delivery's id travels in.
-pub const ID_HEADER: &str = "webhook-id";
-/// The header the signed timestamp travels in.
-pub const TIMESTAMP_HEADER: &str = "webhook-timestamp";
-/// The version prefix Standard Webhooks puts on a symmetric signature.
-const VERSION: &str = "v1";
+pub use standardwebhooks::{
+    HEADER_WEBHOOK_ID as ID_HEADER, HEADER_WEBHOOK_SIGNATURE as SIGNATURE_HEADER,
+    HEADER_WEBHOOK_TIMESTAMP as TIMESTAMP_HEADER,
+};
 
-/// A shared secret, which neither prints itself nor compares in variable time.
+/// A validated symmetric key. Debug output omits key material.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Secret(Vec<u8>);
+pub struct Secret(Webhook);
 
 impl Secret {
-    /// A secret in the Standard Webhooks spelling — `whsec_<base64>`.
+    /// Read the unambiguous Standard Webhooks secret spelling.
     ///
     /// # Errors
     ///
-    /// [`SecretError`] when the prefix is missing or the rest is not base64.
-    ///
-    /// # Why this refuses rather than guesses
-    ///
-    /// Stripping the prefix, trying base64 and falling back to the raw bytes is
-    /// **ambiguous for exactly the secrets that look like base64**: `"mysecret"`
-    /// is eight ASCII bytes and also a valid base64 string, so it would silently
-    /// become six arbitrary ones while `"hunter2"` stayed as it is. The only
-    /// symptom is `SignatureMismatch` on every delivery, which points at the
-    /// payload rather than at the key.
+    /// Rejects missing prefixes, malformed Base64 and empty keys.
     pub fn standard(configured: &str) -> Result<Self, SecretError> {
-        let body = configured
-            .strip_prefix("whsec_")
-            .ok_or(SecretError::NotPrefixed)?;
-        base64::engine::general_purpose::STANDARD
-            .decode(body)
-            .map(Self)
-            .map_err(|_| SecretError::NotBase64)
+        if !configured.starts_with("whsec_") {
+            return Err(SecretError::NotPrefixed);
+        }
+        Webhook::new(configured).map(Self).map_err(|error| {
+            if matches!(error, WebhookError::EmptySecret) {
+                SecretError::Empty
+            } else {
+                SecretError::NotBase64
+            }
+        })
     }
 
-    /// A secret that is the bytes it is written as.
+    /// Use a peer's raw key bytes.
     ///
-    /// For a peer whose configuration is a passphrase rather than the
-    /// specification's encoding. Named so the choice is visible in a diff: the
-    /// same string means two different keys under the two constructors, and
-    /// which one a deployment wants is not something a library can infer.
-    #[must_use]
-    pub fn raw(bytes: impl AsRef<[u8]>) -> Self {
-        Self(bytes.as_ref().to_vec())
+    /// # Errors
+    ///
+    /// Returns [`SecretError::Empty`] for a zero-length key.
+    pub fn raw(bytes: impl AsRef<[u8]>) -> Result<Self, SecretError> {
+        Webhook::from_bytes(bytes.as_ref().to_vec())
+            .map(Self)
+            .map_err(|_| SecretError::Empty)
     }
 }
 
-/// A configured secret that is not the Standard Webhooks spelling.
+/// Why the supplied webhook signing key was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum SecretError {
@@ -115,11 +70,14 @@ pub enum SecretError {
     /// The part after the prefix is not base64.
     #[error("the part after `whsec_` is not base64")]
     NotBase64,
+    /// The decoded key contains no bytes.
+    #[error("the webhook signing key is empty")]
+    Empty,
 }
 
-impl fmt::Debug for Secret {
+impl core::fmt::Debug for Secret {
     /// Never the value.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Secret(…)")
     }
 }
@@ -153,87 +111,49 @@ impl<'a> Delivery<'a> {
             payload,
         }
     }
-
-    /// The bytes the MAC is taken over — `{id}.{timestamp}.{payload}`.
-    fn signed_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.payload.len() + self.id.len() + 24);
-        bytes.extend_from_slice(self.id.as_bytes());
-        bytes.push(b'.');
-        bytes.extend_from_slice(self.timestamp.to_string().as_bytes());
-        bytes.push(b'.');
-        bytes.extend_from_slice(self.payload);
-        bytes
-    }
 }
 
-/// Sign a delivery.
+/// Sign the exact UTF-8 body using the Standard Webhooks v1 wire format.
 ///
-/// Returns the header value — `v1,<base64>` — which a caller sets as
-/// [`SIGNATURE_HEADER`] beside [`ID_HEADER`] and [`TIMESTAMP_HEADER`].
-#[must_use]
-pub fn sign(delivery: &Delivery<'_>, secret: &Secret) -> String {
-    format!("{VERSION},{}", mac(delivery, secret))
+/// # Errors
+///
+/// Returns [`WebhookError::InvalidPayload`] for a body that is not UTF-8.
+pub fn sign(delivery: &Delivery<'_>, secret: &Secret) -> Result<String, WebhookError> {
+    secret
+        .0
+        .sign(delivery.id, delivery.timestamp, delivery.payload)
 }
 
-/// Sign a delivery under several secrets at once.
+/// Sign the same delivery under each active key during rotation.
 ///
-/// What makes a rotation possible without a flag day: the header carries both
-/// the outgoing and the incoming signature, space-separated, and a receiver that
-/// has either one accepts.
-#[must_use]
-pub fn sign_with<'a, I>(delivery: &Delivery<'_>, secrets: I) -> String
-where
-    I: IntoIterator<Item = &'a Secret>,
-{
-    secrets
+/// # Errors
+///
+/// Returns [`WebhookError::InvalidPayload`] for a body that is not UTF-8.
+pub fn sign_with<'a>(
+    delivery: &Delivery<'_>,
+    secrets: impl IntoIterator<Item = &'a Secret>,
+) -> Result<String, WebhookError> {
+    let signatures = secrets
         .into_iter()
-        .map(|secret| format!("{VERSION},{}", mac(delivery, secret)))
-        .collect::<Vec<_>>()
-        .join(" ")
+        .map(|key| sign(delivery, key))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(signatures.join(" "))
 }
 
-/// Whether a `webhook-signature` header authenticates a delivery.
-///
-/// Every space-separated element is tried, because a sender mid-rotation sends
-/// two. An element whose version this build does not know is skipped rather
-/// than refused — a future asymmetric `v1a` alongside a `v1` must not make the
-/// `v1` unreadable.
-///
-/// **The freshness of the timestamp is not checked here.** See the module
-/// documentation: the tolerance belongs to the caller, and
-/// [`Delivery::timestamp`] is what it compares.
+/// Compare every presented signature with every configured key, including during
+/// rotation. The caller checks freshness with its own clock through [`receive`].
 #[must_use]
 pub fn verify(delivery: &Delivery<'_>, secrets: &[Secret], header: &str) -> bool {
-    // A verifier configured with nothing rejects everything.
-    if secrets.is_empty() {
-        return false;
-    }
-    let expected: Vec<String> = secrets.iter().map(|s| mac(delivery, s)).collect();
-
-    // Every candidate is compared against every expected signature, and the
-    // loop does not stop early: an early return on the first match is fine, and
-    // an early return on the first *mismatch* would leak which secret was
-    // tried. Folding with `|` keeps the work constant in the number of secrets.
-    header
-        .split(' ')
-        .filter_map(|element| element.strip_prefix(&format!("{VERSION},")))
-        .fold(false, |found, candidate| {
-            expected.iter().fold(found, |found, expected| {
-                found | bool::from(expected.as_bytes().ct_eq(candidate.as_bytes()))
-            })
+    secrets
+        .iter()
+        .filter_map(|key| sign(delivery, key).ok())
+        .fold(false, |found, expected| {
+            header
+                .split_ascii_whitespace()
+                .fold(found, |matched, supplied| {
+                    matched | bool::from(expected.as_bytes().ct_eq(supplied.as_bytes()))
+                })
         })
-}
-
-/// The base64 MAC of a delivery under one secret.
-fn mac(delivery: &Delivery<'_>, secret: &Secret) -> String {
-    // `new_from_slice` is infallible for HMAC — the construction accepts a key
-    // of any length — so this is a signature, not a fallible step. The branch
-    // that used to stand here fell back to an **empty** key, which is a
-    // different signature reached silently: unreachable, and the wrong thing to
-    // be unreachable to.
-    let mut hmac = HmacSha256::new_from_slice(&secret.0).expect("HMAC takes a key of any length");
-    hmac.update(&delivery.signed_bytes());
-    base64::engine::general_purpose::STANDARD.encode(hmac.finalize().into_bytes())
 }
 
 /// Why a receiver refused a delivery before reading it.
@@ -243,6 +163,9 @@ pub enum Refusal {
     /// A Standard Webhooks header is missing or not text.
     #[error("the delivery carries no {0} header")]
     Unsigned(&'static str),
+    /// A signed field has more than one HTTP header value.
+    #[error("the delivery repeats the {0} header")]
+    Repeated(&'static str),
     /// The timestamp is not a number.
     #[error("the webhook-timestamp is not Unix seconds")]
     BadTimestamp,
@@ -253,7 +176,7 @@ pub enum Refusal {
     )]
     Stale {
         /// How far, in seconds.
-        skew: i64,
+        skew: u64,
         /// The tolerance, in seconds.
         tolerance: i64,
     },
@@ -280,10 +203,16 @@ pub fn receive(
     tolerance: time::Duration,
 ) -> Result<String, Refusal> {
     let header = |name: &'static str| {
-        headers
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(Refusal::Unsigned(name))
+        let mut values = headers.get_all(name).iter();
+        let value = values
+            .next()
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.trim().is_empty())
+            .ok_or(Refusal::Unsigned(name))?;
+        if values.next().is_some() {
+            return Err(Refusal::Repeated(name));
+        }
+        Ok(value)
     };
     let id = header(ID_HEADER)?;
     let timestamp: i64 = header(TIMESTAMP_HEADER)?
@@ -291,9 +220,9 @@ pub fn receive(
         .map_err(|_| Refusal::BadTimestamp)?;
     let signature = header(SIGNATURE_HEADER)?;
 
-    let skew = (now.unix_timestamp() - timestamp).abs();
+    let skew = now.unix_timestamp().abs_diff(timestamp);
     let limit = tolerance.whole_seconds();
-    if skew > limit {
+    if !u64::try_from(limit).is_ok_and(|limit| skew <= limit) {
         return Err(Refusal::Stale {
             skew,
             tolerance: limit,
@@ -317,18 +246,18 @@ pub fn receive(
 /// tolerance.
 #[must_use]
 pub fn secure_target(url: &str) -> bool {
-    if url.starts_with("https://") {
-        return true;
-    }
-    let Some(rest) = url.strip_prefix("http://") else {
+    let Ok(target) = url::Url::parse(url) else {
         return false;
     };
-    let authority = rest.split('/').next().unwrap_or_default();
-    let host = authority
-        .rsplit_once(':')
-        .filter(|(host, port)| !host.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
-        .map_or(authority, |(host, _)| host);
-    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+    if !target.username().is_empty() || target.password().is_some() || target.fragment().is_some() {
+        return false;
+    }
+    match (target.scheme(), target.host()) {
+        ("https", Some(_)) | ("http", Some(url::Host::Domain("localhost"))) => true,
+        ("http", Some(url::Host::Ipv4(ip))) => ip.is_loopback(),
+        ("http", Some(url::Host::Ipv6(ip))) => ip.is_loopback(),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -345,10 +274,65 @@ mod tests {
     }
 
     #[test]
+    fn upstream_signature_vector_and_key_validation() {
+        // Standard Webhooks Rust SDK, test_sign.
+        let key = Secret::standard("whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD").unwrap();
+        let original = Delivery {
+            id: "msg_27UH4WbU6Z5A5EzD8u03UvzRbpk",
+            timestamp: 1_649_367_553,
+            payload: br#"{"email":"test@example.com","username":"test_user"}"#,
+        };
+        let expected = "v1,tZ1I4/hDygAJgO5TYxiSd6Sd0kDW6hPenDe+bTa3Kkw=";
+        assert_eq!(sign(&original, &key).unwrap(), expected);
+        assert!(verify(&original, &[key], expected));
+        assert_eq!(Secret::standard("whsec_"), Err(SecretError::Empty));
+        assert_eq!(Secret::raw([]), Err(SecretError::Empty));
+    }
+
+    #[test]
+    fn each_signed_field_has_one_http_value() {
+        let key = Secret::raw(b"test key").unwrap();
+        let mut received = headers("example", at(), "v1,signature");
+        received.append(ID_HEADER, "second".parse().unwrap());
+        assert_eq!(
+            receive(&received, b"{}", &[key], at(), time::Duration::minutes(5)),
+            Err(Refusal::Repeated(ID_HEADER))
+        );
+    }
+
+    #[test]
+    fn targets_require_a_host_and_explicit_destination() {
+        assert!(!secure_target("https://"));
+        assert!(!secure_target("https://user:password@example.org/events"));
+        assert!(!secure_target("https://receiver.example/events#ignored"));
+        assert!(secure_target("http://[::1]:8080/events"));
+    }
+
+    #[test]
+    fn timestamp_skew_is_defined_across_the_integer_range() {
+        let key = Secret::raw(b"test key").unwrap();
+        for value in [i64::MIN, i64::MAX] {
+            let mut received = headers("example", at(), "unused");
+            received.insert(TIMESTAMP_HEADER, value.to_string().parse().unwrap());
+            assert!(matches!(
+                receive(
+                    &received,
+                    b"{}",
+                    std::slice::from_ref(&key),
+                    at(),
+                    time::Duration::minutes(5)
+                ),
+                Err(Refusal::Stale { .. })
+            ));
+        }
+    }
+
+    // platform-interfaces/SR-032: the signature binds the id, exact body and attempt timestamp.
+    #[test]
     fn a_signature_authenticates_its_own_delivery_and_nothing_else() {
         let secret = Secret::standard("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw").unwrap();
         let body = br#"{"type":"de.emob.cdr.issued"}"#;
-        let header = sign(&delivery(body), &secret);
+        let header = sign(&delivery(body), &secret).unwrap();
 
         assert!(verify(
             &delivery(body),
@@ -380,7 +364,7 @@ mod tests {
         // The deployment where somebody forgot the secret is exactly the one
         // nobody would notice.
         let body = b"{}";
-        let header = sign(&delivery(body), &Secret::standard("whsec_AAAA").unwrap());
+        let header = sign(&delivery(body), &Secret::standard("whsec_AAAA").unwrap()).unwrap();
         assert!(!verify(&delivery(body), &[], &header));
     }
 
@@ -389,7 +373,7 @@ mod tests {
         let outgoing = Secret::standard("whsec_b2xkc2VjcmV0").unwrap();
         let incoming = Secret::standard("whsec_bmV3c2VjcmV0").unwrap();
         let body = b"{}";
-        let header = sign_with(&delivery(body), [&outgoing, &incoming]);
+        let header = sign_with(&delivery(body), [&outgoing, &incoming]).unwrap();
 
         // A receiver that has only the old one accepts, and so does one that
         // has only the new one — which is what makes the two ends independent.
@@ -415,7 +399,7 @@ mod tests {
     fn a_version_this_build_does_not_know_does_not_hide_one_it_does() {
         let secret = Secret::standard("whsec_AAAA").unwrap();
         let body = b"{}";
-        let mine = sign(&delivery(body), &secret);
+        let mine = sign(&delivery(body), &secret).unwrap();
         let mixed = format!("v1a,c29tZXRoaW5nZWxzZQ== {mine}");
         assert!(verify(&delivery(body), &[secret], &mixed));
     }
@@ -427,8 +411,8 @@ mod tests {
         // accepted only one would reject half its senders.
         let body = b"{}";
         let prefixed = Secret::standard("whsec_c2VjcmV0").unwrap();
-        let bare = Secret::raw(b"secret");
-        let header = sign(&delivery(body), &prefixed);
+        let bare = Secret::raw(b"secret").unwrap();
+        let header = sign(&delivery(body), &prefixed).unwrap();
         assert!(verify(&delivery(body), &[bare], &header));
     }
 
@@ -442,13 +426,12 @@ mod tests {
 
     #[test]
     fn signing_reads_no_clock_so_a_replayed_delivery_is_the_same_bytes() {
-        // The property an outbox needs: a retry of a delivery is byte-identical
-        // to the first attempt, so a receiver can de-duplicate on the signature.
+        // A fixed attempt can be independently reconstructed from its inputs.
         let secret = Secret::standard("whsec_AAAA").unwrap();
         let body = b"{}";
         assert_eq!(
-            sign(&delivery(body), &secret),
-            sign(&delivery(body), &secret)
+            sign(&delivery(body), &secret).unwrap(),
+            sign(&delivery(body), &secret).unwrap()
         );
     }
 
@@ -464,17 +447,18 @@ mod tests {
         // The same string under the two readings is two different keys, and
         // that is exactly why neither is a default.
         let body = br#"{"type":"de.emob.cdr.issued"}"#;
-        let as_text = sign(&delivery(body), &Secret::raw("bXlzZWNyZXQ="));
+        let as_text = sign(&delivery(body), &Secret::raw("bXlzZWNyZXQ=").unwrap()).unwrap();
         let as_base64 = sign(
             &delivery(body),
             &Secret::standard("whsec_bXlzZWNyZXQ=").unwrap(),
-        );
+        )
+        .unwrap();
         assert_ne!(as_text, as_base64);
 
         // …and each verifies only under its own.
         assert!(verify(
             &delivery(body),
-            &[Secret::raw("bXlzZWNyZXQ=")],
+            &[Secret::raw("bXlzZWNyZXQ=").unwrap()],
             &as_text
         ));
         assert!(!verify(
@@ -510,7 +494,7 @@ mod tests {
     fn sr_029_a_receiver_takes_its_own_senders_delivery_and_refuses_a_forgery() {
         let secret = Secret::standard("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw").unwrap();
         let body = br#"{"kind":"de.emob.cdr.issued"}"#;
-        let signed = sign(&Delivery::new("DE*ABC/CP-1-1", at(), body), &secret);
+        let signed = sign(&Delivery::new("DE*ABC/CP-1-1", at(), body), &secret).unwrap();
         let tolerance = time::Duration::minutes(5);
 
         assert_eq!(
@@ -524,8 +508,8 @@ mod tests {
             Ok("DE*ABC/CP-1-1".to_owned())
         );
 
-        let other = Secret::raw("somebody else's");
-        let forged = sign(&Delivery::new("DE*ABC/CP-1-1", at(), body), &other);
+        let other = Secret::raw("somebody else's").unwrap();
+        let forged = sign(&Delivery::new("DE*ABC/CP-1-1", at(), body), &other).unwrap();
         assert_eq!(
             receive(
                 &headers("DE*ABC/CP-1-1", at(), &forged),
@@ -550,9 +534,9 @@ mod tests {
 
     #[test]
     fn sr_030_a_signature_older_than_the_tolerance_is_a_replay() {
-        let secret = Secret::raw("shared");
+        let secret = Secret::raw("shared").unwrap();
         let body = b"{}";
-        let signed = sign(&Delivery::new("id-1", at(), body), &secret);
+        let signed = sign(&Delivery::new("id-1", at(), body), &secret).unwrap();
         let refusal = receive(
             &headers("id-1", at(), &signed),
             body,

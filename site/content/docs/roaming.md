@@ -205,6 +205,10 @@ rules:
 - **One computation** yields the served path, the advertised URL and the
   returned `Location`, so they cannot disagree.
 
+The estate advertises its operator as CPO and its provider as eMSP. An authenticated credentials GET returns the caller’s own token and the estate’s versions URL. A registered peer rotates with PUT. Repeating POST after registration, or sending PUT or DELETE before registration, returns HTTP 405.
+
+For inbound charge records, list the CPOs a platform may represent in its estate entry, for example `cdr_owners = ["NL*TNM", "BE*ALT"]`. The receiver checks those grants against the business roles exchanged in Credentials. Follow the returned `Location` to reopen the original. Two CPOs may use the same local ID. Exact retries return the same receipt, and a removed role loses access on the next read. [OCPI specifications](https://evroaming.org/ocpi-downloads/)
+
 Registering is what makes a partner reachable: the handshake keeps the endpoints
 it reads from the peer, and the outbound client holds no separate peer list.
 The `roamd` daemon mounts these endpoints at `/ocpi` ✅. Partners and their

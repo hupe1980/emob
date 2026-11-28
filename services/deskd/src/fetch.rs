@@ -1,9 +1,9 @@
 //! Reading the bounded operator views, and remembering since when one has not
 //! answered.
 //!
-//! Each read has a timeout and a body cap (SR-055): the requested views
+//! JSON views have a timeout and a body cap (SR-055): the requested views
 //! are bounded by a page or a fixed set of delivery counters, so the cap is
-//! 1 MiB and a body past it is a fault, not a busy day (SR-092). A read that fails is
+//! 1 MiB (SR-092). Invoice downloads stream the XML from the authenticated billing owner. A failed read is
 //! described by its **class** — no answer, refused, unreadable — never by the
 //! request, its headers or the body it got back, so the operator token can
 //! never reach the page or a log line through an error message (SR-053).
@@ -88,6 +88,7 @@ impl Reader {
         Ok(Self {
             client: reqwest::Client::builder()
                 .timeout(TIMEOUT)
+                .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
             token,
@@ -339,16 +340,27 @@ impl Reader {
             .await
     }
 
+    /// Keep the original statement bytes so the owner can reject ambiguous JSON fields.
+    pub(crate) async fn statement<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        operator: &str,
+        bytes: &[u8],
+    ) -> Result<T, Why> {
+        let request = self
+            .client
+            .post(url)
+            .bearer_auth(operator)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(bytes.to_owned());
+        self.fetch_request(request).await
+    }
+
     async fn fetch_request<T: DeserializeOwned>(
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, Why> {
-        let mut response = request.send().await.map_err(|_| Why::NoAnswer)?;
-        match response.status().as_u16() {
-            200 => {}
-            401 | 403 => return Err(Why::Refused),
-            other => return Err(Why::Status(other)),
-        }
+        let mut response = Self::response(request).await?;
         if response
             .content_length()
             .is_some_and(|length| length > BODY_CAP as u64)
@@ -357,12 +369,41 @@ impl Reader {
         }
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(|_| Why::NoAnswer)? {
-            body.extend_from_slice(&chunk);
-            if body.len() > BODY_CAP {
+            if chunk.len() > BODY_CAP - body.len() {
                 return Err(Why::Unreadable);
             }
+            body.extend_from_slice(&chunk);
         }
         serde_json::from_slice(&body).map_err(|_| Why::Unreadable)
+    }
+
+    pub(crate) async fn document(
+        &self,
+        url: &str,
+        operator: &str,
+        body: &serde_json::Value,
+    ) -> Result<axum::body::Body, Why> {
+        let response =
+            Self::response(self.client.post(url).bearer_auth(operator).json(body)).await?;
+        if response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            != Some("application/xml")
+        {
+            return Err(Why::Unreadable);
+        }
+        Ok(axum::body::Body::new(reqwest::Body::from(response)))
+    }
+
+    async fn response(request: reqwest::RequestBuilder) -> Result<reqwest::Response, Why> {
+        let response = request.send().await.map_err(|_| Why::NoAnswer)?;
+        match response.status().as_u16() {
+            200 => Ok(response),
+            401 | 403 => Err(Why::Refused),
+            other => Err(Why::Status(other)),
+        }
     }
 }
 

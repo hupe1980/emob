@@ -14,10 +14,10 @@ insert_anchor_links = "heading"
 [extra]
 repository = "https://github.com/hupe1980/emob"
 tagline    = "open-source charging operations for the European market"
-msrv       = "1.94"
+msrv       = "1.96"
 # check-concepts verifies the calendar, workspace test and crate counts.
 stat_obligations = "51"
-stat_tests = "1426"
+stat_tests = "1495"
 stat_crates      = "17"
 stat_floats      = "0"
 stat_curves      = "5"
@@ -26,13 +26,13 @@ keywords = "EV charging, CPO, EMP, eMSP, CSMS, OCPP 2.1, OCPI 2.3.0, OICP, ISO 1
 
 [[extra.faq]]
 q = "How do I try emob?"
-a = "Run just demo in the checkout. It starts five services, three simulated charging stations and a local OCPI peer. Open the printed links to Heute and the driver receipt."
+a = "Run just demo in the checkout. It starts seven services, three simulated charging stations and a local OCPI peer. The printed links open Heute, the driver receipt and a customer portal with an issued invoice."
 [[extra.faq]]
 q = "How can a driver check a charge?"
 a = "The receipt shows energy, price lines and the meter key. Drivers can verify signed OCMF readings in the browser or download the transparency file for S.A.F.E. Transparenzsoftware."
 [[extra.faq]]
 q = "What can an operator do in Heute?"
-a = "Investigate refused sessions, manage stations and reservations, issue or block driver cards, and inspect partner invoices. Card issuance records the agreed point and gross price."
+a = "Investigate refused sessions, manage stations and reservations, issue or replace driver cards, grant customer access and review monthly invoices. Finance staff can import a statement and allocate payments."
 [[extra.faq]]
 q = "Which interfaces are available?"
 a = "The CSMS accepts OCPP 1.6J, 2.0.1 and 2.1. The estate exchanges OCPI records, publishes DATEX II charging data and produces EN 16931 invoices. Rust libraries also provide OICP conversion, SEPA files and ISO 15118 certificate validation."

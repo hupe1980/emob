@@ -82,8 +82,10 @@
 //! the session, the point and the window it came from. A driver looking for the
 //! charge they remember finds it; a partner disputing one finds the same row.
 
+mod line_credit;
+
 use emob_cdr::{Cdr, CdrKey, CdrLedger, Cost};
-use emob_core::{CdrId, Crossing, Currency, Energy, Money, PartyId};
+use emob_core::{Crossing, Currency, Energy, Money};
 use emob_tariff::{Dimension, Rated};
 use rust_decimal::Decimal;
 
@@ -290,8 +292,14 @@ pub struct InvoiceLine {
     /// The line's identifier on the document — BT-126. `"3.2"` is the second
     /// priced dimension of the third record.
     pub id: String,
-    /// Which record this came from.
-    pub cdr: CdrKey,
+    /// BT-126 on the preceding invoice for a monetary line adjustment.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub adjusts: Option<String>,
+    /// The metered record, absent for an independent subscription.
+    pub cdr: Option<CdrKey>,
     /// What it charges for.
     pub dimension: Dimension,
     /// A one-line description of the session, for a human reading the invoice.
@@ -405,14 +413,15 @@ pub struct InvoiceLine {
 }
 
 impl InvoiceLine {
-    /// The UN/ECE Recommendation 20 code the quantity is measured in — BT-130.
-    ///
-    /// Derived from the dimension rather than stored beside it, for the reason
-    /// `emob_tariff::DisplayLine::unit` is: a unit field and a dimension field
-    /// are two statements about one thing and can be made to disagree.
+    /// The UN/ECE Recommendation 20 unit for BT-130. Monetary line adjustments
+    /// use one count (C62). Earlier supply lines use their billed dimension.
     #[must_use]
     pub const fn unit_code(&self) -> &'static str {
-        unit_code(self.dimension)
+        if self.adjusts.is_some() {
+            "C62"
+        } else {
+            unit_code(self.dimension)
+        }
     }
 
     /// Whether the line's own numbers reproduce its exact net —
@@ -638,7 +647,7 @@ impl core::fmt::Display for DocumentKind {
     }
 }
 
-/// The document a credit note cancels — BG-3.
+/// The preceding invoice named on a credit note — BG-3.
 ///
 /// Its number is BT-25 and its issue date BT-26. `BR-55` requires BT-25 to have
 /// content, which is why this is a struct rather than two optional fields: a
@@ -647,7 +656,7 @@ impl core::fmt::Display for DocumentKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cancelled {
-    /// BT-25 — the cancelled document's own number.
+    /// BT-25 — the preceding invoice number.
     pub number: String,
     /// BT-26 — the day it was issued.
     #[cfg_attr(feature = "serde", serde(with = "emob_core::wire::date"))]
@@ -704,18 +713,18 @@ impl DocumentNote {
     }
 }
 
-/// An invoice for a period, or the credit note that cancels one.
+/// An invoice for a period or a credit note referencing a preceding invoice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Invoice {
-    /// What this document is — a demand, or the credit note that cancels one.
+    /// Whether the document issues a charge or credits an earlier invoice.
     ///
     /// EN 16931 carries the direction in the **document type** rather than in
     /// the sign of its amounts, so a credit note states positive figures like
     /// any other document and BT-3 says what they mean. See
     /// [`Invoice::cancellation`].
     pub kind: DocumentKind,
-    /// BG-3 — the document this one cancels, when it is a credit note.
+    /// BG-3 — the preceding invoice on a full or partial credit.
     ///
     /// `None` on an invoice. Always `Some` on a credit note this crate built,
     /// because a `Stornorechnung` that does not name what it reverses is one an
@@ -1011,13 +1020,12 @@ impl Invoice {
     /// The records this invoice bills, in line order and without repeats.
     #[must_use]
     pub fn records(&self) -> Vec<&CdrKey> {
-        let mut out: Vec<&CdrKey> = Vec::new();
-        for line in &self.lines {
-            if !out.contains(&&line.cdr) {
-                out.push(&line.cdr);
-            }
-        }
-        out
+        let mut seen = std::collections::BTreeSet::new();
+        self.lines
+            .iter()
+            .filter_map(|line| line.cdr.as_ref())
+            .filter(|key| seen.insert(*key))
+            .collect()
     }
 }
 
@@ -1040,6 +1048,7 @@ pub struct InvoiceBuilder<'a> {
     buyer: Counterparty,
     treatment: Option<TaxTreatment>,
     subscriptions: Vec<Subscription>,
+    subscription_currency: Option<Currency>,
     point_country: String,
     rates: VatRates,
     records: Vec<&'a Cdr>,
@@ -1049,9 +1058,9 @@ pub struct InvoiceBuilder<'a> {
 impl<'a> InvoiceBuilder<'a> {
     /// Start an invoice.
     ///
-    /// `period` is the window the invoice covers — BG-14 — and it is stated
-    /// rather than derived from the records, because a month with no sessions in
-    /// its last week still ends when the month does.
+    /// Supply the full billing interval, including days without sessions.
+    /// The document's service period (BG-14) expands to include the dates of
+    /// any selected line crossing its boundaries.
     #[must_use]
     pub fn new(
         number: impl Into<String>,
@@ -1073,6 +1082,7 @@ impl<'a> InvoiceBuilder<'a> {
             buyer,
             treatment: None,
             subscriptions: Vec::new(),
+            subscription_currency: None,
             receipts: std::collections::BTreeMap::new(),
             point_country,
             rates: VatRates::new(),
@@ -1181,6 +1191,14 @@ impl<'a> InvoiceBuilder<'a> {
         self
     }
 
+    /// State the currency of a subscription-only document, which has no CDR
+    /// from which to derive one. Records still supply their own currency.
+    #[must_use]
+    pub const fn subscription_currency(mut self, currency: Currency) -> Self {
+        self.subscription_currency = Some(currency);
+        self
+    }
+
     /// State the tax treatment outright instead of deriving it from the
     /// parties.
     #[must_use]
@@ -1254,7 +1272,7 @@ impl<'a> InvoiceBuilder<'a> {
     ///
     /// [`BillingError`] — see the type.
     pub fn build(self) -> Result<Crossing<Invoice>, BillingError> {
-        if self.records.is_empty() {
+        if self.records.is_empty() && self.subscriptions.is_empty() {
             return Err(BillingError::NoLines);
         }
 
@@ -1264,7 +1282,7 @@ impl<'a> InvoiceBuilder<'a> {
         refuse_uncarryable_bound(&self.records)?;
         refuse_unverifiable(&self.records, &self.point_country)?;
 
-        let currency = first_currency(&self.records)?;
+        let currency = document_currency(&self.records, self.subscription_currency)?;
         // The **goods** treatment, which governs every line that came out of a
         // rated record. A caller whose own tax engine decided states it.
         let treatment = match self.treatment.clone() {
@@ -1292,7 +1310,11 @@ impl<'a> InvoiceBuilder<'a> {
         )?;
         let mut lines = lines;
         for line in &mut lines {
-            line.receipt = self.receipts.get(&line.cdr).cloned();
+            line.receipt = line
+                .cdr
+                .as_ref()
+                .and_then(|k| self.receipts.get(k))
+                .cloned();
         }
         let taxed = treatment.category.carries_tax();
         let treatments = self.append_subscriptions(&mut lines, treatment)?;
@@ -1327,6 +1349,7 @@ impl<'a> InvoiceBuilder<'a> {
                 .iter()
                 .map(|a| a.kind.sign() * a.exact_amount)
                 .sum::<Decimal>();
+        let (period_from, period_to) = supply_period(self.period, &lines);
         let invoice = Invoice {
             // Everything this builder assembles is a demand. A credit note is
             // made from one, by `Invoice::cancellation`, so that its lines are
@@ -1336,8 +1359,8 @@ impl<'a> InvoiceBuilder<'a> {
             number: self.number,
             issued_on: self.issued_on,
             due_on: self.due_on,
-            period_from: self.period.0,
-            period_to: self.period.1,
+            period_from,
+            period_to,
             seller: self.seller,
             buyer: self.buyer,
             currency,
@@ -1466,11 +1489,7 @@ fn anchor_on_receipts(lines: &mut [InvoiceLine], receipts: Decimal, currency: Cu
 /// tax, and no line on the document that is not a record's. `None` otherwise,
 /// and BT-114 stays zero. See [`Invoice::payable_total`].
 fn receipts_total(records: &[&Cdr], taxed: bool, lines: &[InvoiceLine]) -> Option<Decimal> {
-    if !taxed
-        || lines
-            .iter()
-            .any(|line| !records.iter().any(|cdr| cdr.key == line.cdr))
-    {
+    if !taxed || lines.iter().any(|line| line.cdr.is_none()) {
         return None;
     }
     let mut total = Decimal::ZERO;
@@ -1748,9 +1767,14 @@ fn note_rounding(cdr: &Cdr, lines: &[InvoiceLine], first: usize, crossing: &mut 
     );
 }
 
-/// The currency the first priced record is in.
-fn first_currency(records: &[&Cdr]) -> Result<Currency, BillingError> {
-    let first = records[0];
+/// The first priced record sets the currency. A subscription-only document states its own.
+fn document_currency(
+    records: &[&Cdr],
+    subscription: Option<Currency>,
+) -> Result<Currency, BillingError> {
+    let Some(first) = records.first() else {
+        return subscription.ok_or(BillingError::SubscriptionCurrencyMissing);
+    };
     first
         .cost
         .as_ref()
@@ -2000,10 +2024,11 @@ fn record_lines(
         let exact_net = line.base_quantity * unit_price / base_quantity;
 
         into.push(InvoiceLine {
+            adjusts: None,
             vat_rate: stated_rate(rate, treatment),
             vat_category: treatment.category,
             id: format!("{ordinal}.{position}"),
-            cdr: cdr.key.clone(),
+            cdr: Some(cdr.key.clone()),
             dimension: line.dimension,
             description: format!(
                 "{description} — {}",
@@ -2121,10 +2146,11 @@ fn record_adjustments(
         if into.len() == first {
             *position += 1;
             into.push(InvoiceLine {
+                adjusts: None,
                 vat_rate: stated_rate(rate, treatment),
                 vat_category: treatment.category,
                 id: format!("{ordinal}.{position}"),
-                cdr: cdr.key.clone(),
+                cdr: Some(cdr.key.clone()),
                 dimension: Dimension::Flat,
                 description: format!("{description} — {}", adjustment_name(adjustment.kind)),
                 started_at: supply.from,
@@ -2258,17 +2284,11 @@ fn subscription_line(
 ) -> InvoiceLine {
     let rate = effective_rate(None, service);
     InvoiceLine {
+        adjusts: None,
         vat_rate: stated_rate(rate, service),
         vat_category: service.category,
         id: format!("S.{position}"),
-        // A subscription belongs to no record. The key is the document's own,
-        // and nothing downstream reads it as a session: `records()` lists what
-        // an invoice billed, and a fee that rests on no measurement is not one
-        // of them.
-        cdr: CdrKey {
-            party: PartyId::new("ZZ", "SUB").unwrap_or_else(|_| unreachable!()),
-            id: CdrId::new("subscription").unwrap_or_else(|_| unreachable!()),
-        },
+        cdr: None,
         dimension: Dimension::Flat,
         description: subscription.description.clone(),
         started_at: subscription.from.midnight().assume_utc(),
@@ -2354,6 +2374,20 @@ const fn stated_rate(effective: Decimal, treatment: &TaxTreatment) -> Option<Dec
     } else {
         Some(Decimal::ZERO)
     }
+}
+
+/// BG-14 includes every line's actual service dates, even across a monthly cut
+/// (PEPPOL-EN16931-R110 and R111).
+fn supply_period(
+    period: (time::Date, time::Date),
+    lines: &[InvoiceLine],
+) -> (time::Date, time::Date) {
+    lines.iter().fold(period, |(from, to), line| {
+        (
+            from.min(line.started_at.date()),
+            to.max(line.ended_at.date()),
+        )
+    })
 }
 
 /// The VAT breakdown, from the lines.
@@ -2605,6 +2639,130 @@ mod tests {
             builder = builder.record(cdr);
         }
         builder
+    }
+
+    #[test]
+    fn the_document_supply_period_includes_lines_crossing_the_closing_month() {
+        let invoice = builder(&[])
+            .subscription_currency(Currency::EUR)
+            .subscription(Subscription::new(
+                "Equipment hire",
+                dec("1"),
+                date!(2026 - 05 - 31),
+                date!(2026 - 07 - 01),
+            ))
+            .build()
+            .unwrap()
+            .value;
+        assert_eq!(
+            (invoice.period_from, invoice.period_to),
+            (date!(2026 - 05 - 31), date!(2026 - 07 - 01))
+        );
+        assert_eq!(invoice.lines[0].started_at.date(), invoice.period_from);
+        assert_eq!(invoice.lines[0].ended_at.date(), invoice.period_to);
+    }
+
+    #[test]
+    fn a_line_credit_reverses_only_the_selected_supply_and_serialises_as_one_adjustment() {
+        let energy = record("kept-source", "5", &gross_tariff());
+        let unrelated = record("other-source", "10", &gross_tariff());
+        let mut invoice = builder(&[&energy, &unrelated]).build().unwrap().value;
+        invoice
+            .notes
+            .push(DocumentNote::on_the_document("other driver's private note"));
+        let id = &invoice.lines[0].id;
+        let day = date!(2026 - 08 - 01);
+        let credit = invoice
+            .line_credit("CR-1", day, id, dec("1.23"), Decimal::ZERO, Decimal::ZERO)
+            .unwrap();
+        assert_eq!(credit.taxable_total().amount(), dec("1.23"));
+        assert_eq!(credit.tax_total().amount(), dec("0.23"));
+        assert_eq!(credit.payable_total().amount(), dec("1.46"));
+        assert!(credit.reconciles());
+        assert_eq!(credit.records(), vec![&energy.key]);
+        assert_eq!(credit.lines[0].adjusts.as_deref(), Some(id.as_str()));
+        let entries = crate::postings::postings_for(&credit);
+        assert!(entries.balances());
+        assert!(
+            entries
+                .postings
+                .iter()
+                .any(|p| p.role == crate::Role::EnergyRevenue
+                    && p.side == crate::Side::Debit
+                    && p.amount == dec("1.23"))
+        );
+        let xml = crate::en16931::write(&credit, crate::Specification::Core, crate::Syntax::Ubl)
+            .unwrap()
+            .value;
+        assert!(xml.contains("<CreditNote ") && xml.contains("<cac:BillingReference>"));
+        assert!(
+            xml.contains("kept-source")
+                && !xml.contains("other-source")
+                && !xml.contains("private note")
+        );
+        assert!(xml.contains("unitCode=\"C62\""));
+        assert_eq!(xml.matches("<cac:CreditNoteLine>").count(), 1);
+        assert!(
+            credit
+                .line_credit("CR-2", day, id, Decimal::ONE, Decimal::ZERO, Decimal::ZERO)
+                .is_err()
+        );
+        assert!(
+            invoice
+                .line_credit("R-1", day, id, Decimal::ONE, Decimal::ZERO, Decimal::ZERO)
+                .is_err()
+        );
+        assert!(
+            invoice
+                .line_credit("CR-2", day, id, dec("0.001"), Decimal::ZERO, Decimal::ZERO)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn line_credits_conserve_vat_cents_across_slices_and_other_lines() {
+        let day = date!(2026 - 07 - 01);
+        let fee = |net| Subscription::new("Fee", net, date!(2026 - 06 - 01), date!(2026 - 06 - 30));
+        let invoice = builder(&[])
+            .subscription_currency(Currency::EUR)
+            .subscription(fee(dec("0.06")))
+            .subscription(fee(dec("0.02")))
+            .build()
+            .unwrap()
+            .value;
+        let first = &invoice.lines[0].id;
+        let second = &invoice.lines[1].id;
+        assert_eq!(invoice.tax_total().amount(), dec("0.02"));
+        let credit = |id: &str, amount, prev_net, prev_tax| {
+            invoice.line_credit("CR", day, id, dec(amount), dec(prev_net), dec(prev_tax))
+        };
+        assert_eq!(
+            credit(first, "0.03", "0", "0")
+                .unwrap()
+                .tax_total()
+                .amount(),
+            dec("0.01")
+        );
+        // Another three-cent credit would consume the cent belonging to the other line.
+        assert!(credit(first, "0.03", "0.03", "0.01").is_err());
+        assert_eq!(
+            credit(first, "0.01", "0.03", "0.01")
+                .unwrap()
+                .tax_total()
+                .amount(),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            credit(first, "0.02", "0.04", "0.01")
+                .unwrap()
+                .tax_total()
+                .amount(),
+            Decimal::ZERO
+        );
+        // This line has a pooled VAT cent; a two-cent standalone credit cannot carry it.
+        assert!(credit(second, "0.02", "0", "0").is_err());
+        assert!(credit(first, "0.07", "0", "0").is_err());
+        assert!(credit("missing", "0.01", "0", "0").is_err());
     }
 
     /// A tariff that prices a reservation beside the session it precedes.
@@ -3376,6 +3534,17 @@ mod tests {
         let cdr = record("c-1", "29.500", &tariff); // 14.455 gross, capped to 10.00
         let invoice = builder(&[&cdr]).build().unwrap().value;
 
+        assert!(matches!(
+            invoice.line_credit(
+                "CR-1",
+                invoice.issued_on,
+                &invoice.lines[0].id,
+                Decimal::ONE,
+                Decimal::ZERO,
+                Decimal::ZERO
+            ),
+            Err(BillingError::InvalidLineCredit { .. })
+        ));
         assert_eq!(invoice.lines.len(), 1, "{:?}", invoice.lines);
         assert_eq!(invoice.adjustments.len(), 1);
         let allowance = &invoice.adjustments[0];
@@ -3468,6 +3637,19 @@ mod tests {
         assert_eq!(invoice.lines[0].vat_rate, Some(dec("19")));
         assert_eq!(invoice.lines[1].vat_rate, Some(dec("7")));
 
+        let fee_credit = invoice
+            .line_credit(
+                "CR-FEE",
+                invoice.issued_on,
+                &invoice.lines[1].id,
+                Decimal::ONE,
+                Decimal::ZERO,
+                Decimal::ZERO,
+            )
+            .unwrap();
+        assert_eq!(fee_credit.tax.len(), 1);
+        assert_eq!(fee_credit.tax_total().amount(), dec("0.07"));
+
         let rates: Vec<Option<Decimal>> = invoice.tax.iter().map(|t| t.rate).collect();
         assert_eq!(
             rates,
@@ -3516,6 +3698,21 @@ mod tests {
     fn an_invoice_with_no_records_is_not_an_invoice() {
         let err = builder(&[]).build().unwrap_err();
         assert!(matches!(err, BillingError::NoLines), "{err}");
+    }
+
+    #[test]
+    fn a_subscription_only_invoice_requires_a_currency_and_has_no_meter_reference() {
+        let fee = Subscription::new("Membership", dec("10"), at(0).date(), at(0).date());
+        let missing = builder(&[]).subscription(fee.clone()).build().unwrap_err();
+        assert!(matches!(missing, BillingError::SubscriptionCurrencyMissing));
+        let doc = builder(&[])
+            .subscription(fee)
+            .subscription_currency(Currency::EUR)
+            .build()
+            .unwrap()
+            .value;
+        assert!(doc.records().is_empty());
+        assert_eq!(doc.payable_total().amount(), dec("11.90"));
     }
 
     #[test]

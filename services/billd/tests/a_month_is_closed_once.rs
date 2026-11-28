@@ -1450,7 +1450,7 @@ mod an_invoice_reaches_its_recipient {
     use billd::invoice_page::{self, Invoices};
     use emob_billing::Syntax;
     use emob_service::Actor;
-    use emob_service::estate::{InvoiceContact, InvoiceSpecification, InvoiceSyntax, MandateSeed};
+    use emob_service::estate::{InvoiceContact, InvoiceSpecification, MandateSeed};
     use emob_service::journal::Memory;
     use emob_service::webhook;
     use time::macros::date;
@@ -1497,7 +1497,10 @@ mod an_invoice_reaches_its_recipient {
                 Memory::new(),
             )
             .unwrap()
-            .delivering_to(subscribers.iter().map(|s| (*s).to_owned()).collect()),
+            .delivering_to(
+                subscribers.iter().map(|s| (*s).to_owned()).collect(),
+                billd::daemon::delivery_syntax(estate),
+            ),
         ));
         let partner = estate.partners[0].party.clone();
         for (n, cdr) in super::month("0.49").iter().enumerate() {
@@ -1715,7 +1718,6 @@ mod an_invoice_reaches_its_recipient {
         Dispatcher::new(
             url,
             webhook::Secret::standard(SECRET).unwrap(),
-            InvoiceSyntax::Ubl,
             std::time::Duration::from_secs(5),
         )
         .unwrap()
@@ -1771,6 +1773,180 @@ mod an_invoice_reaches_its_recipient {
         assert!(issued.booked, "accepted, then booked");
     }
 
+    #[tokio::test]
+    async fn retry_preserves_issued_xml_after_restart_with_a_new_syntax() {
+        use emob_service::estate::{EnvRef, InvoiceDelivery, InvoiceSyntax};
+        use emob_service::journal::Journal as _;
+
+        let (url, held) = receiver(vec![(503, ""), (204, "")]).await;
+        let mut first = estate(true);
+        first.billing.delivery = Some(InvoiceDelivery {
+            url: url.clone(),
+            secret_env: EnvRef::new("TEST_SECRET"),
+            syntax: InvoiceSyntax::Cii,
+        });
+        let books = closed(&first);
+        let invoices = Invoices::ephemeral(None).unwrap();
+        let sender = dispatcher(&url);
+        assert_eq!(sender.drain(&books, &invoices).await, 0);
+
+        let mut cut = Vec::new();
+        for record in books.lock().unwrap().journal().records().unwrap() {
+            serde_json::to_writer(&mut cut, &record).unwrap();
+            cut.push(b'\n');
+        }
+        drop(books);
+        let restored = Books::open(
+            "emob",
+            billd::Numbering::series("R", 2026),
+            billd::ChartOfAccounts::new(),
+            Memory::from_cold_cut(&cut).unwrap(),
+        )
+        .unwrap()
+        .delivering_to(Vec::new(), Syntax::Ubl);
+        let restored = Arc::new(Mutex::new(restored));
+        assert_eq!(sender.drain(&restored, &invoices).await, 1);
+        let sent = held.seen.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[0], sent[1],
+            "a new default applies only to newly issued documents"
+        );
+        let envelope: serde_json::Value = serde_json::from_str(&sent[1].1).unwrap();
+        assert!(
+            envelope["data"]
+                .as_str()
+                .unwrap()
+                .contains("CrossIndustryInvoice")
+        );
+    }
+
+    async fn recover_invoice(
+        http: std::net::SocketAddr,
+        number: &str,
+        subscriber: &str,
+        key: &webhook::Secret,
+    ) -> reqwest::Response {
+        let body = serde_json::to_string(&serde_json::json!({
+            "purpose": "recover", "subscriber": subscriber, "type": "de.emob.invoice.issued", "id": number,
+        })).unwrap();
+        let now = time::OffsetDateTime::now_utc();
+        let proof = webhook::Delivery::new("invoice-query", now, body.as_bytes());
+        reqwest::Client::new()
+            .post(format!("http://{http}/v1/subscriber-events/recover"))
+            .header("content-type", "application/json")
+            .header(webhook::ID_HEADER, proof.id)
+            .header(webhook::TIMESTAMP_HEADER, proof.timestamp.to_string())
+            .header(
+                webhook::SIGNATURE_HEADER,
+                webhook::sign(&proof, key).unwrap(),
+            )
+            .body(body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    // platform-interfaces/SR-030, platform-interfaces/SR-031
+    #[tokio::test]
+    async fn a_subscriber_recovers_the_issued_invoice_after_restart() {
+        use emob_service::estate::{EnvRef, InvoiceDelivery, InvoiceSyntax, Subscriber};
+        let scratch = super::Scratch::new("invoice-recovery");
+        let data_key = emob_service::vault::DataKey::generate();
+        let signing_key = emob_service::head::SigningKey::generate();
+        let env: emob_service::estate::Env = Arc::new(move |name| match name {
+            "EMOB_WEBHOOK_SECRET" => Some(SECRET.to_owned()),
+            "ERP_SECRET" => Some("whsec_ZXJwLXJlY2VpdmVy".to_owned()),
+            "ORIGINAL" => Some("whsec_b3JpZ2luYWw=".to_owned()),
+            "LATER" => Some("whsec_bGF0ZXI=".to_owned()),
+            "EMOB_OPERATOR_TOKEN" => Some("test-operator-token".to_owned()),
+            "EMOB_DESK_READ_TOKEN" => Some("test-reader-token".to_owned()),
+            billd::daemon::DATA_KEY => Some(data_key.clone()),
+            "BILLD_SIGNING_KEY" => Some(signing_key.clone()),
+            _ => None,
+        });
+        let options = |estate| billd::daemon::Options {
+            http: "127.0.0.1:0".parse().unwrap(),
+            journal: scratch.0.clone(),
+            estate,
+            env: Arc::clone(&env),
+            shutdown: emob_service::Shutdown::new(),
+            identity: emob_service::Identity::new("billd", "test"),
+        };
+        let pending = serve(axum::Router::new().route(
+            "/in",
+            axum::routing::post(|| async { axum::http::StatusCode::SERVICE_UNAVAILABLE }),
+        ))
+        .await;
+        let url = format!("{pending}/in");
+        let subscriber = |name: &str, key: &str| Subscriber {
+            name: name.to_owned(),
+            secret_env: EnvRef::new(key),
+            types: vec!["de.emob.invoice.issued".to_owned()],
+            url: url.clone(),
+        };
+        let mut config = estate(true);
+        config.billing.delivery = Some(InvoiceDelivery {
+            url: url.clone(),
+            secret_env: EnvRef::new("ERP_SECRET"),
+            syntax: InvoiceSyntax::Cii,
+        });
+        config.subscribers = vec![subscriber("warehouse", "ORIGINAL")];
+        let original = billd::daemon::run(options(config.clone())).await.unwrap();
+        let partner = config.partners[0].party.clone();
+        for cdr in super::month("0.49").iter() {
+            original
+                .books
+                .lock()
+                .unwrap()
+                .receive(&Actor::service("csmsd"), cdr.clone(), partner.clone(), None)
+                .unwrap();
+        }
+        close_what_is_due(&original.books, &config, date!(2026 - 07 - 01));
+        let (number, expected) = {
+            let books = original.books.lock().unwrap();
+            let d = books.state().documents().next().unwrap();
+            let xml = invoice_page::file(d, Syntax::Cii).unwrap();
+            assert!(xml.contains("CrossIndustryInvoice"));
+            (
+                d.invoice.number.clone(),
+                billd::deliver::event(
+                    &d.invoice.number,
+                    &xml,
+                    original.invoices.url(&d.invoice.number).as_deref(),
+                )
+                .unwrap(),
+            )
+        };
+        original.kill().await;
+
+        config.billing.delivery.as_mut().unwrap().syntax = InvoiceSyntax::Ubl;
+        config.subscribers.push(subscriber("late-reader", "LATER"));
+        let restored = billd::daemon::run(options(config)).await.unwrap();
+        let original_key = webhook::Secret::standard("whsec_b3JpZ2luYWw=").unwrap();
+        let response = recover_invoice(restored.http, &number, "warehouse", &original_key).await;
+        assert_eq!(response.status(), 200);
+        let headers = response.headers().clone();
+        let body = response.bytes().await.unwrap();
+        assert_eq!(
+            webhook::receive(
+                &headers,
+                &body,
+                &[original_key],
+                time::OffsetDateTime::now_utc(),
+                time::Duration::minutes(5)
+            )
+            .unwrap(),
+            number
+        );
+        assert_eq!(body.as_ref(), expected.as_bytes());
+        let later_key = webhook::Secret::standard("whsec_bGF0ZXI=").unwrap();
+        let denied = recover_invoice(restored.http, &number, "late-reader", &later_key).await;
+        assert_eq!(denied.status(), 404);
+        assert!(denied.bytes().await.unwrap().is_empty());
+        restored.kill().await;
+    }
+
     fn subscribers(url: &str) -> billd::deliver::Subscribers {
         billd::deliver::Subscribers::new(
             vec![emob_service::estate::Subscription {
@@ -1779,7 +1955,6 @@ mod an_invoice_reaches_its_recipient {
                 secret: webhook::Secret::standard(SECRET).unwrap(),
                 types: vec!["de.emob.invoice.*".to_owned()],
             }],
-            InvoiceSyntax::Ubl,
             std::time::Duration::from_secs(5),
         )
         .unwrap()
@@ -1883,9 +2058,11 @@ mod an_invoice_reaches_its_recipient {
         let refused = Dispatcher::new(
             "http://erp.example/in",
             webhook::Secret::standard(SECRET).unwrap(),
-            InvoiceSyntax::Ubl,
             std::time::Duration::from_secs(5),
         );
         assert!(refused.is_err());
     }
 }
+
+#[path = "retail/invoice.rs"]
+mod retail_invoice;

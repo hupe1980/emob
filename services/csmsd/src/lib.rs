@@ -42,6 +42,7 @@ use emob_core::{Direction, PartyId};
 use emob_eichrecht::{Evidence, KeyRegistry};
 use emob_ocpp::{Transaction, TransactionEvent};
 use emob_service::Actor;
+use emob_service::events::cdr::RetailAuthorization;
 use emob_service::journal::{Folded, Journal, JournalError};
 use ocpp_kit::csms::events::{Observed, WarningKind, observe_v16, observe_v21, observe_v201};
 use ocpp_kit::csms::ledger::{Ingested, Ledger};
@@ -198,6 +199,9 @@ pub struct CdrDelivery<'a> {
     pub token: &'a Presented,
     /// The signed OCMF records it rests on, as the station sent them.
     pub signed: Vec<String>,
+    /// Present only on the private billing delivery for a native agreement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retail: Option<&'a RetailAuthorization>,
     /// The station that ran it.
     pub station: &'a str,
     /// The point and its place, from the registry (spec 021).
@@ -1212,7 +1216,9 @@ impl<J: Journal> Csmsd<J> {
         };
         if let Some(scope) = &answer.retail {
             let current_point = self.registered(identity).map(|station| station.evse);
-            if current_point.as_ref() != Some(&scope.point)
+            if !token.uid.eq_ignore_ascii_case(uid)
+                || !scope.authorization.is_well_formed()
+                || current_point.as_ref() != Some(&scope.point)
                 || point != current_point
                 || token.issuer != scope.provider
                 || self
@@ -1223,7 +1229,7 @@ impl<J: Journal> Csmsd<J> {
                         self.now(),
                     )
                     .as_ref()
-                    != Some(&scope.reference)
+                    != Some(&scope.authorization.reference)
             {
                 return Answer::invalid("the driver's agreed offer is unavailable at this point");
             }
@@ -1239,6 +1245,15 @@ impl<J: Journal> Csmsd<J> {
         transaction: Option<String>,
         uid: &str,
     ) -> Result<Answer, CallError> {
+        let key = transaction
+            .as_ref()
+            .map(|tx| (identity.to_string(), tx.clone()));
+        if let Some(first) = key
+            .as_ref()
+            .and_then(|key| prior_authorization(lock(&self.folded).state(), key, uid))
+        {
+            return Ok(first);
+        }
         let answer = self.held(
             by,
             identity,
@@ -1248,15 +1263,27 @@ impl<J: Journal> Csmsd<J> {
         if answer.status != Status::Accepted {
             tracing::info!(station = %identity, status = ?answer.status, reason = %answer.reason, "a token was turned away");
         }
-        self.record(
-            by,
-            Event::Authorized {
-                at: self.now(),
-                station: identity.to_string(),
-                transaction,
-                answer: answer.clone(),
-            },
-        )?;
+        let mut folded = lock(&self.folded);
+        // Another request can finish while this request waits on the provider.
+        if let Some(first) = key
+            .as_ref()
+            .and_then(|key| prior_authorization(folded.state(), key, uid))
+        {
+            return Ok(first);
+        }
+        folded
+            .record(
+                by,
+                Event::Authorized {
+                    at: self.now(),
+                    station: identity.to_string(),
+                    transaction,
+                    answer: answer.clone(),
+                },
+            )
+            .map_err(|error| {
+                CallError::internal(format!("could not record authorization: {error}"))
+            })?;
         Ok(answer)
     }
 
@@ -1321,7 +1348,7 @@ impl<J: Journal> Csmsd<J> {
         let key: Key = (identity.to_string(), transaction_id.to_owned());
         // A start the provider refused opened no transaction, and nothing the
         // station sends under its id afterwards is billed.
-        if lock(&self.folded).state().refused.contains(&key) {
+        if lock(&self.folded).state().refused.contains_key(&key) {
             return Ok(());
         }
 
@@ -1577,11 +1604,12 @@ impl<J: Journal> Csmsd<J> {
 
         // Owed to the invoice and to the partner — when somebody pays, and
         // only the first time the record is stored.
-        let deliveries = match (&acceptance, self.token_for(&key)) {
-            (Acceptance::Stored, Some(token)) => {
+        let deliveries = match (&acceptance, self.payer_for(&key)) {
+            (Acceptance::Stored, Some((token, retail))) => {
                 let data = CdrDelivery {
                     cdr: &cdr,
                     token: &token,
+                    retail: None,
                     signed: assembled
                         .records
                         .iter()
@@ -1603,19 +1631,16 @@ impl<J: Journal> Csmsd<J> {
                 )
                 .about(format!("cdr/{record_key}"))
                 .at(self.now());
-                match serde_json::to_string(&event) {
-                    Ok(body) => Target::ESTATE
-                        .into_iter()
-                        .chain(self.subscribers.iter().cloned().map(Target::Subscriber))
-                        .map(|to| Delivery {
-                            id: record_key.clone(),
-                            to,
-                            body: body.clone(),
-                        })
-                        .collect(),
+                match encode_deliveries(event, retail.as_ref(), &self.subscribers) {
+                    Ok(deliveries) => deliveries,
                     Err(error) => {
-                        tracing::error!(%error, key = %record_key, "a delivery could not be encoded");
-                        Vec::new()
+                        facts.push(refuse(
+                            vec![format!(
+                                "could not encode the settled record for delivery: {error}"
+                            )],
+                            Vec::new(),
+                        ));
+                        return facts;
                     }
                 }
             }
@@ -1640,13 +1665,19 @@ impl<J: Journal> Csmsd<J> {
         facts
     }
 
-    /// The token a transaction started under.
-    fn token_for(&self, key: &Key) -> Option<Presented> {
-        lock(&self.folded)
-            .state()
-            .authorized
-            .get(key)
-            .and_then(|answer| answer.token.clone())
+    /// Read both identities from the transaction's recorded authorization.
+    fn payer_for(&self, key: &Key) -> Option<(Presented, Option<RetailAuthorization>)> {
+        let folded = lock(&self.folded);
+        let answer = folded.state().authorized.get(key)?;
+        Some((
+            answer.token.clone()?,
+            answer
+                .retail
+                .as_ref()
+                .map(|scope| &scope.authorization)
+                .filter(|binding| binding.is_well_formed())
+                .cloned(),
+        ))
     }
 
     /// Compare every claimed key against the registry, and report a mismatch.
@@ -1779,10 +1810,48 @@ impl<J: Journal> Csmsd<J> {
     /// handed out — a counter a restart rewound would give the next station an
     /// id an earlier transaction already carries.
     fn allocate_1_6_transaction(&self, by: &Actor) -> Result<i32, CallError> {
-        let id = lock(&self.folded).state().next_1_6;
-        self.record(by, Event::Allocated { id })?;
+        let mut folded = lock(&self.folded);
+        let id = folded.state().next_1_6;
+        if id == i32::MAX {
+            return Err(CallError::internal("the transaction ID range is exhausted"));
+        }
+        folded
+            .record(by, Event::Allocated { id })
+            .map_err(|error| {
+                CallError::internal(format!("could not allocate a transaction ID: {error}"))
+            })?;
         Ok(id)
     }
+}
+
+/// Serialize private retail attribution only for the estate's billing receiver.
+fn encode_deliveries<'a>(
+    mut event: CloudEvent<CdrDelivery<'a>>,
+    retail: Option<&'a RetailAuthorization>,
+    subscribers: &[String],
+) -> Result<Vec<Delivery>, serde_json::Error> {
+    event.data.retail = None;
+    let common = serde_json::to_string(&event)?;
+    let billing = if retail.is_some() {
+        event.data.retail = retail;
+        Some(serde_json::to_string(&event)?)
+    } else {
+        None
+    };
+    Ok(Target::ESTATE
+        .into_iter()
+        .chain(subscribers.iter().cloned().map(Target::Subscriber))
+        .map(|to| Delivery {
+            id: event.id.clone(),
+            body: if to == Target::Billd {
+                billing.as_ref().unwrap_or(&common)
+            } else {
+                &common
+            }
+            .clone(),
+            to,
+        })
+        .collect())
 }
 
 /// Everything an accepted record was identified by, for [`outcome_of`].
@@ -2051,15 +2120,21 @@ impl<J: Journal> Csmsd<J> {
             v2_0_1::CsRequest::TransactionEvent(event) => {
                 let transaction = event.transaction_info.transaction_id.clone();
                 let asked = match &event.id_token {
-                    Some(token) if !self.answered(ctx.identity(), &transaction) => Some(
-                        self.authorize(
-                            by,
-                            ctx.identity(),
-                            Some(transaction.clone()),
-                            &token.id_token,
+                    Some(token)
+                        if event.event_type == v2_0_1::TransactionEventEnum::Started
+                            || (event.event_type == v2_0_1::TransactionEventEnum::Updated
+                                && event.trigger_reason == v2_0_1::TriggerReason::Authorized) =>
+                    {
+                        Some(
+                            self.authorize(
+                                by,
+                                ctx.identity(),
+                                Some(transaction.clone()),
+                                &token.id_token,
+                            )
+                            .await?,
                         )
-                        .await?,
-                    ),
+                    }
                     _ => None,
                 };
                 let observed = observe_v201(&typed);
@@ -2149,15 +2224,21 @@ impl<J: Journal> Csmsd<J> {
             v2_1::CsRequest::TransactionEvent(event) => {
                 let transaction = event.transaction_info.transaction_id.clone();
                 let asked = match &event.id_token {
-                    Some(token) if !self.answered(ctx.identity(), &transaction) => Some(
-                        self.authorize(
-                            by,
-                            ctx.identity(),
-                            Some(transaction.clone()),
-                            &token.id_token,
+                    Some(token)
+                        if event.event_type == v2_1::TransactionEventEnum::Started
+                            || (event.event_type == v2_1::TransactionEventEnum::Updated
+                                && event.trigger_reason == v2_1::TriggerReason::Authorized) =>
+                    {
+                        Some(
+                            self.authorize(
+                                by,
+                                ctx.identity(),
+                                Some(transaction.clone()),
+                                &token.id_token,
+                            )
+                            .await?,
                         )
-                        .await?,
-                    ),
+                    }
                     _ => None,
                 };
                 let observed = observe_v21(&typed);
@@ -2173,13 +2254,27 @@ impl<J: Journal> Csmsd<J> {
             other => answer_v2_1(ctx, other, self.now()),
         }
     }
+}
 
-    /// Whether the provider has already answered for this transaction.
-    fn answered(&self, identity: &Identity, transaction: &str) -> bool {
-        let key = (identity.to_string(), transaction.to_owned());
-        let folded = lock(&self.folded);
-        folded.state().authorized.contains_key(&key) || folded.state().refused.contains(&key)
+/// A protocol retry uses the first decision this station recorded for the transaction.
+fn prior_authorization(state: &State, key: &Key, uid: &str) -> Option<Answer> {
+    if let Some(first) = state.authorized.get(key) {
+        let same = first.token.as_ref().is_some_and(|token| {
+            token.uid == uid || (first.retail.is_some() && token.uid.eq_ignore_ascii_case(uid))
+        });
+        return Some(if same {
+            first.clone()
+        } else {
+            Answer::invalid("the transaction already has a charging identity")
+        });
     }
+    if let Some(position) = state.refused.get(key) {
+        return Some(state.answers[*position].1.clone());
+    }
+    state
+        .investigations
+        .has_decision(key)
+        .then(|| Answer::invalid("the transaction is already closed"))
 }
 
 /// A key as hex, for an operator comparing it against a cabinet.

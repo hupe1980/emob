@@ -355,6 +355,31 @@ fn event_errors(text: &str) -> PyResult<Vec<String>> {
         .collect())
 }
 
+/// Whether a provider response matches the schema referenced by the public OpenAPI document.
+#[pyfunction]
+fn valid_authorize_answer(text: &str) -> PyResult<bool> {
+    matches_schema(
+        text,
+        include_str!("../../schemas/openapi/authorize-answer.json"),
+    )
+}
+
+/// Validate the public seller document, including the decimal wire representations.
+#[pyfunction]
+fn valid_driver_tariff(text: &str) -> PyResult<bool> {
+    matches_schema(text, include_str!("../../schemas/driver-tariff.v1.json"))
+}
+
+fn matches_schema(text: &str, schema: &str) -> PyResult<bool> {
+    let Ok(answer) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Ok(false);
+    };
+    let schema: serde_json::Value = serde_json::from_str(schema).map_err(refused)?;
+    Ok(jsonschema::validator_for(&schema)
+        .map_err(refused)?
+        .is_valid(&answer))
+}
+
 // ── DATEX II ────────────────────────────────────────────────────────────────
 
 /// A DATEX II AFIR file held to the Mobilithek profile, as `emob check-feed`
@@ -399,6 +424,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(emaid, m)?)?;
     m.add_function(wrap_pyfunction!(event_types, m)?)?;
     m.add_function(wrap_pyfunction!(event_errors, m)?)?;
+    m.add_function(wrap_pyfunction!(valid_authorize_answer, m)?)?;
+    m.add_function(wrap_pyfunction!(valid_driver_tariff, m)?)?;
     m.add_function(wrap_pyfunction!(feed_report, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

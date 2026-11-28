@@ -60,16 +60,18 @@ struct Card {
     visual: String,
     token_type: TokenType,
     blocked: bool,
+    retired: bool,
     history: Vec<crate::actions::ResultView>,
 }
 
 impl Card {
-    fn of(reference: &TokenRef, token: &Token) -> Self {
+    fn of(reference: &TokenRef, token: &Token, retired: bool) -> Self {
         Self {
             reference: reference.clone(),
             visual: label(reference),
             token_type: token.token_type,
             blocked: token.blocked,
+            retired,
             history: Vec::new(),
         }
     }
@@ -149,7 +151,8 @@ impl Empd {
                     .token(&reference)
                     .filter(|_| query.after.as_ref().is_none_or(|after| reference > *after))
                     .map(|token| {
-                        let mut card = Card::of(&reference, token);
+                        let mut card =
+                            Card::of(&reference, token, self.changes.retired(&reference));
                         if let Some(history) = self.card_history.get(&reference) {
                             card.history = history
                                 .iter()
@@ -173,7 +176,7 @@ impl Empd {
             let mut refs = group.range(range);
             for reference in refs.by_ref().take(PAGE) {
                 if let Some(token) = self.token(reference) {
-                    items.push(Card::of(reference, token));
+                    items.push(Card::of(reference, token, self.changes.retired(reference)));
                 }
             }
             if refs.next().is_some() {

@@ -1,14 +1,15 @@
 """Conformance: a service that replaces one of emob's shows it keeps the contract.
 
-Two suites, run against a base URL:
+HTTP suites, run against the selected service:
 
 - `receiver(url, secret)` — an ERP, a billing system or any `[[subscribers]]`
   entry taking emob's events in place of `billd`;
 - `authorize(url, token)` — an eMSP backend answering `csmsd` in place of
-  `empd`.
+  `empd`;
+- `tariff(url, tariff_id)` — current and versioned public seller documents.
 
 Every check is a line: `✓` held, `✗` broken with what was seen and why it
-matters. The reference daemons pass both.
+matters. HTTP probes use the configured endpoint directly.
 """
 
 from __future__ import annotations
@@ -16,13 +17,14 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from . import webhooks
+from . import _native, webhooks
 from .core import Meter, event_problems
 
 #: How long `csmsd` waits for an authorisation by default
@@ -67,14 +69,29 @@ class Report:
             raise AssertionError(str(self))
 
 
+class _DirectEndpoint(urllib.request.HTTPRedirectHandler):
+    """A probe holds the configured endpoint to its contract and credentials."""
+
+    def redirect_request(self, *_args):
+        return None
+
+
 def _post(url: str, body: bytes, headers: dict[str, str], timeout: float = 10.0):
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    return _fetch(request, timeout)
+
+
+def _fetch(request: urllib.request.Request, timeout: float):
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as answer:
-            return answer.status, answer.read(), time.monotonic() - started
+        with urllib.request.build_opener(_DirectEndpoint).open(request, timeout=timeout) as answer:
+            data = answer.read((1 << 20) + 1)
+            if len(data) > 1 << 20:
+                raise OSError("response exceeds 1 MiB")
+            return answer.status, data, time.monotonic() - started
     except urllib.error.HTTPError as answer:
-        return answer.code, answer.read(), time.monotonic() - started
+        with answer:
+            return answer.code, b"", time.monotonic() - started
 
 
 # ── receiver ──────────────────────────────────────────────────────────────────
@@ -85,18 +102,18 @@ def sample_cdr_event(meter: Meter | None = None) -> dict:
     so a receiver never books it — its records really signed by a meter."""
     meter = meter or Meter(seed=1)
     records = meter.charge("22.5", start="2026-12-01T10:00:00+01:00", minutes=45)
-    key = f"cdr/DE*EMT/TEST-{uuid.uuid4().hex[:8]}"
+    key = f"test-{uuid.uuid4()}"
     return {
         "specversion": "1.0",
-        "id": f"test-{uuid.uuid4()}",
+        "id": key,
         "source": "urn:emob:csmsd",
         "type": "de.emob.cdr.issued",
-        "subject": key,
+        "subject": f"cdr/{key}",
         "time": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "datacontenttype": "application/json",
         "emobtest": True,
         "data": {
-            "cdr": {"key": key.removeprefix("cdr/"), "energy": "22.5"},
+            "cdr": {"key": key, "energy": "22.5"},
             "token": {"uid": "EMOBTEST", "contract_id": "DE-EMT-C00000001-0"},
             "signed": records,
             "station": "EMOBTEST-1",
@@ -110,10 +127,32 @@ def sample_cdr_event(meter: Meter | None = None) -> dict:
     }
 
 
-def receiver(url: str, secret: str, *, budget: float = 10.0) -> Report:
+def sample_invoice_event() -> dict:
+    """Signed probe payload for an invoice receiver. Never submit it for payment."""
+    key = f"test-{uuid.uuid4()}"
+    return {
+        "specversion": "1.0",
+        "id": key,
+        "source": "urn:emob:billd",
+        "type": "de.emob.invoice.issued",
+        "subject": f"invoice/{key}",
+        "datacontenttype": "application/xml",
+        "emobtest": True,
+        "data": "<Invoice><!-- emobtest sample --></Invoice>",
+    }
+
+
+def receiver(
+    url: str, secret: str, *, budget: float = 10.0, event_type: str = "de.emob.cdr.issued"
+) -> Report:
     """Hold a receiver of emob's events to Standard Webhooks and idempotence."""
     report = Report("receiver", url)
-    event = sample_cdr_event()
+    if event_type == "de.emob.cdr.issued":
+        event = sample_cdr_event()
+    elif event_type == "de.emob.invoice.issued":
+        event = sample_invoice_event()
+    else:
+        raise ValueError(f"unknown receiver event type: {event_type}")
     problems = event_problems(event)
     if problems:  # the kit's own sample is a test bug, not the receiver's
         raise ValueError("emobtest's sample does not match the schema: " + "; ".join(problems))
@@ -126,11 +165,11 @@ def receiver(url: str, secret: str, *, budget: float = 10.0) -> Report:
         except OSError as error:
             report.check(name, False, f"no answer: {error}")
             return
-        ok = 200 <= status < 300
+        ok = 200 <= status < 300 if want_2xx else status == 401
         report.check(
             name,
-            ok == want_2xx,
-            f"{status} in {took * 1000:.0f} ms" + ("" if ok == want_2xx else f" — {why}"),
+            ok,
+            f"{status} in {took * 1000:.0f} ms" + ("" if ok else f" — {why}"),
         )
 
     attempt(
@@ -157,7 +196,7 @@ def receiver(url: str, secret: str, *, budget: float = 10.0) -> Report:
         "anyone could post a record that bills",
     )
     stale_at = int(time.time()) - 15 * 60
-    stale = webhooks.sign(secret, body, msg_id=f"stale-{uuid.uuid4()}", timestamp=stale_at)
+    stale = webhooks.sign(secret, body, msg_id=event["id"], timestamp=stale_at)
     attempt(
         "a delivery fifteen minutes old is refused",
         stale,
@@ -201,7 +240,8 @@ def authorize(
 
     def answer_of(body: bytes) -> dict:
         try:
-            return json.loads(body)
+            text = body.decode("utf-8")
+            return json.loads(text) if _native.valid_authorize_answer(text) else {}
         except ValueError:
             return {}
 
@@ -229,17 +269,49 @@ def authorize(
         ]:
             if uid is None:
                 continue
-            status, body, _ = ask(uid, token)
+            status, body, took = ask(uid, token)
             answer = answer_of(body)
-            good = status == 200 and answer.get("status") == want
+            good = (
+                status == 200 and took <= AUTHORIZE_BUDGET_SECONDS and answer.get("status") == want
+            )
             if want == "Accepted":
-                good = good and bool((answer.get("token") or {}).get("contract_id"))
+                good = good and answer["token"]["uid"] == uid
             else:
                 good = good and bool(answer.get("reason"))
-            report.check(name, good, f"{status} {answer.get('status')!r}")
+            report.check(name, good, f"{status} {answer.get('status')!r} in {took * 1000:.0f} ms")
     except OSError as error:
         report.check("the backend answers", False, str(error))
     return report
 
 
-SUITES: dict[str, Callable[..., Report]] = {"receiver": receiver, "authorize": authorize}
+def tariff(url: str, tariff_id: str) -> Report:
+    """Check a seller's current and immutable version lookup against one tariff."""
+    report = Report("tariff", url)
+    base = url.rstrip("/") + "/v1/driver-tariffs/" + urllib.parse.quote(tariff_id, safe="")
+    try:
+        status, body, _ = _fetch(urllib.request.Request(base), 10.0)
+        text = body.decode("utf-8")
+        current = json.loads(text) if status == 200 and _native.valid_driver_tariff(text) else {}
+        valid = current.get("id") == tariff_id
+        report.check("current tariff matches driver-tariff.v1 and its id", valid, f"HTTP {status}")
+        if valid:
+            pinned = base + "/" + current["version"]
+            status, body, _ = _fetch(urllib.request.Request(pinned), 10.0)
+            report.check(
+                "its version returns the same document",
+                status == 200 and json.loads(body) == current,
+                f"HTTP {status}",
+            )
+        missing = base + "/" + uuid.uuid4().hex + uuid.uuid4().hex
+        status, _, _ = _fetch(urllib.request.Request(missing), 10.0)
+        report.check("an unknown version is 404", status == 404, f"HTTP {status}")
+    except (OSError, ValueError) as error:
+        report.check("the seller receives a readable tariff document", False, str(error))
+    return report
+
+
+SUITES: dict[str, Callable[..., Report]] = {
+    "receiver": receiver,
+    "authorize": authorize,
+    "tariff": tariff,
+}

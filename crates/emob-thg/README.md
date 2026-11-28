@@ -2,7 +2,7 @@
 
 The German greenhouse-gas quota (*THG-Quote*) for EV charging as executable law: eligibility, quantities and notifications under the 38. BImSchV, built only from energy a calibrated meter signed.
 
-[![crates.io](https://img.shields.io/crates/v/emob-thg.svg)](https://crates.io/crates/emob-thg) [![docs.rs](https://img.shields.io/docsrs/emob-thg)](https://docs.rs/emob-thg) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-thg.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-thg.svg)](https://crates.io/crates/emob-thg) [![docs.rs](https://img.shields.io/docsrs/emob-thg)](https://docs.rs/emob-thg) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-thg.svg)](#license)
 
 Every kilowatt-hour a public charge point delivers is worth money twice: once
 from the driver, and once from a fuel supplier that must cut the emissions of

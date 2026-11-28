@@ -10,7 +10,7 @@ vulnerability is [SECURITY.md](SECURITY.md).
 
 | | |
 |---|---|
-| **Scope** | The daemons — `csmsd`, `roamd`, `empd`, `billd`, `poid`, `tarifd`, `sited`, `agentd` and `deskd` (the operator page) — configured from one `estate.toml`, their sealed journals and the deliveries between them; the public driver receipt; the domain crates whose decisions they inherit (OCMF verification, the key registry, CDRs, tariffs, invoices, Plug & Charge); the stations, roaming partners and vehicles they face; and the build and release supply chain |
+| **Scope** | The daemons — `csmsd`, `roamd`, `empd`, `billd`, `accountingd`, `poid`, `tarifd`, `sited`, `agentd`, `deskd` (the operator page) and `portald` (the customer portal) — configured from one `estate.toml`, their sealed journals and the deliveries between them; the public driver receipt; the domain crates whose decisions they inherit (OCMF verification, the key registry, CDRs, tariffs, invoices, Plug & Charge); the stations, roaming partners and vehicles they face; and the build and release supply chain |
 | **Not yet in scope** | Surfaces that do not exist in code: `sited`'s EEBUS/SHIP socket, a Peppol access point (invoices leave through a signed webhook to the operator's system), the OICP mutual-TLS client, and Plug & Charge inside a service. Each is modelled when it is wired |
 | **Method** | STRIDE per element, plus the OWASP Top 10 for LLM Applications and for Agentic Applications, through the [ThreatSpec](https://github.com/hupe1980/spec-kit-threatspec) Spec Kit extension (profiles `stride`, `llm`, `agent`). emob runs no language model: every LLM technique carries a recorded not-applicable disposition |
 | **Machine-readable model** | An Open Threat Model 0.2.0 baseline plus one model per feature that extends it. This file is their public summary and follows them |
@@ -24,6 +24,29 @@ tests or review, one is accepted with an expiry (plain HTTP between daemons on
 one host, until the daemons leave one host) and one is verified only on the
 first tagged release (release provenance). Newer features have separate verification records.
 
+## Native agreements and retail invoices
+
+| Boundary | Control |
+|---|---|
+| Station → billing | The charging authorization fixes the native agreement and offer. A later stop credential cannot reassign a charge. Only the signed delivery to the billing receiver carries that attribution. |
+| Staff → provider | Named writers review and confirm replacement or termination. The provider retains the retired card, effective time and original agreement across replay. |
+| Staff → billing | The issuer checks the operator grant, account, UTC month and review digest. Unresolved price or fee evidence holds issuance. The archived invoice and any credit and replacement have separate numbers. |
+| Document retrieval | Readers supply both account and month. A number alone grants no access. Billing seals the retained documents and the desk uses private POST bodies and non-cacheable responses. |
+
+## Retail receivables
+
+A named finance grant is required at the operator desk, the receivables owner and billing’s document feed. The shared desk reader cannot import statements. Accounting validates the issuer and append position before using an invoice or credit. Statement references are unique within the issuer and source across all payer accounts.
+
+Withdrawal case evidence is available to named writers. Customers see a status under an existing agreement grant. The issuer checks the approved case, the dual finance/write grant and document attribution before issuing a withdrawal credit. Mixed invoices retain their original balances. [Standalone verification](emobtest/tests/test_withdrawal.py)
+
+Private same-origin forms carry account and payment references. The owner binds confirmation to the named actor, cash available and invoice balance, and journals each financial effect once. An independently witnessed signed head and a separate data key protect the cash journal. Recovery compares a replayed state digest without printing statement contents. The trusted single-host estate contains the finance services and their configured credential verifiers. [Owner](services/accountingd) · [External acceptance](emobtest/tests/test_receivables.py)
+
+## Customer sessions and documents
+
+`empd` keeps customer sessions in memory and journals access changes under the named operator. Agreement access exposes its receipts and archived terms. Account access exposes its invoices, credits and replacements. Billing resolves the live scope before each page or download. Deprovisioning an identity, revoking a grant or restarting the provider closes the corresponding access path. A previously downloaded file or bearer receipt can still be shared.
+
+`portald` holds no ledger or service credential. Its forms check their configured origin, and authenticated pages disable caching. Deploy on a dedicated HTTPS host because browser cookies have no port boundary. Customer and staff origins on loopback are for a trusted local estate. [Portal boundary tests](services/portald/tests/customer_views.rs) · [Standalone isolation and replay](emobtest/tests/test_customer_portal.py)
+
 ## Operator investigations, public pricing, publication and recovery
 
 | Boundary | Control and evidence |
@@ -31,6 +54,8 @@ first tagged release (release provenance). Newer features have separate verifica
 | Browser to operator desk and provider | Authenticated body-only search keeps the card UID, printed lookup value and eMAID out of links and shared caches. The provider resolves the card with a keyed index. The standalone test follows the browser form and audits the desk and provider logs. |
 | Stock enrolment and online charging | The provider resolves the sleeve code from local inventory, checks the writer and current offer, then journals the exact terms and card assignment together. The CSMS checks the native scope against the registered point and current price on charging and reservation. An agreement reference requires operator authentication to reopen. |
 | Named operator to provider card controls | Both browser POSTs check the origin. The provider checks the writer grant and binds each five-minute review to its actor, card and revision. Durable confirmation records the reason and survives provider restart. A read-only token handles background queries. The daemons that validate estate credentials remain trusted. |
+| Fleet invoice line and cash | A finance writer confirms a credit bound to the original line, VAT budget and reviewed state. Retries return the original document. Each payer balance read rechecks the current grant and discloses only totals. |
+| Portal grants and recovery | Each subject’s random key lives in current custody outside the operational journals. A named privacy reviewer can destroy it and invalidate sessions. The signed erasure witness detects a custody rollback against a current journal. Restoring both an old journal and old custody can resurrect access. Staff retail XML retrieval requires finance authority. |
 | Station-local transaction ID to public receipt | The decision position identifies the investigation. Reuse preserves an already-issued receipt and its recorded verdict. The desk accepts only an owner receipt path with the expected capability format. |
 | Operator declarations to compliance sweep | A dated public-point finding identifies its source and declaration basis. Free public charging retains its data duties. Treating that finding as proof of network delivery would require independent receiver evidence. |
 | CSMS registry to national access point | Public visibility is explicit. The CSMS exposes a bounded projection with a revision, source times and connector facts. The publisher commits only direct receiver acknowledgements, separately for each offer. A missing report leaves availability unknown. See the subscriber integration test in `services/poid/tests/the_table_reaches_the_access_point.rs`. |
@@ -82,7 +107,7 @@ flowchart LR
 | `csmsd` → `empd` | Is this token allowed to charge now? | A service token compared in constant time; `csmsd` fails closed when `empd` does not answer |
 | Daemon → daemon | Closed sessions to `billd` and `roamd` | A journalled outbox; Standard Webhooks signatures with a freshness window; a body cap before the signature is checked; the CDR id as idempotency key, so a replay or retry settles once. Plain HTTP on one host is an accepted risk |
 | `csmsd`, `billd` → subscribers | `de.emob.cdr.issued` (card UID, station) and `de.emob.invoice.issued` | Named only in the estate file; `https`, or `http` on loopback; a `whsec_` secret per subscriber; type patterns checked against the catalogue at start; every answer journalled and none of them accepts, books or consigns |
-| Partner ↔ `roamd` | Credentials handshake, CDR push and receipt | Tokens held as keyed digests or sealed; a pushed record authorised as the credential's party; the handshake reach-back allowed only to `https` hosts outside private ranges |
+| Partner ↔ `roamd` | Credentials handshake, CDR push and receipt | Tokens held as keyed digests or sealed; each original and receipt checked against the platform’s current CPO role and the estate’s approved owners; the handshake reach-back allowed only to `https` hosts outside private ranges |
 | Driver → receipt | `/r/{token}`, the transparency file, the verifier | A 128-bit token stored only as its hash; the same 404 for any unknown path; no name, card or contract on the page; a strict content security policy; verification runs on the driver's device |
 | Operator → `deskd` | The estate's refused sessions, stations, invoices, consignments | Operator token over HTTP Basic, loopback by default; named grants permit reads or explicitly authorize mutations; no card UID or contract id on the page; bounded lists; a daemon that is down is named rather than shown as calm |
 | Daemon → journal volume | Every fact a service decided | Each journal sealed under the daemon's data key (AES-256-GCM) and hash-chained over the sealed bytes; a foreign key refuses to start (or, for `empd`, erases the UIDs); an edited record stops the daemon. A truncated tail is invisible without an outside witness |
@@ -117,6 +142,7 @@ flowchart LR
 | A journal copy is a working partner credential | high | **Control** | the end-to-end test searches the journals on disk for tokens and UIDs |
 | Card UIDs and bank data at rest cannot be erased | medium | **Control** | sealed journals; `empd` crypto-erasure; redacted `Debug` for mandates |
 | The handshake is pointed at an internal address | medium | **Control** | https and resolved-address checks before the handshake; `ocpi-kit`'s resolver refuses an internal address on every connection and redirect hop, so a name that rebinds is refused too. `reach_back_allow` is for development estates |
+| Two clerks apply the same available credit or a payer reads another invoice’s offset | high | **Control** | A keyed review binds both document revisions, the amount and the named finance writer. One durable event affects both balances. Each payer read checks its current document grant. [Accounting tests](services/accountingd/src/tests.rs) · [Portal tests](services/portald/tests/customer_views.rs) |
 | An invoice number is issued twice or a correction booked out of order | high | **Control** | `services/billd/tests/a_month_is_closed_once.rs` |
 | The displayed price differs from the billed one | high | **Control** | `crates/emob-tariff/src/display.rs::the_displayed_price_is_the_price_that_rates` |
 
@@ -179,3 +205,10 @@ boundary gets a feature threat model that extends the baseline:
 `/speckit-threatspec-model` after specify and plan, `/speckit-threatspec-check`
 after tasks and before implement, `/speckit-threatspec-converge` after
 implement. Its `SR-###` requirements carry evidence in tests that name them.
+
+
+## Subscriber recovery and local verification
+
+A recovery request crosses from a subscriber into the issuing daemon. Both the subscription in the current estate and the recipient on the original event must authorize it. The daemon authenticates the exact bounded request and issues a fresh signature on a private, non-cacheable response. Subscriber identities have distinct keys. Reusing a name for a different organization would transfer that name’s historical access.
+
+The CLI’s MCP verifier runs over local stdio and accepts inline evidence and an independently trusted public key. Input limits apply to both the transport frame and tool arguments. The tool has no estate credentials, filesystem lookup, network call or state-changing operation. The release exercises it in a network-disabled container.

@@ -5,10 +5,7 @@ name: emob
 # Merge shared variables into each environment explicitly because YAML merges are shallow.
 x-env: &env
   EMOB_JOURNAL_DIR: /var/lib/emob
-  # The one a container cannot do without. Every daemon defaults to loopback —
-  # which is right on a laptop and reachable by nothing inside a container — so
-  # the estate-wide address is set here rather than in nine places. A daemon's
-  # own `<DAEMON>_HTTP_BIND` still wins over it.
+  # Containers listen on their internal interface. Host port mappings set public reachability.
   EMOB_HTTP_BIND: 0.0.0.0:8080
   RUST_LOG: ${RUST_LOG:-info}
   # The estate: one file, mounted read-only, every daemon reading its sections.
@@ -19,6 +16,8 @@ x-env: &env
   EMOB_WEBHOOK_SECRET: ${EMOB_WEBHOOK_SECRET:?set EMOB_WEBHOOK_SECRET (whsec_<base64>) — the daemons sign what they hand each other}
   EMOB_SERVICE_TOKEN: ${EMOB_SERVICE_TOKEN:?set EMOB_SERVICE_TOKEN — csmsd presents it to empd}
   EMOB_DESK_READ_TOKEN: ${EMOB_DESK_READ_TOKEN:?set the desk background read credential}
+  EMOB_FINANCE_TOKEN: ${EMOB_FINANCE_TOKEN:-}
+  EMOB_PRIVACY_TOKEN: ${EMOB_PRIVACY_TOKEN:-}
   EMOB_OPERATOR_TOKEN: ${EMOB_OPERATOR_TOKEN:?set the named operator write credential}
   EMOB_PARTNER_DE_MSP_TOKEN_A: ${EMOB_PARTNER_DE_MSP_TOKEN_A:?set EMOB_PARTNER_DE_MSP_TOKEN_A — the Token A the demo partner registers with}
 
@@ -89,12 +88,14 @@ services:
       # SR-047). No default: a default key is one every reader of this
       # repository holds — and destroying this one erases every UID empd ever
       # journalled, which is the point.
+      EMPD_CUSTODY_DIR: /var/lib/emob-custody
+      EMOB_PORTAL_MIKA: ${EMOB_PORTAL_MIKA:-}
       EMPD_DATA_KEY: ${EMPD_DATA_KEY:?set EMPD_DATA_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
       # The Ed25519 seed empd signs its journal head with after every append
       # (spec 008); a journal shorter than its signed head does not start.
       EMPD_SIGNING_KEY: ${EMPD_SIGNING_KEY:?set EMPD_SIGNING_KEY — 32 random bytes, base64; `just dev-keys` prints a set}
     ports: ["127.0.0.1:8083:8080"]
-    volumes: [empd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
+    volumes: [empd:/var/lib/emob, empd-custody:/var/lib/emob-custody, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
   poid:
     <<: *daemon
@@ -138,6 +139,33 @@ services:
     ports: ["127.0.0.1:8088:8080"]
     volumes: [deskd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
 
+  accountingd:
+    restart: unless-stopped
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-accountingd:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: accountingd } }
+    environment:
+      EMOB_ESTATE: /etc/emob/estate.toml
+      EMOB_HTTP_BIND: 0.0.0.0:8080
+      EMOB_JOURNAL_DIR: /var/lib/emob
+      EMOB_OPERATOR_TOKEN: ${EMOB_OPERATOR_TOKEN:?set the named operator credential}
+      EMOB_DESK_READ_TOKEN: ${EMOB_DESK_READ_TOKEN:?set the desk reader credential}
+      EMOB_PRIVACY_TOKEN: ${EMOB_PRIVACY_TOKEN:-}
+      EMOB_FINANCE_TOKEN: ${EMOB_FINANCE_TOKEN:-}
+      ACCOUNTINGD_DATA_KEY: ${ACCOUNTINGD_DATA_KEY:?set the receivables data key}
+      ACCOUNTINGD_SIGNING_KEY: ${ACCOUNTINGD_SIGNING_KEY:?set the receivables signing key}
+    ports: ["127.0.0.1:8090:8080"]
+    volumes: [accountingd:/var/lib/emob, ./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
+
+  portald:
+    restart: unless-stopped
+    image: ${REGISTRY:-ghcr.io/hupe1980}/emob-portald:${VERSION:-dev}
+    build: { context: ., args: { DAEMON: portald } }
+    environment:
+      EMOB_HTTP_BIND: 0.0.0.0:8080
+      EMOB_ESTATE: /etc/emob/estate.toml
+    ports: ["127.0.0.1:8089:8080"]
+    volumes: [./deploy/estate.compose.toml:/etc/emob/estate.toml:ro]
+
   # The one that is not deployed with the others. `sited` runs **at a site**,
   # beside the connection point, because `[LPC-912]` puts a site into its
   # failsafe when the Energy Guard goes quiet and a controller behind a broken
@@ -157,8 +185,10 @@ services:
 volumes:
   csmsd: {}
   roamd: {}
+  accountingd: {}
   billd: {}
   empd: {}
+  empd-custody: {}
   poid: {}
   tarifd: {}
   agentd: {}

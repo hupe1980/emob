@@ -2,7 +2,7 @@
 
 Carries one canonical charge detail record onto OCPI 2.3.0, OCPI 2.2.1 and OICP 2.3 — with an explicit account of what each translation cost — and routes it to the partner the contract identifier names.
 
-[![crates.io](https://img.shields.io/crates/v/emob-roam.svg)](https://crates.io/crates/emob-roam) [![docs.rs](https://img.shields.io/docsrs/emob-roam)](https://docs.rs/emob-roam) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-roam.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-roam.svg)](https://crates.io/crates/emob-roam) [![docs.rs](https://img.shields.io/docsrs/emob-roam)](https://docs.rs/emob-roam) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-roam.svg)](#license)
 
 Roaming means a CDR (charge detail record) is sent to another company, on
 another protocol version, which pays against it. Translation is where roaming

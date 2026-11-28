@@ -2,6 +2,8 @@
 
 The tariff publication daemon: decides when a tariff version must reach the driver (OCPP 2.1), roaming partners (OCPI 2.3.0) and the national access point (DATEX II), and reports any price in force that somebody was never shown.
 
+A seller can import the current driver tariff and retrieve its exact fingerprint using the [integration OpenAPI document](../../schemas/openapi.json).
+
 ## Status
 
 | | |

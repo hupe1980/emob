@@ -145,6 +145,8 @@ pub struct Partner {
     pub party: PartyId,
     /// What it does.
     pub roles: Vec<Role>,
+    /// CPO parties the operator permits this platform to represent for CDR intake.
+    pub cdr_owners: Vec<PartyId>,
     /// Which OCPI version it speaks.
     pub version: OcpiVersion,
     /// Which roaming protocol it is reached on.
@@ -188,6 +190,7 @@ impl Partner {
     pub fn emsp(party: PartyId) -> Self {
         Self {
             party,
+            cdr_owners: Vec::new(),
             roles: vec![Role::Emsp],
             version: OcpiVersion::V2_3_0,
             wire: Wire::Ocpi,
@@ -202,6 +205,7 @@ impl Partner {
     pub fn hub(party: PartyId) -> Self {
         Self {
             party,
+            cdr_owners: Vec::new(),
             roles: vec![Role::Hub],
             version: OcpiVersion::V2_3_0,
             wire: Wire::Ocpi,
@@ -209,6 +213,13 @@ impl Partner {
             issues: Vec::new(),
             requires_signed_data: false,
         }
+    }
+
+    /// Whether the bilateral agreement grants this party and business role.
+    #[must_use]
+    pub fn permits_role(&self, party: &PartyId, role: Role) -> bool {
+        (&self.party == party && self.roles.contains(&role))
+            || (role == Role::Cpo && self.cdr_owners.contains(party))
     }
 
     /// Speak an older version to this partner.

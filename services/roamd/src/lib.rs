@@ -462,7 +462,7 @@ pub struct Roamd {
     outbox: BTreeMap<CdrKey, emob_roam::ocpi::cdr::Outbound>,
     /// The records partners have sent, for the idempotency a receiver owes.
     inbound: CdrLedger,
-    /// …and the **documents** they arrived as, keyed by the id the partner gave.
+    /// …and the original documents, indexed by owner and case-folded OCPI CDR id.
     ///
     /// `[OCPI 2.3.0 §mod_cdrs]` makes a Receiver return a `Location` so the
     /// sender can `GET` back what it sent, and what it sent is the partner's
@@ -470,7 +470,7 @@ pub struct Roamd {
     /// answer a question about their arithmetic with a claim about ours — which
     /// is D324's rule pointed inward: an outbox holds the message, and so does
     /// an inbox.
-    received: BTreeMap<String, Box<ocpi_kit::v2_3_0::Cdr>>,
+    received: BTreeMap<CdrKey, Box<ocpi_kit::v2_3_0::Cdr>>,
     /// What every partner's document is asked about its signed metering data.
     signed_data: SignedDataPolicy,
     /// The platforms registered with this node, and the bootstrap tokens it has
@@ -831,15 +831,10 @@ impl Roamd {
         self.outbox.insert(key.clone(), document);
     }
 
-    /// Keep a partner's document as it arrived.
-    pub(crate) fn hold_received(&mut self, id: String, document: Box<ocpi_kit::v2_3_0::Cdr>) {
-        self.received.insert(id, document);
-    }
-
-    /// A partner's document, as it arrived.
+    /// The complete accepted OCPI document under its owner and receiver identity.
     #[must_use]
-    pub fn document_received(&self, cdr_id: &str) -> Option<&ocpi_kit::v2_3_0::Cdr> {
-        self.received.get(cdr_id).map(Box::as_ref)
+    pub fn document_received(&self, key: &CdrKey) -> Option<&ocpi_kit::v2_3_0::Cdr> {
+        self.received.get(key).map(Box::as_ref)
     }
 
     /// The platforms registered with this node.
@@ -956,6 +951,23 @@ impl Roamd {
         evidence: Option<emob_cdr::EvidenceRef>,
         at: time::OffsetDateTime,
     ) -> Verdict {
+        let verdict = self.evaluate_received(from, document, evidence, at);
+        if let Verdict::Accepted(inbound) = &verdict {
+            self.apply(crate::node::Event::Received {
+                cdr: Box::new(inbound.cdr.clone()),
+                document: Box::new(document.clone()),
+            });
+        }
+        verdict
+    }
+
+    fn evaluate_received(
+        &self,
+        from: &emob_service::Principal,
+        document: &ocpi_kit::v2_3_0::Cdr,
+        evidence: Option<emob_cdr::EvidenceRef>,
+        at: time::OffsetDateTime,
+    ) -> Verdict {
         // 0. The credential. Read off the document's own party rather than off
         //    the credential, because the question is whose records this is being
         //    pushed *for*: a hub pushes on behalf of the operators it brokers,
@@ -973,6 +985,14 @@ impl Roamd {
         };
         if let Err(reasons) = self.may(from, caps::CDR_WRITE, &owner, document.id.as_str(), at) {
             return Verdict::Unauthorised { reasons };
+        }
+
+        // The kit decodes CiString leniently. Every accepted id must fit the
+        // receiver's documented receipt format and printable ASCII alphabet.
+        if let Err(error) = ocpi_kit::types::Validate::validate(&document.id) {
+            return Verdict::Rejected {
+                reasons: vec![error.to_string()],
+            };
         }
 
         // 1. The document, asked OCPI's own questions — **before** any
@@ -1007,9 +1027,16 @@ impl Roamd {
         // …and only then the ledger, which is what makes a retry idempotent and
         // a restatement a conflict rather than an overwrite.
         let key = inbound.cdr.key.clone();
-        match self.inbound.accept(inbound.cdr.clone()) {
+        let receipt = crate::inbound::receipt_key(&key);
+        if let Some(original) = self.received.get(&receipt) {
+            return if original.as_ref() == document {
+                Verdict::Duplicate { key }
+            } else {
+                Verdict::Conflicted { key }
+            };
+        }
+        match self.inbound.classify(&inbound.cdr) {
             emob_cdr::Acceptance::Stored => Verdict::Accepted(Box::new(inbound)),
-            emob_cdr::Acceptance::Duplicate => Verdict::Duplicate { key },
             // …and everything else. `Acceptance` is `#[non_exhaustive]`, so an
             // outcome a later release adds arrives here — and it must not be
             // read as "stored", because a receiver that guessed would settle a

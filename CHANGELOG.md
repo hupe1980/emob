@@ -5,10 +5,32 @@ All notable changes to this workspace. The format follows
 [Semantic Versioning](https://semver.org/) — before 1.0 the minor version is the
 breaking one. Every publishable crate carries the one workspace version.
 
-Changes are hard cuts: nothing is deprecated first, and a release that removes or
-renames something says so under **Removed** or **Changed** instead.
-
 ## [Unreleased]
+
+## [0.8.0] - 2026-11-28
+
+### Added
+
+- Customers can sign in to a German or English portal to check charging receipts, download retail invoices and inspect balances. Staff can grant, revoke or erase access and review a private driver’s withdrawal.
+- Billing staff can close a driver or fleet month, issue UBL, correct a single line or replace an invoice after a late charge. Finance staff can import payment statements, allocate cash and transfer available credit between a payer’s invoices.
+- The operator desk has role-aware workspace navigation, a shortcut to waiting tasks and keyboard-accessible fleet map areas. Station investigations and payer balances preserve the originating search or history page.
+- The release includes OpenAPI contracts, event schemas and interface probe results. Subscribers can recover authorized events by ID. The CLI exposes a local MCP meter verifier.
+
+### Changed
+
+- The minimum Rust version is 1.96. Site control uses EEBUS 0.14, distinguishes a zero-watt limit from a release, expires timed limits and detects heartbeat loss at 120 seconds.
+- OCPI registrations record both estate roles. Roaming CDR receipt URLs include the owner and require a current CPO grant. Out-of-order credential registration returns HTTP 405.
+- Signed invoice deliveries retain the original XML syntax on retry and recovery. Each event subscriber requires a distinct signing secret.
+
+### Fixed
+
+- Invoices use the actual supply dates across month boundaries. A different stop credential cannot change the charging identity used for billing.
+- Late observations respect daily tally retention. An unknown payer is distinguishable from an account with a zero balance.
+
+### Upgrading
+
+- Provision a fresh estate for the changed billing, provider custody and roaming registration formats. Preserve the previous estate and its keys for historical records.
+- Set `EMPD_CUSTODY_DIR`, configure accounting signing and data keys, and use recovery cut format 2. Configure `[billing.retail_seller]`, `[[retail_accounts]]` and inbound `partners[].cdr_owners`. Native enrolment requires a payer. Staff downloading retail XML need a finance grant.
 
 ## [0.7.0] - 2026-11-25
 
@@ -472,7 +494,8 @@ could not.
 First release: fifteen crates from the signed meter value to the ledger posting,
 and eight daemons.
 
-[Unreleased]: https://github.com/hupe1980/emob/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/hupe1980/emob/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/hupe1980/emob/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/hupe1980/emob/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/hupe1980/emob/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hupe1980/emob/compare/v0.5.0...v0.6.0

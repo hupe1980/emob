@@ -2,7 +2,7 @@
 
 The shared shell for emob's daemons — HTTP health and readiness endpoints, graceful shutdown, the one estate file, JSON logs with request ids, a hash-chained journal sealed under a data key whose every record names its actor and whose end is signed for a witness, the server-rendered pages — plus an OCPI-party authority model, the CloudEvents catalogue and Standard Webhooks signing.
 
-[![crates.io](https://img.shields.io/crates/v/emob-service.svg)](https://crates.io/crates/emob-service) [![docs.rs](https://img.shields.io/docsrs/emob-service)](https://docs.rs/emob-service) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-service.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-service.svg)](https://crates.io/crates/emob-service) [![docs.rs](https://img.shields.io/docsrs/emob-service)](https://docs.rs/emob-service) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-service.svg)](#license)
 
 Every emob domain crate is sans-I/O: it takes instants and keys as arguments and
 opens no socket, so a two-year-old dispute can be replayed exactly. This crate
@@ -154,21 +154,25 @@ that each admit a type in the catalogue.
 
 ### Webhook signatures
 
-[Standard Webhooks](https://www.standardwebhooks.com): HMAC-SHA256 over
-`{id}.{timestamp}.{payload}`, base64, in a header that can carry several
-signatures so a secret rotates without a flag day.
+The official Rust SDK signs each UTF-8 CloudEvent. Each attempt carries the
+original event id and a fresh Unix timestamp. Receivers use the event id for
+deduplication and the timestamp for freshness. [Standard Webhooks specification](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md)
 
 ```rust
-let header = webhook::sign_with(&delivery, [&outgoing, &incoming]);
-webhook::verify(&delivery, &[outgoing], &header);   // the old end still accepts
+let header = webhook::sign_with(&delivery, [&outgoing, &incoming])?;
+webhook::verify(&delivery, &[outgoing], &header);
 ```
 
-Signing reads no clock — `Delivery::new` takes the instant — so a delivery
-replayed from an outbox is byte-identical and receivers can de-duplicate on it.
-The freshness tolerance is the caller's. A secret's encoding is always stated:
-`webhook::Secret::standard("whsec_…")` decodes base64, `webhook::Secret::raw`
-takes the bytes as written. Guessing would silently turn `"mysecret"` (valid
-base64) into a different key than the sender used.
+For incoming HTTP use `webhook::receive` with the receiver's clock and
+freshness tolerance. `webhook::Secret::standard` takes a prefixed Base64 key
+and `webhook::Secret::raw` takes raw bytes. Both reject an empty key.
+
+Enable `webhook-client` to send signed CloudEvents with
+`webhook::transport::Client`. CDR and invoice delivery use the same status
+rules. A 2xx acknowledges delivery. A 401, 408, 429 or 5xx leaves it pending.
+Other 4xx responses record a refusal. The client contacts the configured
+destination directly, leaves redirects pending, and reads at most 8 KiB
+of response content for the receipt or diagnostic.
 
 ### The estate: one file for every daemon
 

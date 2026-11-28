@@ -88,8 +88,8 @@ pub struct Registration {
     /// push a record to it, which is rule 1 pointed at a fetch rather than at a
     /// field (D330).
     pub endpoints: Vec<Endpoint>,
-    /// The parties the platform speaks for, as `country` and `party_id`.
-    pub parties: Vec<(String, String)>,
+    /// The approved business roles exchanged in this registration.
+    pub roles: Vec<(PartyId, emob_core::Role)>,
 }
 
 impl Registration {
@@ -140,9 +140,13 @@ impl Registration {
                 );
             }
         }
-        for (country, party) in &self.parties {
-            peer = peer
-                .party(PartyRef::new(country.clone(), party.clone()).map_err(PeerError::Party)?);
+        for (party, role) in &self.roles {
+            if *role != emob_core::Role::Emsp {
+                continue;
+            }
+            peer = peer.party(
+                PartyRef::new(party.country_code(), party.party_id()).map_err(PeerError::Party)?,
+            );
         }
         Ok(peer.build())
     }
@@ -156,9 +160,9 @@ impl Registration {
             // the whole handshake for nothing.
             role: TokenRole::C,
             parties: self
-                .parties
+                .roles
                 .iter()
-                .filter_map(|(country, party)| PartyRef::new(country.clone(), party.clone()).ok())
+                .filter_map(|(party, _)| PartyRef::new(party.country_code(), party.party_id()).ok())
                 .collect(),
             version: self
                 .version
@@ -170,10 +174,7 @@ impl Registration {
     /// Whether this platform speaks for a party.
     #[must_use]
     pub fn speaks_for(&self, party: &PartyId) -> bool {
-        self.parties.iter().any(|(country, id)| {
-            country.eq_ignore_ascii_case(party.country_code())
-                && id.eq_ignore_ascii_case(party.party_id())
-        })
+        self.roles.iter().any(|(held, _)| held == party)
     }
 }
 
@@ -295,6 +296,9 @@ impl<J: emob_service::journal::Journal> TokenStore for Registry<J> {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if node.is_halted() {
+            return None;
+        }
         let key = node.key();
         let presented = token.expose_secret().as_bytes();
         let peers = node.state().peers();

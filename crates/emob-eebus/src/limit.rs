@@ -26,16 +26,15 @@
 //! leaves `isLimitActive` out, and reading that as `false` turns a curtailment
 //! into a release back to full power.
 
-use eebus::model::{CmdData, LoadControlLimitId, ScaledNumber};
+use eebus::model::{CmdData, LoadControlLimitData, LoadControlLimitId, ScaledNumber};
 use rust_decimal::Decimal;
 
 use crate::EebusError;
 
 /// A limit a grid operator wrote, in this workspace's own arithmetic.
 ///
-/// The same three facts `eebus::usecases::limitation::LimitWrite` carries, with
-/// the value as an exact decimal instead of a `f64`. See [`crate`] for the line
-/// this crate draws and why it falls there.
+/// Carries the activation, exact watts and validity from a resolved LPC write.
+/// Watts are a decimal so the allocator can use them directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LimitWrite {
@@ -90,28 +89,40 @@ pub struct LimitWrite {
 /// ```
 #[must_use]
 pub fn watts_of(value: &ScaledNumber) -> Option<Decimal> {
-    let number = value.number?.get();
-    let scale = value.scale.map_or(0, eebus::model::Scale::get);
-    shift(Decimal::from(number), scale)
+    let canonical = value.canonical();
+    let mantissa = i128::from(canonical.number?.get());
+    let scale = i32::from(canonical.scale.map_or(0, eebus::model::Scale::get));
+    if scale <= 0 {
+        return Decimal::try_from_i128_with_scale(mantissa, scale.unsigned_abs()).ok();
+    }
+    let factor = 10_i128.checked_pow(scale.unsigned_abs())?;
+    Decimal::try_from_i128_with_scale(mantissa.checked_mul(factor)?, 0).ok()
 }
 
-/// `mantissa × 10^scale`, by moving the decimal point rather than multiplying.
-///
-/// `Decimal` panics on overflow rather than saturating, and a `scale` is a
-/// signed 16-bit number a peer chooses — so `i64::MAX` at scale 300 is one
-/// well-formed message away. Every step is checked, and a value that runs out
-/// of room is [`None`] rather than a process this workspace no longer has.
-fn shift(mantissa: Decimal, scale: i16) -> Option<Decimal> {
-    const TEN: Decimal = Decimal::from_parts(10, 0, 0, false, 0);
-    let mut value = mantissa;
-    for _ in 0..scale.unsigned_abs() {
-        value = if scale.is_positive() {
-            value.checked_mul(TEN)?
-        } else {
-            value.checked_div(TEN)?
-        };
+pub(crate) fn entry_for(
+    resolved: &CmdData,
+    limit_id: LoadControlLimitId,
+) -> Result<&LoadControlLimitData, EebusError> {
+    let CmdData::LoadControlLimitListData(list) = resolved else {
+        return Err(EebusError::NotALimitWrite {
+            detail: "the payload is not a LoadControlLimitListData".to_owned(),
+        });
+    };
+    let mut matching = list
+        .load_control_limit_data
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| entry.limit_id == Some(limit_id));
+    let entry = matching.next().ok_or_else(|| EebusError::NotALimitWrite {
+        detail: format!("no entry for limit id {limit_id:?}"),
+    })?;
+    if matching.next().is_some() {
+        return Err(EebusError::UnreadableLimit {
+            detail: format!("multiple entries for limit id {limit_id:?}"),
+        });
     }
-    Some(value)
+    Ok(entry)
 }
 
 /// Read a limit write out of the payload a peer wrote.
@@ -124,40 +135,27 @@ fn shift(mantissa: Decimal, scale: i16) -> Option<Decimal> {
 ///
 /// [`EebusError::NotALimitWrite`] where the payload is not a
 /// `LoadControlLimitListData` or carries no entry for `limit_id`;
-/// [`EebusError::UnreadableLimit`] where it carries one whose value no decimal
-/// can hold; and [`EebusError::NegativeLimit`] for one below zero, which
+/// [`EebusError::UnreadableLimit`] for duplicate entries, missing activation or
+/// value or invalid validity. [`EebusError::OutsidePrecision`] identifies unrepresentable watts. [`EebusError::NegativeLimit`]
+/// identifies a consumption limit below zero, which
 /// `[LPC-001]` forbids and which would otherwise reach an allocation as a
 /// ceiling below the floor every point has.
 pub fn read_limit_write(
     resolved: &CmdData,
     limit_id: LoadControlLimitId,
 ) -> Result<LimitWrite, EebusError> {
-    let CmdData::LoadControlLimitListData(list) = resolved else {
-        return Err(EebusError::NotALimitWrite {
-            detail: "the payload is not a LoadControlLimitListData".to_owned(),
-        });
-    };
-    let entry = list
-        .load_control_limit_data
-        .as_ref()
-        .and_then(|entries| entries.iter().find(|e| e.limit_id == Some(limit_id)))
-        .ok_or_else(|| EebusError::NotALimitWrite {
-            detail: format!("no entry for limit id {limit_id:?}"),
+    let entry = entry_for(resolved, limit_id)?;
+    let is_active = entry
+        .is_limit_active
+        .ok_or_else(|| EebusError::UnreadableLimit {
+            detail: "the resolved limit has no activation flag".to_owned(),
         })?;
-
-    // An absent `value` is zero watts, which is what the kit's own reader does
-    // and what the schema's optionality means here: a write that activates a
-    // limit and states no value is a limit of nothing.
-    let watts = match entry.value.as_ref() {
-        Some(value) => watts_of(value).ok_or_else(|| EebusError::UnreadableLimit {
-            detail: "a scaled number no decimal can hold".to_owned(),
-        })?,
-        None => Decimal::ZERO,
-    };
-    if watts.is_sign_negative() {
-        return Err(EebusError::NegativeLimit { watts });
-    }
-
+    let value = entry
+        .value
+        .as_ref()
+        .ok_or_else(|| EebusError::UnreadableLimit {
+            detail: "the resolved limit has no value".to_owned(),
+        })?;
     // `[LPC §3.1.8.2]`: *"Durations used within this Use Case SHALL be presented
     // as relative times. The same holds for the `endTime` Element used for the
     // duration of validity ([LPC-004])."* An `endTime` that is present and is
@@ -179,8 +177,24 @@ pub fn read_limit_write(
         None => None,
     };
 
+    let number = value.number.ok_or_else(|| EebusError::UnreadableLimit {
+        detail: "missing scaled number".to_owned(),
+    })?;
+    let watts = watts_of(value).ok_or_else(|| {
+        if number.get() < 0 {
+            EebusError::UnreadableLimit {
+                detail: "negative consumption limit".to_owned(),
+            }
+        } else {
+            EebusError::OutsidePrecision
+        }
+    })?;
+    if watts.is_sign_negative() {
+        return Err(EebusError::NegativeLimit { watts });
+    }
+
     Ok(LimitWrite {
-        is_active: entry.is_limit_active.unwrap_or(false),
+        is_active,
         watts,
         valid_for,
     })
@@ -230,15 +244,18 @@ mod tests {
         // enough. Refusing produces a NACK; substituting a number nobody sent
         // would apply a limit nobody asked for.
         assert_eq!(watts_of(&ScaledNumber::new(i64::MAX, 300)), None);
+        assert_eq!(watts_of(&ScaledNumber::new(1, -29)), None);
+        assert_eq!(watts_of(&ScaledNumber::new(15, -29)), None);
+        assert_eq!(
+            watts_of(&ScaledNumber::new(10, -29)),
+            Some(Decimal::from_parts(1, 0, 0, false, 28))
+        );
         let refused = read_limit_write(
             &limit(Some(ScaledNumber::new(i64::MAX, 300)), true),
             eebus::usecases::limitation::LIMIT_ID,
         )
         .expect_err("no decimal holds it");
-        assert!(
-            matches!(refused, EebusError::UnreadableLimit { .. }),
-            "{refused}"
-        );
+        assert!(matches!(refused, EebusError::OutsidePrecision), "{refused}");
     }
 
     #[test]
@@ -259,11 +276,47 @@ mod tests {
     }
 
     #[test]
-    fn a_write_with_no_value_is_a_limit_of_nothing_rather_than_an_error() {
-        let write = read_limit_write(&limit(None, true), eebus::usecases::limitation::LIMIT_ID)
-            .expect("an active limit stating no value");
-        assert_eq!(write.watts, Decimal::ZERO);
-        assert!(write.is_active);
+    fn resolved_writes_require_one_value_and_activation_and_accept_explicit_zero() {
+        use eebus::usecases::limitation::{self, Direction, LIMIT_ID};
+
+        let zero = ScaledNumber::new(0, 0);
+        for active in [true, false] {
+            let data = limit(Some(zero), active);
+            let reference = limitation::read_limit_write(&data, LIMIT_ID, Direction::Consumption)
+                .expect("explicit zero is a complete write");
+            let actual = read_limit_write(&data, LIMIT_ID).unwrap();
+            assert_eq!(actual.is_active, reference.is_active);
+            assert_eq!(actual.watts, Decimal::ZERO);
+        }
+
+        let complete = LoadControlLimitData {
+            limit_id: Some(LIMIT_ID),
+            is_limit_active: Some(true),
+            value: Some(zero),
+            ..Default::default()
+        };
+        for entries in [
+            vec![LoadControlLimitData {
+                value: None,
+                ..complete.clone()
+            }],
+            vec![LoadControlLimitData {
+                is_limit_active: None,
+                ..complete.clone()
+            }],
+            vec![complete.clone(), complete],
+        ] {
+            let data = CmdData::LoadControlLimitListData(LoadControlLimitListData {
+                load_control_limit_data: Some(entries),
+            });
+            assert!(
+                limitation::read_limit_write(&data, LIMIT_ID, Direction::Consumption).is_none()
+            );
+            assert!(matches!(
+                read_limit_write(&data, LIMIT_ID),
+                Err(EebusError::UnreadableLimit { .. })
+            ));
+        }
     }
 
     #[test]

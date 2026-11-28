@@ -61,6 +61,8 @@ with et.Station("wss://csms.example/ocpp", "CP-1", password="…", ocpp="2.0.1")
     cp.charge(card="04A1B2C3D4E5F6", fault="tampered")   # …and what a CSMS must refuse
 ```
 
+Pass `started_at` to `cp.charge` to place the signed readings in a specific invoice period. Supply an RFC 3339 timestamp or a timezone-aware Python datetime.
+
 `fault="tampered"` changes the closing reading after it was signed,
 `"dropped"` signs one and never sends it. Register `cp.meter_key` with the
 CSMS first, or it is right to refuse to bill. `cp.reservations` lists what
@@ -83,11 +85,15 @@ did arrive. `et.assert_event(…)` holds any event to its published schema.
 
 ## Conformance
 
-A service that takes the place of one of emob's runs its suite:
+The [integration guide](@/docs/interfaces.md) includes the downloadable OpenAPI contract, the MCP verifier and signed historical event recovery.
+
+The [integration OpenAPI document](https://hupe1980.github.io/emob/schemas/openapi.json) describes the service operations and outbound webhooks. Run the suite for the port your system provides.
 
 ```console
-emobtest conformance receiver https://erp.example/emob --secret whsec_…
-emobtest conformance authorize https://emsp.example --token … --known 04A1B2 --blocked 04FFEE
+emobtest conformance receiver https://erp.example/emob --secret-env EMOB_WEBHOOK_SECRET
+emobtest conformance receiver https://erp.example/invoices --event-type de.emob.invoice.issued --secret-env EMOB_INVOICE_DELIVERY_SECRET
+emobtest conformance tariff https://prices.example --tariff-id ad-hoc
+emobtest conformance authorize https://emsp.example --token-env EMOB_SERVICE_TOKEN --known 04A1B2 --blocked 04FFEE
 ```
 
 - **`receiver`** — for an ERP, a billing system or any `[[subscribers]]` entry
@@ -100,7 +106,7 @@ emobtest conformance authorize https://emsp.example --token … --known 04A1B2 -
   `Accepted` naming its contract, a blocked one `Blocked`, and every answer
   within the two seconds `csmsd` waits.
 
-emob's own `billd` and `empd` pass both. In pytest:
+The tariff suite fetches the current public price, checks the published JSON Schema, follows its fingerprint and requires the same document. In pytest:
 `conformance.receiver(url, secret).assert_passed()`.
 
 ## On the command line

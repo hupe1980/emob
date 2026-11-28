@@ -109,8 +109,11 @@ fn no_demand_and_no_market_plan_can_put_a_site_above_its_ceiling() {
         // All five of `[LPC §2.3.2]`'s states, because the ceiling has to hold
         // under every one of them — including the two that state no ceiling for
         // a reason and the one whose ceiling is a communications fault.
-        let limit = match rng.between(0, 5) {
+        let limit = match rng.between(0, 6) {
             0 => GridLimit::Uncontrolled,
+            4 => GridLimit::Initializing {
+                limit_kw: dec(rng.between(0, 600), 1),
+            },
             1 => GridLimit::InContact { heard_at: at },
             2 => GridLimit::Autonomous { silent_since: at },
             3 => GridLimit::failsafe(dec(rng.between(0, 600), 1), at),
@@ -204,7 +207,10 @@ fn no_demand_and_no_market_plan_can_put_a_site_above_its_ceiling() {
                     .any(|note| matches!(note, SmartNote::RunningAutonomously { .. })),
                 "case {case}: a site its grid operator can no longer reach looked ordinary"
             ),
-            GridLimit::Uncontrolled | GridLimit::Curtailed(_) | GridLimit::InContact { .. } => {}
+            GridLimit::Initializing { .. }
+            | GridLimit::Uncontrolled
+            | GridLimit::Curtailed(_)
+            | GridLimit::InContact { .. } => {}
         }
     }
 }
@@ -533,9 +539,11 @@ fn silence_from_the_grid_operator_is_not_permission() {
         .iter()
         .find(|note| matches!(note, SmartNote::UnderFailsafe { .. }))
         .expect("a site held at its failsafe says so");
-    assert!(note.to_string().contains("not talking"), "{note}");
+    let reason = note.to_string();
+    assert!(reason.contains(&silent_since.to_string()), "{reason}");
+    assert!(reason.contains("failsafe limit of 4.2 kW"), "{reason}");
 
-    // …and after the Failsafe Duration Minimum it is released `[LPC-906]`, back
+    // …and after the Failsafe Duration Minimum it is released `[LPC-922]`, back
     // on its own connection — which is correct, and is the state a grid
     // operator most needs told about, because it believes it can still curtail
     // this site and it cannot.

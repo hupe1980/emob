@@ -4,8 +4,8 @@ Built on emob's own crates, so a test asserts with the code that bills: a meter
 that signs OCMF, the receipt's verifier, the Eichrecht chain, the tariff
 rating and the Preisstand, the event schemas, Standard Webhooks, the
 Mobilithek profile, a charging station and a car that drive a CSMS over OCPP,
-an eMSP that answers it — and two conformance suites for a service that replaces
-one of emob's.
+an eMSP that answers it, and conformance probes for replacement services and
+local MCP meter verifiers.
 
 `AssertionError` means the system under test is wrong; `ValueError` means the
 test is.
@@ -42,6 +42,7 @@ from .core import (
 )
 from .emsp import Emsp
 from .inbox import Inbox
+from .recovery import recover_event
 from .station import Car, Reservation, Session, Station
 
 __all__ = [
@@ -74,6 +75,7 @@ __all__ = [
     "event_problems",
     "evidence",
     "evse_id",
+    "recover_event",
     "utc",
     "verify",
     "webhooks",

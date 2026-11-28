@@ -2,7 +2,7 @@
 
 § 14a EnWG as executable law for EV charging sites: which charge points a German grid operator may curtail, the minimum power their operator keeps a claim to, and a site allocation that cannot exceed the grid limit.
 
-[![crates.io](https://img.shields.io/crates/v/emob-smart.svg)](https://crates.io/crates/emob-smart) [![docs.rs](https://img.shields.io/docsrs/emob-smart)](https://docs.rs/emob-smart) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-smart.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-smart.svg)](https://crates.io/crates/emob-smart) [![docs.rs](https://img.shields.io/docsrs/emob-smart)](https://docs.rs/emob-smart) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-smart.svg)](#license)
 
 `[EnWG §14a]` lets a distribution grid operator reduce the draw of
 *steuerbare Verbrauchseinrichtungen* (controllable consumption devices, SteuVE)
@@ -76,30 +76,18 @@ assert!(allocation.within_ceiling());
 
 ## How it works
 
-### Five grid states, not two
+### Grid control states
 
-§ 14a is carried over EEBUS's Limitation of Power Consumption (LPC) use case,
-and `[LPC §2.3.2]` gives a controllable site five states. `GridLimit` has all
-five rather than an `Option`, because three of them allow full power for
-different reasons:
-
-| State | Meaning |
+| State | Ceiling before allocation |
 |---|---|
-| `limited` | a setpoint is in force |
-| `unlimited/controlled` | the grid operator is present and allows full power |
-| `failsafe state` | the Energy Guard has gone silent `[LPC-912]`; the site holds its failsafe limit `[LPC-901/1]` |
-| `unlimited/autonomous` | the failsafe has been released and the site runs on its own connection `[LPC-906]`, `[LPC-022]` |
-| — | no control box is commissioned for this site |
+| `init` | Configured failsafe power while the site awaits its first control exchange |
+| `limited` | Active setpoint |
+| `unlimited/controlled` | Connection capacity while the guard permits full power |
+| `failsafe state` | Configured failsafe power after 120 seconds without a heartbeat in a controlled state |
+| `unlimited/autonomous` | Connection capacity after the local policy releases failsafe under [LPC-922] |
+| No guard commissioned | Connection capacity |
 
-Two of the five put a `SmartNote` on the allocation: a depot at 60 kW because it
-may, and one at 60 kW because its control box died, are different problems.
-`[LPC-022]` releases a failsafe after two to 24 hours, so running autonomously is
-the note an operator most needs. The Mindestleistung holds against a failsafe
-limit too.
-
-The timers are not here: they belong beside the socket (`sited`, using the
-[`eebus`](https://github.com/hupe1980/eebus) crate's state machine). This crate
-receives the state they reached.
+The allocator protects the minimum draw and caps every allocation at the connection capacity. It attaches an operator note to failsafe and autonomous decisions. The `emob-eebus` watchdog evaluates time at the edge, and `sited` supplies the resulting state to this crate.
 
 ### Why 4.2 kW: the 6 A pilot floor
 
@@ -140,7 +128,7 @@ practical experience, so the table here is the one in force.
 ## Standards and sources
 
 - `[EnWG §14a]`; Bundesnetzagentur Festlegung `[BK6-22-300 Ziff. 2.4.1]`, Ziff. 2.4.2, 4.5, 4.5.2, 4.6
-- EEBUS Limitation of Power Consumption: `[LPC §2.3.2]`, `[LPC-901/1]`, `[LPC-906]`, `[LPC-912]`, `[LPC-022]`
+- EEBUS Limitation of Power Consumption: `[LPC §2.3.2]`, `[LPC-901/1]`, `[LPC-922]`, `[LPC-912]`, `[LPC-022]`
 - DIN EN 61851-1 (control pilot current floor)
 
 Not covered: heat pumps, space cooling and storage. A site with a heat pump over

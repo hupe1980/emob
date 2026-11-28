@@ -63,6 +63,21 @@
         "$ref": "#/$defs/ContractSeed"
       }
     },
+    "portal_users": {
+      "description": "Customer sign-in subjects. Grants are held in the provider journal.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PortalUser"
+      }
+    },
+    "retail_accounts": {
+      "description": "Private bill-to accounts available for native enrolment.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RetailAccount"
+      },
+      "default": []
+    },
     "card_stock": {
       "description": "Unassigned provider RFID cards available for native enrolment.",
       "type": "array",
@@ -93,6 +108,17 @@
       "anyOf": [
         {
           "$ref": "#/$defs/Desk"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "portal": {
+      "description": "Public origin of the customer portal.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Portal"
         },
         {
           "type": "null"
@@ -600,6 +626,14 @@
           "type": "string",
           "pattern": "^[A-Z]{2}\\*?[A-Z0-9]{3}$"
         },
+        "cdr_owners": {
+          "description": "CPO parties this platform may represent when sending or reading charge records.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
         "token_a_env": {
           "description": "The variable holding the Token A handed to it out of band\n`[OCPI 2.3.0 §credentials]`.",
           "$ref": "#/$defs/EnvRef"
@@ -750,8 +784,19 @@
           "type": "string"
         },
         "seller": {
-          "description": "The seller on every invoice.",
+          "description": "The CPO seller on partner invoices.",
           "$ref": "#/$defs/Billing"
+        },
+        "retail_seller": {
+          "description": "The mobility provider issuing native retail invoices.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Billing"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "vat_rate": {
           "description": "The standard VAT rate, in percent, where the energy is supplied.",
@@ -939,6 +984,101 @@
         "whitelist"
       ]
     },
+    "PortalUser": {
+      "description": "A stable customer subject and the environment variable holding its sign-in key.",
+      "type": "object",
+      "properties": {
+        "subject": {
+          "description": "Immutable opaque subject, distinct from a payer, agreement or staff login.",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "secret_env": {
+          "description": "Variable holding a separately generated 32-byte hexadecimal key.",
+          "$ref": "#/$defs/EnvRef"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "subject",
+        "secret_env"
+      ]
+    },
+    "RetailAccount": {
+      "description": "Private invoice particulars configured by the provider.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable, opaque bill-to identifier, shared by agreements with the same payer.",
+          "type": "string",
+          "pattern": "^[A-Z0-9][A-Z0-9-]{0,31}$"
+        },
+        "kind": {
+          "description": "Individual or fleet payer.",
+          "$ref": "#/$defs/RetailAccountKind"
+        },
+        "name": {
+          "description": "Legal name on the invoice.",
+          "type": "string"
+        },
+        "street": {
+          "description": "Street and building number.",
+          "type": "string"
+        },
+        "post_code": {
+          "description": "Postal code.",
+          "type": "string"
+        },
+        "city": {
+          "description": "Postal locality.",
+          "type": "string"
+        },
+        "country": {
+          "description": "Two-letter country code.",
+          "type": "string",
+          "pattern": "^[A-Z]{2}$"
+        },
+        "vat_id": {
+          "description": "Business VAT identifier, when applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "electronic_address": {
+          "description": "Electronic invoice address, when available.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "street",
+        "post_code",
+        "city",
+        "country"
+      ]
+    },
+    "RetailAccountKind": {
+      "description": "How an operator identifies the payer during enrolment.",
+      "oneOf": [
+        {
+          "description": "One private bill-to party.",
+          "type": "string",
+          "const": "private"
+        },
+        {
+          "description": "A business that pays for its drivers.",
+          "type": "string",
+          "const": "fleet"
+        }
+      ]
+    },
     "CardStock": {
       "description": "An unissued physical card. Staff enter the inventory code printed on its sleeve.",
       "type": "object",
@@ -974,6 +1114,16 @@
         },
         "write": {
           "description": "Permit named operator actions. Omit for read-only access.",
+          "type": "boolean",
+          "default": false
+        },
+        "finance": {
+          "description": "Permit finance reads, statement imports and reviewed allocations.",
+          "type": "boolean",
+          "default": false
+        },
+        "privacy": {
+          "description": "Permit a named reviewer to erase customer portal access bindings.",
           "type": "boolean",
           "default": false
         }
@@ -1077,6 +1227,20 @@
         "time_zone"
       ]
     },
+    "Portal": {
+      "description": "The origin on which customers use their portal.",
+      "type": "object",
+      "properties": {
+        "public_url": {
+          "description": "External HTTPS origin, or an HTTP loopback origin for a local deployment.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "public_url"
+      ]
+    },
     "ReceiptSection": {
       "description": "`[receipts]` — read by `csmsd`.",
       "type": "object",
@@ -1098,6 +1262,13 @@
         "billd": {
           "description": "`billd`'s base URL.",
           "type": "string"
+        },
+        "accountingd": {
+          "description": "Optional receivables owner used by the finance desk.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "roamd": {
           "description": "`roamd`'s base URL.",

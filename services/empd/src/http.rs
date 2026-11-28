@@ -141,6 +141,7 @@ pub struct Shared<J: Journal> {
     pub book: Arc<Mutex<Book<J>>>,
     /// The token `csmsd` presents.
     pub service: Token,
+    pub(crate) customers: Arc<Mutex<crate::customer::Identity>>,
     pub(crate) catalog: Arc<crate::enrol::Catalog>,
     pub(crate) clock: emob_service::Clock,
 }
@@ -151,12 +152,13 @@ impl<J: Journal> Clone for Shared<J> {
             book: Arc::clone(&self.book),
             service: self.service.clone(),
             catalog: Arc::clone(&self.catalog),
+            customers: Arc::clone(&self.customers),
             clock: Arc::clone(&self.clock),
         }
     }
 }
 
-fn lock<T>(held: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock<T>(held: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     held.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -259,7 +261,7 @@ async fn lookup<J: Journal>(
         .ok_or(StatusCode::BAD_REQUEST)
 }
 
-fn payload<T>(input: Result<Json<T>, JsonRejection>) -> Result<T, StatusCode> {
+pub(crate) fn payload<T>(input: Result<Json<T>, JsonRejection>) -> Result<T, StatusCode> {
     input
         .map(|Json(value)| value)
         .map_err(|error| match error.status() {
@@ -311,6 +313,7 @@ async fn confirm<J: Journal>(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EnrolRequest {
+    account: String,
     point: EvseId,
     plan: String,
     stock: String,
@@ -331,11 +334,13 @@ struct AgreementLookup {
 #[derive(Serialize)]
 struct Options {
     offers: Vec<crate::enrol::Selection>,
+    accounts: Vec<crate::enrol::AccountOption>,
 }
 
 async fn options<J: Journal>(State(shared): State<Shared<J>>) -> Json<Options> {
     Json(Options {
         offers: shared.catalog.options().to_vec(),
+        accounts: shared.catalog.accounts(),
     })
 }
 
@@ -345,13 +350,14 @@ async fn enrol_preview<J: Journal>(
     input: Result<Json<EnrolRequest>, JsonRejection>,
 ) -> Result<Json<crate::enrol::Review>, StatusCode> {
     let input = payload(input)?;
+    let payer = shared.catalog.account(&input.account)?;
     let uid = shared.catalog.stock_uid(&input.stock)?;
     let offer = shared
         .catalog
         .current(&input.point, &input.plan, &shared.clock)
         .await?;
     lock(&shared.book)
-        .review_agreement(&actor, input.stock, uid, offer, (shared.clock)())
+        .review_agreement(&actor, input.stock, uid, payer, offer, (shared.clock)())
         .map(Json)
 }
 
@@ -359,12 +365,12 @@ async fn enrol_confirm<J: Journal>(
     State(shared): State<Shared<J>>,
     Extension(actor): Extension<emob_service::Actor>,
     input: Result<Json<EnrolConfirmation>, JsonRejection>,
-) -> Result<Json<crate::Agreement>, StatusCode> {
+) -> Result<Json<AgreementView>, StatusCode> {
     let input = payload(input)?;
     let review = {
         let book = lock(&shared.book);
         if let Some(agreement) = book.own_receipt(&actor, &input.operation)? {
-            return Ok(Json(agreement));
+            return Ok(Json(AgreementView::of(&book, agreement)));
         }
         book.pending_agreement(&actor, &input.operation, (shared.clock)())?
             .clone()
@@ -380,20 +386,96 @@ async fn enrol_confirm<J: Journal>(
     let uid = shared.catalog.stock_uid(&review.stock)?;
     // Recheck operation, time, current terms and remaining stock under the lock
     // after I/O. Two simultaneous confirms can append at most one agreement.
+    let mut book = lock(&shared.book);
+    let issued = book.enrol(&actor, &input.operation, uid, &offer, (shared.clock)())?;
+    Ok(Json(AgreementView::of(&book, issued)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PayerLookup {
+    account: String,
+}
+
+async fn billing_agreements<J: Journal>(
+    State(shared): State<Shared<J>>,
+    input: Result<Json<PayerLookup>, JsonRejection>,
+) -> Result<Json<crate::enrol::BillingRoster>, StatusCode> {
+    let input = payload(input)?;
+    let payer = shared.catalog.account(&input.account)?;
+    lock(&shared.book).billing_agreements(payer).map(Json)
+}
+
+async fn lifecycle_preview<J: Journal>(
+    State(shared): State<Shared<J>>,
+    Extension(actor): Extension<emob_service::Actor>,
+    input: Result<Json<crate::lifecycle::Request>, JsonRejection>,
+) -> Result<Json<crate::lifecycle::Review>, StatusCode> {
+    let input = payload(input)?;
+    let uid = input
+        .stock
+        .as_deref()
+        .map(|code| shared.catalog.stock_uid(code))
+        .transpose()?;
     lock(&shared.book)
-        .enrol(&actor, &input.operation, uid, &offer, (shared.clock)())
+        .preview_lifecycle(&actor, input, uid, (shared.clock)())
         .map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangeConfirmation {
+    agreement: String,
+    operation: String,
+}
+
+async fn lifecycle_confirm<J: Journal>(
+    State(shared): State<Shared<J>>,
+    Extension(actor): Extension<emob_service::Actor>,
+    input: Result<Json<ChangeConfirmation>, JsonRejection>,
+) -> Result<Json<crate::AgreementChange>, StatusCode> {
+    let input = payload(input)?;
+    lock(&shared.book)
+        .confirm_lifecycle(
+            &actor,
+            &input.agreement,
+            &input.operation,
+            &shared.catalog,
+            (shared.clock)(),
+        )
+        .map(Json)
+}
+
+#[derive(Serialize)]
+struct AgreementView {
+    #[serde(flatten)]
+    issued: crate::Agreement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle: Option<crate::AgreementChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    withdrawal_status: Option<crate::withdrawal::Stage>,
+}
+
+impl AgreementView {
+    fn of<J: Journal>(book: &Book<J>, issued: crate::Agreement) -> Self {
+        Self {
+            lifecycle: book.state().changes.latest(&issued.agreement).cloned(),
+            withdrawal_status: book.state().withdrawals.stage(&issued.agreement),
+            issued,
+        }
+    }
 }
 
 async fn agreement_lookup<J: Journal>(
     State(shared): State<Shared<J>>,
     input: Result<Json<AgreementLookup>, JsonRejection>,
-) -> Result<Json<crate::Agreement>, StatusCode> {
+) -> Result<Json<AgreementView>, StatusCode> {
     let query = payload(input)?;
-    lock(&shared.book)
+    let book = lock(&shared.book);
+    let issued = book
         .receipt(&query.agreement)?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(AgreementView::of(&book, issued)))
 }
 
 async fn private(mut response: Response) -> Response {
@@ -420,15 +502,28 @@ pub fn router<J: Journal>(shared: Shared<J>, operators: Operators) -> axum::Rout
             )
             .route("/v1/empd/contracts/options", get(options::<J>))
             .route(
+                "/v1/empd/contracts/billing-agreements",
+                post(billing_agreements::<J>).layer(DefaultBodyLimit::max(2048)),
+            )
+            .route(
                 "/v1/empd/contracts/lookup",
                 post(agreement_lookup::<J>).layer(DefaultBodyLimit::max(2048)),
             )
             .with_state(shared.clone());
-    let actions = axum::Router::new()
+    let customer = crate::customer::routes(shared.clone(), operators.clone());
+    let actions = crate::withdrawal::routes::<J>()
         .route("/v1/empd/cards/preview", post(preview::<J>))
         .route("/v1/empd/cards/confirm", post(confirm::<J>))
         .route("/v1/empd/contracts/preview", post(enrol_preview::<J>))
         .route("/v1/empd/contracts/confirm", post(enrol_confirm::<J>))
+        .route(
+            "/v1/empd/contracts/change/preview",
+            post(lifecycle_preview::<J>),
+        )
+        .route(
+            "/v1/empd/contracts/change/confirm",
+            post(lifecycle_confirm::<J>),
+        )
         .layer(DefaultBodyLimit::max(2048))
         .with_state(shared.clone());
     axum::Router::new()
@@ -437,6 +532,7 @@ pub fn router<J: Journal>(shared: Shared<J>, operators: Operators) -> axum::Rout
             post(authorize::<J>).layer(DefaultBodyLimit::max(2048)),
         )
         .with_state(shared)
+        .merge(customer)
         .merge(
             emob_service::serve::operator_only(view, operators.clone())
                 .merge(emob_service::serve::operator_write(actions, operators)),

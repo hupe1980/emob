@@ -291,6 +291,7 @@ pub struct Recent {
 
 /// What every section formats with.
 struct Ctx<'a> {
+    view: crate::stations::FleetView<'a>,
     lang: Lang,
     zone: &'a TimeZone,
     now: time::OffsetDateTime,
@@ -330,8 +331,10 @@ pub fn render(
     now: time::OffsetDateTime,
     receipts: &str,
     can_write: bool,
+    view: crate::stations::FleetView<'_>,
 ) -> String {
     let ctx = Ctx {
+        view,
         lang,
         zone,
         now,
@@ -355,7 +358,7 @@ pub fn render(
     if can_write {
         body.push_str(&manage(page, &ctx));
     }
-    ui::page(
+    crate::navigation::page(
         &ui::Shell {
             title: &page.identity,
             place: lang.pick("Station", "Station"),
@@ -371,7 +374,7 @@ pub fn render(
 /// for a card (spec 025). The card shows as its tail only (SR-176).
 fn reservation(page: &StationPage, ctx: &Ctx<'_>) -> String {
     let lang = ctx.lang;
-    let station = escape(&href(&page.identity));
+    let station = href(&page.identity);
     let mut out = format!(
         "<section class=\"card\" id=\"reservation\" aria-labelledby=\"reservation-h\"><h2 id=\"reservation-h\">{}</h2>",
         lang.pick("Reservierung", "Reservation")
@@ -390,8 +393,11 @@ fn reservation(page: &StationPage, ctx: &Ctx<'_>) -> String {
         if ctx.can_write {
             let _ = write!(
                 out,
-                "<form method=\"post\" action=\"{station}/reservations/{}/cancel\" class=\"noprint\"><button class=\"btn ghost\" type=\"submit\">{}</button></form>",
-                held.number,
+                "<form method=\"post\" action=\"{}\" class=\"noprint\"><button class=\"btn ghost\" type=\"submit\">{}</button></form>",
+                escape(&ctx.view.href(
+                    &format!("{station}/reservations/{}/cancel", held.number),
+                    lang
+                )),
                 lang.pick("Reservierung aufheben", "Cancel the reservation")
             );
         }
@@ -400,7 +406,7 @@ fn reservation(page: &StationPage, ctx: &Ctx<'_>) -> String {
             out,
             "<details class=\"noprint\"><summary>{add}</summary>{form}</details>",
             add = lang.pick("+ Für eine Karte reservieren", "+ Hold for a card"),
-            form = reserve_form(&page.identity, None, lang),
+            form = reserve_form(&page.identity, None, lang, ctx.view),
         );
     } else {
         let _ = write!(
@@ -440,7 +446,12 @@ pub struct Typed<'a> {
 /// The form that holds a point for a card — on the asset card, and again,
 /// filled in, beside a refusal.
 #[must_use]
-pub fn reserve_form(identity: &str, typed: Option<&Typed<'_>>, lang: Lang) -> String {
+pub fn reserve_form(
+    identity: &str,
+    typed: Option<&Typed<'_>>,
+    lang: Lang,
+    view: crate::stations::FleetView<'_>,
+) -> String {
     let chosen = typed.map_or(30, |typed| typed.minutes);
     let mut minutes = String::new();
     for m in [15, 30, 60, 120, 240, 480] {
@@ -456,12 +467,12 @@ pub fn reserve_form(identity: &str, typed: Option<&Typed<'_>>, lang: Lang) -> St
         );
     }
     format!(
-        "<form method=\"post\" action=\"{station}/reservations\">\
+        "<form method=\"post\" action=\"{action}\">\
          <p><label for=\"reserve-uid\">{card}</label><br><input type=\"text\" id=\"reserve-uid\" name=\"uid\" required maxlength=\"36\" autocomplete=\"off\" spellcheck=\"false\" inputmode=\"latin\" value=\"{uid}\" placeholder=\"04A1B2C3D4E5F6\" aria-describedby=\"reserve-hint\"></p>\
          <p><label for=\"reserve-minutes\">{how_long}</label><br><select id=\"reserve-minutes\" name=\"minutes\">{minutes}</select></p>\
          <p><label for=\"reserve-reason\">{why}</label><br><input type=\"text\" id=\"reserve-reason\" name=\"reason\" required maxlength=\"200\" value=\"{reason}\" placeholder=\"{example}\"></p>\
          <p class=\"muted\" id=\"reserve-hint\">{hint}</p><p><button class=\"btn\" type=\"submit\">{save}</button></p></form>",
-        station = escape(&href(identity)),
+        action = escape(&view.href(&format!("{}/reservations", href(identity)), lang)),
         uid = escape(typed.map_or("", |typed| typed.uid)),
         reason = escape(typed.map_or("", |typed| typed.reason)),
         card = lang.pick("Karte (UID, wie die Station sie liest)", "Card (UID, as the station reads it)"),
@@ -554,7 +565,7 @@ pub fn refusal_text(reason: &str, lang: Lang) -> String {
 /// next one (spec 023). Every text is escaped (SR-155).
 fn notes(page: &StationPage, ctx: &Ctx<'_>) -> String {
     let lang = ctx.lang;
-    let station = escape(&href(&page.identity));
+    let station = href(&page.identity);
     let mut out = format!(
         "<section class=\"card\" id=\"notes\" aria-labelledby=\"notes-h\"><h2 id=\"notes-h\">{}</h2>",
         lang.pick("Notizen", "Notes")
@@ -572,7 +583,11 @@ fn notes(page: &StationPage, ctx: &Ctx<'_>) -> String {
             if ctx.can_write {
                 let _ = write!(
                     out,
-                    "<form method=\"post\" action=\"{station}/notes/{number}/remove\" class=\"noprint\"><button class=\"btn ghost\" type=\"submit\" aria-label=\"{remove_label} {number}\">{remove}</button></form>",
+                    "<form method=\"post\" action=\"{action}\" class=\"noprint\"><button class=\"btn ghost\" type=\"submit\" aria-label=\"{remove_label} {number}\">{remove}</button></form>",
+                    action = escape(
+                        &ctx.view
+                            .href(&format!("{station}/notes/{}/remove", note.number), lang)
+                    ),
                     number = note.number,
                     remove = lang.pick("Entfernen", "Remove"),
                     remove_label = lang.pick("Notiz entfernen", "Remove note"),
@@ -592,11 +607,12 @@ fn notes(page: &StationPage, ctx: &Ctx<'_>) -> String {
     let _ = write!(
         out,
         "<details class=\"noprint\"{open}><summary>{add}</summary>\
-         <form method=\"post\" action=\"{station}/notes\"><p><label for=\"note-text\">{label}</label><br>\
+         <form method=\"post\" action=\"{action}\"><p><label for=\"note-text\">{label}</label><br>\
          <textarea id=\"note-text\" name=\"text\" required maxlength=\"500\" aria-describedby=\"note-hint\" placeholder=\"{example}\"></textarea></p>\
          <p class=\"muted\" id=\"note-hint\">{hint}</p><p><button class=\"btn\" type=\"submit\">{save}</button></p></form></details></section>",
         // Open while there is nothing to read; a disclosure once there is.
         open = if page.notes.is_empty() { " open" } else { "" },
+        action = escape(&ctx.view.href(&format!("{station}/notes"), lang)),
         add = lang.pick("+ Notiz hinzufügen", "+ Add a note"),
         label = lang.pick("Neue Notiz", "New note"),
         example = lang.pick("Zugang über Tor 3, Schlüssel beim Pförtner", "Access through gate 3, key at the gatehouse"),
@@ -641,10 +657,11 @@ fn verdict(page: &StationPage, ctx: &Ctx<'_>) -> String {
         ),
     };
     format!(
-        "<p class=\"eyebrow back\"><a href=\"/\">{back}</a></p>\
+        "<p class=\"eyebrow back\"><a href=\"{results}\">{label}</a></p>\
          <div class=\"verdict {tone}\"><span class=\"icon\" aria-hidden=\"true\">{icon}</span>\
          <div><h1>{identity} · {headline}</h1><p>{detail}</p></div></div>",
-        back = lang.pick("← Heute", "← Today"),
+        results = escape(&ctx.view.href("/stations", lang)),
+        label = lang.pick("Zur Stationsliste", "Back to station results"),
         identity = escape(&page.identity),
     )
 }
@@ -1243,6 +1260,7 @@ mod tests {
             time::macros::datetime!(2026-11-20 12:00 UTC),
             "",
             true,
+            crate::stations::FleetView::default(),
         );
         for sec1 in &points {
             assert!(html.contains(&format!(">{sec1}</code>")));
@@ -1258,6 +1276,7 @@ mod tests {
             time::macros::datetime!(2026-11-20 12:00 UTC),
             "https://estate.example",
             true,
+            crate::stations::FleetView::default(),
         );
         assert!(!html.contains("<script>alert"), "escaped");
         assert!(html.contains("&lt;script&gt;"), "and still visible");
@@ -1282,6 +1301,7 @@ mod tests {
             time::macros::datetime!(2026-11-20 12:00 UTC),
             "",
             true,
+            crate::stations::FleetView::default(),
         );
         assert!(html.contains("&lt;i&gt;Schlüssel&lt;/i&gt;"), "{html}");
         assert!(!html.contains("<i>Schlüssel</i>"));
@@ -1289,8 +1309,8 @@ mod tests {
             html.contains("anna ·"),
             "the author, without the actor's prefix"
         );
-        assert!(html.contains("action=\"/station/CP-1/notes/2/remove\""));
-        assert!(html.contains("action=\"/station/CP-1/notes\""));
+        assert!(html.contains("action=\"/station/CP-1/notes/2/remove?lang=de\""));
+        assert!(html.contains("action=\"/station/CP-1/notes?lang=de\""));
         // Before the numbers: what the next person needs comes first.
         assert!(html.find("id=\"notes\"") < html.find("Ladeerfolg"));
     }
@@ -1299,9 +1319,17 @@ mod tests {
     fn a_held_point_says_until_when_for_which_card_and_can_be_cancelled() {
         let ber = TimeZone::new("Europe/Berlin").unwrap();
         let noon = time::macros::datetime!(2026-11-20 12:00 UTC);
-        let free = render(&page(), Lang::De, &ber, noon, "", true);
+        let free = render(
+            &page(),
+            Lang::De,
+            &ber,
+            noon,
+            "",
+            true,
+            crate::stations::FleetView::default(),
+        );
         assert!(
-            free.contains("action=\"/station/CP-1/reservations\""),
+            free.contains("action=\"/station/CP-1/reservations?lang=de\""),
             "a form when free"
         );
         let mut held = page();
@@ -1311,23 +1339,31 @@ mod tests {
             until: time::macros::datetime!(2026-11-20 13:30 UTC),
             by: "operator:anna".to_owned(),
         });
-        let html = render(&held, Lang::De, &ber, noon, "", true);
+        let html = render(
+            &held,
+            Lang::De,
+            &ber,
+            noon,
+            "",
+            true,
+            crate::stations::FleetView::default(),
+        );
         assert!(
             html.contains(
                 ">14:30</time></strong> · noch 1 h 30 min · für Karte <code>…F6</code> · anna"
             ),
             "{html}"
         );
-        assert!(html.contains("action=\"/station/CP-1/reservations/3/cancel\""));
+        assert!(html.contains("action=\"/station/CP-1/reservations/3/cancel?lang=de\""));
         assert!(
-            !html.contains("action=\"/station/CP-1/reservations\""),
+            !html.contains("action=\"/station/CP-1/reservations?lang=de\""),
             "no second hold"
         );
         assert!(html.find("id=\"reservation\"") < html.find("id=\"notes\""));
     }
 
-    #[test]
-    fn a_refused_reservation_says_why_in_the_operators_words_and_keeps_what_was_typed() {
+    #[tokio::test]
+    async fn a_refused_reservation_says_why_in_the_operators_words_and_keeps_what_was_typed() {
         assert_eq!(
             refusal_text("CP-1 answered Occupied", Lang::De),
             "Die Station ist gerade belegt."
@@ -1343,19 +1379,44 @@ mod tests {
             refusal_text("CP-1 is held until 14:30; cancel that first", Lang::De)
                 .contains("bis 14:30")
         );
-        let form = reserve_form(
+        let typed = Typed {
+            uid: "04A1<b>",
+            minutes: 120,
+            reason: "Gast",
+        };
+        let view = crate::stations::FleetView {
+            query: "test + test",
+            area: Some("6,47,15,54"),
+            offset: 50,
+        };
+        let back = format!("{}#reservation", view.href("/station/CP-1", Lang::De));
+        let saved = crate::reservation_result(
             "CP-1",
-            Some(&Typed {
-                uid: "04A1<b>",
-                minutes: 120,
-                reason: "Gast",
-            }),
+            view,
+            Ok((201, serde_json::Value::Null)),
+            Some(&typed),
             Lang::De,
         );
-        assert!(
-            form.contains("value=\"04A1&lt;b&gt;\"") && form.contains("value=\"120\" selected")
+        assert_eq!(saved.headers()["location"], back);
+        let refused = crate::reservation_result(
+            "CP-1",
+            view,
+            Ok((422, serde_json::json!({"reason":"CP-1 answered Occupied"}))),
+            Some(&typed),
+            Lang::De,
         );
-        assert!(form.contains("value=\"Gast\""));
+        assert_eq!(refused.status(), 422);
+        let bytes = axum::body::to_bytes(refused.into_body(), 16_384)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&bytes).unwrap();
+        let action = view.href("/station/CP-1/reservations", Lang::De);
+        assert!(html.contains(&format!(r#"href="{}""#, escape(&back))));
+        assert!(html.contains(&format!(r#"action="{}""#, escape(&action))));
+        assert!(
+            html.contains("value=\"04A1&lt;b&gt;\"") && html.contains("value=\"120\" selected")
+        );
+        assert!(html.contains("value=\"Gast\""));
     }
 
     #[test]
@@ -1371,6 +1432,7 @@ mod tests {
             time::macros::datetime!(2026-11-20 12:00 UTC),
             "",
             true,
+            crate::stations::FleetView::default(),
         );
         assert!(
             html.contains("Breite und Länge sind vermutlich vertauscht"),
@@ -1385,6 +1447,7 @@ mod tests {
                 time::macros::datetime!(2026-11-20 12:00 UTC),
                 "",
                 true,
+                crate::stations::FleetView::default(),
             )
             .contains("vertauscht")
         );
@@ -1404,6 +1467,7 @@ mod tests {
                 time::macros::datetime!(2026-11-25 12:00 UTC),
                 "",
                 true,
+                crate::stations::FleetView::default(),
             )
         };
         assert!(render_en(&station).contains("No result for the current boot"));

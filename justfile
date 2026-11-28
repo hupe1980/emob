@@ -6,7 +6,7 @@ set shell := ["bash", "-uc"]
 set dotenv-load
 
 # Keep in sync with rust-toolchain.toml and `rust-version` in Cargo.toml.
-msrv := "1.94"
+msrv := "1.96"
 
 # The one version every publishable crate carries, from `[workspace.package]`.
 version := `sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version *= *"\(.*\)"/\1/p' | head -1`
@@ -84,27 +84,14 @@ deny:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
-# The MSRV is a promise to the crates downstream, and it is not one number any
-# more: `emob-roam` speaks to `ocpi-kit`, which asks for 1.96, and the crates
-# `mako` and `hems` consume still promise 1.94. So this checks that the promise
-# holds where it is made rather than asserting one floor for everything.
-#
-# 🔒 Minimum supported Rust version, where it is promised
+# Check every workspace member at the minimum supported Rust version.
 msrv:
-    cargo +{{ msrv }} check --all-features \
-        -p emob-core -p emob-eichrecht -p emob-session -p emob-cdr \
-        -p emob-tariff -p emob-ocpp -p emob-poi -p emob-billing -p emob-thg -p emob-service \
-        -p emob-sim -p emob-smart -p emob-eebus -p emob-pnc
-    @echo "🔒 the crates that promise {{ msrv }} build on {{ msrv }}"
+    cargo +{{ msrv }} check --locked --workspace --all-features
 
-# `cargo publish` cannot be undone, so the dry run is the cheap half of the
-# decision: it packages the publishable crates in dependency order and verifies
-# each builds from its own tarball.
-#
-# 🚢 Everything the release workflow checks, before the tag exists
+# Package and verify the working tree before committing a release.
 release-check:
-    cargo publish --workspace --locked --dry-run
-    @echo "🚢 verified — tag it with: git tag v{{ version }} && git push origin v{{ version }}"
+    cargo publish --workspace --locked --dry-run --allow-dirty
+    @echo "🚢 packaging dry run passed"
 
 # The receipt page's verifier: `emob-verify` for `wasm32-unknown-unknown`,
 # compiled into `csmsd` with `include_bytes!`. Paths are remapped so the module
@@ -152,7 +139,7 @@ pnc-fixtures:
     cd crates/emob-pnc && ./scripts/make-test-pki.sh
     cargo fmt -p emob-pnc
 
-# The nine daemons and the `emob` CLI, from one Dockerfile. `docker-bake.hcl`
+# The eleven daemons and the `emob` CLI, from one Dockerfile. `docker-bake.hcl`
 # carries the list, so `just images -- --print` is the answer to *what does
 # this workspace ship*.
 #
@@ -178,15 +165,15 @@ images *ARGS:
 up:
     #!/usr/bin/env bash
     set -euo pipefail
-    for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY POID_NAP_IDENTIFIER; do
+    for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY ACCOUNTINGD_DATA_KEY ACCOUNTINGD_SIGNING_KEY POID_NAP_IDENTIFIER; do
         if [ -z "${!key:-}" ]; then
-            echo "❌ $key is unset — for a local run:  just dev-keys > .env" >&2
+            echo "❌ $key is unset — for a fresh estate: just dev-keys > .env. For an existing journal restore its original key" >&2
             exit 1
         fi
     done
     [ -f target/dev-tls/server.pem ] || just dev-ca
     docker compose up --build -d
-    echo "🚀 up — probes on :8080…:8087, Heute on :8088, OCPP on wss://localhost:9000"
+    echo "🚀 up — probes on :8080…:8087, Heute on :8088, customer portal on :8089, receivables owner on :8090, OCPP on wss://localhost:9000"
 
 # A throwaway CA, a loopback server certificate (127.0.0.1, ::1, localhost)
 # and profile-3 client certificates for CP-1 and CP-2, with openssl, into
@@ -209,19 +196,19 @@ dev-keys estate="deploy/estate.example.toml":
     #!/usr/bin/env bash
     set -euo pipefail
     echo "# emob secrets for THIS machine only — never commit, never reuse in production."
-    for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY; do
+    for key in CSMSD_DATA_KEY ROAMD_DATA_KEY EMPD_DATA_KEY BILLD_DATA_KEY CSMSD_SIGNING_KEY ROAMD_SIGNING_KEY EMPD_SIGNING_KEY BILLD_SIGNING_KEY POID_SIGNING_KEY ACCOUNTINGD_DATA_KEY ACCOUNTINGD_SIGNING_KEY; do
         echo "export $key=$(openssl rand -base64 32)"
     done
     grep -E '^[a-z_]*_env *= *"[A-Z0-9_]+"' "{{ estate }}" | sed -E 's/.*"([A-Z0-9_]+)".*/\1/' | sort -u | while read -r var; do
         case "$var" in
             *WEBHOOK_SECRET|*DELIVERY_SECRET) echo "export $var=whsec_$(openssl rand -base64 32)" ;;
-            *) echo "export $var=$(openssl rand -hex 24)" ;;
+            *) echo "export $var=$(openssl rand -hex 32)" ;;
         esac
     done
     echo "export POID_NAP_IDENTIFIER=DE-NAP-DEV"
     echo "export EMOB_ESTATE={{ estate }}"
 
-# The nine daemons from source on loopback, against the example estate (or
+# The eleven daemons from source on loopback, against the example estate (or
 # the one named: `just run my.toml`), with the secrets in `.env` — written by
 # `just dev-keys` on the first run. Checks the estate first, waits until every
 # daemon is ready, prints where Heute is, and stops them all on Ctrl-C.
@@ -241,20 +228,20 @@ run estate="":
     mkdir -p "$EMOB_JOURNAL_DIR"
     pids=()
     trap 'kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null' EXIT INT TERM
-    for daemon in empd csmsd billd roamd tarifd poid sited agentd deskd; do
+    for daemon in empd csmsd billd roamd tarifd poid sited agentd deskd portald accountingd; do
         target/debug/$daemon > "$EMOB_JOURNAL_DIR/$daemon.log" 2>&1 & pids+=($!)
     done
-    for port in 9001 9580 9581 9582 9583 9584 9585 9586 9587; do
+    for port in 9001 9580 9581 9582 9583 9584 9585 9586 9587 9589 9591; do
         for _ in $(seq 100); do
             curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 && break
             sleep 0.1
         done
-        curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 || echo "⚠️  :$port is not ready — see $EMOB_JOURNAL_DIR/*.log" >&2
+        curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1 || { echo "❌ :$port is not ready — see $EMOB_JOURNAL_DIR/*.log" >&2; exit 1; }
     done
-    echo "🚀 the estate runs — Heute: http://127.0.0.1:9587 (user: demo operator, password: \$EMOB_OPERATOR_TOKEN in .env) · OCPP: wss://127.0.0.1:9000 · logs: $EMOB_JOURNAL_DIR/*.log · Ctrl-C stops"
+    echo "🚀 the estate runs — Portal: http://127.0.0.1:9589 · Heute: http://127.0.0.1:9587 (user: demo operator, password: \$EMOB_OPERATOR_TOKEN in .env) · OCPP: wss://127.0.0.1:9000 · logs: $EMOB_JOURNAL_DIR/*.log · Ctrl-C stops"
     wait
 
-# The five demo services on loopback in one process: the daemons through their own
+# The seven demo services on loopback in one process: the daemons through their own
 # `daemon::run`, three simulated stations on OCPP 1.6 / 2.0.1 / 2.1 over wss://
 # (security profile 2), a roaming partner, a seeded morning at 60×. Prints
 # Heute (signed in), a receipt and the partner's inbox, and runs until Ctrl-C.
@@ -277,7 +264,9 @@ demo *ARGS:
     command -v docker >/dev/null || { echo "❌ neither cargo nor docker — see just doctor" >&2; exit 69; }
     echo "🐳 no cargo — running ghcr.io/hupe1980/emob (Ctrl-C ends it)" >&2
     tty=(); [ -t 0 ] && tty=(-it)
+    mkdir -p -m 700 "$PWD/target/demo-tmp"
     exec docker run --rm ${tty[@]+"${tty[@]}"} --network host --user "$(id -u):$(id -g)" \
+        -e TMPDIR="$PWD/target/demo-tmp" -v "$PWD/target/demo-tmp:$PWD/target/demo-tmp" \
         -v "$PWD/target/dev-tls:/tls:ro" ghcr.io/hupe1980/emob demo --tls /tls {{ ARGS }}
 
 # What this workspace needs, checked before something fails halfway: each
@@ -449,6 +438,30 @@ emobtest:
     ruff check . && ruff format --check .
 
 
+# Check published contracts, exercise reference implementations, and negotiate MCP.
+interfaces:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${CI:-}" ]; then
+        just emobtest
+        . emobtest/.venv/bin/activate
+        uv pip install -q openapi-spec-validator==0.7.2
+    fi
+    python3 xtask/interface_contracts.py
+    openapi-spec-validator schemas/openapi.json
+    CI=1 just e2e
+    emobtest conformance mcp target/debug/emob mcp
+    # Cargo exits successfully when a renamed filter selects zero tests.
+    report=$(mktemp)
+    trap 'rm -f "$report"' EXIT
+    check_test() {
+        cargo test --locked -q "$@" | tee "$report"
+        grep -Eq '^test result: ok\. [1-9][0-9]* passed' "$report" || { echo "missing interface test: $*" >&2; return 1; }
+    }
+    check_test -p emob-service --lib recovery_requires_fresh_proof
+    check_test -p csmsd --test the_estate_runs a_subscriber_outside_the_estate
+    check_test -p billd --test a_month_is_closed_once a_subscriber_recovers
+
 # 🚗 emob driven from outside: the example estate on a scratch journal; a
 # 2.0.1 and a 2.1 station are onboarded through csmsd's registry, and
 # emobtest's stations charge cars on all three versions over wss:// — a good
@@ -461,6 +474,7 @@ e2e:
     [ -n "${CI:-}" ] || just emobtest
     [ -f target/dev-tls/server.pem ] || just dev-ca
     cargo build -q --locked --bins
+    cargo build -q --locked -p emob-cli --example retail_fixture_clock
     keys=$(mktemp)
     trap 'rm -f "$keys"' EXIT
     just dev-keys deploy/estate.example.toml > "$keys"

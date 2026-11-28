@@ -1567,7 +1567,7 @@ fn no_floats(root: &Path) -> Result<()> {
             // spelling (`Decimal::from` for the integers, `from_str_exact` for
             // text), so refusing the whole name costs nothing and closes the
             // one path a token search misses.
-            if let Some(col) = code.find("Decimal::try_from") {
+            if let Some(col) = find_type_token(code, "Decimal::try_from") {
                 offenders.push(format!(
                     "{}:{}:{} — {} (use Decimal::from or from_str_exact: try_from accepts an f64)",
                     file.strip_prefix(root).unwrap_or(&file).display(),
@@ -3159,6 +3159,14 @@ mod tests {
         // Checked by name in `no_floats` rather than here, because there is no
         // type to look at.
         assert!(find_type_token("Decimal::try_from(x)", "f64").is_none());
+        assert!(find_type_token("Decimal::try_from(value)", "Decimal::try_from").is_some());
+        assert!(
+            find_type_token(
+                "Decimal::try_from_i128_with_scale(value, 2)",
+                "Decimal::try_from"
+            )
+            .is_none()
+        );
         // …but not a substring of a longer identifier.
         assert!(find_type_token("let sf64x = 1;", "f64").is_none());
         assert!(find_type_token("my_f64_helper()", "f64").is_none());

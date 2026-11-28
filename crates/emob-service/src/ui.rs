@@ -167,6 +167,12 @@ pub struct Shell<'a> {
 /// built with [`escape`]; nothing else is interpolated unescaped.
 #[must_use]
 pub fn page(shell: &Shell<'_>, body: &str) -> String {
+    page_with_navigation(shell, body, "")
+}
+
+/// Render trusted navigation markup in the header, outside the skip-to-content target.
+#[must_use]
+pub fn page_with_navigation(shell: &Shell<'_>, body: &str, navigation: &str) -> String {
     let script = shell.script.map_or_else(String::new, |src| {
         format!("<script type=\"module\" src=\"{}\"></script>", escape(src))
     });
@@ -177,7 +183,7 @@ pub fn page(shell: &Shell<'_>, body: &str) -> String {
          <meta name=\"robots\" content=\"noindex\">\
          <title>{title} · emob</title><link rel=\"stylesheet\" href=\"{css}\">{script}</head>\
          <body><a class=\"skip\" href=\"#main\">{skip}</a>\
-         <header class=\"bar\"><span class=\"brand\">emob</span><span class=\"where\">{place}</span></header>\
+         <header class=\"bar\"><span class=\"brand\">emob</span><span class=\"where\">{place}</span>{navigation}</header>\
          <main id=\"main\"{class}>{body}</main></body></html>",
         lang = shell.lang.tag(),
         title = escape(shell.title),

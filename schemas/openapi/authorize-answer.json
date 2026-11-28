@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hupe1980.github.io/emob/schemas/openapi/authorize-answer.json",
+  "title": "Charging authorization decision",
+  "type": "object",
+  "required": ["status", "reason"],
+  "properties": {
+    "status": { "enum": ["Accepted", "Blocked", "Expired", "Invalid"] },
+    "reason": { "type": "string", "minLength": 1 },
+    "token": {
+      "type": ["object", "null"],
+      "required": ["issuer", "uid", "token_type", "contract_id"],
+      "properties": {
+        "issuer": { "$ref": "#/$defs/party" },
+        "uid": { "type": "string" },
+        "token_type": { "enum": ["Rfid", "AppUser", "Emaid", "AdHocUser", "Other"] },
+        "contract_id": { "type": "string", "pattern": "\\S" }
+      }
+    },
+    "reference": {
+      "description": "Pseudonymous token reference suitable for a session journal when supplied.",
+      "type": ["string", "null"]
+    },
+    "retail": {
+      "description": "Binding for a point-specific native agreement. The CSMS checks the current offer before accepting the charge.",
+      "type": ["object", "null"],
+      "required": ["point", "provider", "plan", "agreement", "reference"],
+      "properties": {
+        "point": { "type": "string", "examples": ["DE*EMT*E1"] },
+        "provider": { "$ref": "#/$defs/party" },
+        "plan": { "type": "string" },
+        "agreement": { "$ref": "#/$defs/digest" },
+        "reference": { "$ref": "#/$defs/digest" }
+      }
+    }
+  },
+  "if": { "properties": { "status": { "const": "Accepted" } } },
+  "then": { "required": ["token"], "properties": { "token": { "type": "object" } } },
+  "else": { "properties": { "token": { "type": "null" }, "reference": { "type": "null" }, "retail": { "type": "null" } } },
+  "$defs": {
+    "party": { "type": "string", "pattern": "^[A-Za-z]{2}[-*]?[A-Za-z0-9]{3}$", "examples": ["DE*EMT"] },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

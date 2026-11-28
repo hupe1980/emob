@@ -6,7 +6,7 @@
 //! `emob subscribers test <name>` sends a subscriber one signed sample of
 //! each type it takes — see [`subscribers`].
 //!
-//! `emob demo` runs five demo services on loopback — see [`demo`].
+//! `emob demo` runs seven demo services on loopback — see [`demo`].
 //!
 //! `emob witness <url>...` reads each daemon's signed journal head and alarms
 //! on one that went backwards — see [`witness`].
@@ -29,12 +29,14 @@ use emob_verify::Verdict;
 mod check;
 mod check_feed;
 mod demo;
+mod mcp;
 mod qr;
 mod recovery;
 mod subscribers;
 mod witness;
 
-const USAGE: &str = "usage: emob check [--secrets] [--schema] <estate.toml>\n       emob subscribers test <name> [--estate PATH]\n       emob verify <transparency-file>\n       emob demo [--check] [--seed N] [--clock RFC3339] [--speed N|max] [--listen IP] [--tls DIR] [--links FILE]\n       emob witness [--file PATH] <url>...\n\n\
+const USAGE: &str = "usage: emob check [--secrets] [--schema] <estate.toml>\n       emob subscribers test <name> [--estate PATH]\n       emob mcp\n       emob verify <transparency-file>\n       emob demo [--check] [--seed N] [--clock RFC3339] [--speed N|max] [--listen IP] [--tls DIR] [--links FILE]\n       emob witness [--file PATH] <url>...\n\n\
+    mcp     Serves the offline meter signature check to an MCP host over stdio.\n\
     recovery-drill   Checks a synthetic cold cut inside the isolated recovery launcher.\n\
     recovery-fixture Generates a fresh synthetic recovery fixture from the example estate.\n\
     check   Checks an estate before a daemon reads it: every section, every\n\
@@ -51,7 +53,7 @@ const USAGE: &str = "usage: emob check [--secrets] [--schema] <estate.toml>\n   
     verify  Checks every signed meter value in a S.A.F.E. transparency file against\n\
             the key it carries, offline. Exit 0 = all verified, 1 = one did not\n\
             verify, 2 = one could not be checked here.\n\
-    demo    Runs five services on loopback: three simulated stations, a roaming\n\
+    demo    Runs seven services on loopback: three simulated stations, a roaming\n\
             partner, a seeded morning. --check plays it at full speed and asserts\n\
             what it prints.\n\
     witness Reads each daemon's signed journal head (EMOB_OPERATOR_TOKEN) and\n\
@@ -62,6 +64,16 @@ fn main() -> ExitCode {
     let mut out = std::io::stdout().lock();
     let mut err = std::io::stderr().lock();
     let code = match args.as_slice() {
+        [command] if command == "mcp" => {
+            drop((out, err));
+            return match mcp::serve() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("emob mcp: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         [command, rest @ ..] if command == "recovery-drill" => recovery::main(rest, &mut out),
         [command, rest @ ..] if command == "recovery-fixture" => {
             recovery::fixture::main(rest, &mut out)

@@ -126,6 +126,7 @@ pub async fn run(options: Options) -> Result<Running> {
     let operators = estate::operator_tokens(&estate.operators, &env)?;
     let secret = estate::webhook_secret(&estate.services, &env)?;
     let subscriptions = estate::subscriptions(&estate.subscribers, &env)?;
+    estate::separate_subscriber_keys(&subscriptions, &secret)?;
     let issued_to: Vec<String> = subscriptions
         .iter()
         .filter(|s| s.takes(emob_service::events::cdr::ISSUED))
@@ -332,6 +333,20 @@ pub async fn run(options: Options) -> Result<Running> {
         }
     }));
 
+    let archive = Arc::clone(&csmsd);
+    let recovery = emob_service::recovery::router(
+        subscriptions.clone(),
+        emob_service::events::cdr::ISSUED,
+        move |subscriber, id| {
+            let key = (
+                id.to_owned(),
+                crate::journal::Target::Subscriber(subscriber.to_owned()),
+            );
+            let delivery = archive
+                .with_state(|state| state.outbox.get(&key).map(|(delivery, _)| delivery.clone()));
+            Ok(delivery.map(|delivery| crate::outbox::with_receipt(&archive, &delivery).body))
+        },
+    );
     let dispatcher = Dispatcher::new(
         &estate.services.billd,
         &estate.services.roamd,
@@ -357,6 +372,7 @@ pub async fn run(options: Options) -> Result<Running> {
         .with_context(|| format!("binding the shell {http}"))?;
     let http_addr = http_listener.local_addr()?;
     let shell = Server::new(identity, readiness.clone(), shutdown.clone())
+        .with(recovery)
         .with(emob_service::serve::operator_only(
             head::router("csmsd", latest),
             operators.clone(),

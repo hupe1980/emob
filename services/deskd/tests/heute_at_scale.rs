@@ -135,6 +135,8 @@ fn sc_001_the_bounded_view_is_small_and_fast_at_a_million_sessions() {
     // FR-004: the page, from exactly what deskd would have read.
     let read: deskd::model::Csmsd = serde_json::from_slice(&body).unwrap();
     let snapshot = deskd::heute::Snapshot {
+        accounting: false,
+        access: emob_service::authority::OperatorAccess::default(),
         csmsd: deskd::fetch::Source::Up(read),
         billd: deskd::fetch::Source::Up(deskd::model::Billd::default()),
         roamd: deskd::fetch::Source::Up(deskd::model::Roamd::default()),

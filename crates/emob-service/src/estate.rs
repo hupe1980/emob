@@ -169,6 +169,12 @@ pub struct Estate {
     /// Driver contracts `empd` seeds.
     #[serde(default)]
     pub contracts: Vec<ContractSeed>,
+    /// Customer sign-in subjects. Grants are held in the provider journal.
+    #[serde(default)]
+    pub portal_users: Vec<PortalUser>,
+    /// Private bill-to accounts available for native enrolment.
+    #[serde(default)]
+    pub retail_accounts: Vec<RetailAccount>,
     /// Unassigned provider RFID cards available for native enrolment.
     #[serde(default)]
     pub card_stock: Vec<CardStock>,
@@ -181,6 +187,9 @@ pub struct Estate {
     /// The operator page.
     #[serde(default)]
     pub desk: Option<Desk>,
+    /// Public origin of the customer portal.
+    #[serde(default)]
+    pub portal: Option<Portal>,
     /// Where receipt links point.
     #[serde(default)]
     pub receipts: Option<ReceiptSection>,
@@ -199,6 +208,15 @@ pub struct Estate {
     /// Registered Mobilithek offers for the static DATEX II table and dynamic updates.
     #[serde(default)]
     pub mobilithek: Option<Mobilithek>,
+}
+
+/// The origin on which customers use their portal.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Portal {
+    /// External HTTPS origin, or an HTTP loopback origin for a local deployment.
+    pub public_url: String,
 }
 
 /// `[mobilithek]` configures the separate static and dynamic offers that
@@ -893,6 +911,34 @@ pub struct InvoiceDelivery {
     pub syntax: InvoiceSyntax,
 }
 
+impl InvoiceDelivery {
+    /// Resolve the ERP credential, keeping it separate from subscriber and internal keys.
+    ///
+    /// # Errors
+    /// An unset, malformed or shared key cannot identify the operator system.
+    pub fn signing_key(
+        &self,
+        env: &Env,
+        subscribers: &[Subscription],
+        internal: Option<&crate::webhook::Secret>,
+    ) -> Result<crate::webhook::Secret, EstateError> {
+        let field = "billing.delivery.secret_env";
+        let configured = self.secret_env.resolve_in(field, env)?;
+        let invalid = |reason: String| EstateError::Invalid {
+            key: field.into(),
+            reason,
+        };
+        let key = crate::webhook::Secret::standard(configured.expose())
+            .map_err(|e| invalid(e.to_string()))?;
+        if internal == Some(&key) || subscribers.iter().any(|s| s.secret == key) {
+            return Err(invalid(
+                "the invoice receiver needs its own signing key".into(),
+            ));
+        }
+        Ok(key)
+    }
+}
+
 /// `[[subscribers]]` — a system outside the estate that receives events.
 ///
 /// Each event a daemon emits whose type one of `types` admits
@@ -914,7 +960,7 @@ pub struct Subscriber {
     pub types: Vec<String>,
 }
 
-/// A subscriber, checked and with its secret.
+/// A subscriber, checked and with its own secret.
 #[derive(Debug, Clone)]
 pub struct Subscription {
     /// Its name.
@@ -998,6 +1044,12 @@ pub fn subscriptions(
                 reason: format!("{} holds {error}", subscriber.secret_env.variable()),
             }
         })?;
+        if out.iter().any(|prior| prior.secret == secret) {
+            return Err(invalid(
+                "secret_env",
+                "each subscriber needs its own signing key".to_owned(),
+            ));
+        }
         out.push(Subscription {
             name: subscriber.name.clone(),
             url: subscriber.url.clone(),
@@ -1006,6 +1058,24 @@ pub fn subscriptions(
         });
     }
     Ok(out)
+}
+
+/// Require a separate key for internal deliveries and every external principal.
+///
+/// # Errors
+/// Returns the offending subscriber's name if its key also signs internal events.
+pub fn separate_subscriber_keys(
+    list: &[Subscription],
+    internal: &crate::webhook::Secret,
+) -> Result<(), EstateError> {
+    if let Some(entry) = list.iter().find(|s| s.secret == *internal) {
+        return Err(EstateError::Invalid {
+            key: format!("subscribers.{}.secret_env", entry.name),
+            reason: "a subscriber must have a different key from the estate delivery key"
+                .to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// `[[partners]]` — a provider this operator settles with.
@@ -1019,6 +1089,10 @@ pub struct Partner {
         schemars(with = "String", regex(pattern = r"^[A-Z]{2}\*?[A-Z0-9]{3}$"))
     )]
     pub party: PartyId,
+    /// CPO parties this platform may represent when sending or reading charge records.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<String>"))]
+    pub cdr_owners: Vec<PartyId>,
     /// The variable holding the Token A handed to it out of band
     /// `[OCPI 2.3.0 §credentials]`.
     pub token_a_env: EnvRef,
@@ -1047,8 +1121,10 @@ pub struct Partner {
 pub struct BillingSection {
     /// The invoice number series prefix.
     pub series: String,
-    /// The seller on every invoice.
+    /// The CPO seller on partner invoices.
     pub seller: Billing,
+    /// The mobility provider issuing native retail invoices.
+    pub retail_seller: Option<Billing>,
     /// The standard VAT rate, in percent, where the energy is supplied.
     #[cfg_attr(
         feature = "schema",
@@ -1204,6 +1280,12 @@ pub struct Operator {
     /// Permit named operator actions. Omit for read-only access.
     #[serde(default)]
     pub write: bool,
+    /// Permit finance reads, statement imports and reviewed allocations.
+    #[serde(default)]
+    pub finance: bool,
+    /// Permit a named reviewer to erase customer portal access bindings.
+    #[serde(default)]
+    pub privacy: bool,
 }
 
 /// `[services]` — where the daemons reach each other, and how.
@@ -1213,6 +1295,8 @@ pub struct Operator {
 pub struct Services {
     /// `billd`'s base URL.
     pub billd: String,
+    /// Optional receivables owner used by the finance desk.
+    pub accountingd: Option<String>,
     /// `roamd`'s base URL.
     pub roamd: String,
     /// `empd`'s base URL.
@@ -1347,11 +1431,7 @@ pub fn operator_tokens(
                 reason: "each operator credential must have a distinct value".to_owned(),
             });
         }
-        let access = if operator.write {
-            OperatorAccess::Write
-        } else {
-            OperatorAccess::Read
-        };
+        let access = OperatorAccess::new(operator.write, operator.finance, operator.privacy);
         tokens.push((actor, Token::new(secret.expose()), access));
     }
     Ok(crate::authority::Operators::from_grants(tokens))
@@ -1371,7 +1451,7 @@ pub fn desk_read_credential(
     let secret = desk.token_env.resolve_in(key, env)?;
     if !matches!(
         operators.identify(secret.expose()),
-        Some((_, crate::authority::OperatorAccess::Read))
+        Some((_, access)) if access == crate::authority::OperatorAccess::default()
     ) {
         return Err(EstateError::Invalid {
             key: key.to_owned(),
@@ -1664,6 +1744,29 @@ service_token_env = "EMOB_SERVICE_TOKEN"
         assert!(fine[0].takes(crate::events::cdr::ISSUED));
         assert!(fine[0].takes(crate::events::invoice::ISSUED));
 
+        // platform-interfaces/SR-030: distinct names cannot share authority.
+        assert!(separate_subscriber_keys(&fine, &fine[0].secret).is_err());
+        let delivery = InvoiceDelivery {
+            url: "https://erp.example/invoices".into(),
+            secret_env: EnvRef("SUB_SECRET".into()),
+            syntax: InvoiceSyntax::Ubl,
+        };
+        assert!(delivery.signing_key(&env, &fine, None).is_err());
+        assert!(
+            delivery
+                .signing_key(&env, &[], Some(&fine[0].secret))
+                .is_err()
+        );
+        assert!(delivery.signing_key(&env, &[], None).is_ok());
+        let shared_key = subscriptions(
+            &[
+                subscriber("billing", "https://billing.example", &["*"]),
+                subscriber("warehouse", "https://warehouse.example", &["*"]),
+            ],
+            &env,
+        )
+        .unwrap_err();
+        assert!(shared_key.to_string().contains("own signing key"));
         let refused = |s: Subscriber| subscriptions(&[s], &env).unwrap_err().to_string();
         assert!(
             refused(subscriber(
@@ -1755,3 +1858,11 @@ pub use public_plan::{
     PublicPlan, PublicSchedule, check_public_plans, validate_public_origin, validate_public_plans,
 };
 pub use retail_offer::{RetailOffer, RetailTerms};
+
+mod retail_account;
+pub use retail_account::{
+    RetailAccount, RetailAccountKind, valid_account_id, validate_retail_accounts,
+};
+
+mod portal_user;
+pub use portal_user::{PortalUser, portal_credentials};

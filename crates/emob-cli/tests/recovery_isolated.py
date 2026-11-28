@@ -90,12 +90,12 @@ def qualify(image, report_file, root):
         == first["owed_after"]["invoice_subscriber"]
         == 1
     )
-    assert set(first["services"]) == {"csmsd", "billd", "roamd", "empd", "poid"}
+    assert set(first["services"]) == {"csmsd", "billd", "roamd", "empd", "poid", "accountingd"}
     assert all(
         r["witness"] == "exact" and r["replay"] == "folded"
         for r in first["services"].values()
     )
-    assert len(first["business"]) == 6 and set(first["business"].values()) == {"match"}
+    assert len(first["business"]) == 7 and set(first["business"].values()) == {"match"}
     assert snapshot((cold, evidence, keys)) == initial
     keyfile = keys / "data.json"
     original_keys = keyfile.read_bytes()
@@ -105,6 +105,7 @@ def qualify(image, report_file, root):
         "04A1B2C3D4E5F6",
         "DE-MSP-C00000001-W",
         "pilot-archive",
+        "PILOT-PAYMENT",
     ]
     for report in (report_file, root / "second.json"):
         assert all(value not in report.read_text() for value in canaries)

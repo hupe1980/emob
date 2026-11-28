@@ -7,7 +7,7 @@ description = "Try emob with just demo, then walk one EV charging session in Rus
 nav = "Getting started"
 +++
 
-Run `just demo` to try the standalone operator workflow. It starts station management, provider authorization, billing, roaming and the operator desk on your machine. Three simulated stations and a local test peer generate the sessions, receipts and invoices. For a persistent estate with all nine services, follow [Run the estate](@/docs/run-the-estate.md).
+Run `just demo` to try the standalone operator workflow. It starts station management, provider authorization, billing, roaming, receivables, the operator desk and the customer portal on your machine. Three simulated stations and a local test peer generate the sessions, receipts and invoices. Use **Driver contracts** to issue a card to a private or fleet billing account. Use **Receivables** to allocate a payment or [credit an invoice line](@/docs/run-the-estate.md#credit-one-invoice-line) on the demo fleet account. Staff can review a private driver’s [withdrawal](@/docs/run-the-estate.md#review-a-withdrawal) from **Driver contracts**. Open the printed customer portal link and sign in as `mika` with the key from the private file named by the demo. Try [customer erasure](@/docs/run-the-estate.md#erase-customer-portal-access) after exploring the demo portal. For a persistent estate with all eleven services, follow [Run the estate](@/docs/run-the-estate.md).
 
 The rest of this tutorial takes one charging session from the meter to
 the money in library code: you verify the station's signed meter values, split
@@ -33,6 +33,10 @@ simulated month end, the partner's **invoice** page with its XRechnung files. Op
 on a phone and tap *Selbst prüfen* to check the signed meter values on the
 device. From Heute, open the refused transaction to see its recorded timeline and provider card. A writer can review a lost-card block, confirm it and later reverse it from the same card. The history names the operator for each change. Open **Driver contracts**, choose the standard offer and enter `STOCK-1004` to review and issue the demonstration card. Ctrl-C ends the run and removes its journals.
 
+The operator bar follows you across the desk. On desktop, choose **Today**, **Stations**, **Search**, **Driver contracts** or **Retail invoices**. **More** lists the tools your role can use, including receivables when configured. On a phone, contracts and invoices also appear under **More**.
+
+On **Today**, **Open tasks** jumps straight to the shift queue when work is waiting. Choose **Stations**, enter a station ID or network and open a result. Text searches show matches first. Open **Station map** to inspect them geographically. After adding a note or changing a reservation, **Back to station results** restores your search, area and page. From session evidence, **Search** opens the next session or card lookup directly. In a large fleet, **Map area** lets you open the same clusters using a keyboard. In the customer portal, **Back to overview** returns from a balance to the invoice history page you were reading.
+
 <div class="shot-pair">
 <figure class="shot phone">
 <picture><source media="(prefers-color-scheme: dark)" srcset="../../img/heute-mobile-dark.webp"><img src="../../img/heute-mobile-light.webp" width="390" height="844" loading="lazy" alt="Heute on a phone: the charging success rate, its causes and the sessions that need attention"></picture>
@@ -52,8 +56,7 @@ estate file and how to run the daemons yourself are on
 
 ## Install the crates
 
-emob needs Rust **1.94** or later (`emob-roam` needs 1.96, because its OCPI
-library does). Add the crates for the steps you follow:
+Install Rust **1.96** or later. Add the crates for the steps you follow.
 
 ```console
 cargo add emob-core emob-eichrecht emob-session emob-cdr emob-tariff emob-billing
@@ -341,7 +344,7 @@ settled or was refused with a reason. A run is fully determined by its seed.
 just            # list every recipe
 just ci         # fmt, clippy, purity, tests, guards, cargo-deny, docs — what CI runs
 just guards     # the workspace's consistency checks (citations, API names, counts …)
-just msrv       # the crates that promise Rust 1.94 still build on it
+just msrv       # check all workspace members on Rust 1.96
 just a11y       # accessibility of every page, light and dark, 320 and 1280 px
 ```
 

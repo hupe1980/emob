@@ -4,7 +4,7 @@ The charge point register and its national access point feed, for charge point
 operators: a DATEX II AFIR Recharging publication generated from the same tariff
 that prices the session.
 
-[![crates.io](https://img.shields.io/crates/v/emob-poi.svg)](https://crates.io/crates/emob-poi) [![docs.rs](https://img.shields.io/docsrs/emob-poi)](https://docs.rs/emob-poi) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-poi.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-poi.svg)](https://crates.io/crates/emob-poi) [![docs.rs](https://img.shields.io/docsrs/emob-poi)](https://docs.rs/emob-poi) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-poi.svg)](#license)
 
 `[AFIR Art. 5(4)]` makes the price shown before a session the price that may be
 charged, and `[AFIR Art. 20(2)(f)]` requires operators to publish that ad-hoc

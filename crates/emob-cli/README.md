@@ -2,7 +2,7 @@
 
 The `emob` command line: `emob check` refuses an estate before a daemon reads
 it, `emob verify` checks a charging receipt's signed meter values offline,
-`emob demo` runs a five-service charging demo on your machine, `emob witness` keeps an
+`emob demo` runs a seven-service charging demo on your machine, `emob witness` keeps an
 independent record of where each daemon's journal ends, and `emob subscribers
 test` proves an event receiver before the first real record reaches it.
 
@@ -27,12 +27,38 @@ checked here (brainpool/secp192k1, a non-OCMF value, no key) · `64` usage ·
 The file says which key signed; whether that is the key printed on the charge
 point is a comparison only the driver can make. `publish = false`.
 
+The demo prints a two-driver fleet invoice and an agreement for reviewing a line credit. The private payer has a separate issued agreement and invoice. Use the agreement reference in Heute to review a withdrawal. Use **Customer erasure** to retire the demo customer’s portal access and reopen its receipt. [Operator walkthrough](../../site/content/docs/run-the-estate.md#review-a-withdrawal)
+
+## `emob mcp`
+
+Configure a local MCP host to launch the `emob` executable with the argument `mcp`. For a host using `mcpServers` configuration:
+
+```json
+{
+  "mcpServers": {
+    "emob": { "command": "emob", "args": ["mcp"] }
+  }
+}
+```
+
+Ask the host to verify one signed meter record. The `verify_meter_record` tool takes the verbatim OCMF string as `record` and the independently obtained meter key as `public_key`. Copy the public key from the charge point or another trusted source. The tool checks the signature with the same offline verifier as the receipt page. Its structured answer gives `verified`, `mismatch` or `inconclusive` and a short explanation. A mismatched key or altered signature produces `mismatch`. Unsupported curves and unreadable inputs produce `inconclusive`.
+
+For an isolated container, configure the host command as `docker` with arguments `["run", "--rm", "-i", "--network", "none", "ghcr.io/hupe1980/emob:<version>", "mcp"]`, replacing `<version>` with the selected image tag. Keep stdin attached with `-i` and leave the terminal unallocated so the host receives the protocol bytes.
+
+The host communicates over standard input and output. The verifier reads only the supplied strings, performs the check locally and returns the verdict without echoing the record or key. It needs no estate configuration. The record accepts up to 65,536 characters, the public key up to 1,024, and a protocol message up to 512 KiB. The MCP host's own policy determines whether it sends the supplied record to a model.
+
+Check an installed server from another process:
+
+```console
+emobtest conformance mcp emob mcp
+```
+
 ## `emob demo`
 
 ```console
 $ just demo            # = just dev-ca (once) + cargo run -q -p emob-cli -- demo
 emob demo — Stadtwerke Musterstadt eMobility · seed 2026 · 60× · from 2026-06-01 10:00 Europe/Berlin
-  ✓ empd billd roamd csmsd deskd up · CP-1 (1.6) CP-2 (2.0.1) CP-3 (2.1) on wss://127.0.0.1:9000 with profile 2 · partner DE*MSP registered
+  ✓ empd billd roamd csmsd deskd portald accountingd up · CP-1 (1.6) CP-2 (2.0.1) CP-3 (2.1) on wss://127.0.0.1:9000 with profile 2 · partner DE*MSP registered
 
   Heute     http://demo:<token>@127.0.0.1:9587/        (operator page, signed in)
   10:22  CP-1 · 1.6    ✓ billed   26.984 kWh · 13.22 EUR · DE*MUS/CP-1-1
@@ -47,8 +73,10 @@ emob demo — Stadtwerke Musterstadt eMobility · seed 2026 · 60× · from 2026
   🔏 witness: csmsd ✓ N · billd ✓ N · roamd ✓ N · empd ✓ N
 ```
 
-The five demo services run in one process on loopback: `empd`, `billd`, `roamd`,
-`csmsd` and `deskd` started through the `daemon::run` their own `main` calls,
+The customer portal line gives the sign-in ID `mika` and the path to its private temporary key file. The customer can open an invoice for a simulated charge.
+
+The seven demo services run in one process on loopback: `empd`, `billd`, `roamd`,
+`csmsd`, `deskd`, `portald` and `accountingd` started through the `daemon::run` their own `main` calls,
 with a generated estate file; three `ocpp-kit` stations — OCPP 1.6, 2.0.1 and
 2.1 — over `wss://` with Basic auth (security profile 2, `just dev-ca`'s
 throwaway CA); `ocpi-kit`'s `MockPeer` as the roaming partner, whose inbox is

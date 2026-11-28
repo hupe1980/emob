@@ -1,4 +1,4 @@
-//! Cold-cut verification for the five durable services. All replayed appends
+//! Cold-cut verification for the six durable services. All replayed appends
 //! target memory. Only the private launcher may start the command-line worker.
 pub(crate) mod fixture;
 mod replay;
@@ -16,18 +16,19 @@ use emob_service::journal::{Journal, Memory};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const SERVICES: [&str; 5] = ["csmsd", "billd", "roamd", "empd", "poid"];
-const CHECKS: [&str; 6] = [
+const SERVICES: [&str; 6] = ["csmsd", "billd", "roamd", "empd", "poid", "accountingd"];
+const CHECKS: [&str; 7] = [
     "settled",
     "refused",
     "invoice",
     "cards",
     "roaming",
     "publication",
+    "receivables",
 ];
 const GIB: u64 = 1024 * 1024 * 1024;
 const SMALL: u64 = 1024 * 1024;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

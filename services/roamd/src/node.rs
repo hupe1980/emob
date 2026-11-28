@@ -79,7 +79,7 @@ pub enum Event {
         cdr: Box<Cdr>,
         /// …and the document it arrived as, kept so a sender can `GET` back
         /// what it sent rather than a rebuild of it.
-        document: Option<Box<ocpi_kit::v2_3_0::Cdr>>,
+        document: Box<ocpi_kit::v2_3_0::Cdr>,
     },
 }
 
@@ -380,17 +380,12 @@ impl<J: Journal> Node<J> {
     ) -> Result<(), NodeError> {
         self.guard()?;
         let peer_id = registration.peer_id.clone();
-        self.folded
-            .state_mut()
-            .peers_mut()
-            .register(registration.clone());
-        self.commit(
-            by,
-            &Event::Registered {
-                registration: Box::new(registration),
-            },
-            &peer_id,
-        )
+        let event = Event::Registered {
+            registration: Box::new(registration),
+        };
+        self.commit(by, &event, &peer_id)?;
+        self.folded.state_mut().apply(event);
+        Ok(())
     }
 
     /// Forget a platform.
@@ -400,14 +395,12 @@ impl<J: Journal> Node<J> {
     /// [`NodeError::Journal`] where the removal could not be recorded.
     pub fn unregister(&mut self, by: &Actor, peer_id: &str) -> Result<(), NodeError> {
         self.guard()?;
-        self.folded.state_mut().peers_mut().unregister(peer_id);
-        self.commit(
-            by,
-            &Event::Unregistered {
-                peer_id: peer_id.to_owned(),
-            },
-            peer_id,
-        )
+        let event = Event::Unregistered {
+            peer_id: peer_id.to_owned(),
+        };
+        self.commit(by, &event, peer_id)?;
+        self.folded.state_mut().apply(event);
+        Ok(())
     }
 
     /// Record what a partner said about a record this node sent.
@@ -463,25 +456,14 @@ impl<J: Journal> Node<J> {
         at: time::OffsetDateTime,
     ) -> Result<Verdict, NodeError> {
         self.guard()?;
-        let verdict = self
-            .folded
-            .state_mut()
-            .receive(from, document, evidence, at);
+        let verdict = self.state().evaluate_received(from, document, evidence, at);
         if let Verdict::Accepted(inbound) = &verdict {
-            let cdr = inbound.cdr.clone();
-            let key = cdr.key.to_string();
-            let kept = Box::new(document.clone());
-            self.folded
-                .state_mut()
-                .hold_received(document.id.as_str().to_owned(), kept.clone());
-            self.commit(
-                by,
-                &Event::Received {
-                    cdr: Box::new(cdr),
-                    document: Some(kept),
-                },
-                &key,
-            )?;
+            let event = Event::Received {
+                cdr: Box::new(inbound.cdr.clone()),
+                document: Box::new(document.clone()),
+            };
+            self.commit(by, &event, &inbound.cdr.key.to_string())?;
+            self.folded.state_mut().apply(event);
         }
         Ok(verdict)
     }
@@ -512,9 +494,8 @@ impl Roamd {
             Event::Registered { registration } => self.peers.register(*registration),
             Event::Unregistered { peer_id } => self.peers.unregister(&peer_id),
             Event::Received { cdr, document } => {
-                if let Some(document) = document {
-                    self.hold_received(document.id.as_str().to_owned(), document);
-                }
+                self.received
+                    .insert(crate::inbound::receipt_key(&cdr.key), document);
                 let _ = self.inbound.accept(*cdr);
             }
         }

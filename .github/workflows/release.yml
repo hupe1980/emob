@@ -7,7 +7,7 @@ name: Release
 # What a tag produces: the fifteen crates on crates.io (trusted publishing — no
 # stored token), a GitHub release carrying every `.crate`, one CycloneDX SBOM of
 # the workspace and `SHA256SUMS`, all three under a build-provenance
-# attestation, and the nine daemon images plus the `emob` CLI image (what
+# attestation, and the eleven daemon images plus the `emob` CLI image (what
 # `just demo` runs without Rust) on ghcr.io with BuildKit provenance.
 on:
   push:
@@ -75,9 +75,37 @@ jobs:
       # its own tarball — the half of the decision that is still cheap.
       - run: cargo publish --workspace --locked --dry-run
 
+  interfaces:
+    name: Replacement interfaces
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4
+      - name: Build the conformance kit from this revision
+        run: |
+          python -m pip wheel --no-deps ./emobtest -w kit
+          python -m pip install kit/*.whl pytest openapi-spec-validator==0.7.2
+      - name: Exercise the replacement ports
+        shell: bash
+        run: just interfaces | tee interface-checks.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: interface-checks
+          path: interface-checks.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: interface-probe-wheel
+          path: kit/*.whl
+
   publish:
     name: Publish to crates.io
-    needs: verify
+    needs: [verify, interfaces, images]
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
     # Named so crates.io's trusted publishing can be scoped to it, and where a
@@ -200,7 +228,7 @@ jobs:
 
   emobtest-publish:
     name: Publish emobtest to PyPI
-    needs: [verify, emobtest-wheels]
+    needs: [verify, interfaces, images, emobtest-wheels]
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -242,9 +270,16 @@ jobs:
         with:
           tool: cargo-cyclonedx
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: "*-checks"
+          merge-multiple: true
+          path: dist
       - name: Package, SBOM, checksums
         run: |
           set -euo pipefail
+          test -s dist/interface-checks.txt
+          test -s dist/image-checks.txt
           # Only the published crates: the daemons and tools are publish = false
           # and some depend on path-only crates, which `cargo package` refuses.
           cargo metadata --no-deps --format-version 1 \
@@ -252,6 +287,7 @@ jobs:
             | xargs cargo package --locked --no-verify
           just sbom
           mkdir -p dist
+          tar -czf dist/emob-interfaces.tar.gz platform.toml schemas
           cp target/package/emob-*.crate target/sbom/*.cdx.json dist/
           (cd dist && sha256sum ./* > SHA256SUMS && cat SHA256SUMS)
 
@@ -260,6 +296,9 @@ jobs:
           subject-path: |
             dist/*.crate
             dist/*.cdx.json
+            dist/interface-checks.txt
+            dist/image-checks.txt
+            dist/emob-interfaces.tar.gz
 
       - env:
           GH_TOKEN: ${{ github.token }}
@@ -275,14 +314,13 @@ jobs:
             --notes-file "$RUNNER_TEMP/release-notes.md" \
             --verify-tag
 
-  # The nine daemons and the `emob` CLI, from `docker-bake.hcl` — the list
+  # The eleven daemons and the `emob` CLI, from `docker-bake.hcl` — the list
   # lives there and only there. Pushed only for a tag; BuildKit attaches its SLSA provenance to each
   # image manifest. The base images are pinned by digest in the Dockerfile, so
   # what this builds on cannot move between two runs of the same tag.
   images:
     name: Images
-    needs: verify
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, interfaces]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -290,14 +328,37 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build every application image before publication
+        run: docker buildx bake -f docker-bake.hcl
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: interface-probe-wheel
+          path: kit
+      - name: Probe the packaged CLI and tariff service
+        shell: bash
+        run: |
+          python -m pip install kit/*.whl
+          REGISTRY=emob-check docker buildx bake -f docker-bake.hcl --load emob tarifd
+          xtask/probe-images.sh emob-check/emob:dev emob-check/emob-tarifd:dev | tee image-checks.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-checks
+          path: image-checks.txt
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
       - name: Version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-      - uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+      - name: Push the verified image targets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         with:
           source: .
           files: docker-bake.hcl

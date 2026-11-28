@@ -4,7 +4,7 @@ The shared domain model of the [emob](https://github.com/hupe1980/emob)
 e-mobility stack: identifiers, exact quantities, time zones, and the regulatory
 obligation calendar for charge points, providers and operators.
 
-[![crates.io](https://img.shields.io/crates/v/emob-core.svg)](https://crates.io/crates/emob-core) [![docs.rs](https://img.shields.io/docsrs/emob-core)](https://docs.rs/emob-core) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-core.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-core.svg)](https://crates.io/crates/emob-core) [![docs.rs](https://img.shields.io/docsrs/emob-core)](https://docs.rs/emob-core) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-core.svg)](#license)
 
 Every other emob crate is written against these types. They keep identifiers
 exactly as a partner sent them, never let a binary float near money or energy,

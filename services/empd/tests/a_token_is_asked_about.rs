@@ -33,10 +33,16 @@ fn env() -> Env {
         ("EMOB_SERVICE_TOKEN", "service-token"),
         ("EMOB_OPERATOR_TOKEN", "operator-token"),
         ("EMOB_DESK_READ_TOKEN", "reader-token"),
+        ("PRIVACY_TEST", "privacy-token"),
+        ("PRIVACY_SECOND", "second-privacy"),
     ]
     .into_iter()
     .collect();
-    Arc::new(move |name| values.get(name).map(|value| (*value).to_owned()))
+    Arc::new(move |name| match name {
+        "CUSTOMER_TEST_KEY" => Some("9a".repeat(32)),
+        "CUSTOMER_TEST_OTHER" => Some("b3".repeat(32)),
+        _ => values.get(name).map(|v| (*v).to_owned()),
+    })
 }
 
 fn book() -> Book<Memory> {
@@ -126,7 +132,12 @@ fn journal_path(name: &str) -> std::path::PathBuf {
             std::process::id(),
             time::OffsetDateTime::now_utc().unix_timestamp_nanos()
         ))
-        .join("empd.ndjson")
+        .join("journals/empd.ndjson")
+}
+
+fn fixture_root(journal: &std::path::Path) -> &std::path::Path {
+    assert!(journal.ends_with("journals/empd.ndjson"));
+    journal.ancestors().nth(2).unwrap()
 }
 
 async fn started(name: &str) -> empd::daemon::Running {
@@ -150,6 +161,7 @@ async fn start_with_clock(
         Options {
             http: "127.0.0.1:0".parse().unwrap(),
             journal: path.to_owned(),
+            custody: fixture_root(path).join("custody"),
             estate,
             env: env(),
             shutdown: Shutdown::new(),
@@ -534,7 +546,7 @@ async fn a_writer_reverses_a_seed_block_once_and_the_decision_survives_restart()
             .contains(r#""status":"Blocked""#)
     );
     restarted.kill().await;
-    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::remove_dir_all(fixture_root(&path)).unwrap();
 }
 
 async fn enrol_action(
@@ -636,8 +648,8 @@ async fn current_terms_and_one_physical_card_are_committed_once() {
     let writer = Some("operator-token");
     let reader = Some("reader-token");
     let service = Some("service-token");
-    let input = json!({"stock":"STOCK-1004","point":live.terms.point,"plan":live.terms.code});
-    let unknown = json!({"stock":"GUESS","point":live.terms.point,"plan":live.terms.code});
+    let input = json!({"account":"PAYER-FLEET","stock":"STOCK-1004","point":live.terms.point,"plan":live.terms.code});
+    let unknown = json!({"account":"PAYER-FLEET","stock":"GUESS","point":live.terms.point,"plan":live.terms.code});
     for (bearer, code) in [(reader, 403), (service, 401), (None, 401)] {
         assert_eq!(enrol_action(addr, "preview", bearer, &input).await.0, code);
         assert_eq!(
@@ -659,6 +671,17 @@ async fn current_terms_and_one_physical_card_are_committed_once() {
         .await
         .0,
         413
+    );
+    let mut bad_payer = input.clone();
+    bad_payer["account"] = json!("UNKNOWN-PAYER");
+    assert_eq!(
+        enrol_action(addr, "preview", writer, &bad_payer).await.0,
+        404
+    );
+    bad_payer.as_object_mut().unwrap().remove("account");
+    assert_eq!(
+        enrol_action(addr, "preview", writer, &bad_payer).await.0,
+        400
     );
     let (status, review) = enrol_action(addr, "preview", writer, &input).await;
     assert_eq!(status, 200);
@@ -727,7 +750,7 @@ async fn current_terms_and_one_physical_card_are_committed_once() {
     );
     running.kill().await;
     price_task.abort();
-    let restored = start_with_clock(&path, estate, clock).await;
+    let restored = start_with_clock(&path, estate.clone(), Arc::clone(&clock)).await;
     let addr = restored.http;
     // Completed confirmations and lookup work even when the price service is offline.
     assert_eq!(enrol_action(addr, "confirm", writer, &op).await.1, receipt);
@@ -746,6 +769,29 @@ async fn current_terms_and_one_physical_card_are_committed_once() {
             .position,
         original + 1
     );
+    // retail billing roster: the price and payer survive replay, without card or operator details.
+    let fleet = json!({"account":"PAYER-FLEET"});
+    assert_eq!(
+        enrol_action(addr, "billing-agreements", service, &fleet)
+            .await
+            .0,
+        401
+    );
+    let (status, roster) = enrol_action(addr, "billing-agreements", reader, &fleet).await;
+    assert_eq!(status, 200);
+    assert_eq!(roster["account"]["id"], receipt["account"]);
+    assert_eq!(roster["agreements"][0]["account"], receipt["account"]);
+    assert_eq!(roster["agreements"][0]["offer"], receipt["offer"]);
+    assert!(roster["agreements"][0].get("card").is_none());
+    assert!(roster["agreements"][0].get("actor").is_none());
+    let (_, unrelated) = enrol_action(
+        addr,
+        "billing-agreements",
+        reader,
+        &json!({"account":"PAYER-PRIVATE"}),
+    )
+    .await;
+    assert_eq!(unrelated["agreements"], json!([]));
     for (point, expected) in [
         (None, "Invalid"),
         (Some("DE*ABC*E00002"), "Invalid"),
@@ -758,6 +804,7 @@ async fn current_terms_and_one_physical_card_are_committed_once() {
         assert_eq!(answer["status"], expected);
         if point == Some("DE*ABC*E00001") {
             assert_eq!(answer["token"]["contract_id"], receipt["emaid"]);
+            assert_eq!(answer["retail"]["agreement"], receipt["agreement"]);
             assert_eq!(answer["retail"]["reference"], live.reference);
         } else {
             assert!(answer["token"].is_null() && answer["retail"].is_null());
@@ -770,7 +817,158 @@ async fn current_terms_and_one_physical_card_are_committed_once() {
         serde_json::from_str::<serde_json::Value>(&expired).unwrap()["status"],
         "Invalid"
     );
+    *now.lock().unwrap() = frozen;
+    let replaced = replace_issued_card(addr, &receipt, &now).await;
+    *now.lock().unwrap() += time::Duration::hours(1);
+    let stop = json!({"agreement":receipt["agreement"],"action":"end"});
+    let (status, review) = enrol_action(addr, "change/preview", writer, &stop).await;
+    assert_eq!(status, 200);
+    let end_op = json!({"agreement":receipt["agreement"],"operation":review["operation"]});
+    let (status, ended) = enrol_action(addr, "change/confirm", writer, &end_op).await;
+    assert_eq!(status, 200);
+    assert_eq!(ended["action"], "end");
+    restored.kill().await;
+    let restored = start_with_clock(&path, estate, clock).await;
+    let addr = restored.http;
+    let replace = json!({"agreement":receipt["agreement"],"action":"replace","stock":"STOCK-1006"});
+    let replace_op = json!({"agreement":receipt["agreement"],"operation":replaced["operation"]});
+    assert_eq!(
+        enrol_action(addr, "change/preview", writer, &replace)
+            .await
+            .0,
+        409
+    );
+    assert_eq!(
+        enrol_action(addr, "change/confirm", writer, &end_op)
+            .await
+            .1,
+        ended
+    );
+    assert_eq!(
+        enrol_action(addr, "change/confirm", writer, &replace_op)
+            .await
+            .1,
+        replaced
+    );
+    assert_eq!(
+        enrol_action(addr, "lookup", reader, &query).await.1["lifecycle"],
+        ended
+    );
+    assert_eq!(
+        enrol_action(addr, "confirm", writer, &op).await.1["lifecycle"],
+        ended
+    );
+    let after = enrol_action(addr, "billing-agreements", reader, &fleet)
+        .await
+        .1;
+    assert_eq!(after["agreements"][0]["ended_at"], ended["at"]);
+    assert_eq!(after["agreements"][0]["offer"], receipt["offer"]);
+    for uid in ["04AB0000000004", "04AB0000000006"] {
+        let answer = authorize_card(addr, uid).await;
+        assert_eq!(answer["status"], "Blocked");
+        assert!(answer["token"].is_null() && answer["retail"].is_null());
+    }
+    assert_eq!(
+        restored
+            .book
+            .lock()
+            .unwrap()
+            .journal()
+            .head()
+            .unwrap()
+            .position,
+        original + 3
+    );
     let file = std::fs::read_to_string(&path).unwrap();
     assert!(!file.contains("04AB0000000004") && !file.contains("STOCK-1004"));
+    assert!(!file.contains("04AB0000000006") && !file.contains("STOCK-1006"));
+    assert!(!file.contains("Musterflotte") && !file.contains("Beispielweg"));
     restored.kill().await;
 }
+
+async fn replace_issued_card(
+    addr: std::net::SocketAddr,
+    receipt: &serde_json::Value,
+    now: &std::sync::Mutex<time::OffsetDateTime>,
+) -> serde_json::Value {
+    use serde_json::json;
+
+    let writer = Some("operator-token");
+    let reader = Some("reader-token");
+    let service = Some("service-token");
+    let query = json!({"agreement":receipt["agreement"]});
+    let replace = json!({"agreement":receipt["agreement"],"action":"replace","stock":"STOCK-1006"});
+    for (bearer, status) in [(None, 401), (reader, 403), (service, 401)] {
+        assert_eq!(
+            enrol_action(addr, "change/preview", bearer, &replace)
+                .await
+                .0,
+            status
+        );
+        assert_eq!(
+            enrol_action(addr, "change/confirm", bearer, &query).await.0,
+            status
+        );
+    }
+    let (status, review) = enrol_action(addr, "change/preview", writer, &replace).await;
+    assert_eq!(status, 200);
+    assert_eq!(review["current_card"], receipt["card"]);
+    let replace_op = json!({"agreement":receipt["agreement"],"operation":review["operation"]});
+    let wrong = json!({"agreement":"0".repeat(64),"operation":review["operation"]});
+    assert_eq!(
+        enrol_action(addr, "change/confirm", writer, &wrong).await.0,
+        409
+    );
+    *now.lock().unwrap() += time::Duration::minutes(5);
+    assert_eq!(
+        enrol_action(addr, "change/confirm", writer, &replace_op)
+            .await
+            .0,
+        409
+    );
+    let (status, review) = enrol_action(addr, "change/preview", writer, &replace).await;
+    assert_eq!(status, 200);
+    let replace_op = json!({"agreement":receipt["agreement"],"operation":review["operation"]});
+    let (first, second) = tokio::join!(
+        enrol_action(addr, "change/confirm", writer, &replace_op),
+        enrol_action(addr, "change/confirm", writer, &replace_op)
+    );
+    assert_eq!(first.0, 200);
+    assert_eq!(first, second);
+    assert_eq!(first.1["current_card"], review["replacement_card"]);
+    assert_eq!(first.1["account"], receipt["account"]);
+    let lookup = enrol_action(addr, "lookup", reader, &query).await.1;
+    assert_eq!(lookup["lifecycle"], first.1);
+    assert_eq!(lookup["offer"], receipt["offer"]);
+    assert_eq!(lookup["emaid"], receipt["emaid"]);
+    let unblock = json!({"reference":receipt["reference"],"blocked":false,"reason":"recovered"});
+    assert_eq!(card_action(addr, "preview", writer, &unblock).await.0, 409);
+    for (uid, status) in [
+        ("04AB0000000004", "Blocked"),
+        ("04AB0000000006", "Accepted"),
+    ] {
+        let answer = authorize_card(addr, uid).await;
+        assert_eq!(answer["status"], status);
+        if status == "Accepted" {
+            assert_eq!(answer["retail"]["agreement"], receipt["agreement"]);
+            assert_eq!(answer["token"]["contract_id"], receipt["emaid"]);
+        }
+    }
+    first.1
+}
+
+async fn authorize_card(addr: std::net::SocketAddr, uid: &str) -> serde_json::Value {
+    let req = serde_json::json!({"uid":uid,"evse":"DE*ABC*E00001"});
+    let (status, raw) = call(addr, &post(addr, Some("service-token"), &req.to_string())).await;
+    assert_eq!(status, 200);
+    serde_json::from_str(&raw).unwrap()
+}
+
+#[path = "customer/access.rs"]
+mod customer_access;
+
+#[path = "withdrawal/case.rs"]
+mod withdrawal_case;
+
+#[path = "customer/erasure.rs"]
+mod customer_erasure;

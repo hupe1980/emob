@@ -1,6 +1,8 @@
 # billd
 
-The billing daemon: decides when a month is closed, which invoice number it gets, which invoice supersedes which, and which ledger account each posting lands in — and puts every issued invoice on a page its recipient can read, and in the operator's ERP.
+The CPO closes each partner’s month from its charge detail records. The mobility provider issues separate invoices for native drivers and fleet accounts. The billing journal retains the numbered documents and their corrections.
+
+The customer portal reads `POST /v1/billd/customer/history` and downloads XML from `POST /v1/billd/customer/document`. Both require a customer session. Receivables checks the same live payer grant through `POST /v1/billd/customer/balance-basis` before showing the balance on a current invoice. Billing reads current grants from the provider before returning agreement receipts or the payer’s archived invoice, credit or replacement.
 
 ## Status
 
@@ -8,10 +10,11 @@ The billing daemon: decides when a month is closed, which invoice number it gets
 |---|---|
 | ✅ library | `billd::Billd` and `billd::Books` implement numbering, closing once, cancellation and re-billing, submission state, and double-entry posting into [`doubleentry`](https://crates.io/crates/doubleentry) 0.9 — tested in `tests/a_month_is_closed_once.rs` |
 | ✅ journal | on start the daemon folds its hash-chained journal (`billd` under `EMOB_JOURNAL_DIR`) and resumes the number series from it before reporting ready. Record bodies — received CDRs carry a card UID, invoices an IBAN — are sealed under `BILLD_DATA_KEY`; every record names its actor; the head is signed under `BILLD_SIGNING_KEY` after every append, and a journal shorter than its signed head refuses the start |
-| ✅ deliveries | `POST /v1/deliveries` takes the `de.emob.cdr.issued` CloudEvents `csmsd` emits (any other type is refused): 1 MiB cap, Standard-Webhooks signature and 300 s freshness, id = CDR key, issuer must be an estate partner; journalled as `received`, then answered. A duplicate is answered `200 duplicate`; a signed sample marked `emobtest` is `202` and never booked, so a replacement and this one pass the same `emobtest conformance receiver` |
+| ✅ deliveries | `POST /v1/deliveries` takes the `de.emob.cdr.issued` CloudEvents `csmsd` emits (any other type is refused): 1 MiB cap, Standard-Webhooks signature and 300 s freshness, id = CDR key, issuer must be the configured native provider or an estate partner; journalled as `received`, then answered. A duplicate is answered `200 duplicate`; a signed sample marked `emobtest` is `202` and never booked, so a replacement and this one pass the same `emobtest conformance receiver` |
 | ✅ month close | an hourly calendar closes each partner's previous month once: one EN 16931 invoice per partner and calendar month from the records received, seller from `[billing]`, buyer from the partner, in the partner's `specification` (EN 16931 or XRechnung). A document that specification rejects is refused at the close, while it is only a spent number. Each line carries the driver's receipt link |
-| ✅ invoice page | every issued invoice has a page at `/i/{token}` with its UBL and CII files |
-| ✅ delivery | with `[billing.delivery]`, each issued invoice is posted, signed, to the operator's ERP or Peppol provider until it answers; an accepted one is booked |
+| ✅ retail | `POST /v1/billd/retail/{review,close,lookup,document}` serves named staff. Review a completed UTC month by account, confirm its digest with a writer, and download the archived UBL by account, period and number with a finance grant. Late eligible usage requires a new review, credit and replacement. |
+| ✅ invoice page | every issued partner invoice has a page at `/i/{token}` with its UBL and CII files |
+| ✅ delivery | with `[billing.delivery]`, each issued partner invoice is posted, signed, to the operator's ERP or Peppol provider until it answers; an accepted one is booked |
 | ⏳ not wired | SEPA collection runs; the library builds them |
 
 What a document **says** — rounding, VAT, EN 16931, SEPA, role-addressed
@@ -127,13 +130,7 @@ move the `.head` file aside.
 
 ### The invoice page: `/i/{token}`
 
-From 01.01.2027 a German business invoice is the structured EN 16931 file
-`[UStG §14(1)]` names, and nobody reads XML. So every issued document has one
-page, built like a bill: what is owed, by when and how it is collected; who
-bills whom; every session with the receipt link that lets its driver check it;
-the VAT; the one rounding amount the document states; and the two files —
-`/i/{token}/ubl.xml` (OASIS UBL 2.1) and `/i/{token}/cii.xml` (UN/CEFACT CII),
-which are the invoice in law. German first, `?lang=en`, printable, no script.
+Every issued partner invoice has a printable German or English page with the amount, due date, VAT, rounding and session receipts. Its structured documents are available at `/i/{token}/ubl.xml` (UBL 2.1) and `/i/{token}/cii.xml` (CII). German issuance requirements depend on the transaction and applicable transition rules. [Federal Ministry of Finance guidance](https://www.bundesfinanzministerium.de/Content/DE/FAQ/e-rechnung.html)
 
 - **The page computes nothing that decides.** Every figure is the document's
   own, and the files are byte for byte what the operator system receives.
@@ -153,13 +150,16 @@ it as `Invoice`).
 ### Handing the invoice over: `[billing.delivery]`
 
 `billd` writes the e-invoice and does not transmit it — no SMTP, no Peppol access
-point. With `[billing.delivery]` set, every document still `Issued` is posted to
+point. With `[billing.delivery]` set, each partner document still `Issued` is posted to
 the operator's ERP or Peppol provider as a `de.emob.invoice.issued` CloudEvent:
-`data` is the file in the configured `syntax` (`ubl` or `cii`,
+`data` is the file in the `syntax` recorded at issue (`ubl` or `cii`,
 `application/xml`), `subject` is `invoice/<number>`, the page link is the
 `invoiceurl` attribute when `public_url` is set. Signed under the secret
 `secret_env` names, `webhook-id` = the invoice number (the receiver's
-idempotency key). The URL must be `https://`, or `http://` on loopback.
+idempotency key). Configure the final HTTPS URL or a loopback HTTP endpoint.
+A redirect leaves the delivery pending. An estate syntax change applies to new
+invoices. A retry or subscriber recovery uses the syntax retained in the
+issued invoice fact.
 
 Every `[[subscribers]]` entry that takes `de.emob.invoice.issued` receives the
 same event under its own secret. Whom a document is owed to is fixed at issue;
@@ -170,7 +170,23 @@ and books.
 |---|---|---|
 | `2xx` | accepted, with the optional `reference`; then booked | the recipient's platform took it |
 | `401`, `408`, `429`, `5xx`, no answer | nothing — retried every `retry_secs` | a secret being rotated, a system starting, a system down |
-| any other `4xx` | rejected, with the body (up to 512 bytes) as the reason | the system read it and said no; the number stays spent |
+| any other `4xx` | rejected, with a reason of up to 512 characters plus a truncation marker | the system read it and said no; the number stays spent |
+
+## Receivables feed
+
+A named operator with a finance grant can read `GET /v1/billd/receivables?after=0&limit=50`. Pass the returned `next_after` to continue. Each position identifies one issued retail document. A correction emits the credit first, then its replacement. Both reference the original invoice. The page carries the issuer, payer account, currency and exact nonnegative payable amount in minor units. Receivables uses the document kind to distinguish debts from credits. A billing restart reproduces the same order.
+
+## Credit one invoice line
+
+Use a named finance writer. `POST /v1/billd/adjustment/lookup` takes the invoice number and agreement. Each row identifies the original UBL line, its source, VAT rate and remaining net amount in minor units. Post the line ID, proposed net amount and reason to `/v1/billd/adjustment/review`. Confirm the same selection and returned review at `/v1/billd/adjustment/confirm`. The issuer checks the remaining net, VAT and payable before issuing a numbered credit.
+
+The receipt identifies the credit for download through the archive. Retrying a confirmed review returns the original receipt. The finance feed carries a `line_credit` with its gross amount and original invoice number. After a partial credit, a changed month is held for reconciliation before any full reversal.
+
+## Withdrawal credit
+
+Enter an issued retail invoice number in the withdrawal case to inspect that agreement’s charging records and monthly fees. A named writer can request evidence at `POST /v1/billd/withdrawal/evidence` with `agreement` and `number`. An optional zero-based `page` selects up to 50 matching lines. Each session line identifies its CDR.
+
+A writer with a finance grant can review a full credit at `POST /v1/billd/withdrawal/review`. Billing checks the approved case and its financial disposition with the agreement owner. The invoice must be current and every line must belong to the agreement. Confirm the same fields and the returned `review` at `POST /v1/billd/withdrawal/confirm`. The original XML remains available. The numbered credit references the original invoice, and the finance feed records its exact payable amount. Shared invoices and further changes to a fully credited month require separate review.
 
 ## Configuration
 

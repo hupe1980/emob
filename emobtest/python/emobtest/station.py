@@ -24,7 +24,7 @@ from typing import Literal
 
 from . import _native
 from .assertions import assert_bills
-from .core import Evidence
+from .core import Evidence, _when
 
 Fault = Literal["tampered", "dropped"]
 
@@ -178,9 +178,11 @@ class Station:
         car: Car | None = None,
         minutes: int = 30,
         fault: Fault | None = None,
+        started_at: datetime | str | None = None,
     ) -> Session:
         """Plug `car` in, present `card`, charge for `minutes`, unplug.
 
+        Pass `started_at` to replay a specific billing period.
         `fault="tampered"` changes the closing reading after it was signed;
         `fault="dropped"` signs a reading and never sends it. A platform that
         bills either has a bug.
@@ -197,6 +199,7 @@ class Station:
             car.max_amps,
             car.phases,
             fault or "",
+            _when(started_at) if started_at is not None else None,
         )
         return Session(status, transaction, Decimal(kwh), tuple(records), self.meter_key, fault)
 

@@ -35,7 +35,7 @@
 //! `[LPC §2.3.2]` gives a controllable site **five** states where a summary
 //! gives it two. Three allow full power and they are not one fact: the grid
 //! operator is there and allowing it, the grid operator has been gone for hours
-//! `[LPC-906]`, or no control box was ever commissioned. So [`GridLimit`] is
+//! `[LPC-922]`, or no control box was ever commissioned. So [`GridLimit`] is
 //! five values rather than an `Option`, and two of them put a note on the
 //! allocation — a depot at 60 kW because it may and one at 60 kW because its
 //! control box died are the same number and different problems.

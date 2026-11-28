@@ -61,6 +61,63 @@ impl Writer<'_> {
     }
 }
 
+fn receivables_fixture(writer: &mut Writer<'_>, issuer: &emob_core::PartyId) -> Result<String> {
+    let key = Arc::new(writer.key("accountingd")?);
+    let journal = Sealing::new(
+        writer.journal("accountingd")?,
+        Arc::clone(&key),
+        "accountingd/receivables/v1",
+    );
+    let actor = Actor::operator("pilot-finance")?;
+    let number = "MSP-DE*MSP-00000001";
+    let scope = "PAYER-PRIVATE";
+    let source = "LOCAL-BANK";
+    let reference = "PILOT-PAYMENT";
+    let facts = [
+        (
+            "document",
+            serde_json::json!({
+                "fact":"document","document":{"issuer":issuer,"number":number,"position":1,"currency":"EUR",
+                "account":scope,"kind":"invoice","predecessor":null,"amount_minor":10000}
+            }),
+        ),
+        (
+            "statement",
+            serde_json::json!({
+                "fact":"statement","issuer":issuer,"account":scope,"currency":"EUR","source":source,
+                "payments":[{"reference":reference,"amount_minor":6000}],"held":[]
+            }),
+        ),
+        (
+            "allocation",
+            serde_json::json!({
+                "fact":"allocation","actor":actor,"allocation":{"account":scope,"currency":"EUR","number":number,
+                "source":source,"reference":reference,"amount_minor":6000},
+                "result":{"review":digest(b"synthetic-finance-review"),"open_after_minor":4000,"unapplied_after_minor":0}
+            }),
+        ),
+    ];
+    for (kind, fact) in facts {
+        let origin = if kind == "document" {
+            Actor::service("billd")
+        } else {
+            actor.clone()
+        };
+        journal.append(kind, &origin, &serde_json::to_string(&fact)?)?;
+    }
+    drop(journal);
+    let reopened = File::open(writer.cold.join("accountingd.ndjson"))?;
+    let proof = accountingd::recovery_proof(reopened, key, issuer)?;
+    ensure!(
+        proof["cursor"] == 1 && proof["payments"] == 1 && proof["allocations"] == 1,
+        "fixture cash ledger incomplete"
+    );
+    Ok(proof["digest"]
+        .as_str()
+        .context("fixture ledger digest")?
+        .to_owned())
+}
+
 pub(super) fn create(root: &Path) -> Result<()> {
     use csmsd::journal::{Delivery, Target};
     use emob_sim::{Fault, FaultPlan, Rate, ReferenceDay};
@@ -164,7 +221,10 @@ pub(super) fn create(root: &Path) -> Result<()> {
             billd::ChartOfAccounts::new(),
             j,
         )?;
-        let mut books = books.delivering_to(vec!["pilot-archive".to_owned()]);
+        let mut books = books.delivering_to(
+            vec!["pilot-archive".to_owned()],
+            billd::daemon::delivery_syntax(&bill),
+        );
         ensure!(
             books.receive(
                 &Actor::service("csmsd"),
@@ -240,11 +300,13 @@ pub(super) fn create(root: &Path) -> Result<()> {
             },
         )?;
     }
-    // All five writers have closed and no code below can append to the source.
+    let receivables_digest = receivables_fixture(&mut writer, &estate.parties.provider)?;
+    // All six writers have closed and no code below can append to the source.
     // Record the expectations separately, from the exercise inputs and invoice
     // as observed by its issuer, before running any recovery code.
     let contract = estate.contracts.first().context("fixture contract")?;
     let expected = Expected {
+        receivables_digest,
         settled: id,
         energy_kwh: cdr.total_energy.kwh().to_string(),
         price: price.amount().to_string(),

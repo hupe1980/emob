@@ -59,7 +59,7 @@ pub fn main(args: &[String], out: &mut impl Write, err: &mut impl Write) -> u8 {
     let env: Env = if secrets {
         estate::process_env()
     } else {
-        placeholders()
+        placeholders(&text)
     };
     match check(&text, &path, &env) {
         Ok(whole) => {
@@ -90,9 +90,21 @@ pub fn main(args: &[String], out: &mut impl Write, err: &mut impl Write) -> u8 {
 }
 
 /// Distinct placeholders exercise credential separation and webhook formatting.
-fn placeholders() -> Env {
+fn placeholders(text: &str) -> Env {
     use base64::Engine as _;
-    Arc::new(|name: &str| {
+    use sha2::{Digest as _, Sha256};
+    let customer_vars: std::collections::BTreeSet<String> = estate::from_str::<Estate>(text)
+        .map(|e| {
+            e.portal_users
+                .iter()
+                .map(|p| p.secret_env.variable().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    Arc::new(move |name: &str| {
+        if customer_vars.contains(name) {
+            return Some(hex::encode(Sha256::digest(name.as_bytes())));
+        }
         Some(format!(
             "whsec_{}",
             base64::engine::general_purpose::STANDARD.encode(name)
@@ -113,6 +125,7 @@ pub fn check(text: &str, path: &str, env: &Env) -> Result<Estate, EstateError> {
     let whole: Estate = estate::from_str_at(text, path)?;
 
     estate::check_public_plans(&whole)?;
+    estate::validate_retail_accounts(&whole.retail_accounts)?;
     if !whole.card_stock.is_empty() {
         let provider: empd::daemon::Estate = estate::from_str_at(text, path)?;
         empd::daemon::validate_enrolment(&provider).map_err(|error| EstateError::Invalid {
@@ -163,20 +176,47 @@ pub fn check(text: &str, path: &str, env: &Env) -> Result<Estate, EstateError> {
     // Everyone: the operators are actors, the subscribers are reachable and
     // subscribe to something that is emitted, the secrets are named.
     let operators = estate::operator_tokens(&whole.operators, env)?;
-    estate::subscriptions(&whole.subscribers, env)?;
-    if let Some(services) = &whole.services {
-        estate::webhook_secret(services, env)?;
-        estate::service_credential(services, env, &operators)?;
+    let subscribers = estate::subscriptions(&whole.subscribers, env)?;
+    let internal = whole
+        .services
+        .as_ref()
+        .map(|services| estate::webhook_secret(services, env))
+        .transpose()?;
+    if let Some(key) = &internal {
+        estate::separate_subscriber_keys(&subscribers, key)?;
     }
+    let service = whole
+        .services
+        .as_ref()
+        .map(|services| estate::service_credential(services, env, &operators))
+        .transpose()?;
+    estate::portal_credentials(&whole.portal_users, env, &operators, service.as_ref())?;
     for (index, partner) in whole.partners.iter().enumerate() {
         partner
             .token_a_env
             .resolve_in(&format!("partners[{index}].token_a_env"), env)?;
     }
     if let Some(delivery) = whole.billing.as_ref().and_then(|b| b.delivery.as_ref()) {
-        delivery
-            .secret_env
-            .resolve_in("billing.delivery.secret_env", env)?;
+        delivery.signing_key(env, &subscribers, internal.as_ref())?;
+    }
+    if whole
+        .services
+        .as_ref()
+        .and_then(|s| s.accountingd.as_ref())
+        .is_some()
+    {
+        let owner: accountingd::Estate = estate::from_str_at(text, path)?;
+        owner.validate().map_err(|error| EstateError::Invalid {
+            key: "services".into(),
+            reason: error.to_string(),
+        })?;
+    }
+    if whole.portal.is_some() {
+        let portal: portald::Estate = estate::from_str_at(text, path)?;
+        portal.validate().map_err(|error| EstateError::Invalid {
+            key: "portal".into(),
+            reason: error.to_string(),
+        })?;
     }
     if let Some(desk) = &whole.desk {
         estate::desk_read_credential(desk, env, &operators)?;
@@ -204,7 +244,7 @@ fn report(error: &EstateError, path: &str) -> String {
 #[must_use]
 pub fn passes(path: &Path) -> bool {
     std::fs::read_to_string(path)
-        .is_ok_and(|text| check(&text, &path.display().to_string(), &placeholders()).is_ok())
+        .is_ok_and(|text| check(&text, &path.display().to_string(), &placeholders(&text)).is_ok())
 }
 
 #[cfg(test)]

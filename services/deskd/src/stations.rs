@@ -85,7 +85,7 @@ pub struct DrawnCell {
 impl Drawn {
     /// The map as SVG; empty when nothing has coordinates to draw.
     #[must_use]
-    pub fn svg(&self, query: &str, lang: Lang) -> String {
+    pub fn svg(&self, view: FleetView<'_>, lang: Lang) -> String {
         use crate::map::{Cell, Dot, hundredths};
         let dots: Vec<Dot> = self
             .points
@@ -116,7 +116,37 @@ impl Drawn {
                 })
             })
             .collect();
-        crate::map::fleet(&dots, &cells, query, lang)
+        crate::map::fleet(&dots, &cells, view, lang)
+    }
+}
+
+/// Shareable position in the inventory.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FleetView<'a> {
+    /// The words searched for.
+    pub query: &'a str,
+    /// The area searched in.
+    pub area: Option<&'a str>,
+    /// Where this page starts.
+    pub offset: u64,
+}
+
+impl FleetView<'_> {
+    /// Encode the query once, independently of HTML attribute escaping.
+    #[must_use]
+    pub fn href(self, path: &str, lang: Lang) -> String {
+        let mut params = form_urlencoded::Serializer::new(String::new());
+        if !self.query.is_empty() {
+            params.append_pair("q", self.query);
+        }
+        if let Some(area) = self.area {
+            params.append_pair("area", area);
+        }
+        if self.offset > 0 {
+            params.append_pair("offset", &self.offset.to_string());
+        }
+        params.append_pair("lang", lang.tag());
+        format!("{path}?{}", params.finish())
     }
 }
 
@@ -127,12 +157,8 @@ pub struct Listing<'a> {
     pub found: &'a Found,
     /// The map, already drawn.
     pub map: String,
-    /// The words searched for.
-    pub query: &'a str,
-    /// The area searched in.
-    pub area: Option<&'a str>,
-    /// Where this page starts.
-    pub offset: u64,
+    /// Active search and page.
+    pub view: FleetView<'a>,
     /// Rows per page.
     pub limit: usize,
 }
@@ -381,14 +407,10 @@ pub fn same_origin(headers: &HeaderMap) -> bool {
 /// `/stations`: the search and the way to add one.
 #[must_use]
 pub fn render_list(listing: &Listing<'_>, lang: Lang, can_write: bool) -> String {
-    let Listing {
-        found,
-        query,
-        area,
-        offset,
-        limit,
-        ..
-    } = *listing;
+    let found = listing.found;
+    let view = listing.view;
+    let query = view.query;
+    let area = view.area;
     let area_input = area.map_or_else(String::new, |area| {
         format!(
             "<input type=\"hidden\" name=\"area\" value=\"{}\">",
@@ -397,20 +419,20 @@ pub fn render_list(listing: &Listing<'_>, lang: Lang, can_write: bool) -> String
     });
     let add = if can_write {
         format!(
-            "<a class=\"btn\" href=\"/stations/new\">{}</a>",
+            "<a class=\"btn\" href=\"/stations/new?lang={}\">{}</a>",
+            lang.tag(),
             lang.pick("+ Station hinzufügen", "+ Add a station")
         )
     } else {
         format!("<span class=\"muted\">{}</span>", crate::read_only(lang))
     };
     let mut body = format!(
-        "<p class=\"eyebrow back\"><a href=\"/\">{back}</a></p>\
-         <div class=\"head\"><h1>{title} <span class=\"count\">{total}</span></h1>\
+        "<div class=\"head\"><h1>{title} <span class=\"count\">{total}</span></h1>\
          {add}</div>\
-         <form class=\"search\" method=\"get\" action=\"/stations\" role=\"search\">\
+         <form class=\"search\" method=\"get\" action=\"/stations\" role=\"search\"><input type=\"hidden\" name=\"lang\" value=\"{tag}\">\
          <label for=\"q\">{label}</label> <input id=\"q\" name=\"q\" type=\"search\" value=\"{query}\" \
          placeholder=\"{hint}\" autocomplete=\"off\">{area_input} <button class=\"btn\" type=\"submit\">{go}</button></form>",
-        back = lang.pick("← Heute", "← Today"),
+        tag = lang.tag(),
         title = lang.pick("Stationen", "Stations"),
         total = found.total,
         label = lang.pick("Suchen", "Search"),
@@ -425,19 +447,74 @@ pub fn render_list(listing: &Listing<'_>, lang: Lang, can_write: bool) -> String
         let _ = write!(
             body,
             "<p class=\"chips\"><span class=\"badge tone-info\">{inside} {area}</span> \
-             <a href=\"/stations?q={q}\">{all}</a></p>",
+             <a href=\"{href}\">{all}</a></p>",
             inside = lang.pick("Im Gebiet", "In the area"),
             area = escape(area),
-            q = escape(&query.replace(' ', "+")),
+            href = escape(
+                &FleetView {
+                    area: None,
+                    offset: 0,
+                    ..view
+                }
+                .href("/stations", lang)
+            ),
             all = lang.pick("Ganze Flotte zeigen", "Show the whole fleet"),
         );
     }
-    body.push_str(&listing.map);
-    if found.items.is_empty() {
+    if !listing.map.is_empty() && !query.is_empty() && area.is_none() {
+        let _ = write!(
+            body,
+            "<details><summary>{}</summary>{}</details>",
+            lang.pick("Stationskarte", "Station map"),
+            listing.map
+        );
+    } else {
+        body.push_str(&listing.map);
+    }
+    render_results(&mut body, listing, lang, can_write);
+    crate::navigation::page(
+        &ui::Shell {
+            title: lang.pick("Stationen", "Stations"),
+            place: lang.pick("Betrieb", "Operations"),
+            lang,
+            reading: false,
+            script: None,
+        },
+        &body,
+    )
+}
+
+fn render_results(body: &mut String, listing: &Listing<'_>, lang: Lang, can_write: bool) {
+    let Listing {
+        found, view, limit, ..
+    } = *listing;
+    let FleetView {
+        query,
+        area,
+        offset,
+    } = view;
+    let list_at = |offset| escape(&FleetView { offset, ..view }.href("/stations", lang));
+    if found.items.is_empty() && offset > 0 {
+        let _ = write!(
+            body,
+            r#"<p>{} <a href="{}">{}</a></p>"#,
+            lang.pick(
+                "Auf dieser Seite sind keine Treffer mehr.",
+                "There are no results on this page."
+            ),
+            list_at(0),
+            lang.pick("Zur ersten Seite", "Go to first page")
+        );
+    } else if found.items.is_empty() {
         let _ = write!(
             body,
             "<p class=\"empty\">{}</p>",
-            if query.is_empty() && !can_write {
+            if area.is_some() {
+                lang.pick(
+                    "Keine Treffer in diesem Gebiet.",
+                    "No matches in this area.",
+                )
+            } else if query.is_empty() && !can_write {
                 lang.pick("Keine Station registriert.", "No stations registered.")
             } else if query.is_empty() {
                 lang.pick(
@@ -452,33 +529,46 @@ pub fn render_list(listing: &Listing<'_>, lang: Lang, can_write: bool) -> String
             }
         );
     } else {
-        body.push_str(&table(&found.items, lang));
-        let next = offset + limit as u64;
-        if next < found.total {
+        let first = offset.saturating_add(1);
+        let last = offset.saturating_add(found.items.len() as u64);
+        let _ = write!(
+            body,
+            r#"<p class="muted">{first}–{last} {} {}</p>"#,
+            lang.pick("von", "of"),
+            found.total
+        );
+        body.push_str(&table(&found.items, view, lang));
+        let next = offset.saturating_add(limit as u64);
+        if offset > 0 || next < found.total {
             let _ = write!(
                 body,
-                "<p class=\"more\"><a href=\"/stations?q={q}{area}&amp;offset={next}\">{more}</a></p>",
-                q = escape(&query.replace(' ', "+")),
-                area = area.map_or_else(String::new, |area| format!("&amp;area={}", escape(area))),
-                more = lang.pick("Weitere anzeigen", "Show more"),
+                r#"<nav class="desk-nav" aria-label="{}">"#,
+                lang.pick("Ergebnisseiten", "Result pages")
             );
+            if offset > 0 {
+                let _ = write!(
+                    body,
+                    r#"<a rel="prev" href="{}">{}</a>"#,
+                    list_at(offset.saturating_sub(limit as u64)),
+                    lang.pick("Vorherige Seite", "Previous page")
+                );
+            }
+            if next < found.total {
+                let _ = write!(
+                    body,
+                    r#"<a rel="next" href="{}">{}</a>"#,
+                    list_at(next),
+                    lang.pick("Nächste Seite", "Next page")
+                );
+            }
+            body.push_str("</nav>");
         }
     }
-    ui::page(
-        &ui::Shell {
-            title: lang.pick("Stationen", "Stations"),
-            place: lang.pick("Betrieb", "Operations"),
-            lang,
-            reading: false,
-            script: None,
-        },
-        &body,
-    )
 }
 
 /// The rows of a search, one link per station — the keyboard's way to what
 /// the map shows.
-fn table(rows: &[Row], lang: Lang) -> String {
+fn table(rows: &[Row], view: FleetView<'_>, lang: Lang) -> String {
     let mut body = String::new();
     body.push_str("<div class=\"scroll\"><table><thead><tr>");
     for head in [
@@ -503,7 +593,7 @@ fn table(rows: &[Row], lang: Lang) -> String {
             body,
             "<tr><td><a href=\"{href}\"><strong>{identity}</strong></a></td><td>{evse}</td><td>{ocpp}</td>\
              <td><span class=\"badge {tone}\">{word}</span>{held}</td><td>{model}</td><td>{firmware}</td><td>{network}</td></tr>",
-            href = escape(&crate::station::href(&row.identity)),
+            href = escape(&view.href(&crate::station::href(&row.identity), lang)),
             identity = escape(&row.identity),
             evse = escape(&row.evse),
             ocpp = escape(&row.ocpp),
@@ -841,7 +931,7 @@ pub fn render_form(
             "Europe/Berlin"
         ),
     );
-    ui::page(
+    crate::navigation::page(
         &ui::Shell {
             title,
             place: lang.pick("Betrieb", "Operations"),
@@ -958,7 +1048,7 @@ pub fn render_sheet(
         open = lang.pick("Zur Station", "Open the station"),
         another = lang.pick("Noch eine Station", "Add another"),
     );
-    ui::page(
+    crate::navigation::page(
         &ui::Shell {
             title: lang.pick("Station angelegt", "Station created"),
             place: lang.pick("Betrieb", "Operations"),
@@ -1056,6 +1146,64 @@ mod tests {
         assert!(html.contains("aria-invalid=\"true\" aria-describedby=\"tariff-err\""));
     }
 
+    #[test]
+    fn fleet_navigation_preserves_filter_values_and_recovers_from_a_stale_page() {
+        // fleet-navigation/SR-030. URL encoding precedes HTML attribute escaping.
+        let view = FleetView {
+            query: "A+B & #50% München",
+            area: Some("6,48,7,49"),
+            offset: 50,
+        };
+        let href = view.href("/stations", Lang::En);
+        let parsed = reqwest::Url::parse(&format!("https://estate.example{href}")).unwrap();
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+        assert_eq!(parsed.path(), "/stations");
+        assert_eq!(parsed.fragment(), None);
+        assert_eq!(params["q"], view.query);
+        assert_eq!(params["area"], "6,48,7,49");
+        assert_eq!(params["offset"], "50");
+        assert_eq!(params["lang"], "en");
+        let found = Found {
+            total: 100,
+            items: Vec::new(),
+        };
+        let page = render_list(
+            &Listing {
+                found: &found,
+                map: String::new(),
+                view: FleetView {
+                    offset: u64::MAX,
+                    ..view
+                },
+                limit: 50,
+            },
+            Lang::En,
+            true,
+        );
+        assert!(page.contains("Go to first page"));
+        assert!(page.contains(&escape(
+            &FleetView { offset: 0, ..view }.href("/stations", Lang::En)
+        )));
+        assert!(!page.contains("No station yet"));
+        let grid = Drawn {
+            points: vec![],
+            cells: vec![DrawnCell {
+                west: "6".into(),
+                south: "48".into(),
+                east: "7".into(),
+                north: "49".into(),
+                stations: 120,
+                silent: 3,
+            }],
+        };
+        let map = grid.svg(view, Lang::En);
+        assert!(map.contains(r#"<option value="6,48,7,49">120 stations, 3 silent"#));
+        assert!(map.contains(&escape(
+            &FleetView { offset: 0, ..view }.href("/stations", Lang::En)
+        )));
+        assert!(map.contains(r#"name="q" value="A+B &amp; #50% München""#));
+    }
+
     /// Spec 022, SC-001: the Stations page holds the operator budget with
     /// the most the map draws — 300 dots, or the grid a fleet of 10 000
     /// becomes — and a full page of rows.
@@ -1104,20 +1252,43 @@ mod tests {
                 })
                 .collect(),
         };
+        let view = FleetView {
+            query: "HYC300",
+            area: Some("6,47,15,54"),
+            offset: 50,
+        };
         for drawn in [dots, grid] {
             let html = render_list(
                 &Listing {
                     found: &found,
-                    map: drawn.svg("", Lang::De),
-                    query: "",
-                    area: None,
-                    offset: 0,
+                    map: drawn.svg(view, Lang::De),
+                    view,
                     limit: crate::heute::ROWS,
                 },
                 Lang::De,
                 true,
             );
             assert!(html.contains("<svg"), "a map is drawn");
+            assert!(
+                !html.contains("<summary>Stationskarte</summary>"),
+                "geographic drill-down stays open"
+            );
+            let searched = render_list(
+                &Listing {
+                    found: &found,
+                    map: drawn.svg(view, Lang::De),
+                    view: FleetView { area: None, ..view },
+                    limit: crate::heute::ROWS,
+                },
+                Lang::De,
+                true,
+            );
+            assert!(searched.contains("<details><summary>Stationskarte</summary>"));
+            assert!(html.contains("51–100 von 10000"));
+            for (rel, offset) in [("prev", 0), ("next", 100)] {
+                let href = FleetView { offset, ..view }.href("/stations", Lang::De);
+                assert!(html.contains(&format!(r#"rel="{rel}" href="{}""#, escape(&href))));
+            }
             assert!(
                 html.len() < 150_000,
                 "the Stations page weighs {} bytes",

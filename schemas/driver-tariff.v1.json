@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hupe1980.github.io/emob/schemas/driver-tariff.v1.json",
   "title": "driver-tariff.v1",
-  "description": "One version of an emob tariff as a seller imports it: served by tarifd at /v1/driver-tariffs/{id} (the version in force) and /v1/driver-tariffs/{id}/{version} (that version, for ever). Public; nothing about any customer.",
+  "description": "One version of an emob tariff as a seller imports it: served by tarifd at /v1/driver-tariffs/{id} (the version in force) and /v1/driver-tariffs/{id}/{version} (that version while retained in history). Public; nothing about any customer.",
   "type": "object",
   "required": ["schema", "id", "version", "preisstand", "valid_from", "valid_until", "currency", "components", "display", "examples", "tariff"],
   "additionalProperties": false,

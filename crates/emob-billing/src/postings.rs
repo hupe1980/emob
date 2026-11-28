@@ -346,7 +346,7 @@ fn dominant_is_energy(invoice: &Invoice, cdr: &emob_cdr::CdrKey) -> bool {
     invoice
         .lines
         .iter()
-        .filter(|line| line.cdr == *cdr)
+        .filter(|line| line.cdr.as_ref() == Some(cdr))
         .max_by_key(|line| line.net.abs())
         .is_some_and(|line| line.dimension == emob_tariff::Dimension::Energy)
 }
@@ -809,7 +809,7 @@ mod tests {
         let energy_line: Decimal = invoice
             .lines
             .iter()
-            .filter(|line| line.cdr == energy_session.key)
+            .filter(|line| line.cdr.as_ref() == Some(&energy_session.key))
             .map(|line| line.net)
             .sum();
         assert_eq!(energy.side, Side::Credit);
@@ -827,7 +827,7 @@ mod tests {
         let service_line: Decimal = invoice
             .lines
             .iter()
-            .filter(|line| line.cdr == parked_session.key)
+            .filter(|line| line.cdr.as_ref() == Some(&parked_session.key))
             .map(|line| line.net)
             .sum();
         assert_eq!(service.side, Side::Credit);

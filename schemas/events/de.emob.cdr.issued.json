@@ -14,6 +14,47 @@
     "datacontenttype",
     "data"
   ],
+  "if": {
+    "required": ["emobtest"],
+    "properties": { "emobtest": { "const": true } }
+  },
+  "else": {
+    "properties": {
+      "data": {
+        "properties": {
+          "cdr": {
+            "required": ["key", "session_id", "evse_id", "started_at", "ended_at", "periods", "total_energy", "direction", "auth_path"],
+            "properties": {
+              "key": {
+                "type": "object",
+                "required": ["party", "id"],
+                "properties": {
+                  "party": { "type": "string", "pattern": "^[A-Z]{2}\\*[A-Z0-9]{3}$" },
+                  "id": { "type": "string", "minLength": 1 }
+                }
+              },
+              "session_id": { "type": "string", "minLength": 1 },
+              "evse_id": { "type": "string", "minLength": 1 },
+              "started_at": { "type": "string", "format": "date-time" },
+              "ended_at": { "type": "string", "format": "date-time" },
+              "periods": { "type": "array", "items": { "type": "object" } },
+              "total_energy": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$", "description": "Exact, non-negative kWh." },
+              "direction": { "enum": ["import", "export"] }
+            }
+          },
+          "token": {
+            "required": ["uid", "token_type", "contract_id", "issuer"],
+            "properties": {
+              "uid": { "type": "string" },
+              "token_type": { "enum": ["Rfid", "AppUser", "Emaid", "AdHocUser", "Other"] },
+              "contract_id": { "type": "string", "minLength": 1 },
+              "issuer": { "type": "string", "pattern": "^[A-Z]{2}\\*[A-Z0-9]{3}$" }
+            }
+          }
+        }
+      }
+    }
+  },
   "properties": {
     "specversion": {
       "const": "1.0"
@@ -71,6 +112,16 @@
         "station": {
           "type": "string",
           "description": "The OCPP identity of the station that ran it."
+        },
+        "retail": {
+          "type": "object",
+          "description": "Native agreement and price recorded at transaction authorization. Only the private delivery to billd contains this member.",
+          "required": ["agreement", "reference"],
+          "additionalProperties": false,
+          "properties": {
+            "agreement": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "reference": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
         },
         "receipt": {
           "type": "string",

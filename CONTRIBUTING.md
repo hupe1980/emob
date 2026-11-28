@@ -8,7 +8,7 @@ meter values, so the bar is "a test can fail", not "it looks right".
 ```console
 just doctor                     # what is missing on this machine
 just demo                       # the whole estate in one process, seeded
-just dev-keys > .env && just run   # the nine daemons from source, no demo
+just dev-keys > .env && just run   # the eleven daemons from source, no demo
 emob check estate.toml          # an estate checked before a daemon reads it
 ```
 

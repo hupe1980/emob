@@ -112,6 +112,16 @@ impl CdrLedger {
     /// or that forks a chain another correction already owns, is refused rather
     /// than stored beside it. See [`Acceptance::Forked`].
     pub fn accept(&mut self, cdr: Cdr) -> Acceptance {
+        let decision = self.classify(&cdr);
+        if decision.is_stored() {
+            self.entries.insert(cdr.key.clone(), cdr);
+        }
+        decision
+    }
+
+    /// Decide whether a record can be accepted before committing its journal entry.
+    #[must_use]
+    pub fn classify(&self, cdr: &Cdr) -> Acceptance {
         if let Some(previous) = &cdr.supersedes {
             // A record cannot correct itself. Stored, it would be superseded by
             // its own presence and vanish from every live set — a CDR that
@@ -136,13 +146,10 @@ impl CdrLedger {
         }
 
         match self.entries.get(&cdr.key) {
-            None => {
-                self.entries.insert(cdr.key.clone(), cdr);
-                Acceptance::Stored
-            }
-            Some(existing) if *existing == cdr => Acceptance::Duplicate,
+            None => Acceptance::Stored,
+            Some(existing) if existing == cdr => Acceptance::Duplicate,
             Some(existing) => Acceptance::Conflict {
-                difference: describe_difference(existing, &cdr),
+                difference: describe_difference(existing, cdr),
             },
         }
     }

@@ -2,7 +2,7 @@
 
 A deterministic EV charging fleet simulator: virtual stations that sign genuine OCMF meter records, eight seeded faults, and a day-level reconciliation proving every kilowatt-hour was either billed or refused with a reason.
 
-[![crates.io](https://img.shields.io/crates/v/emob-sim.svg)](https://crates.io/crates/emob-sim) [![docs.rs](https://img.shields.io/docsrs/emob-sim)](https://docs.rs/emob-sim) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-sim.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-sim.svg)](https://crates.io/crates/emob-sim) [![docs.rs](https://img.shields.io/docsrs/emob-sim)](https://docs.rs/emob-sim) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-sim.svg)](#license)
 
 A fleet test that asserts "no errors" passes by throwing sessions away. This
 crate asserts something a silent failure cannot satisfy: over a whole day,

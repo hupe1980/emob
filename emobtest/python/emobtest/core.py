@@ -238,7 +238,7 @@ class Event:
     id: str
     type: str
     subject: str
-    data: dict[str, Any]
+    data: dict[str, Any] | str
     raw: bytes
     headers: dict[str, str] = field(repr=False)
     problems: tuple[str, ...] = ()

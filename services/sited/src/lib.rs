@@ -18,13 +18,8 @@
 //!
 //! # The edge is where the WAN is not
 //!
-//! This is the only service in the workspace designed to run *at a site* rather
-//! than in a data centre, and the reason is in the statute. `[LPC-912]` puts a
-//! site into its failsafe when the Energy Guard goes quiet, and `[LPC-021]`
-//! gives that timer a floor of two hours — so a site whose controller is on the
-//! far side of a broken WAN link is a site that will be held at 4.2 kW because
-//! *this* process could not be reached, not because a grid operator asked. The
-//! decision belongs next to the connection point.
+//! The site applies its failsafe ceiling locally after 120 seconds without a
+//! heartbeat (LPC-911/912). Failsafe residence starts at that threshold.
 //!
 //! # Nothing here is a rule
 //!
@@ -50,23 +45,21 @@
 #![warn(missing_docs, clippy::pedantic)]
 
 use emob_core::Crossing;
-use emob_eebus::{EebusError, LimitWrite, Watchdog};
+use emob_eebus::{EebusError, Watchdog};
 use emob_ocpp::Setpoint;
 use emob_smart::{Allocation, Demand, GridLimit, Site};
 use rust_decimal::Decimal;
 
-/// Watts in a kilowatt. The wire speaks watts and `[BK6-22-300]` speaks
-/// kilowatts, and the conversion is a shift.
-const W_PER_KW: Decimal = Decimal::from_parts(1000, 0, 0, false, 0);
-
 /// One entry of the record `[LPC §4.1.5]` asks an operator to be able to
 /// produce.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Instruction {
     /// When it arrived.
     pub at: time::OffsetDateTime,
     /// What the Energy Guard asked for, exactly as the wire carried it.
-    pub asked: LimitWrite,
+    pub asked: eebus::model::CmdData,
+    /// Effective protocol state immediately after this decision.
+    pub effective: GridLimit,
     /// What this side answered.
     pub answered: Answer,
 }
@@ -104,15 +97,13 @@ pub struct Sited {
 impl Sited {
     /// A site whose control box has never spoken.
     ///
-    /// `failsafe_kw` is `[LPC-901/1]`'s failsafe consumption active power limit
-    /// — what the site holds at once an Energy Guard has spoken and then stops
-    /// — and `failsafe_after` is `[LPC-912]`'s Failsafe Duration Minimum, which
-    /// the guard writes and `[LPC-021]` floors at two hours.
+    /// Initialization and loss of control use the configured failsafe power.
+    /// The residence sets when prolonged loss permits autonomous operation.
     #[must_use]
-    pub fn new(site: Site, failsafe_kw: Decimal, failsafe_after: time::Duration) -> Self {
+    pub fn new(site: Site, failsafe_kw: Decimal, residence: time::Duration) -> Self {
         Self {
             site,
-            watchdog: Watchdog::new(failsafe_kw, failsafe_after),
+            watchdog: Watchdog::new(failsafe_kw, residence),
             log: Vec::new(),
         }
     }
@@ -121,7 +112,7 @@ impl Sited {
     ///
     /// The only thing that keeps the failsafe at bay, and the reason this
     /// service has a clock at all.
-    pub const fn on_heartbeat(&mut self, at: time::OffsetDateTime) {
+    pub fn on_heartbeat(&mut self, at: time::OffsetDateTime) {
         self.watchdog.heard_from(at);
     }
 
@@ -139,49 +130,28 @@ impl Sited {
     /// that was *not* honoured as much a part of the record as one that was.
     pub fn on_limit(
         &mut self,
+        data: &eebus::model::CmdData,
         resolved: &eebus::model::CmdData,
         at: time::OffsetDateTime,
     ) -> Result<GridLimit, EebusError> {
-        let asked =
-            match emob_eebus::read_limit_write(resolved, eebus::usecases::limitation::LIMIT_ID) {
-                Ok(asked) => asked,
-                Err(refusal) => {
-                    self.log.push(Instruction {
-                        at,
-                        // The refusal has no readable write behind it, so what is
-                        // recorded is the refusal itself — which is the half that
-                        // matters when a grid operator asks why nothing changed.
-                        asked: LimitWrite {
-                            is_active: false,
-                            watts: Decimal::ZERO,
-                            valid_for: None,
-                        },
-                        answered: Answer::Refused {
-                            reason: refusal.to_string(),
-                        },
-                    });
-                    return Err(refusal);
-                }
-            };
-
-        // A write that is not active is a **release** `[LPC-905]`, and the
-        // implementation guide §2.13 wants one sent rather than inferred from
-        // silence — which is why it is a different call and not an absence.
-        if asked.is_active {
-            self.watchdog.limited_to(asked.watts / W_PER_KW, at);
-        } else {
-            self.watchdog.released(at);
-        }
-
-        let limit = self.watchdog.limit_at(at);
+        let result =
+            self.watchdog
+                .on_write(data, resolved, eebus::usecases::limitation::LIMIT_ID, at);
+        let answered = match &result {
+            Ok(limit) => Answer::Accepted {
+                ceiling_kw: self.ceiling_kw(limit),
+            },
+            Err(error) => Answer::Refused {
+                reason: error.to_string(),
+            },
+        };
         self.log.push(Instruction {
             at,
-            asked,
-            answered: Answer::Accepted {
-                ceiling_kw: self.ceiling_kw(&limit),
-            },
+            asked: data.clone(),
+            effective: self.watchdog.limit_at(at),
+            answered,
         });
-        Ok(limit)
+        result
     }
 
     /// Which state the site is in now, and what it may draw.

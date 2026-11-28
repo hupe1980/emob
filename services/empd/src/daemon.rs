@@ -2,7 +2,7 @@
 //! contracts seeded, the routes mounted.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
@@ -22,6 +22,12 @@ pub const CONTRACTS: &str = "contracts";
 /// every UID the journal holds without breaking the chain.
 pub const DATA_KEY: &str = "EMPD_DATA_KEY";
 
+/// Directory holding the current per-customer keys and erasure receipts.
+pub fn custody_directory() -> PathBuf {
+    std::env::var_os("EMPD_CUSTODY_DIR")
+        .map_or_else(|| PathBuf::from("custody/empd"), PathBuf::from)
+}
+
 /// What `empd` reads of the estate.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Estate {
@@ -30,6 +36,12 @@ pub struct Estate {
     /// The contracts to seed.
     #[serde(default)]
     pub contracts: Vec<ContractSeed>,
+    /// Principals authenticated by the local customer identity service.
+    #[serde(default)]
+    pub portal_users: Vec<emob_service::estate::PortalUser>,
+    /// Private payer profiles used to assign native agreements.
+    #[serde(default)]
+    pub retail_accounts: Vec<emob_service::estate::RetailAccount>,
     /// Unissued RFID inventory.
     #[serde(default)]
     pub card_stock: Vec<emob_service::estate::CardStock>,
@@ -60,6 +72,8 @@ pub struct Options {
     pub http: SocketAddr,
     /// The journal file.
     pub journal: PathBuf,
+    /// Current key store, managed independently of the journal backup.
+    pub custody: PathBuf,
     /// The estate.
     pub estate: Estate,
     /// Where secrets are looked up.
@@ -102,9 +116,8 @@ impl Running {
 ///
 /// # Errors
 ///
-/// An unset secret (`EMPD_DATA_KEY`, `EMPD_SIGNING_KEY`), a journal shorter
-/// than or diverged from its signed head, a seed the book refuses, a journal that does not fold, or
-/// an address that cannot be bound.
+/// Startup checks secrets, the signed journal and its independent custody binding
+/// before replaying grants, applying estate seeds and binding the listener.
 pub async fn run(options: Options) -> Result<Running> {
     run_with_clock(options, emob_service::system_clock()).await
 }
@@ -118,6 +131,7 @@ pub async fn run_with_clock(options: Options, clock: emob_service::Clock) -> Res
     let Options {
         http,
         journal,
+        custody,
         estate,
         env,
         shutdown,
@@ -137,8 +151,22 @@ pub async fn run_with_clock(options: Options, clock: emob_service::Clock) -> Res
     )
     .context("opening empd's journal against its signed head")?;
     let latest = file.latest();
-    let mut book = Book::open(Empd::new(estate.parties.provider.clone(), key), file)
-        .context("folding empd's journal")?;
+    let custody_dir = independent_directory(&journal, &custody)?;
+    let provider = Empd::new(estate.parties.provider.clone(), key);
+    let provider = attach_custody(provider, &file, &custody_dir)?;
+    let mut users = Vec::new();
+    for user in &estate.portal_users {
+        if !provider.is_customer_erased(&user.subject)? {
+            users.push(user.clone());
+        }
+    }
+    let credentials =
+        emob_service::estate::portal_credentials(&users, &env, &operators, Some(&service))?;
+    let mut book = Book::open(provider, file).context("folding empd's journal")?;
+    anyhow::ensure!(
+        book.state().grants.readable(),
+        "customer grants could not be replayed with the current custody"
+    );
     let seeded = crate::seed::apply(&mut book, &estate.contracts)?;
     tracing::info!(
         seeded,
@@ -157,6 +185,7 @@ pub async fn run_with_clock(options: Options, clock: emob_service::Clock) -> Res
         crate::http::Shared {
             book: Arc::clone(&book),
             service: Token::new(service.expose()),
+            customers: Arc::new(Mutex::new(crate::customer::Identity::new(credentials))),
             catalog,
             clock,
         },
@@ -184,4 +213,106 @@ pub async fn run_with_clock(options: Options, clock: emob_service::Clock) -> Res
         shutdown,
         task,
     })
+}
+
+fn attach_custody(provider: Empd, file: &Journal, path: &Path) -> Result<Empd> {
+    use emob_service::journal::Kinded as _;
+    let first = file.records()?.into_iter().next();
+    let bound = match first {
+        None => None,
+        Some(r) if r.kind == "custody_bound" => {
+            let crate::Event::CustodyBound { id } = serde_json::from_str(&r.body)? else {
+                anyhow::bail!("invalid provider custody binding");
+            };
+            Some(id)
+        }
+        Some(_) => anyhow::bail!("existing provider journal has no custody binding"),
+    };
+    let (custody, id) =
+        crate::custody::Custody::disk(path, Arc::clone(&provider.key), bound.as_deref())?;
+    if bound.is_none() {
+        let event = crate::Event::CustodyBound { id };
+        file.append(
+            event.kind(),
+            &emob_service::Actor::Estate,
+            &serde_json::to_string(&event)?,
+        )?;
+    }
+    Ok(provider.with_custody(custody))
+}
+
+fn independent_directory(journal: &Path, dir: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !dir.as_os_str().is_empty(),
+        "the empd custody directory is empty"
+    );
+    // The journal has already opened. Resolve the existing ancestry of the custody
+    // path too, including symlinks, before a fresh store creates missing directories.
+    let journal_dir = std::fs::canonicalize(journal)?
+        .parent()
+        .context("empd journal has no parent")?
+        .to_owned();
+    let absolute = std::path::absolute(dir)?;
+    let mut ancestor = absolute.as_path();
+    while !ancestor.try_exists()? {
+        ancestor = ancestor
+            .parent()
+            .context("empd custody path has no existing parent")?;
+    }
+    let path = std::fs::canonicalize(ancestor)?.join(absolute.strip_prefix(ancestor)?);
+    anyhow::ensure!(
+        !path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+            && !path.starts_with(&journal_dir)
+            && !journal_dir.starts_with(&path),
+        "EMPD_CUSTODY_DIR must be independent of the provider journal directory"
+    );
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use emob_service::journal::Memory;
+    use emob_service::vault::DataKey;
+
+    #[test]
+    fn a_signed_journal_binds_current_custody_before_any_customer_grant() {
+        let root = std::env::temp_dir().join(format!(
+            "empd-pin-{}-{}",
+            std::process::id(),
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        let journal = root.join("journals/empd.ndjson");
+        let dir = root.join("custody");
+        let journal_file = || {
+            Signing::open(
+                File::open(&journal).unwrap(),
+                SigningKey::from_seed(&[2; 32], "empd"),
+                head::beside(&journal),
+            )
+            .unwrap()
+        };
+        let provider = || Empd::new("DE*MSP".parse().unwrap(), DataKey::from_bytes(&[1; 32]));
+        let file = journal_file();
+        assert!(independent_directory(&journal, &journal.with_extension("custody")).is_err());
+        assert!(independent_directory(&journal, &root).is_err());
+        assert!(independent_directory(&journal, &dir).is_ok());
+        let bound = attach_custody(provider(), &file, &dir).unwrap();
+        let records = file.records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, "custody_bound");
+        let bytes = std::fs::read(&journal).unwrap();
+        let copy = Memory::from_cold_cut(&bytes).unwrap();
+        assert!(Book::open(provider(), copy).is_err());
+        assert!(Book::open(bound, Memory::from_cold_cut(&bytes).unwrap()).is_ok());
+        drop(file);
+        std::fs::rename(&dir, root.join("offline")).unwrap();
+        assert!(attach_custody(provider(), &journal_file(), &dir).is_err());
+        assert!(!dir.exists());
+        std::fs::rename(root.join("offline"), &dir).unwrap();
+        assert!(attach_custody(provider(), &journal_file(), &dir).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

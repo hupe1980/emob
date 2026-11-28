@@ -4,7 +4,7 @@ Charge detail records (CDRs) for charge point operators and e-mobility
 providers: built so they cannot fail their own arithmetic, priced from their own
 periods, accepted exactly once, and validated without being silently repaired.
 
-[![crates.io](https://img.shields.io/crates/v/emob-cdr.svg)](https://crates.io/crates/emob-cdr) [![docs.rs](https://img.shields.io/docsrs/emob-cdr)](https://docs.rs/emob-cdr) [![MSRV 1.94](https://img.shields.io/badge/MSRV-1.94-blue)](#) [![License](https://img.shields.io/crates/l/emob-cdr.svg)](#license)
+[![crates.io](https://img.shields.io/crates/v/emob-cdr.svg)](https://crates.io/crates/emob-cdr) [![docs.rs](https://img.shields.io/docsrs/emob-cdr)](https://docs.rs/emob-cdr) [![MSRV 1.96](https://img.shields.io/badge/MSRV-1.96-blue)](#) [![License](https://img.shields.io/crates/l/emob-cdr.svg)](#license)
 
 A session is what happened; a CDR is a claim about it, sent to a company that
 was not there and will pay against it. This crate builds CDRs whose periods sum

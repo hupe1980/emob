@@ -29,6 +29,8 @@ pub(super) struct Card {
     pub reference: String,
     pub visual: String,
     pub blocked: bool,
+    #[serde(default)]
+    retired: bool,
     history: Vec<Applied>,
 }
 
@@ -90,6 +92,16 @@ pub(super) const fn status(blocked: bool, lang: Lang) -> &'static str {
         lang.pick("Karte gesperrt", "Card blocked")
     } else {
         lang.pick("Karte nicht gesperrt", "Card unblocked")
+    }
+}
+
+impl Card {
+    pub(super) fn standing(&self, lang: Lang) -> &'static str {
+        if self.retired {
+            lang.pick("Karte dauerhaft gesperrt", "Card permanently retired")
+        } else {
+            status(self.blocked, lang)
+        }
     }
 }
 
@@ -181,13 +193,13 @@ pub(super) fn view(
     let _ = write!(
         body,
         "<section class=\"card\"><h2>{state}</h2><p>{label} <strong>{visual}</strong></p></section>",
-        state = status(card.blocked, lang),
+        state = card.standing(lang),
         label = lang.pick("emob-Suchnummer", "emob lookup number"),
         visual = escape(&card.visual)
     );
-    if can_write {
+    if can_write && !card.retired {
         body.push_str(&preview_form(card, lang));
-    } else {
+    } else if !can_write {
         let _ = write!(body, "<p>{}</p>", crate::read_only(lang));
     }
     let _ = write!(
@@ -195,7 +207,17 @@ pub(super) fn view(
         "<section class=\"card\" id=\"card-history\"><h2>{}</h2>",
         lang.pick("Letzte Kartenänderungen", "Recent card changes")
     );
-    if card.history.is_empty() {
+    if card.retired {
+        let _ = write!(
+            body,
+            "<p>{}</p>",
+            lang.pick(
+                "Die Karte wurde beim Ersetzen oder Beenden des Vertrags dauerhaft gesperrt.",
+                "The provider retired this card when it was replaced or its agreement ended."
+            )
+        );
+    }
+    if card.history.is_empty() && !card.retired {
         let _ = write!(
             body,
             "<p>{}</p>",
@@ -204,7 +226,7 @@ pub(super) fn view(
                 "No operator changes recorded."
             )
         );
-    } else {
+    } else if !card.history.is_empty() {
         body.push_str("<ol class=\"timeline\">");
         for change in card
             .history

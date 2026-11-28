@@ -2,6 +2,10 @@
 
 The e-mobility service provider (eMSP) daemon: the keyed token store, real-time authorisation of a driver's contract, the AFIR price quote before a session, and the monthly fee owed whether or not the driver charged.
 
+The provider also authenticates `[[portal_users]]` and owns live agreement and payer grants. Named operators manage them through **Customer access** in Heute. After restart, the provider restores active grants using the signed journal and current customer custody. Customers sign in again.
+
+Implement a replacement charging authorization service using the request, decisions, retail binding and bearer credentials in the [integration OpenAPI document](../../schemas/openapi.json).
+
 ## Status
 
 | | |
@@ -29,9 +33,7 @@ provider.present(&reference)?.uid;  // the UID, only at the edge that must send 
 The reference is an HMAC-SHA256 under a subkey of `EMPD_DATA_KEY`, so another
 provider holding the same card computes a different one; the UID itself is
 sealed under the same key. The key is never written to the journal — a backup
-must not make every digest reversible. Losing the key is crypto-erasure on
-purpose: a journal folded under a new key keeps its chain, and its tokens are
-`Erased` — they cannot be presented and do not resolve. The contract identifier's check
+must not make every digest reversible. Recovery requires the original provider data key and current customer custody. The data key opens withdrawal evidence and names card tokens. Each portal subject has a separate random key for its grant records. The contract identifier's check
 digit is verified when the token is issued, before any session is billed to it.
 
 ### Real-time authorisation
@@ -107,12 +109,19 @@ block, operator change, native agreement, usage and invoice records. A session o
 the same figure records nothing (partner retries must not grow the journal); at
 a different figure it records, because a re-rated record moves the total.
 
+### Restore customer access
+
+Stop the provider before replacing its journal and signed head. Keep the **current** `EMPD_CUSTODY_DIR` mounted outside the journal backup and supply the original `EMPD_DATA_KEY`. The first signed journal record pins the custody identity. The provider checks it before opening its HTTP listener. An unavailable, unrelated or unreadable store stops startup.
+
+Erasure replaces one subject’s grant key with its receipt in a single durable update. A signed journal record binds that receipt to the confirmed operation. Restoring an older custody registry alongside a journal containing that record stops startup. Older copies of the journal then replay without that subject’s grant contents. The remaining subjects keep their own keys. Arrange protection and replication of the current custody separately. Historical copies, filesystem snapshots or exports containing destroyed keys can recover those records and must be covered by the deployment’s erasure procedure.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[contracts]]`, `[[card_stock]]`, `[[public_plans]]`, `[desk] csmsd`, `[services]`, `[[operators]]` |
-| `EMPD_DATA_KEY` | **required** | 32 bytes, base64: the token references' key and the seal on UIDs. A default would be a key anyone with this source could use |
+| `EMOB_ESTATE` | `./estate.toml` | `[parties]`, `[[contracts]]`, `[[card_stock]]`, `[[retail_accounts]]`, `[[public_plans]]`, `[desk] csmsd`, `[services]`, `[[operators]]` |
+| `EMPD_DATA_KEY` | **required** | 32 bytes, base64, for token references, sealed UIDs, withdrawal evidence and the current customer key store |
+| `EMPD_CUSTODY_DIR` | `custody/empd` | Independent private directory for current subject keys and erasure receipts. Mount a persistent volume at `/var/lib/emob-custody` when running the container. Compose supplies it. |
 | `EMPD_SIGNING_KEY` | **required** | 32 random bytes, base64 (an Ed25519 seed); signs the journal head. A `.head` signed under another key refuses the start |
 | `EMOB_SERVICE_TOKEN` | **required** | Service credential used by `csmsd` for online authorisation |
 | `EMOB_OPERATOR_TOKEN` | **required in demo** | Named human operator with `write = true` for card changes and native agreements |
@@ -140,6 +149,7 @@ Or `just demo`, or `just up` for the whole estate (`empd`'s shell on
 | `POST /v1/empd/cards/lookup` | operator token. Find cards by a printed number, eMAID or exact keyed reference. Results are private and bounded to 20 cards. |
 | `POST /v1/empd/cards/preview` | Named writer. Review a change to one card and obtain its five-minute operation ID. |
 | `POST /v1/empd/cards/confirm` | Same named writer. Confirm the reviewed operation and return its journalled receipt. |
+| `POST /v1/empd/customer/erasure/{status,review,confirm}` | Named privacy operator. Status and review accept the customer sign-in ID in `subject`. Confirm also requires the returned `operation`. Reopen the subject for the original receipt. |
 | `GET /v1/empd/head` | operator token: the journal's signed head, `text/plain`, verifier key in `Emob-Verifier-Key` |
 | `GET /v1/empd` | operator token: contracts and tokens **by reference, never by UID** |
 | `GET /health/live` | `200` while the process runs |
@@ -155,13 +165,34 @@ A named writer can issue one stocked RFID against one currently offered point an
 | Request | Access and result |
 |---|---|
 | `GET /v1/empd/contracts/options` | A reader can list configured provider, point and plan choices. The provider checks live publication during review and confirmation. |
-| `POST /v1/empd/contracts/preview` | A writer submits `{"stock":"STOCK-1004","point":"DE*ABC*E00001","plan":"standard"}`. The five-minute review contains a masked label, complete offer and operation reference. |
+| `POST /v1/empd/contracts/preview` | A writer submits `{"account":"PAYER-FLEET","stock":"STOCK-1004","point":"DE*ABC*E00001","plan":"standard"}`. The five-minute review contains a masked label, complete offer and operation reference. |
 | `POST /v1/empd/contracts/confirm` | The same writer submits `{"operation":"<reference>"}`. The provider checks the current offer again and commits the agreement, actor, assigned eMAID and sealed card together. |
 | `POST /v1/empd/contracts/lookup` | An operator submits `{"agreement":"<reference>"}` to retrieve the original accepted terms and time. The original writer can also repeat a successful confirmation after restart. |
 
 The next online authorization must identify the enrolled EVSE. The provider checks the card’s standing and the offer’s validity interval, and the CSMS checks the digest against its current advertised terms before approving charging. The card uses `NEVER` whitelisting, which requires real-time authorization. [OCPI Tokens](https://github.com/ocpi/ocpi/blob/release-2.3.0-bugfixes/mod_tokens.asciidoc#mod_tokens_real-time_authorization)
 
-A writer gets one pending enrolment at a time. A later review replaces it, and restarting the provider discards unconfirmed reviews. An unknown stock code or selection returns 404. An already used card, changed terms, wrong actor or expired review returns 409. Unavailable or unverifiable publication returns 503. After a lost confirmation response, look up the agreement reference or retry the original confirmation. The operator intake records administrative issuance. Customer billing, consent evidence, bank details and payment collection require separate workflows.
+To replace a card or end an agreement, submit `{agreement,action,stock?}` to `POST /v1/empd/contracts/change/preview`. Confirm the returned `{agreement,operation}` at `/v1/empd/contracts/change/confirm`. The old credential is retired immediately for online authorization.
+
+A writer gets one pending enrolment at a time. A later review replaces it, and restarting the provider discards unconfirmed reviews. An unknown stock code or selection returns 404. An already used card, changed terms, wrong actor or expired review returns 409. Unavailable or unverifiable publication returns 503. After a lost confirmation response, look up the agreement reference or retry the original confirmation. The operator intake records administrative issuance. The sale retains the selected bill-to account, its private or fleet classification, and its profile digest with the terms. A named reader can retrieve its agreements through `POST /v1/empd/contracts/billing-agreements`. Billing owns the retail invoice. No mandate is created at enrolment.
+
+### Erase customer portal access
+
+Use a named privacy operator to review a customer’s current agreement and payer grant counts. Confirmation destroys the independent key for all that subject’s historical portal grants, drops their live sessions and disables future sign-in and regrant. The status receipt retains counts, the reviewer and confirmation time. Card authorization, original contracts, charging records, invoices and payment allocations continue under their respective owners. Remove the obsolete sign-in credential from deployment configuration.
+
+The privacy API accepts POST requests at `/v1/empd/customer/erasure/review` and `/v1/empd/customer/erasure/status` with `{"subject":"driver-one"}`. To confirm, submit the subject and the review’s `operation` to `/v1/empd/customer/erasure/confirm`. The review expires after five minutes or when the grants change. A retry of the confirmed operation by its original reviewer returns the recorded receipt.
+
+### Review a withdrawal
+
+A named writer records a declaration already received for a private agreement. The four JSON endpoints accept POST requests under `/v1/empd/contracts/withdrawal/`.
+
+| Action | Request |
+|---|---|
+| `intake` | `agreement`, one stable `request_ref`, RFC 3339 `received_at` and `channel` (`email`, `letter`, `phone`, `in_person` or `other`). |
+| `lookup` | `agreement`. Returns the archived offer reference, receipt time, current stage and latest decision. |
+| `review` | `agreement`, `outcome` (`hold`, `approve` or `decline`), `evidence_ref` and `billing` (`unaffected` or `review_required`). |
+| `confirm` | `agreement` and the returned `operation`, using the same writer credential within five minutes. |
+
+Approval retires the current card for online authorization and ends the agreement for future retail billing. Holding a case keeps its current entitlement and permits a later decision. A card change or competing decision requires a fresh review. A committed confirmation returns its original receipt on retry, including after restart. Issued invoices and cash adjustments have their own finance review.
 
 ### Review and change a card
 

@@ -382,7 +382,7 @@ mod tests {
 
         let reasons: Vec<String> = to_charging_profiles(&allocation, 1).reasons().collect();
         assert!(
-            reasons.iter().any(|r| r.contains("[LPC-906]")),
+            reasons.iter().any(|r| r.contains("[LPC-922]")),
             "the dangerous quiet is on the record: {reasons:?}"
         );
     }

@@ -1,0 +1,19 @@
+# Replacement interfaces verified by the conformance command below.
+tier = "vertical"
+capability = ["charging", "driver-authorization", "billing", "roaming"]
+interface = "L4"
+fills = ["charge-point-operator", "mobility-service-provider"]
+
+[contracts]
+openapi = "schemas/openapi.json"
+event_schemas = ["schemas/events/de.emob.cdr.issued.json", "schemas/events/de.emob.invoice.issued.json"]
+mcp = ["emob", "mcp"]
+conformance = "just interfaces"
+images = "docker-bake.hcl"
+
+[ports]
+authorize = ["empd"]
+receiver = ["billd", "roamd"]
+tariff = ["tarifd"]
+recover = ["csmsd", "billd"]
+mcp = ["emob"]

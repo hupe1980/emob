@@ -6,7 +6,7 @@ description = "Open-source EV charging software for Europe: CSMS and eMSP back o
 
 ## The operator desk and driver receipt
 
-`just demo` starts five emob services, three simulated stations and a local OCPI peer. Open Heute to trace a refused session to its evidence, open the driver’s receipt, issue a stocked card on a published plan, or review a lost-card block.
+`just demo` starts seven emob services, three simulated stations and a local OCPI peer. Open Heute to trace a refused session to its evidence, open the driver’s receipt, issue a stocked card on a published plan, or review a lost-card block.
 
 <div class="shots">
 <figure>

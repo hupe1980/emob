@@ -697,10 +697,11 @@ mod tests {
             .lines()
             .filter_map(|line| {
                 let rest = line.trim().strip_prefix("pub const ")?;
-                let (name, _) = rest.split_once(':')?;
-                (name != "ALL").then_some(name)
+                let (_, value) = rest.split_once(": &str = ")?;
+                value.strip_prefix('"')?.strip_suffix("\";")
             })
             .collect();
+        assert!(declared.iter().all(|value| caps::ALL.contains(value)));
         assert_eq!(
             declared.len(),
             caps::ALL.len(),

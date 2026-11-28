@@ -424,19 +424,40 @@ pub mod caps {
 }
 
 /// Access granted to one estate operator credential.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperatorAccess {
-    /// Read operator views and submit private searches.
-    Read,
-    /// Read views and perform named operator actions.
-    Write,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OperatorAccess {
+    write: bool,
+    finance: bool,
+    privacy: bool,
 }
 
 impl OperatorAccess {
+    /// Construct the independent permissions configured for this named credential.
+    #[must_use]
+    pub const fn new(write: bool, finance: bool, privacy: bool) -> Self {
+        Self {
+            write,
+            finance,
+            privacy,
+        }
+    }
+
     /// Whether this credential may submit an operator action.
     #[must_use]
     pub const fn can_write(self) -> bool {
-        matches!(self, Self::Write)
+        self.write
+    }
+
+    /// Whether this credential may manage receivables.
+    #[must_use]
+    pub const fn can_finance(self) -> bool {
+        self.finance
+    }
+
+    /// Whether this credential may review and confirm customer erasure.
+    #[must_use]
+    pub const fn can_privacy(self) -> bool {
+        self.privacy
     }
 }
 
@@ -462,7 +483,7 @@ impl Operators {
         Self::from_grants(
             tokens
                 .into_iter()
-                .map(|(actor, token)| (actor, token, OperatorAccess::Read))
+                .map(|(actor, token)| (actor, token, OperatorAccess::default()))
                 .collect(),
         )
     }
@@ -678,7 +699,7 @@ mod tests {
         // SR-101: the operator's name, never its token.
         assert_eq!(
             operators.admit(Some("Bearer ops-2")),
-            Some((&two, OperatorAccess::Read))
+            Some((&two, OperatorAccess::default()))
         );
         assert_eq!(two.to_string(), "operator:nachtschicht");
         assert!(operators.admit(Some("Bearer ops-3")).is_none());

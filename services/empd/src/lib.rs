@@ -47,10 +47,10 @@
 //! owed anyway is invisible downstream of the ledger. [`Empd::fees_for`] is where
 //! it comes from, and `billd` puts it on the document.
 //!
-//! # No I/O
+//! # Charging decisions
 //!
-//! Nothing here opens a socket or reads a clock. Every date and instant is an
-//! argument, so two runs of one authorisation give one answer.
+//! The authorisation decision takes its date and instant as arguments, so
+//! evaluating the same inputs twice gives the same answer.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
@@ -59,8 +59,13 @@ mod actions;
 pub use actions::CardChange;
 pub mod book;
 mod cards;
+pub mod custody;
+mod customer;
 mod enrol;
+mod lifecycle;
+mod withdrawal;
 pub use enrol::{Agreement, RetailBinding};
+pub use lifecycle::{AgreementChange, ChangeKind};
 pub mod daemon;
 pub mod http;
 pub mod seed;
@@ -548,6 +553,10 @@ pub struct Empd {
     tokens: BTreeMap<String, Token>,
     cards: cards::Index,
     agreements: enrol::Agreements,
+    changes: lifecycle::Changes,
+    withdrawals: withdrawal::Cases,
+    grants: customer::Grants,
+    custody: custody::Custody,
     issued_rfids: BTreeSet<TokenRef>,
     foreign_uid_key: bool,
     card_history: BTreeMap<TokenRef, std::collections::VecDeque<CardChange>>,
@@ -578,6 +587,13 @@ pub struct Empd {
 }
 
 impl Empd {
+    /// Attach the independent customer custody used for this book's entire lifetime.
+    #[must_use]
+    pub(crate) fn with_custody(mut self, custody: custody::Custody) -> Self {
+        self.custody = custody;
+        self
+    }
+
     /// A provider with an empty book.
     ///
     /// The key is the one the token references are derived under. It is an
@@ -593,6 +609,10 @@ impl Empd {
             tokens: BTreeMap::new(),
             cards: cards::Index::default(),
             agreements: enrol::Agreements::default(),
+            changes: lifecycle::Changes::default(),
+            withdrawals: withdrawal::Cases::default(),
+            grants: customer::Grants::default(),
+            custody: custody::Custody::memory(),
             issued_rfids: BTreeSet::new(),
             foreign_uid_key: false,
             card_history: BTreeMap::new(),
@@ -790,6 +810,9 @@ impl Empd {
             return Err(ProviderError::AskedAboutAlways {
                 token: token.as_str().to_owned(),
             });
+        }
+        if self.changes.retired(token) {
+            return Ok(Allowed::Blocked);
         }
         let standing = self.decide(stored, at.date());
         if standing.is_allowed()

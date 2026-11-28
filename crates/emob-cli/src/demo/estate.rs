@@ -60,19 +60,21 @@ pub mod env {
     pub const WEBHOOK: &str = "EMOB_WEBHOOK_SECRET";
     /// The partner's bootstrap token.
     pub const TOKEN_A: &str = "EMOB_PARTNER_DE_MSP_TOKEN_A";
-    /// The four data keys.
-    pub const DATA_KEYS: [&str; 4] = [
+    /// One data key per private journal.
+    pub const DATA_KEYS: [&str; 5] = [
         "CSMSD_DATA_KEY",
         "ROAMD_DATA_KEY",
         "EMPD_DATA_KEY",
         "BILLD_DATA_KEY",
+        "ACCOUNTINGD_DATA_KEY",
     ];
     /// The head-signing keys (spec 008), one per journalled daemon.
-    pub const SIGNING_KEYS: [&str; 4] = [
+    pub const SIGNING_KEYS: [&str; 5] = [
         "CSMSD_SIGNING_KEY",
         "ROAMD_SIGNING_KEY",
         "EMPD_SIGNING_KEY",
         "BILLD_SIGNING_KEY",
+        "ACCOUNTINGD_SIGNING_KEY",
     ];
 }
 
@@ -91,6 +93,10 @@ pub struct Ports {
     pub empd: SocketAddr,
     /// deskd, Heute.
     pub deskd: SocketAddr,
+    /// Finance ledger.
+    pub accountingd: SocketAddr,
+    /// Customer portal.
+    pub portald: SocketAddr,
 }
 
 /// The meters: `emob-sim`'s virtual stations 1..=3 from the seed's `estate`
@@ -190,7 +196,7 @@ provider = "DE*MSP"
 code = "standard"
 name = "MSP Standard"
 uniform_public_terms = true
-points = ["DE*MUS*E00001"]
+points = ["DE*MUS*E00001", "DE*MUS*E00002"]
 
 [[public_plans.schedules]]
 version = "v1"
@@ -216,13 +222,50 @@ mandate = {{ reference = "MSP-LS-2026-001", iban = "DE02120300000000202051" }}
 series = "R"
 vat_rate = "19"
 seller = {{ name = "Stadtwerke Musterstadt eMobility GmbH", street = "Am Stadtwerk 1", post_code = "12345", city = "Musterstadt", country = "DE", vat_id = "DE999999999", electronic_address = "rechnung@stadtwerke-musterstadt.example" }}
+retail_seller = {{ name = "MSP Mobility GmbH", street = "Ring 9", post_code = "10115", city = "Berlin", country = "DE", vat_id = "DE111222333" }}
 creditor_id = "DE98ZZZ09999999999"
 contact = {{ name = "Rechnungswesen", phone = "+49 3601 4711-0", email = "rechnung@stadtwerke-musterstadt.example" }}
 
 # Unissued RFID for the standalone driver-enrolment walkthrough.
+[[retail_accounts]]
+id = "PAYER-PRIVATE"
+kind = "private"
+name = "Mika Muster"
+street = "Beispielweg 2"
+post_code = "10115"
+city = "Berlin"
+country = "DE"
+
+[[retail_accounts]]
+id = "PAYER-FLEET"
+kind = "fleet"
+name = "Musterflotte GmbH"
+street = "Beispielweg 4"
+post_code = "10115"
+city = "Berlin"
+country = "DE"
+vat_id = "DE111333555"
+electronic_address = "fleet@example.invalid"
+
 [[card_stock]]
 code = "STOCK-1004"
 uid = "04AB0000000004"
+
+[[card_stock]]
+code = "STOCK-1005"
+uid = "04AB0000000005"
+
+[[card_stock]]
+code = "STOCK-1006"
+uid = "04AB0000000006"
+
+[[card_stock]]
+code = "STOCK-1007"
+uid = "04AB0000000007"
+
+[[card_stock]]
+code = "STOCK-1008"
+uid = "04AB0000000008"
 
 [[contracts]]
 id = "DE-MSP-C00000001-W"
@@ -236,6 +279,8 @@ tokens = [
 name = "demo operator"
 token_env = "{operator}"
 write = true
+finance = true
+privacy = true
 
 [[operators]]
 name = "desk reader"
@@ -254,10 +299,18 @@ csmsd = "http://{csmsd}"
 token_env = "{desk_read}"
 time_zone = "Europe/Berlin"
 
+[[portal_users]]
+subject = "mika"
+secret_env = "EMOB_PORTAL_MIKA"
+
+[portal]
+public_url = "http://{portald}"
+
 [receipts]
 public_url = "http://{csmsd}"
 
 [services]
+accountingd = "http://{accountingd}"
 billd = "http://{billd}"
 roamd = "http://{roamd}"
 empd = "http://{empd}"
@@ -286,6 +339,8 @@ reach_back_allow = ["127.0.0.1", "::1", "localhost"]
         cert = tls("server.pem"),
         key = tls("server.key"),
         ca = tls("ca.pem"),
+        portald = ports.portald,
+        accountingd = ports.accountingd,
         csmsd = ports.csmsd,
         billd = ports.billd,
         roamd = ports.roamd,
@@ -308,6 +363,8 @@ mod tests {
             billd: at(9584),
             empd: at(9585),
             deskd: at(9587),
+            portald: at(9589),
+            accountingd: at(9591),
         }
     }
 

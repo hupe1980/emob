@@ -39,6 +39,7 @@ const BLOCKED_CARD: &str = "04DEADBEEF0001";
 const OTHER_CARD: &str = "04C0FFEE000002";
 const OPERATOR: &str = "operator-token";
 const READER: &str = "reader-token";
+const SUBSCRIBER_KEY: &str = "whsec_c3Vic2NyaWJlci1rZXktZm9yLXRoZS10ZXN0";
 const SECRET: &str = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
 /// The bootstrap token the demo estate hands the partner out of band.
 const TOKEN_A: &str = "token-a-for-de-msp";
@@ -50,6 +51,7 @@ const TOKEN_B: &str = "token-b-from-the-partner";
 fn env() -> Env {
     let mut values: BTreeMap<&str, String> = [
         ("EMOB_WEBHOOK_SECRET", SECRET),
+        ("WAREHOUSE_SIGNING_KEY", SUBSCRIBER_KEY),
         ("EMOB_SERVICE_TOKEN", "service-token"),
         ("EMOB_DESK_READ_TOKEN", READER),
         ("EMOB_OPERATOR_TOKEN", OPERATOR),
@@ -145,14 +147,22 @@ impl Estate {
     }
 
     async fn empd(&self) -> empd::daemon::Running {
-        empd::daemon::run(empd::daemon::Options {
-            http: self.empd,
-            journal: self.dir.join("empd.ndjson"),
-            estate: self.sections(),
-            env: env(),
-            shutdown: Shutdown::new(),
-            identity: Identity::new("empd", "test"),
-        })
+        self.empd_clocked(emob_service::system_clock()).await
+    }
+
+    async fn empd_clocked(&self, clock: emob_service::Clock) -> empd::daemon::Running {
+        empd::daemon::run_with_clock(
+            empd::daemon::Options {
+                http: self.empd,
+                journal: self.dir.join("journals/empd.ndjson"),
+                custody: self.dir.join("custody"),
+                estate: self.sections(),
+                env: env(),
+                shutdown: Shutdown::new(),
+                identity: Identity::new("empd", "test"),
+            },
+            clock,
+        )
         .await
         .expect("empd starts")
     }
@@ -160,7 +170,7 @@ impl Estate {
     async fn billd(&self) -> billd::daemon::Running {
         billd::daemon::run(billd::daemon::Options {
             http: self.billd,
-            journal: self.dir.join("billd.ndjson"),
+            journal: self.dir.join("journals/billd.ndjson"),
             estate: self.sections(),
             env: env(),
             shutdown: Shutdown::new(),
@@ -173,7 +183,7 @@ impl Estate {
     async fn roamd(&self) -> roamd::daemon::Running {
         roamd::daemon::run(roamd::daemon::Options {
             http: self.roamd,
-            journal: self.dir.join("roamd.ndjson"),
+            journal: self.dir.join("journals/roamd.ndjson"),
             estate: self.sections(),
             env: env(),
             shutdown: Shutdown::new(),
@@ -196,7 +206,7 @@ impl Estate {
         csmsd::daemon::run(csmsd::daemon::Options {
             ocpp: "127.0.0.1:0".parse().unwrap(),
             http: self.csmsd_http,
-            journal: self.dir.join("csmsd.ndjson"),
+            journal: self.dir.join("journals/csmsd.ndjson"),
             estate,
             env: env(),
             shutdown: Shutdown::new(),
@@ -669,7 +679,7 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
         }
         assert!(limited, "the price page is rate-limited");
         let token = path.trim_start_matches("/r/");
-        let journal = std::fs::read_to_string(estate.dir.join("csmsd.ndjson")).unwrap();
+        let journal = std::fs::read_to_string(estate.dir.join("journals/csmsd.ndjson")).unwrap();
         assert!(
             !journal.contains(token),
             "SR-060: csmsd's journal never holds the token"
@@ -785,8 +795,9 @@ async fn a_session_becomes_an_invoice_line_and_a_consignment_with_the_same_energ
         // roamd, and no journal holds it — nor the partner's tokens — in the
         // clear.
         for journal in ["csmsd", "empd", "roamd", "billd"] {
-            let text = std::fs::read_to_string(estate.dir.join(format!("{journal}.ndjson")))
-                .expect("the journal is on disk");
+            let text =
+                std::fs::read_to_string(estate.dir.join(format!("journals/{journal}.ndjson")))
+                    .expect("the journal is on disk");
             assert!(
                 !text.contains(GOOD_CARD),
                 "{journal}.ndjson holds the card's uid"
@@ -933,7 +944,7 @@ async fn sr_029_a_delivery_signed_with_another_secret_is_refused_and_counted() {
     let forger = csmsd::outbox::Dispatcher::new(
         &format!("http://{}", estate.billd),
         &format!("http://{}", estate.roamd),
-        emob_service::webhook::Secret::raw("not the estate's secret"),
+        emob_service::webhook::Secret::raw("not the estate's secret").unwrap(),
         Duration::from_secs(5),
     )
     .unwrap();
@@ -984,7 +995,7 @@ async fn outside_subscriber() -> (SocketAddr, Seen) {
             move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
                 let held = Arc::clone(&held);
                 async move {
-                    let secret = emob_service::webhook::Secret::standard(SECRET).unwrap();
+                    let secret = emob_service::webhook::Secret::standard(SUBSCRIBER_KEY).unwrap();
                     let id = emob_service::webhook::receive(
                         &headers,
                         &body,
@@ -1016,7 +1027,7 @@ async fn a_subscriber_outside_the_estate_receives_the_issued_record_as_a_cloudev
         let (outside, seen) = outside_subscriber().await;
         estate.text.push_str(&format!(
             "\n[[subscribers]]\nname = \"warehouse\"\nurl = \"http://{outside}/events\"\n\
-             secret_env = \"EMOB_WEBHOOK_SECRET\"\ntypes = [\"de.emob.cdr.*\"]\n"
+             secret_env = \"WAREHOUSE_SIGNING_KEY\"\ntypes = [\"de.emob.cdr.*\"]\n"
         ));
         let _empd = estate.empd().await;
         let _billd = estate.billd().await;
@@ -1039,6 +1050,23 @@ async fn a_subscriber_outside_the_estate_receives_the_issued_record_as_a_cloudev
         assert_eq!(event.subject.as_deref(), Some(format!("cdr/{id}").as_str()));
         assert!(event.time.is_some());
         assert!(event.data["cdr"].is_object() && event.data["signed"].is_array());
+        // An already acknowledged event can be recovered without reopening the outbox.
+        let query = serde_json::json!({"purpose": "recover", "subscriber": "warehouse", "type": event.kind, "id": id}).to_string();
+        let now = time::OffsetDateTime::now_utc();
+        let key = emob_service::webhook::Secret::standard(SUBSCRIBER_KEY).unwrap();
+        let proof = emob_service::webhook::Delivery::new("read-1", now, query.as_bytes());
+        let response = reqwest::Client::new().post(format!("http://{}/v1/subscriber-events/recover", csmsd.http))
+            .header("webhook-id", "read-1")
+            .header("webhook-timestamp", now.unix_timestamp())
+            .header("webhook-signature", emob_service::webhook::sign(&proof, &key).unwrap())
+            .body(query).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["webhook-id"], id.as_str());
+        let headers = response.headers().clone();
+        let recovered = response.bytes().await.unwrap();
+        assert_eq!(recovered.as_ref(), body);
+        assert_eq!(emob_service::webhook::receive(&headers, &recovered, &[key], now, time::Duration::minutes(5)).unwrap(), *id);
+        assert!(delivered(&csmsd, Target::Subscriber("warehouse".into())));
         // Spec 012: the published schema describes what was sent.
         let schema: serde_json::Value = serde_json::from_str(include_str!(
             "../../../schemas/events/de.emob.cdr.issued.json"
@@ -1417,7 +1445,7 @@ async fn sr_144_sr_147_a_station_is_onboarded_and_retired_without_a_restart() {
 
     // SR-144: the journal holds the hash and never the password; the facts
     // name the operator.
-    let journal = std::fs::read_to_string(estate.dir.join("csmsd.ndjson")).unwrap();
+    let journal = std::fs::read_to_string(estate.dir.join("journals/csmsd.ndjson")).unwrap();
     assert!(
         !journal.contains(&password),
         "the password is not journalled"
@@ -1723,4 +1751,217 @@ async fn a_held_point_is_cancelled_on_the_station_and_expires_on_time() {
     station.shutdown(Duration::from_secs(1)).await;
     csmsd.kill().await;
     empd.kill().await;
+}
+
+/// Drive native and stop-only tokens through both TransactionEvent versions.
+/// The CSMS must use the answer that opened charging, even across a restart.
+// driver-monthly-invoice/SR-302
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_billing_attribution_survives_restart_and_excludes_stop_credentials() {
+    use ocpp_kit::Version::{V2_0_1, V2_1};
+    use serde_json::json;
+
+    for (wire, version) in [(V2_0_1, "2.0.1"), (V2_1, "2.1")] {
+        let estate = retail_estate(version).await;
+        let clock: emob_service::Clock = Arc::new(|| plan().started_at);
+        let provider = estate.empd_clocked(Arc::clone(&clock)).await;
+        let start = estate
+            .csmsd_clocked(estate.sections(), Arc::clone(&clock))
+            .await;
+        let (agreement, expected) = enrol_fleet_card(estate.empd).await;
+        let station = station_2x(start.ocpp, wire).await;
+        let mut frames = signed_events_2x("charge", "04AB0000000004");
+        // A 2.1 station can start on cable insertion and identify the driver later.
+        let mut start_count = 1;
+        if wire == V2_1 {
+            let mut identified = frames[0].clone();
+            identified.as_object_mut().unwrap().remove("meterValue");
+            identified["eventType"] = json!("Updated");
+            frames[0].as_object_mut().unwrap().remove("idToken");
+            frames[0]["triggerReason"] = json!("CablePluggedIn");
+            frames.insert(1, identified);
+            for (seq, frame) in frames.iter_mut().enumerate() {
+                frame["seqNo"] = json!(seq);
+            }
+            tx_2x(&station, &frames[0]).await;
+            start_count += 1;
+        }
+        let accepted = tx_2x(&station, &frames[start_count - 1]).await;
+        assert_eq!(accepted["idTokenInfo"]["status"], "Accepted");
+        let retry = tx_2x(&station, &frames[start_count - 1]).await;
+        assert_eq!(retry, accepted);
+        station.shutdown(Duration::from_secs(1)).await;
+        start.kill().await;
+
+        // The new process no longer publishes the accepted plan.
+        let mut withdrawn: csmsd::estate::Estate = estate.sections();
+        withdrawn.public_plans.clear();
+        let restarted = estate.csmsd_clocked(withdrawn, clock).await;
+        let station = station_2x(restarted.ocpp, wire).await;
+        for frame in &frames[start_count..] {
+            tx_2x(&station, frame).await;
+        }
+        restarted.csmsd.with_state(|state| {
+            assert_eq!(state.outbox.len(), 3);
+            for ((_, target), (delivery, _)) in &state.outbox {
+                let body: serde_json::Value = serde_json::from_str(&delivery.body).unwrap();
+                if *target == Target::Billd {
+                    assert_eq!(body["data"]["retail"], expected);
+                    assert_eq!(body["data"]["token"]["contract_id"], agreement["emaid"]);
+                } else {
+                    assert!(body["data"].get("retail").is_none());
+                    assert!(
+                        !delivery
+                            .body
+                            .contains(agreement["agreement"].as_str().unwrap())
+                    );
+                }
+            }
+        });
+        let mut replay = frames[0].clone();
+        replay["idToken"] = json!({"idToken": OTHER_CARD, "type": "ISO14443"});
+        let closed = tx_2x(&station, &replay).await;
+        assert_eq!(closed["idTokenInfo"]["status"], "Invalid");
+        let key = ("CP-1".to_owned(), "charge".to_owned());
+        assert!(
+            restarted
+                .csmsd
+                .with_state(|s| !s.authorized.contains_key(&key))
+        );
+        let after_withdrawal = signed_events_2x("new-charge", "04AB0000000004");
+        let denied = tx_2x(&station, &after_withdrawal[0]).await;
+        assert_eq!(denied["idTokenInfo"]["status"], "Invalid");
+        let mut stop_only = signed_events_2x("stop-only", GOOD_CARD);
+        stop_only[0].as_object_mut().unwrap().remove("idToken");
+        let end = stop_only.last_mut().unwrap();
+        end["idToken"] = json!({"idToken":GOOD_CARD,"type":"ISO14443"});
+        end["triggerReason"] = json!("StopAuthorized");
+        for frame in &stop_only {
+            tx_2x(&station, frame).await;
+        }
+        assert_eq!(
+            restarted.csmsd.settled(),
+            2,
+            "{:?}",
+            restarted.csmsd.outcomes()
+        );
+        assert_eq!(restarted.csmsd.with_state(|s| s.outbox.len()), 3);
+        station.shutdown(Duration::from_secs(1)).await;
+        restarted.kill().await;
+        provider.kill().await;
+    }
+}
+
+async fn retail_estate(version: &str) -> Estate {
+    let mut estate = Estate::new(&format!("retail-binding-{version}"));
+    estate.text = estate
+        .text
+        .replace(
+            "http://127.0.0.1:9001",
+            &format!("http://{}", estate.csmsd_http),
+        )
+        .replace("ocpp = \"1.6\"", &format!("ocpp = \"{version}\""));
+    let (outside, _) = outside_subscriber().await;
+    estate.text.push_str(&format!(
+            "\n[[subscribers]]\nname = \"warehouse\"\nurl = \"http://{outside}/events\"\nsecret_env = \"WAREHOUSE_SIGNING_KEY\"\ntypes = [\"de.emob.cdr.*\"]\n"
+        ));
+    estate
+}
+
+async fn enrol_fleet_card(empd: SocketAddr) -> (serde_json::Value, serde_json::Value) {
+    use serde_json::json;
+    let owner = format!("http://{empd}/v1/empd/contracts");
+    let request = json!({
+        "account": "PAYER-FLEET",
+        "stock": "STOCK-1004",
+        "point": "DE*ABC*E00001",
+        "plan": "standard",
+    });
+    let (status, review) = send(
+        reqwest::Method::POST,
+        &format!("{owner}/preview"),
+        Some(OPERATOR),
+        request,
+    )
+    .await;
+    assert_eq!(status, 200, "{review}");
+    let (status, agreement) = send(
+        reqwest::Method::POST,
+        &format!("{owner}/confirm"),
+        Some(OPERATOR),
+        json!({"operation":review["operation"]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{agreement}");
+
+    let binding =
+        json!({"agreement":agreement["agreement"],"reference":review["offer"]["reference"]});
+    (agreement, binding)
+}
+
+async fn station_2x(ocpp: SocketAddr, wire: ocpp_kit::Version) -> MockStation {
+    let station = MockStation::builder("CP-1")
+        .versions([wire])
+        .connect(&format!("ws://{ocpp}/ocpp"))
+        .unwrap();
+    station.boot(wire).await.unwrap();
+    station
+}
+
+async fn tx_2x(station: &MockStation, frame: &serde_json::Value) -> serde_json::Value {
+    let raw = serde_json::value::RawValue::from_string(frame.to_string()).unwrap();
+    let answer = station
+        .handle()
+        .call_raw(
+            "TransactionEvent",
+            raw,
+            ocpp_kit::engine::CallOptions::default(),
+        )
+        .await
+        .unwrap();
+    serde_json::from_str(answer.payload().expect("a TransactionEvent response").get()).unwrap()
+}
+
+fn signed_events_2x(transaction: &str, card: &str) -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let plan = plan();
+    let signed = meter().charge(&plan, &[]).records;
+    let last = signed.len() - 1;
+    let mut events = Vec::with_capacity(signed.len());
+    for (sequence, record) in signed.into_iter().enumerate() {
+        let (kind, trigger, context) = if sequence == 0 {
+            ("Started", "Authorized", "Transaction.Begin")
+        } else if sequence == last {
+            ("Ended", "EVDeparted", "Transaction.End")
+        } else {
+            ("Updated", "MeterValuePeriodic", "Sample.Periodic")
+        };
+        let instant = at(if sequence == last {
+            plan.ended_at
+        } else {
+            plan.started_at
+        });
+        let signed = json!({
+            "signedMeterData": record,
+            "signingMethod": "",
+            "encodingMethod": "OCMF",
+            "publicKey": "",
+        });
+        let sample = json!({
+            "value": 0, "context": context,
+            "measurand": "Energy.Active.Import.Register", "signedMeterValue": signed,
+        });
+        let mut frame = json!({
+            "eventType": kind, "triggerReason": trigger,
+            "timestamp": instant, "seqNo": sequence,
+            "transactionInfo": {"transactionId": transaction},
+            "evse": {"id": 1, "connectorId": 1},
+            "meterValue": [{"timestamp": instant, "sampledValue": [sample]}],
+        });
+        if sequence == 0 {
+            frame["idToken"] = json!({"idToken": card, "type": "ISO14443"});
+        }
+        events.push(frame);
+    }
+    events
 }

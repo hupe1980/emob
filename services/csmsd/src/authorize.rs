@@ -43,8 +43,9 @@ pub struct RetailScope {
     pub provider: emob_core::PartyId,
     /// Published plan code.
     pub plan: String,
-    /// Digest of the full point offer that the operator accepted.
-    pub reference: String,
+    /// Provider agreement and accepted price retained with this transaction.
+    #[serde(flatten)]
+    pub authorization: emob_service::events::cdr::RetailAuthorization,
 }
 
 /// The answer, its reason, and — when it is `Accepted` — whom the session

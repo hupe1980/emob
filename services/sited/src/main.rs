@@ -21,13 +21,8 @@
 //!
 //! # The edge is where the WAN is not
 //!
-//! `[LPC-912]` puts a site into its failsafe when the Energy Guard goes quiet
-//! and `[LPC-021]` floors that timer at two hours, so a site whose controller
-//! sits behind a broken WAN link is held at 4.2 kW because this process could
-//! not be reached — not because a grid operator asked. That is why this daemon
-//! is designed to run at the site, and why the readiness probe waits on the
-//! **site inventory** rather than on anything upstream: a controller that
-//! cannot say which points it controls must not take traffic.
+//! In both controlled states, 120 seconds without a heartbeat triggers failsafe.
+//! The controller uses local time and site configuration to derive each profile.
 
 use std::net::SocketAddr;
 
@@ -45,14 +40,6 @@ const INVENTORY: &str = "site-inventory";
 /// no other instruction is entitled to draw — and the default a deployment
 /// overrides with whatever its own connection contract says.
 const FAILSAFE_KW: &str = "4.2";
-
-/// `[LPC-021]`'s floor under the Failsafe Duration Minimum.
-///
-/// The Energy Guard writes the real period over
-/// `deviceConfigurationKeyValue`; two hours is the shortest the specification
-/// admits, which is the reading that keeps a site under control for longer
-/// rather than shorter.
-const FAILSAFE_AFTER: time::Duration = time::Duration::hours(2);
 
 /// What `sited` reads of the estate.
 #[derive(Debug, serde::Deserialize)]
@@ -83,7 +70,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| FAILSAFE_KW.to_owned())
         .parse::<Decimal>()
         .context("SITED_FAILSAFE_KW is not a decimal number of kilowatts")?;
-    let service = Sited::new(site, failsafe_kw, FAILSAFE_AFTER);
+    anyhow::ensure!(
+        failsafe_kw >= Decimal::ZERO,
+        "SITED_FAILSAFE_KW must be nonnegative"
+    );
+    let service = Sited::new(site, failsafe_kw, emob_eebus::MIN_FAILSAFE_RESIDENCE);
     readiness.up(INVENTORY);
 
     // Who may read the read model: the estate's operators, and nobody when
@@ -116,7 +107,9 @@ async fn main() -> Result<()> {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     axum::Json(serde_json::json!({
-                        "lpc_state": format!("{:?}", held.limit_at(now).lpc_state()),
+                        "lpc_state": held.limit_at(now).lpc_state(),
+                        "state_ceiling_kw": held.limit_at(now).stated_kw(),
+                        "effective_ceiling_kw": held.allocate(&[], now).ceiling_kw(),
                     }))
                 },
             ),

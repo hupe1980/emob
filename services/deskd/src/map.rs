@@ -223,7 +223,12 @@ pub struct Cell {
 /// narrowed to them. `query` is the search it draws, carried into each cell's
 /// link. Empty when there is nothing to draw.
 #[must_use]
-pub fn fleet(dots: &[Dot], cells: &[Cell], query: &str, lang: Lang) -> String {
+pub fn fleet(
+    dots: &[Dot],
+    cells: &[Cell],
+    search: crate::stations::FleetView<'_>,
+    lang: Lang,
+) -> String {
     let mut corners: Vec<(i64, i64)> = dots.iter().map(|d| (d.lon, d.lat)).collect();
     for cell in cells {
         corners.push((cell.bounds.0, cell.bounds.1));
@@ -265,7 +270,7 @@ pub fn fleet(dots: &[Dot], cells: &[Cell], query: &str, lang: Lang) -> String {
         let _ = write!(
             svg,
             "<a href=\"{href}\" tabindex=\"-1\" aria-label=\"{id}\"><circle class=\"dot {presence}\" cx=\"{x}\" cy=\"{y}\" r=\"9\"><title>{id}</title></circle></a>",
-            href = escape(&crate::station::href(&dot.identity)),
+            href = escape(&search.href(&crate::station::href(&dot.identity), lang)),
             id = escape(&dot.identity),
             presence = match dot.presence.as_str() {
                 "online" => "online",
@@ -276,33 +281,7 @@ pub fn fleet(dots: &[Dot], cells: &[Cell], query: &str, lang: Lang) -> String {
             y = view.y(dot.lat),
         );
     }
-    let most = cells.iter().map(|c| c.stations).max().unwrap_or(1).max(1);
-    for cell in cells {
-        let (w, s, e, n) = cell.bounds;
-        let (cx, cy) = (view.x(i64::midpoint(w, e)), view.y(i64::midpoint(s, n)));
-        // Area, not radius, follows the count.
-        let radius = |count: u64| 6 + (count * 400 / most).isqrt();
-        let title = match lang {
-            Lang::De => format!("{} Stationen, davon {} still", cell.stations, cell.silent),
-            Lang::En => format!("{} stations, {} silent", cell.stations, cell.silent),
-        };
-        let _ = write!(
-            svg,
-            "<a href=\"/stations?area={area}&amp;q={q}\" tabindex=\"-1\" aria-label=\"{title}\">\
-             <circle class=\"cell\" cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\"><title>{title}</title></circle>",
-            area = escape(&cell.area),
-            q = escape(&query.replace(' ', "+")),
-            r = radius(cell.stations),
-        );
-        if cell.silent > 0 {
-            let _ = write!(
-                svg,
-                "<circle class=\"dot offline\" cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\"/>",
-                r = (radius(cell.silent) - 2).max(4),
-            );
-        }
-        svg.push_str("</a>");
-    }
+    let options = draw_cells(&mut svg, cells, &view, search, lang);
     svg.push_str("</svg>");
     let legend = if cells.is_empty() {
         format!(
@@ -318,10 +297,70 @@ pub fn fleet(dots: &[Dot], cells: &[Cell], query: &str, lang: Lang) -> String {
         )
         .to_owned()
     };
+    let picker = if options.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<form method="get" action="/stations" class="search"><input type="hidden" name="lang" value="{}"><input type="hidden" name="q" value="{}"><label for="map-area">{}</label><select id="map-area" name="area">{options}</select><button class="btn" type="submit">{}</button></form>"#,
+            lang.tag(),
+            escape(search.query),
+            lang.pick("Kartengebiet", "Map area"),
+            lang.pick("Gebiet öffnen", "Open area")
+        )
+    };
     format!(
-        "<figure class=\"map\">{svg}<figcaption>{legend} <span class=\"credit\">{credit}</span></figcaption></figure>",
+        "<figure class=\"map\">{svg}<figcaption>{legend} <span class=\"credit\">{credit}</span></figcaption></figure>{picker}",
         credit = lang.pick("Umrisse: Natural Earth", "Outline: Natural Earth")
     )
+}
+
+/// Draw each geographic cell and its equivalent native picker option together.
+fn draw_cells(
+    svg: &mut String,
+    cells: &[Cell],
+    view: &View,
+    search: crate::stations::FleetView<'_>,
+    lang: Lang,
+) -> String {
+    let most = cells.iter().map(|c| c.stations).max().unwrap_or(1).max(1);
+    let mut options = String::new();
+    for cell in cells {
+        let (w, s, e, n) = cell.bounds;
+        let (cx, cy) = (view.x(i64::midpoint(w, e)), view.y(i64::midpoint(s, n)));
+        // Area, not radius, follows the count.
+        let radius = |count: u64| 6 + (count * 400 / most).isqrt();
+        let title = match lang {
+            Lang::De => format!("{} Stationen, davon {} still", cell.stations, cell.silent),
+            Lang::En => format!("{} stations, {} silent", cell.stations, cell.silent),
+        };
+        let href = crate::stations::FleetView {
+            area: Some(&cell.area),
+            offset: 0,
+            ..search
+        }
+        .href("/stations", lang);
+        let _ = write!(
+            options,
+            r#"<option value="{area}">{title} · {area}</option>"#,
+            area = escape(&cell.area)
+        );
+        let _ = write!(
+            svg,
+            "<a href=\"{href}\" tabindex=\"-1\" aria-label=\"{title}\">\
+             <circle class=\"cell\" cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\"><title>{title}</title></circle>",
+            href = escape(&href),
+            r = radius(cell.stations),
+        );
+        if cell.silent > 0 {
+            let _ = write!(
+                svg,
+                "<circle class=\"dot offline\" cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\"/>",
+                r = (radius(cell.silent) - 2).max(4),
+            );
+        }
+        svg.push_str("</a>");
+    }
+    options
 }
 
 /// Where a station's coordinates lie, against the country it is registered in.
@@ -483,7 +522,7 @@ mod tests {
             lat: 5077,
             presence: "online\" onload=\"x".to_owned(),
         }];
-        let svg = fleet(&dots, &[], "", Lang::De);
+        let svg = fleet(&dots, &[], crate::stations::FleetView::default(), Lang::De);
         assert!(!svg.contains("<script>"), "{svg}");
         assert!(svg.contains("CP-&lt;script&gt;"));
         assert!(
@@ -501,7 +540,7 @@ mod tests {
             presence: "online".to_owned(),
         }];
         for svg in [
-            fleet(&dots, &[], "", Lang::De),
+            fleet(&dots, &[], crate::stations::FleetView::default(), Lang::De),
             locator(608, 5077, Lang::En),
         ] {
             let outside = svg.replace("http://www.w3.org/2000/svg", "");

@@ -39,6 +39,9 @@ pub const TOLERANCE: time::Duration = time::Duration::minutes(5);
 pub struct Token {
     /// The provider that issued the token.
     pub issuer: PartyId,
+    /// Native contract under which a bound CDR was authorized.
+    #[serde(default)]
+    pub contract_id: Option<String>,
 }
 
 /// The parts of a `de.emob.cdr.issued` event's data `billd` reads
@@ -47,6 +50,9 @@ pub struct Token {
 pub struct Body {
     /// The record.
     pub cdr: emob_cdr::Cdr,
+    /// Native agreement evidence supplied on the private delivery.
+    #[serde(default)]
+    pub retail: Option<emob_service::events::cdr::RetailAuthorization>,
     /// Who pays.
     pub token: Token,
     /// The driver's receipt link, added by `csmsd` at dispatch (spec 003);
@@ -61,7 +67,7 @@ pub struct Shared<J: Journal> {
     pub books: Arc<Mutex<Books<J>>>,
     /// The secret deliveries are signed with.
     pub secret: webhook::Secret,
-    /// The partners an invoice may be addressed to.
+    /// The accepted issuers, including the standalone retail provider.
     pub partners: Vec<PartyId>,
     /// Deliveries refused before the journal.
     pub refused: Arc<AtomicU64>,
@@ -121,22 +127,18 @@ async fn deliveries<J: Journal>(
             return refuse(StatusCode::UNAUTHORIZED, refusal.to_string());
         }
     };
-    // A signed sample (`emobtest`): taken and never booked, so an operator can
-    // test this receiver — and a replacement for it — against the real thing.
-    if emob_service::cloudevent::is_test(&body) {
-        tracing::info!(%id, "a test delivery was taken and not booked");
-        return (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "test": true })),
-        )
-            .into_response();
-    }
-    // A `de.emob.cdr.issued` CloudEvent and nothing else; the record is its data.
-    let body: Body =
-        match emob_service::cloudevent::open::<Body>(&body, emob_service::events::cdr::ISSUED) {
-            Ok(event) => event.data,
-            Err(refusal) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()),
-        };
+    let body: Body = match emob_service::cloudevent::open_cdr(&body, &id) {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            tracing::info!(%id, "a test delivery was taken and not booked");
+            return (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "test": true })),
+            )
+                .into_response();
+        }
+        Err(refusal) => return refuse(StatusCode::UNPROCESSABLE_ENTITY, refusal.to_string()),
+    };
     if body.cdr.key.to_string() != id {
         return refuse(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -158,13 +160,36 @@ async fn deliveries<J: Journal>(
     }
     // The signature above is `csmsd`'s, so the receipt is `csmsd`'s fact —
     // never whoever the body says it is about.
-    match lock(&shared.books).receive(
+    let retail = if let Some(binding) = body.retail {
+        let Some(emaid) = body.token.contract_id.filter(|_| binding.is_well_formed()) else {
+            return refuse(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid native authorization",
+            );
+        };
+        Some(crate::retail::Binding {
+            agreement: binding.agreement,
+            reference: binding.reference,
+            emaid,
+        })
+    } else {
+        body.token.contract_id.map(|emaid| crate::retail::Binding {
+            agreement: String::new(),
+            reference: String::new(),
+            emaid,
+        })
+    };
+    match lock(&shared.books).receive_bound(
         &Actor::service("csmsd"),
         body.cdr,
         body.token.issuer,
         body.receipt,
+        retail,
     ) {
         Ok(fresh) => Json(Receipt { duplicate: !fresh }).into_response(),
+        Err(crate::BooksError::ConflictingDelivery) => {
+            refuse(StatusCode::CONFLICT, "conflicting delivery")
+        }
         Err(error) => refuse(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
     }
 }

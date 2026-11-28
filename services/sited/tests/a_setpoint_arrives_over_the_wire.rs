@@ -147,7 +147,10 @@ impl Wire {
                     // The **decision** is the controller's, and the value it
                     // decides on comes off `resolved` — what the function
                     // becomes if the write is accepted (SPINE IG §3.3).
-                    match self.controller.on_limit(&request.resolved, wire_at) {
+                    match self
+                        .controller
+                        .on_limit(&request.data, &request.resolved, wire_at)
+                    {
                         Ok(limit) => {
                             if let Some(stated) = limit.stated_kw() {
                                 accepted.push(stated);
@@ -198,6 +201,7 @@ impl Wire {
             self.guard.request_subscription(&client, &server, self.now);
         }
         self.pump(at(0));
+        self.controller.on_heartbeat(at(0));
     }
 
     /// The grid operator writes a limit, as a `ScaledNumber` — the exact pair
@@ -209,15 +213,22 @@ impl Wire {
         active: bool,
         wire_at: time::OffsetDateTime,
     ) {
-        let client = self.guard_client();
-        let server = self.site_feature(1);
-        let data = CmdData::LoadControlLimitListData(LoadControlLimitListData {
-            load_control_limit_data: Some(vec![LoadControlLimitData {
+        self.update(
+            LoadControlLimitData {
                 limit_id: Some(limitation::LIMIT_ID),
                 is_limit_active: Some(active),
                 value: Some(ScaledNumber::new(number, scale)),
                 ..Default::default()
-            }]),
+            },
+            wire_at,
+        );
+    }
+
+    fn update(&mut self, entry: LoadControlLimitData, wire_at: time::OffsetDateTime) {
+        let client = self.guard_client();
+        let server = self.site_feature(1);
+        let data = CmdData::LoadControlLimitListData(LoadControlLimitListData {
+            load_control_limit_data: Some(vec![entry]),
         });
         self.guard.write(&server, &client, data, true, self.now);
         self.pump(wire_at);
@@ -286,8 +297,17 @@ fn a_setpoint_travels_as_a_datagram_and_no_point_ends_up_above_it() {
     // The pair `[LPC §4.1.5]` makes the operator's evidence.
     let log = wire.controller.log();
     assert_eq!(log.len(), 1);
-    assert_eq!(log[0].asked.watts, Decimal::from(11_000));
-    assert!(log[0].asked.is_active);
+    assert_eq!(
+        emob_eebus::read_limit_write(&log[0].asked, limitation::LIMIT_ID)
+            .unwrap()
+            .watts,
+        Decimal::from(11_000)
+    );
+    assert!(
+        emob_eebus::read_limit_write(&log[0].asked, limitation::LIMIT_ID)
+            .unwrap()
+            .is_active
+    );
     assert!(
         matches!(&log[0].answered, Answer::Accepted { ceiling_kw } if *ceiling_kw == kw("11")),
         "{:?}",
@@ -326,7 +346,12 @@ fn a_setpoint_below_the_mindestleistung_is_held_at_the_mindestleistung_and_says_
     // …and the record says what was asked for and what was answered, which are
     // different numbers here and are both facts an operator has to produce.
     let log = wire.controller.log();
-    assert_eq!(log[0].asked.watts, Decimal::from(2_000));
+    assert_eq!(
+        emob_eebus::read_limit_write(&log[0].asked, limitation::LIMIT_ID)
+            .unwrap()
+            .watts,
+        Decimal::from(2_000)
+    );
     assert!(
         matches!(&log[0].answered, Answer::Accepted { ceiling_kw } if *ceiling_kw == kw("4.2")),
         "{:?}",
@@ -346,55 +371,64 @@ fn a_limit_no_decimal_can_hold_is_refused_over_the_wire_rather_than_approximated
 
     wire.write_limit(i64::MAX, 300, true, at(1));
 
-    // Nothing was taken on: the site is still uncontrolled, because a write
-    // that could not be read is not a write that happened.
+    // LPC-902: an inapplicable valid first limit ends initialization.
     assert_eq!(
-        wire.controller.limit_at(at(1)),
-        emob_smart::GridLimit::Uncontrolled
+        wire.controller.limit_at(at(1)).lpc_state(),
+        Some("unlimited/controlled")
     );
     let log = wire.controller.log();
     assert_eq!(log.len(), 1);
     let Answer::Refused { reason } = &log[0].answered else {
         panic!("{:?}", log[0].answered);
     };
-    assert!(reason.contains("will not approximate"), "{reason}");
+    assert!(reason.contains("precision"), "{reason}");
 }
 
 #[test]
 fn a_silence_walks_the_site_through_the_states_the_specification_gives_it() {
-    // `[LPC §2.3.2]` gives a controllable system five states and three of them
-    // allow full power. A site at full power because its grid operator says so,
-    // one in its failsafe, and one that has left the failsafe under `[LPC-022]`
-    // are three different facts — and only the timer can tell them apart, which
-    // is the whole reason this service has a clock.
+    // site-limit-timing/SR-031
     let one = depot(1, Decimal::from(11));
-    let mut wire = Wire::new(vec![one], Decimal::from(22));
+    let mut wire = Wire::new(vec![one.clone()], Decimal::from(11));
+    let plan = [Demand {
+        evse_id: one.evse_id().clone(),
+        wanted_kw: kw("11"),
+    }];
+    let seconds = |s| at(0) + time::Duration::seconds(s);
+    let check = |wire: &Wire, s, state, power| {
+        let t = seconds(s);
+        assert_eq!(wire.controller.limit_at(t).lpc_state(), Some(state));
+        assert_eq!(wire.controller.allocate(&plan, t).ceiling_kw(), kw(power));
+        assert_eq!(
+            wire.controller.charging_profiles(&plan, t, 1).value[0].watts,
+            kw(power) * Decimal::from(1000)
+        );
+    };
+    check(&wire, 0, "init", "4.2");
     wire.commission();
-    wire.write_limit(11_000, 0, true, at(1));
-
-    assert_eq!(
-        wire.controller.limit_at(at(30)).lpc_state(),
-        Some("limited")
-    );
-    assert_eq!(
-        wire.controller.limit_at(at(150)).lpc_state(),
-        Some("failsafe state"),
-        "past the Failsafe Duration Minimum [LPC-912]"
-    );
-    assert_eq!(
-        wire.controller.limit_at(at(300)).lpc_state(),
-        Some("unlimited/autonomous"),
-        "and past [LPC-022]'s release, which every summary of § 14a drops"
-    );
-
-    // …and a heartbeat is the one thing that stops all of that `[LPC §3.8]`.
-    // The setpoint is not re-sent — it stands until a write replaces it, which
-    // is what `[LPC-004]`'s duration and §2.13's explicit deactivation are both
-    // about — so the site goes back to being *limited* rather than released.
-    wire.controller.on_heartbeat(at(290));
-    let after = wire.controller.limit_at(at(300));
-    assert_eq!(after.lpc_state(), Some("limited"));
-    assert_eq!(after.stated_kw(), Some(kw("11")));
+    wire.write_limit(5_000, 0, true, seconds(60));
+    wire.write_limit(6_000, 0, true, seconds(110));
+    check(&wire, 119, "limited", "6");
+    check(&wire, 120, "failsafe state", "4.2");
+    check(&wire, 7319, "failsafe state", "4.2");
+    check(&wire, 7320, "unlimited/autonomous", "11");
+    wire.controller.on_heartbeat(seconds(7330));
+    check(&wire, 7330, "unlimited/autonomous", "11");
+    wire.write_limit(7_000, 0, true, seconds(7391));
+    assert!(matches!(
+        wire.controller.log().last().unwrap().answered,
+        Answer::Refused { .. }
+    ));
+    wire.controller.on_heartbeat(seconds(7392));
+    wire.write_limit(7_000, 0, true, seconds(7452));
+    check(&wire, 7452, "limited", "7");
+    wire.write_limit(0, 0, false, seconds(7460));
+    check(&wire, 7511, "unlimited/controlled", "11");
+    check(&wire, 7512, "failsafe state", "4.2");
+    wire.controller.on_heartbeat(seconds(7513));
+    wire.write_limit(i64::MAX, 300, true, seconds(7514));
+    check(&wire, 7514, "unlimited/controlled", "11");
+    let fresh = Wire::new(vec![one], kw("11"));
+    check(&fresh, 7515, "init", "4.2");
 }
 
 #[test]
@@ -407,13 +441,188 @@ fn a_release_is_a_message_the_wire_carries_and_not_the_absence_of_one() {
     let mut wire = Wire::new(vec![one], Decimal::from(22));
     wire.commission();
     wire.write_limit(5_000, 0, true, at(1));
+    wire.controller.on_heartbeat(at(1));
     assert_eq!(wire.controller.limit_at(at(2)).lpc_state(), Some("limited"));
+    wire.controller.on_heartbeat(at(2));
 
     wire.write_limit(0, 0, false, at(3));
     assert_eq!(
-        wire.controller.limit_at(at(4)).lpc_state(),
+        wire.controller.limit_at(at(3)).lpc_state(),
         Some("unlimited/controlled"),
         "the guard is speaking and allowing full power [LPC-905]"
     );
     assert_eq!(wire.controller.log().len(), 2, "both writes are evidence");
+}
+
+fn fragment(active: Option<bool>, watts: Option<i64>, end: Option<&str>) -> LoadControlLimitData {
+    LoadControlLimitData {
+        limit_id: Some(limitation::LIMIT_ID),
+        is_limit_active: active,
+        value: watts.map(|w| ScaledNumber::new(w, 0)),
+        time_period: end.map(|end| eebus::model::TimePeriod {
+            end_time: Some(end.to_owned().into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn partial_writes_preserve_or_replace_the_expiry_seen_by_the_station() {
+    // site-limit-timing/SR-030
+    let one = depot(1, kw("11"));
+    let demand = [Demand {
+        evse_id: one.evse_id().clone(),
+        wanted_kw: kw("11"),
+    }];
+    for (replacement, expected) in [(None, "11"), (Some("PT10M"), "6")] {
+        let mut wire = Wire::new(vec![one.clone()], kw("11"));
+        wire.commission();
+        wire.update(fragment(Some(true), Some(5000), Some("PT10M")), at(0));
+        for n in 1..=18 {
+            wire.controller
+                .on_heartbeat(at(0) + time::Duration::seconds(30 * n));
+        }
+        wire.update(fragment(None, Some(6000), replacement), at(9));
+        wire.update(fragment(None, None, Some("2026-11-28T12:00:00Z")), at(9));
+        assert!(matches!(
+            wire.controller.log().last().unwrap().answered,
+            Answer::Refused { .. }
+        ));
+        for (time, ceiling) in [(at(10) - time::Duration::SECOND, "6"), (at(10), expected)] {
+            assert_eq!(
+                wire.controller.allocate(&demand, time).ceiling_kw(),
+                kw(ceiling)
+            );
+            assert_eq!(
+                wire.controller.charging_profiles(&demand, time, 1).value[0].watts,
+                kw(ceiling) * Decimal::from(1000)
+            );
+        }
+        wire.update(fragment(None, Some(7000), None), at(10));
+        assert_eq!(
+            wire.controller.limit_at(at(10)).stated_kw(),
+            replacement.map(|_| kw("7"))
+        );
+    }
+}
+
+#[test]
+fn activation_zero_duration_and_coincident_loss_have_distinct_outcomes() {
+    let mut wire = Wire::new(vec![depot(1, kw("11"))], kw("11"));
+    wire.commission();
+    wire.update(fragment(Some(true), Some(0), Some("PT2M")), at(0));
+    assert_eq!(
+        wire.controller.limit_at(at(0)).stated_kw(),
+        Some(Decimal::ZERO)
+    );
+    assert_eq!(
+        wire.controller.limit_at(at(2)).lpc_state(),
+        Some("failsafe state")
+    );
+    wire.controller.on_heartbeat(at(2));
+    wire.update(fragment(Some(true), Some(6000), Some("PT0S")), at(2));
+    assert_eq!(
+        wire.controller.limit_at(at(2)).lpc_state(),
+        Some("unlimited/controlled")
+    );
+    wire.update(fragment(Some(false), Some(5000), Some("PT1M")), at(2));
+    wire.update(fragment(None, Some(4000), None), at(2));
+    assert_eq!(
+        wire.controller.limit_at(at(2)).lpc_state(),
+        Some("unlimited/controlled")
+    );
+    wire.update(fragment(Some(true), None, None), at(3));
+    assert_eq!(
+        wire.controller.limit_at(at(3)).lpc_state(),
+        Some("unlimited/controlled")
+    );
+}
+
+#[test]
+fn malformed_recovery_and_out_of_order_receipts_preserve_the_current_exchange() {
+    let mut wire = Wire::new(vec![depot(1, kw("11"))], kw("11"));
+    wire.commission();
+    wire.write_limit(5000, 0, true, at(0));
+    wire.controller.on_heartbeat(at(2));
+    wire.update(fragment(Some(true), Some(-1), Some("PT1M")), at(2));
+    assert_eq!(
+        wire.controller.limit_at(at(2)).lpc_state(),
+        Some("failsafe state")
+    );
+    wire.write_limit(6000, 0, true, at(2));
+    wire.controller.on_heartbeat(at(1));
+    wire.write_limit(9000, 0, true, at(1));
+    assert!(matches!(
+        wire.controller.log().last().unwrap().answered,
+        Answer::Refused { .. }
+    ));
+    assert_eq!(wire.controller.limit_at(at(2)).stated_kw(), Some(kw("6")));
+    wire.update(fragment(Some(true), Some(6000), Some("PT4M")), at(2));
+    wire.controller.on_heartbeat(at(4));
+    wire.update(fragment(Some(true), Some(7000), None), at(4));
+    wire.controller.on_heartbeat(at(5));
+    assert_eq!(
+        wire.controller
+            .limit_at(at(6) - time::Duration::SECOND)
+            .stated_kw(),
+        Some(kw("7"))
+    );
+    assert_eq!(
+        wire.controller.limit_at(at(6)).lpc_state(),
+        Some("unlimited/controlled")
+    );
+}
+
+#[test]
+fn a_deadline_outside_the_clock_preserves_the_accepted_limit() {
+    let mut wire = Wire::new(vec![depot(1, kw("11"))], kw("11"));
+    let t = time::Date::MAX.with_hms(23, 59, 58).unwrap().assume_utc();
+    wire.commission();
+    wire.controller.on_heartbeat(t);
+    wire.write_limit(5000, 0, true, t);
+    wire.update(fragment(Some(true), Some(6000), Some("PT1M")), t);
+    assert!(matches!(
+        wire.controller.log().last().unwrap().answered,
+        Answer::Refused { .. }
+    ));
+    assert_eq!(wire.controller.limit_at(t).stated_kw(), Some(kw("5")));
+}
+
+#[test]
+fn withdrawing_end_time_cancels_the_existing_deadline() {
+    use eebus::model::{
+        Filter, FilterElements, FilterSelectors, LoadControlLimitDataElements,
+        LoadControlLimitListDataSelectors, TimePeriodElements,
+    };
+    let mut wire = Wire::new(vec![depot(1, kw("11"))], kw("11"));
+    wire.commission();
+    wire.update(fragment(Some(true), Some(5000), Some("PT1M")), at(0));
+    let delete = Filter::delete()
+        .select(FilterSelectors::LoadControlLimitListDataSelectors(
+            LoadControlLimitListDataSelectors {
+                limit_id: Some(limitation::LIMIT_ID),
+            },
+        ))
+        .covering(FilterElements::LoadControlLimitDataElements(
+            LoadControlLimitDataElements {
+                time_period: Some(TimePeriodElements {
+                    end_time: Some(eebus::codec::ElementTag),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+    let update = CmdData::LoadControlLimitListData(LoadControlLimitListData {
+        load_control_limit_data: Some(vec![fragment(None, Some(7000), None)]),
+    });
+    wire.guard.write_filtered(
+        &wire.site_feature(1),
+        &wire.guard_client(),
+        update,
+        vec![delete, Filter::partial()],
+        wire.now,
+    );
+    wire.pump(at(0) + time::Duration::seconds(30));
+    assert_eq!(wire.controller.limit_at(at(1)).stated_kw(), Some(kw("7")));
 }

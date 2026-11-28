@@ -1,10 +1,10 @@
 # emob
 
-> Self-hosted EV charging software for charge point operators and mobility providers. The Rust services manage OCPP stations and driver contracts, verify signed OCMF meter values, exchange OCPI records, publish DATEX II data and settle partner invoices. Run just demo for a local estate with simulated stations.
+> Self-hosted EV charging software for charge point operators and mobility providers. The Rust services manage OCPP stations and driver contracts, verify signed OCMF meter values, exchange OCPI records, publish DATEX II data, issue invoices, reconcile retail payments and line credits and manage driver withdrawals and customer portal erasure. Run just demo for a local estate with simulated stations.
 
 ## Docs
 
-- [Run the estate](https://hupe1980.github.io/emob/docs/run-the-estate/): `just demo`, the estate file, the operator page Heute and the driver receipt
+- [Run the estate](https://hupe1980.github.io/emob/docs/run-the-estate/): `just demo`, the estate file, the operator page Heute, the driver receipt and the customer portal for agreements and invoice downloads
 - [Getting started](https://hupe1980.github.io/emob/docs/getting-started/): install the crates, verify a session, price it, settle it
 - [Eichrecht](https://hupe1980.github.io/emob/docs/eichrecht/): how an OCMF signed meter value becomes an invoice line
 - [OCPP](https://hupe1980.github.io/emob/docs/ocpp/): the seam between the station protocol and the money
@@ -17,6 +17,9 @@
 - [Compliance](https://hupe1980.github.io/emob/docs/compliance/): the obligation calendar
 - [Architecture](https://hupe1980.github.io/emob/docs/architecture/): crates, daemons, journal, sibling kits
 - [Glossary](https://hupe1980.github.io/emob/docs/glossary/): CPO, eMSP, OCPP, OCPI, OCMF, Eichrecht, AFIR, CDR and more
+
+- [Replacement interfaces](https://hupe1980.github.io/emob/docs/interfaces/): authorization, tariff, signed delivery and recovery, local MCP and conformance.
+- [OpenAPI](https://hupe1980.github.io/emob/schemas/openapi.json): machine-readable HTTP and event contracts.
 
 ## Source
 

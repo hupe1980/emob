@@ -83,6 +83,8 @@ fn week() -> Tally {
 
 fn busy() -> Snapshot {
     Snapshot {
+        accounting: false,
+        access: emob_service::authority::OperatorAccess::default(),
         csmsd: Source::Up(Csmsd {
             station_count: 2,
             success: Windows {
@@ -121,6 +123,8 @@ fn quiet() -> Snapshot {
     let mut tally = Tally::default();
     tally.record("CP-1", Ending::Billed);
     Snapshot {
+        accounting: false,
+        access: emob_service::authority::OperatorAccess::default(),
         csmsd: Source::Up(Csmsd {
             station_count: 2,
             success: Windows {
@@ -282,6 +286,10 @@ fn nothing_to_do_is_one_sentence_and_no_empty_list() {
     let page = render(&quiet(), Lang::De);
     assert!(page.contains("class=\"calm tone-good\""));
     assert!(page.contains("Heute braucht nichts deine Aufmerksamkeit"));
+    assert!(!page.contains(r##"href="#queue""##));
+    assert!(
+        render(&busy(), Lang::En).contains(r##"href="#queue" class="btn ghost">Open tasks ("##)
+    );
     assert!(!page.contains("<ol class=\"rows\">"), "no empty table");
     assert!(page.contains("Jeder Versuch wurde abgerechnet."));
 }
@@ -444,6 +452,8 @@ fn sc_001_heute_renders_from_bounded_inputs_in_time() {
     // The largest input a bounded view can give: 200 rows in every list.
     let rows = 200;
     let snapshot = Snapshot {
+        accounting: false,
+        access: emob_service::authority::OperatorAccess::default(),
         csmsd: Source::Up(Csmsd {
             station_count: 2,
             success: Windows {

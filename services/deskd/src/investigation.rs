@@ -53,13 +53,7 @@ struct Evidence {
 }
 
 pub(super) fn shell(lang: Lang, title: &str, body: &str) -> Response {
-    let head = format!(
-        "<nav class=\"noprint\"><a href=\"/?lang={tag}\">{today}</a> · <a href=\"/stations?lang={tag}\">{stations}</a></nav><h1>{title}</h1>",
-        tag = lang.tag(),
-        today = lang.pick("Heute", "Today"),
-        stations = lang.pick("Stationen", "Stations")
-    );
-    ui::html(ui::page(
+    ui::html(crate::navigation::page(
         &ui::Shell {
             title,
             place: lang.pick("Betrieb", "Operations"),
@@ -67,7 +61,7 @@ pub(super) fn shell(lang: Lang, title: &str, body: &str) -> Response {
             reading: true,
             script: None,
         },
-        &format!("<div class=\"investigation\">{head}{body}</div>"),
+        &format!("<div class=\"investigation\"><h1>{title}</h1>{body}</div>"),
     ))
 }
 
@@ -508,7 +502,7 @@ async fn card_matches(desk: &Page, input: &Input, lang: Lang, can_write: bool) -
         let _ = write!(
             list,
             "<li><p>{}</p>{}</li>",
-            card::status(card.blocked, lang),
+            card.standing(lang),
             post_button("reference", &card.reference, None, &label, lang),
         );
     }

@@ -34,13 +34,12 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use emob_billing::Syntax;
 use emob_service::Actor;
-use emob_service::cloudevent::{self, CloudEvent};
-use emob_service::estate::InvoiceSyntax;
+use emob_service::cloudevent::CloudEvent;
 use emob_service::estate::Subscription;
 use emob_service::journal::Journal;
-use emob_service::webhook::{self, ID_HEADER, SIGNATURE_HEADER, TIMESTAMP_HEADER};
+use emob_service::webhook::{self, transport};
+use transport::Disposition;
 
 use crate::Books;
 use crate::invoice_page::{Invoices, file};
@@ -69,27 +68,6 @@ pub fn event(number: &str, file: &str, page: Option<&str>) -> serde_json::Result
     serde_json::to_string(&event)
 }
 
-async fn post(
-    client: &reqwest::Client,
-    url: &str,
-    secret: &webhook::Secret,
-    number: &str,
-    body: &str,
-    at: time::OffsetDateTime,
-) -> Result<reqwest::Response, String> {
-    let signature = webhook::sign(&webhook::Delivery::new(number, at, body.as_bytes()), secret);
-    client
-        .post(url)
-        .header(ID_HEADER, number)
-        .header(TIMESTAMP_HEADER, at.unix_timestamp().to_string())
-        .header(SIGNATURE_HEADER, signature)
-        .header("content-type", cloudevent::CONTENT_TYPE)
-        .body(body.to_owned())
-        .send()
-        .await
-        .map_err(|error| error.to_string())
-}
-
 /// The most of a refusal's body kept as its reason (SR-121).
 pub const REASON_LIMIT: usize = 512;
 
@@ -108,10 +86,9 @@ pub struct InsecureTarget {
 
 /// Where invoices go, how, and with which secret.
 pub struct Dispatcher {
-    client: reqwest::Client,
+    client: transport::Client,
     url: String,
     secret: webhook::Secret,
-    syntax: Syntax,
 }
 
 impl core::fmt::Debug for Dispatcher {
@@ -157,7 +134,6 @@ impl Dispatcher {
     pub fn new(
         url: &str,
         secret: webhook::Secret,
-        syntax: InvoiceSyntax,
         timeout: std::time::Duration,
     ) -> anyhow::Result<Self> {
         if !secure(url) {
@@ -167,13 +143,9 @@ impl Dispatcher {
             .into());
         }
         Ok(Self {
-            client: reqwest::Client::builder().timeout(timeout).build()?,
+            client: transport::Client::new(timeout)?,
             url: url.to_owned(),
             secret,
-            syntax: match syntax {
-                InvoiceSyntax::Ubl => Syntax::Ubl,
-                InvoiceSyntax::Cii => Syntax::Cii,
-            },
         })
     }
 
@@ -189,24 +161,28 @@ impl Dispatcher {
             Ok(body) => body,
             Err(error) => return Attempt::Again(error.to_string()),
         };
-        let response = match post(&self.client, &self.url, &self.secret, number, &body, at).await {
+        let response = match self
+            .client
+            .post(&self.url, &self.secret, number, body, at)
+            .await
+        {
             Ok(response) => response,
-            Err(error) => return Attempt::Again(error),
+            Err(error) => return Attempt::Again(error.to_string()),
         };
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        if status.is_success() {
-            let reference = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
-                .and_then(|v| v.get("reference")?.as_str().map(str::to_owned))
-                .filter(|r| !r.is_empty())
-                .map(|r| bounded(&r, REFERENCE_LIMIT));
-            return Attempt::Accepted(reference);
-        }
-        match status.as_u16() {
-            401 | 408 | 429 | 500..=599 => Attempt::Again(status.to_string()),
-            400..=499 => Attempt::Refused(bounded(&format!("{status}: {text}"), REASON_LIMIT)),
-            _ => Attempt::Again(status.to_string()),
+        match response.disposition() {
+            Disposition::Accepted => {
+                let reference = serde_json::from_str::<serde_json::Value>(&response.text)
+                    .ok()
+                    .and_then(|v| v.get("reference")?.as_str().map(str::to_owned))
+                    .filter(|r| !r.is_empty())
+                    .map(|r| bounded(&r, REFERENCE_LIMIT));
+                Attempt::Accepted(reference)
+            }
+            Disposition::Refused => Attempt::Refused(bounded(
+                &format!("{}: {}", response.status, response.text),
+                REASON_LIMIT,
+            )),
+            Disposition::Retry => Attempt::Again(response.status.to_string()),
         }
     }
 
@@ -226,7 +202,7 @@ impl Dispatcher {
                 .map(|d| {
                     (
                         d.invoice.number.clone(),
-                        file(d, self.syntax).map_err(|e| e.to_string()),
+                        file(d, d.delivery_syntax).map_err(|e| e.to_string()),
                     )
                 })
                 .collect()
@@ -269,9 +245,8 @@ impl Dispatcher {
 
 /// The subscribers outside the estate that take `de.emob.invoice.issued`.
 pub struct Subscribers {
-    client: reqwest::Client,
+    client: transport::Client,
     list: Vec<Subscription>,
-    syntax: Syntax,
 }
 
 impl core::fmt::Debug for Subscribers {
@@ -283,27 +258,52 @@ impl core::fmt::Debug for Subscribers {
 }
 
 impl Subscribers {
-    /// The subscribers that take invoices, in the syntax the estate writes.
+    /// The configured subscribers that take invoice events.
     ///
     /// # Errors
     ///
     /// The HTTP client could not be built.
     pub fn new(
         subscriptions: Vec<Subscription>,
-        syntax: InvoiceSyntax,
         timeout: std::time::Duration,
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
-            client: reqwest::Client::builder().timeout(timeout).build()?,
+            client: transport::Client::new(timeout)?,
             list: subscriptions
                 .into_iter()
                 .filter(|s| s.takes(emob_service::events::invoice::ISSUED))
                 .collect(),
-            syntax: match syntax {
-                InvoiceSyntax::Ubl => Syntax::Ubl,
-                InvoiceSyntax::Cii => Syntax::Cii,
-            },
         })
+    }
+
+    /// Retrieve a document by its original recipient and invoice number.
+    pub fn recovery<J: Journal + 'static>(
+        &self,
+        books: Arc<Mutex<Books<J>>>,
+        invoices: Arc<Invoices>,
+    ) -> axum::Router {
+        emob_service::recovery::router(
+            self.list.clone(),
+            emob_service::events::invoice::ISSUED,
+            move |subscriber, number| {
+                let issued = {
+                    let books = books.lock().unwrap_or_else(PoisonError::into_inner);
+                    books
+                        .state()
+                        .issued(number)
+                        .filter(|d| d.owed_to.iter().any(|s| s == subscriber))
+                        .cloned()
+                };
+                issued
+                    .map(|d| {
+                        let file = file(&d, d.delivery_syntax)
+                            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+                        event(number, &file, invoices.url(number).as_deref())
+                            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                    })
+                    .transpose()
+            },
+        )
     }
 
     /// Their names, which every document issued from now on is owed to.
@@ -325,7 +325,7 @@ impl Subscribers {
                 .state()
                 .documents()
                 .flat_map(|d| {
-                    let file = file(d, self.syntax).map_err(|e| e.to_string());
+                    let file = file(d, d.delivery_syntax).map_err(|e| e.to_string());
                     d.unannounced()
                         .map(move |to| (d.invoice.number.clone(), to.to_owned(), file.clone()))
                         .collect::<Vec<_>>()
@@ -347,34 +347,29 @@ impl Subscribers {
                 }
             };
             let now = time::OffsetDateTime::now_utc();
-            let refused = match post(
-                &self.client,
-                &subscriber.url,
-                &subscriber.secret,
-                &number,
-                &body,
-                now,
-            )
-            .await
+            let reply = match self
+                .client
+                .post(&subscriber.url, &subscriber.secret, &number, body, now)
+                .await
             {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        None
-                    } else if matches!(status.as_u16(), 401 | 408 | 429 | 500..=599)
-                        || !status.is_client_error()
-                    {
-                        tracing::warn!(%number, %to, %status, "an invoice event was not taken yet");
-                        continue;
-                    } else {
-                        let text = response.text().await.unwrap_or_default();
-                        tracing::error!(%number, %to, "a subscriber refused an invoice event — a person has to read why");
-                        Some(bounded(&format!("{status}: {text}"), REASON_LIMIT))
-                    }
-                }
+                Ok(reply) => reply,
                 Err(why) => {
                     tracing::warn!(%number, %to, %why, "an invoice event was not taken yet");
                     continue;
+                }
+            };
+            let refused = match reply.disposition() {
+                Disposition::Accepted => None,
+                Disposition::Retry => {
+                    tracing::warn!(%number, %to, status = %reply.status, "an invoice event was not taken yet");
+                    continue;
+                }
+                Disposition::Refused => {
+                    tracing::error!(%number, %to, "a subscriber refused an invoice event");
+                    Some(bounded(
+                        &format!("{}: {}", reply.status, reply.text),
+                        REASON_LIMIT,
+                    ))
                 }
             };
             let Ok(by) = Actor::subscriber(&to) else {

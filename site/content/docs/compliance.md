@@ -446,14 +446,14 @@ What the site may draw when the grid operator goes silent is set by EEBUS's
 
 | State | The ceiling | Reported |
 |---|---|---|
+| `init` | configured failsafe power | — |
 | `limited` | the setpoint | — |
 | `unlimited/controlled` | the site's connection | — |
 | `failsafe state` `[LPC-912]` | the Failsafe Consumption Active Power Limit `[LPC-021]` | **yes** |
-| `unlimited/autonomous` `[LPC-906]` | the site's connection | **yes** |
+| `unlimited/autonomous` `[LPC-922]` | the site's connection | **yes** |
 | no control box commissioned | the site's connection | — |
 
-`GridLimit` models all five, because full power by permission and full power
-after a failed control box are different situations. The guaranteed minimum
+`GridLimit` models the five protocol states and a site with no commissioned guard. The guaranteed minimum
 power of `Ziff. 4.5` holds under failsafe too. Applicability lives in
 `emob-core`; the power arithmetic is in `emob-smart` — see
 [§ 14a and the grid](@/docs/smart-charging.md).
